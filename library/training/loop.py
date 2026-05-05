@@ -31,6 +31,7 @@ from library import train_util
 from library.datasets import LossRecorder
 from library.runtime.device import clean_memory_on_device
 from library.training.checkpoints import CheckpointSaver
+from library.training.contexts import TrainCtx, ValCtx
 from library.training.method_adapter import StepCtx
 from library.training.metrics import MetricContext, collect_metrics
 
@@ -49,8 +50,8 @@ class LoopState:
 
     args: Any
     accelerator: Accelerator
-    train_ctx: Any  # TrainCtx
-    val_ctx: Any  # ValCtx
+    train_ctx: TrainCtx
+    val_ctx: ValCtx
     saver: CheckpointSaver
 
     network: Any
@@ -124,18 +125,12 @@ def build_loop_state(
     epoch_to_start,
     initial_step,
     metadata,
-    train_ctx_cls,
-    val_ctx_cls,
 ) -> LoopState:
     """Build :class:`LoopState`. Mirrors the pre-loop setup that used to sit
     between ``_prepare_with_accelerator()`` and the for-epoch loop in
     ``train()``: noise scheduler, trackers, loss recorders, optional text
     encoder eviction, ``--sample_at_first``, train/val ctx construction,
     progress bar, profiler parsing.
-
-    ``train_ctx_cls`` / ``val_ctx_cls`` are the trainer's ``TrainCtx`` /
-    ``ValCtx`` dataclasses (defined in train.py); passing them as parameters
-    avoids a circular import.
     """
     noise_scheduler = trainer.get_noise_scheduler(args, accelerator.device)
 
@@ -179,7 +174,7 @@ def build_loop_state(
     if is_tracking:
         accelerator.log({}, step=0)
 
-    train_ctx = train_ctx_cls(
+    train_ctx = TrainCtx(
         args=args,
         accelerator=accelerator,
         network=network,
@@ -245,7 +240,7 @@ def build_loop_state(
         if args.validation_sigmas is not None
         else [0.1, 0.4, 0.7]
     )
-    val_ctx = val_ctx_cls(
+    val_ctx = ValCtx(
         dataloader=val_dataloader,
         sigmas=validation_sigmas,
         steps=validation_steps,

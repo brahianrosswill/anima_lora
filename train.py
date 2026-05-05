@@ -5,8 +5,7 @@ import argparse
 import math
 import os
 import typing
-from dataclasses import dataclass
-from typing import Any, Callable, Union, Optional
+from typing import Any, Union, Optional
 import sys
 import random
 import time
@@ -68,6 +67,8 @@ from library.training import (
     LossContext,
     SAMPLER_REGISTRY,
     SamplerContext,
+    TrainCtx,
+    ValCtx,
     add_custom_train_arguments,
     add_dataset_arguments,
     add_dataset_metadata,
@@ -96,46 +97,6 @@ setup_logging()
 import logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class TrainCtx:
-    """Training-wide state built once near the top of train() and passed to
-    per-step / per-batch methods instead of 15-arg parameter lists. Fields here
-    are fixed for the whole training run -- per-call values (epoch, global_step,
-    progress_bar, logging keys, …) stay explicit at call sites."""
-
-    args: Any
-    accelerator: Accelerator
-    network: Any
-    unet: Any
-    vae: Any
-    text_encoders: list
-    noise_scheduler: Any
-    text_encoding_strategy: Any
-    tokenize_strategy: Any
-    vae_dtype: torch.dtype
-    weight_dtype: torch.dtype
-    train_text_encoder: bool
-    train_unet: bool
-    optimizer_eval_fn: Callable
-    optimizer_train_fn: Callable
-    is_tracking: bool
-
-
-@dataclass(frozen=True)
-class ValCtx:
-    """Validation-wide state fixed for the entire training run. The per-call
-    val_loss_recorder (step vs epoch) stays explicit since it differs per call
-    site; everything else here is shared."""
-
-    dataloader: Any
-    sigmas: list
-    steps: int
-    total_steps: int
-    train_loss_recorder: Any
-    original_t_min: float
-    original_t_max: float
 
 
 class AnimaTrainer:
@@ -599,7 +560,7 @@ class AnimaTrainer:
 
     def get_noise_pred_and_target(
         self,
-        ctx: "TrainCtx",
+        ctx: TrainCtx,
         latents,
         batch,
         text_encoder_conds,
@@ -972,14 +933,14 @@ class AnimaTrainer:
 
         return model
 
-    def on_validation_step_end(self, ctx: "TrainCtx", batch):
+    def on_validation_step_end(self, ctx: TrainCtx, batch):
         if self.is_swapping_blocks:
             # prepare for next forward: because backward pass is not called, we need to prepare it here
             ctx.accelerator.unwrap_model(ctx.unet).prepare_block_swap_before_forward()
 
     def process_batch(
         self,
-        ctx: "TrainCtx",
+        ctx: TrainCtx,
         batch,
         *,
         is_train=True,
@@ -1010,7 +971,7 @@ class AnimaTrainer:
 
     def _process_batch_inner(
         self,
-        ctx: "TrainCtx",
+        ctx: TrainCtx,
         batch,
         *,
         is_train=True,
@@ -1305,7 +1266,7 @@ class AnimaTrainer:
             else [False] * len(text_encoders)
         )
 
-    def on_step_start(self, ctx: "TrainCtx", batch, *, is_train: bool = True):
+    def on_step_start(self, ctx: TrainCtx, batch, *, is_train: bool = True):
         if not self._adapters:
             return
         step_ctx = StepCtx(
@@ -1967,8 +1928,8 @@ class AnimaTrainer:
 
     def _run_validation(
         self,
-        ctx: "TrainCtx",
-        val: "ValCtx",
+        ctx: TrainCtx,
+        val: ValCtx,
         *,
         val_loss_recorder,
         epoch,
@@ -2541,8 +2502,6 @@ class AnimaTrainer:
             epoch_to_start=epoch_to_start,
             initial_step=initial_step,
             metadata=metadata,
-            train_ctx_cls=TrainCtx,
-            val_ctx_cls=ValCtx,
         )
 
         run_training_loop(self, loop_state)

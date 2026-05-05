@@ -66,6 +66,10 @@ from library.training.metrics import (
     MetricProducer,
     collect_metrics,
 )
+from library.training.contexts import (
+    TrainCtx,
+    ValCtx,
+)
 from library.training.checkpoints import (
     EPOCH_STATE_NAME,
     EPOCH_FILE_NAME,
@@ -95,6 +99,9 @@ from library.training.checkpoints import (
 )
 
 __all__ = [
+    # contexts
+    "TrainCtx",
+    "ValCtx",
     # samplers
     "SamplerContext",
     "SamplerOut",
