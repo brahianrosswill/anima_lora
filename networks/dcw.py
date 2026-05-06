@@ -149,27 +149,30 @@ def haar_LL_norm(v: torch.Tensor) -> float:
 
 
 class FusionHead(nn.Module):
-    """v4 fusion head: (c_pool, aspect, g_obs[0:k], aux) → (α̂, log σ̂²).
+    """v4 fusion head: (c_pool, g_obs[0:k], aux) → (α̂, log σ̂²).
 
     Shared by the trainer (``scripts/dcw/train_fusion_head.py``) and the
     inference controller (``library/inference/dcw_calibrator.py``) so the MLP
     architecture is in one place. The trainer's saved state-dict keys are
-    prefixed with ``head.`` (so e.g. ``head.aspect_emb.weight`` /
-    ``head.mlp.X.weight`` in the artifact); inference module strips the
-    prefix when loading.
+    prefixed with ``head.`` (so e.g. ``head.alpha_mlp.X.weight`` in the
+    artifact); inference module strips the prefix when loading.
+
+    Bucket conditioning (``aspect_emb`` + ``aspect_id``) was removed
+    2026-05-05 after the aggregate ablation
+    (memory `project_dcw_bucket_prior_cosmetic`) confirmed it was cosmetic
+    end-to-end. Pre-cleanup artifacts fail to load with a shape mismatch
+    — retrain with ``make dcw-train``.
     """
 
     def __init__(
         self,
         c_pool_dim: int = 1024,
-        n_aspects: int = 3,
-        aspect_emb_dim: int = 16,
         k: int = 7,
         aux_dim: int = 3,
         c_proj_dim: int = 0,
         hidden: tuple[int, ...] = (256, 128),
         sigma_hidden: int = 64,
-        dropout: float = 0.2,
+        dropout: float = 0.0,
         log_sigma2_init: float = 0.0,
     ):
         super().__init__()
@@ -190,9 +193,7 @@ class FusionHead(nn.Module):
         else:
             self.c_proj = nn.Identity()
             cat_dim = c_pool_dim
-        self.aspect_emb = nn.Embedding(n_aspects, aspect_emb_dim)
-        nn.init.normal_(self.aspect_emb.weight, std=0.02)
-        in_dim = cat_dim + aspect_emb_dim + k + aux_dim
+        in_dim = cat_dim + k + aux_dim
 
         # α̂ and log σ̂² use independent trunks. Sharing a single trunk turned
         # the per-prompt seed-variance aux loss into a destructive interference
@@ -227,11 +228,9 @@ class FusionHead(nn.Module):
     def forward(
         self,
         c_pool: torch.Tensor,
-        aspect_id: torch.Tensor,
         g_obs: torch.Tensor,
         aux: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        a = self.aspect_emb(aspect_id)
         c = self.c_proj(c_pool)
-        x = torch.cat([c, a, g_obs, aux], dim=-1)
+        x = torch.cat([c, g_obs, aux], dim=-1)
         return self.alpha_mlp(x).squeeze(-1), self.sigma_mlp(x).squeeze(-1)

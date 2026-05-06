@@ -16,3 +16,6 @@ sample_ratio = 0.25
 
 [tenth]
 sample_ratio = 0.1
+
+[debug]
+sample_ratio = 0.01

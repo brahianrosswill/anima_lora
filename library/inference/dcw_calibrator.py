@@ -131,17 +131,15 @@ class OnlineDCWCalibrator:
                 "the alpha/sigma trunk split. Retrain with `make dcw-train`."
             )
         in_dim = int(head_sd["alpha_mlp.0.weight"].shape[0])
-        # FusionHead's training-time in_dim = cat_dim + aspect_emb_dim + k + aux_dim.
-        # Old v4 artifacts carry aspect_emb tensor (per-aspect rows, all zeroed
-        # by the trainer's `aspect_emb.weight.data.zero_()`); new v5 artifacts
-        # drop it. In both cases we pass aspect_id=0 at forward and zero the
-        # row so its contribution is exactly 0.
+        # Post-cleanup FusionHead in_dim = cat_dim + k + aux_dim. Old v4/v5
+        # artifacts have an extra `aspect_emb_dim` (=16 by default) of phantom
+        # slots in alpha_mlp's input — load_state_dict will fail with a clear
+        # shape mismatch on alpha_mlp.1.weight, prompting a retrain.
         if "aspect_emb.weight" in head_sd:
-            n_aspects = int(head_sd["aspect_emb.weight"].shape[0])
-            aspect_emb_dim = int(head_sd["aspect_emb.weight"].shape[1])
-        else:
-            n_aspects = 1
-            aspect_emb_dim = 16  # FusionHead's default — must match trainer
+            raise ValueError(
+                f"{path}: artifact contains 'aspect_emb.weight' — predates the "
+                "bucket-cosmetic removal. Retrain with `make dcw-train`."
+            )
         aux_dim = 3
         if "c_proj.1.weight" in head_sd:
             c_proj_w = head_sd["c_proj.1.weight"]
@@ -150,27 +148,23 @@ class OnlineDCWCalibrator:
             cat_dim = c_proj_dim
         else:
             c_proj_dim = 0
-            c_pool_dim = in_dim - (aspect_emb_dim + k_warmup + aux_dim)
+            c_pool_dim = in_dim - (k_warmup + aux_dim)
             cat_dim = c_pool_dim
-        if cat_dim + aspect_emb_dim + k_warmup + aux_dim != in_dim:
+        if cat_dim + k_warmup + aux_dim != in_dim:
             raise ValueError(
-                f"{path}: shape mismatch — cat({cat_dim}) + aspect_emb"
-                f"({aspect_emb_dim}) + k({k_warmup}) + aux({aux_dim}) != "
-                f"alpha_mlp.0 in_dim({in_dim})"
+                f"{path}: shape mismatch — cat({cat_dim}) + k({k_warmup}) "
+                f"+ aux({aux_dim}) != alpha_mlp.0 in_dim({in_dim}). "
+                "Likely a pre-cleanup artifact with aspect_emb slots; retrain."
             )
         head = FusionHead(
             c_pool_dim=c_pool_dim,
-            n_aspects=n_aspects,
-            aspect_emb_dim=aspect_emb_dim,
             k=k_warmup,
             aux_dim=aux_dim,
             c_proj_dim=c_proj_dim,
         )
-        # New v5 artifacts skip aspect_emb + sigma_mlp keys → load with
-        # strict=False; sigma_mlp is never called at inference (σ̂² path is
-        # gone), aspect_emb is zeroed below to neutralise its contribution.
+        # sigma_mlp keys are stripped at save time (σ̂² path is gone), so
+        # load with strict=False to tolerate their absence.
         head.load_state_dict(head_sd, strict=False)
-        head.aspect_emb.weight.data.zero_()
 
         c_pool_norm = meta.get("c_pool_norm", "none")
         if c_pool_norm not in ("none", "l2", "standardize", "l2_then_standardize"):
@@ -302,7 +296,6 @@ class OnlineDCWCalibrator:
         with torch.no_grad():
             alpha_hat, _ = self.head(
                 self.c_pool.unsqueeze(0),
-                torch.zeros(1, device=self.device, dtype=torch.long),
                 g_obs_n.unsqueeze(0),
                 self.aux.unsqueeze(0),
             )

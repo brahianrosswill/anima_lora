@@ -124,27 +124,23 @@ def train_one_fold(
 ) -> tuple[FusionHead, dict]:
     head = FusionHead(
         c_pool_dim=features["c_pool"].shape[1],
-        n_aspects=N_ASPECTS,
         k=features["g_obs"].shape[1],
         aux_dim=features["aux"].shape[1],
         c_proj_dim=c_proj_dim,
         log_sigma2_init=float(np.log(max(sigma2_pop, 1e-6))),
     ).to(device)
-    head.aspect_emb.weight.data.zero_()
-    head.aspect_emb.weight.requires_grad_(False)
     opt = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=weight_decay)
 
     def to_dev(idx):
         return (
             torch.tensor(features["c_pool"][idx], device=device),
-            torch.tensor(features["aspect"][idx], dtype=torch.long, device=device),
             torch.tensor(features["g_obs"][idx], device=device),
             torch.tensor(features["aux"][idx], device=device),
             torch.tensor(targets[idx], device=device),
         )
 
-    c_t, a_t, g_t, x_t, r_t = to_dev(train_idx)
-    c_v, a_v, g_v, x_v, r_v = to_dev(val_idx)
+    c_t, g_t, x_t, r_t = to_dev(train_idx)
+    c_v, g_v, x_v, r_v = to_dev(val_idx)
     stem_groups_train = _build_stem_groups(stems, train_idx, device)
     stem_groups_val = _build_stem_groups(stems, val_idx, device)
 
@@ -158,7 +154,7 @@ def train_one_fold(
     for ep in range(epochs):
         head.train()
         opt.zero_grad()
-        alpha_hat, log_sigma2 = head(c_t, a_t, g_t, x_t)
+        alpha_hat, log_sigma2 = head(c_t, g_t, x_t)
         nll = gaussian_nll(alpha_hat, log_sigma2, r_t)
         if lambda_sigma_aux > 0.0:
             aux = sigma_aux_loss(log_sigma2, r_t, stem_groups_train)
@@ -170,7 +166,7 @@ def train_one_fold(
         opt.step()
         head.eval()
         with torch.no_grad():
-            ah_v, ls_v = head(c_v, a_v, g_v, x_v)
+            ah_v, ls_v = head(c_v, g_v, x_v)
             val_nll = gaussian_nll(ah_v, ls_v, r_v).item()
             # 0.0 (not NaN) when no multi-seed val groups exist — matches
             # sigma_aux_loss's own empty-group return. Using NaN here
@@ -206,7 +202,7 @@ def train_one_fold(
         head.load_state_dict(best_state)
     head.eval()
     with torch.no_grad():
-        ah_v, ls_v = head(c_v, a_v, g_v, x_v)
+        ah_v, ls_v = head(c_v, g_v, x_v)
     return head, {
         "val_score": best_val,
         "alpha_hat": ah_v.cpu().numpy(),
@@ -296,7 +292,7 @@ def main():
     p.add_argument(
         "--c_pool_norm",
         type=str,
-        default="none",
+        default="l2",
         choices=("none", "l2", "standardize", "l2_then_standardize"),
         help="Per-row c_pool preprocessing before the head sees it. "
         "l2 = unit-norm per row (removes caption-length magnitude bias). "
@@ -317,7 +313,7 @@ def main():
     p.add_argument(
         "--lambda_sigma_aux",
         type=float,
-        default=0.1,
+        default=1.0,
         help="Weight on the per-prompt aggregate σ̂² supervision (log-MSE "
         "of mean σ̂²_p vs unbiased seed-var of target_p, only over stems "
         "with ≥2 seeds in batch). 0 disables. Default 1.0 because the loss "
@@ -680,12 +676,12 @@ def main():
         "dcw", label=f"v4-fusion-head-{args.label}", root=args.out_root
     )
 
-    # Strip aspect_emb + sigma_mlp from the artifact: aspect_emb is zero-frozen
-    # by training and contributes nothing at inference; σ̂² head fails Gate B
-    # at every target window so the inference controller no longer reads it.
-    # bucket_prior_* and sigma2_prior are dropped for the same reason — the
-    # post-cleanup controller is a single (1−σ) envelope keyed only off α̂.
-    _DROP_PREFIXES = ("aspect_emb.", "sigma_mlp.")
+    # Strip sigma_mlp from the artifact: σ̂² head fails Gate B at every target
+    # window so the inference controller no longer reads it. bucket_prior_* and
+    # sigma2_prior are dropped for the same reason — the post-cleanup controller
+    # is a single (1−σ) envelope keyed only off α̂. (aspect_emb is gone from
+    # FusionHead entirely as of the bucket-cosmetic removal.)
+    _DROP_PREFIXES = ("sigma_mlp.",)
     state = {
         f"head.{k}": v.cpu()
         for k, v in final_head.state_dict().items()

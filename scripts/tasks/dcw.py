@@ -20,6 +20,16 @@ is observed on the same trajectory inference will use, and warmup steps
 get the same correction as the rest. Override with `--baseline_lambda 0`
 to fall back to the legacy no-DCW baseline.
 
+Incremental gathers: each measure_bias run drops a `manifest.json` listing
+the (stem, seed) pairs it collected. On every subsequent `make dcw`,
+`_scan_used_stems` walks `output/dcw/*/manifest.json` matching the current
+(bucket, baseline_lambda) and writes the union to
+`output/dcw/.exclude/<HxW>.txt`, which is passed to measure_bias.py via
+`--exclude_stems`. Re-running `make dcw` therefore grows the calibration
+pool with fresh prompts instead of re-sampling the same stems. Pass
+`--allow_repeats` to opt out (e.g. when you want a deliberate seed
+re-roll on the same prompts).
+
 `make dcw-train` skips the sampling phase and trains on the existing pool.
 
 See `docs/proposal/dcw-learnable-calibrator-v4.md` §I1.
@@ -27,7 +37,11 @@ See `docs/proposal/dcw-learnable-calibrator-v4.md` §I1.
 
 from __future__ import annotations
 
+import json
+import math
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from ._common import run
 
@@ -55,6 +69,102 @@ def _pop_kv(extra: list[str], key: str, default: str) -> tuple[str, list[str]]:
     return default, list(extra)
 
 
+def _pop_flag(extra: list[str], key: str) -> tuple[bool, list[str]]:
+    """Extract a boolean ``--flag`` from extra. Returns (present, remaining)."""
+    if key in extra:
+        i = extra.index(key)
+        return True, extra[:i] + extra[i + 1 :]
+    return False, list(extra)
+
+
+def _latest_bucket_dir(out_root: Path, bucket_label: str) -> Path | None:
+    """Most recently modified ``<ts>-<bucket_label>/`` dir under ``out_root``."""
+    if not out_root.exists():
+        return None
+    matches = sorted(
+        (
+            p
+            for p in out_root.iterdir()
+            if p.is_dir() and p.name.endswith(f"-{bucket_label}")
+        ),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return matches[0] if matches else None
+
+
+def _emit_aggregate_plot(
+    out_root: Path, bucket_dirs: list[Path], label: str
+) -> None:
+    """Pool baseline trajectories across bucket runs and write a single plot.
+
+    Replaces the per-bucket gap_curves.png that we suppress via
+    ``--no-save_plot`` — one plot summarizing the whole data-gen phase,
+    weighted by each bucket's (n_samples × n_seeds).
+    """
+    if not bucket_dirs:
+        print("\n=== aggregate plot: no bucket dirs found, skipping ===")
+        return
+    from scripts.dcw.output import aggregate_run_dirs, make_aggregate_plot
+
+    accum, per_bucket, n_steps = aggregate_run_dirs(bucket_dirs)
+    if not accum:
+        print("\n=== aggregate plot: no usable bucket data, skipping ===")
+        return
+    ts = datetime.now().strftime("%Y%m%d-%H%M")
+    agg_dir = out_root / f"{ts}-{label}-aggregate"
+    agg_dir.mkdir(parents=True, exist_ok=True)
+    written = make_aggregate_plot(agg_dir, accum, per_bucket, n_steps)
+    if written:
+        n = accum["baseline"]["n"]
+        print(
+            f"\n=== aggregate plot ({len(per_bucket)} buckets, n={n} trajectories) "
+            f"→ {agg_dir / 'gap_curves.png'} ==="
+        )
+
+
+def _scan_used_stems(
+    out_root: Path,
+    H: int,
+    W: int,
+    baseline_lambda: float,
+) -> tuple[set[str], int]:
+    """Walk ``out_root`` for prior runs' manifest.json matching this bucket
+    and baseline_lambda. Returns (used_stems, n_runs_matched).
+
+    Filtering on baseline_lambda keeps λ=0 and λ=0.01 pools separate — they
+    train different heads (residual vs no-residual), so reusing one for the
+    other would break the trainer's contract. Manifests with mismatched
+    baseline_lambda are skipped silently.
+
+    Runs without a manifest.json are treated as failed/incomplete and
+    correctly remain re-eligible.
+    """
+    used: set[str] = set()
+    n_runs = 0
+    if not out_root.exists():
+        return used, n_runs
+    for manifest_path in sorted(out_root.glob("*/manifest.json")):
+        try:
+            data = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        bucket = data.get("bucket")
+        if bucket is None or bucket[0] != H or bucket[1] != W:
+            continue
+        prior_lam = data.get("baseline_lambda")
+        if prior_lam is None or not math.isclose(
+            float(prior_lam), baseline_lambda, abs_tol=1e-9
+        ):
+            continue
+        for pair in data.get("pairs", []):
+            stem = pair.get("stem")
+            if stem:
+                used.add(stem)
+        n_runs += 1
+    return used, n_runs
+
+
 def cmd_dcw(extra):
     """Sample baseline trajectories per bucket, then train fusion head.
 
@@ -75,7 +185,7 @@ def cmd_dcw(extra):
     Other extra args pass through to every measure_bias invocation
     (--dit, --lora_weight, --pooled_text_proj '', --guidance_scale, etc.).
     """
-    n_images, extra = _pop_kv(extra, "--n_images", "100")
+    n_images, extra = _pop_kv(extra, "--n_images", "6")
     n_seeds, extra = _pop_kv(extra, "--n_seeds", "2")
     shuffle_seed, extra = _pop_kv(extra, "--shuffle_seed", "0")
     label, extra = _pop_kv(extra, "--label", "make-dcw")
@@ -83,14 +193,49 @@ def cmd_dcw(extra):
     # the residual α̂ on top — kills the v4 dead-zone mismatch (head
     # observes / acts on the same trajectory inference will).
     baseline_lambda, extra = _pop_kv(extra, "--baseline_lambda", "0.01")
+    allow_repeats, extra = _pop_flag(extra, "--allow_repeats")
 
     out_root = "output/dcw"
+    out_root_path = Path(out_root)
+    out_root_path.mkdir(parents=True, exist_ok=True)
+    exclude_dir = out_root_path / ".exclude"
+    if not allow_repeats:
+        exclude_dir.mkdir(parents=True, exist_ok=True)
+
+    bucket_run_dirs: list[Path] = []
     for H, W in DCW_BUCKETS:
         bucket_label = f"{label}-{H}x{W}"
-        print(
-            f"\n=== DCW sample: bucket {H}x{W} ({n_images} imgs × {n_seeds} seeds, "
-            f"shuffle_seed={shuffle_seed}, baseline_lambda={baseline_lambda}) ==="
-        )
+        exclude_args: list[str] = []
+        if not allow_repeats:
+            used, n_runs = _scan_used_stems(
+                out_root_path, H, W, float(baseline_lambda)
+            )
+            exclude_path = exclude_dir / f"{H}x{W}.txt"
+            exclude_path.write_text(
+                "\n".join(
+                    [
+                        f"# auto-generated by make dcw at bucket {H}x{W}, "
+                        f"baseline_lambda={baseline_lambda}",
+                        f"# {len(used)} prior stems across {n_runs} run(s) "
+                        f"under {out_root}/*/manifest.json",
+                        *sorted(used),
+                    ]
+                )
+                + "\n"
+            )
+            exclude_args = ["--exclude_stems", str(exclude_path)]
+            print(
+                f"\n=== DCW sample: bucket {H}x{W} ({n_images} imgs × {n_seeds} seeds, "
+                f"shuffle_seed={shuffle_seed}, baseline_lambda={baseline_lambda}) ===\n"
+                f"    excluding {len(used)} stems from {n_runs} prior matching run(s); "
+                f"pass --allow_repeats to disable."
+            )
+        else:
+            print(
+                f"\n=== DCW sample: bucket {H}x{W} ({n_images} imgs × {n_seeds} seeds, "
+                f"shuffle_seed={shuffle_seed}, baseline_lambda={baseline_lambda}) ===\n"
+                f"    --allow_repeats: not deduping against prior runs."
+            )
         run(
             [
                 sys.executable,
@@ -108,13 +253,20 @@ def cmd_dcw(extra):
                 "--baseline_lambda",
                 baseline_lambda,
                 "--dump_per_sample_gaps",
+                "--no-save_plot",
                 "--label",
                 bucket_label,
                 "--out_root",
                 out_root,
+                *exclude_args,
                 *extra,
             ]
         )
+        bucket_dir = _latest_bucket_dir(out_root_path, bucket_label)
+        if bucket_dir is not None:
+            bucket_run_dirs.append(bucket_dir)
+
+    _emit_aggregate_plot(out_root_path, bucket_run_dirs, label)
 
     print("\n=== DCW: training fusion head on pooled trajectories ===")
     run(

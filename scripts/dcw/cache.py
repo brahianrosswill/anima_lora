@@ -19,6 +19,7 @@ def pick_cached_samples(
     image_h: int | None = None,
     image_w: int | None = None,
     shuffle_seed: int | None = None,
+    exclude_stems: set[str] | None = None,
 ) -> list[tuple[str, Path, Path]]:
     """Return list of (stem, latent_npz_path, text_safetensors_path).
 
@@ -34,6 +35,11 @@ def pick_cached_samples(
     Pass an int to deterministically shuffle the candidate pool before
     truncating to ``n`` (used by ``make dcw`` to widen prompt diversity
     across the 14× cache headroom we previously ignored).
+
+    ``exclude_stems`` (optional) drops stems already covered by prior runs
+    so incremental ``make dcw`` invocations grow the pool monotonically
+    instead of resampling the same prompts. Filtered before shuffle so the
+    remaining candidates' shuffle order is independent of pool size.
     """
     candidates: list[tuple[str, Path, Path]] = []
     for npz_path in sorted(dataset_dir.glob("*_anima.npz")):
@@ -45,6 +51,8 @@ def pick_cached_samples(
         if image_w is not None and int(m.group("w")) != image_w:
             continue
         stem = m.group("stem")
+        if exclude_stems is not None and stem in exclude_stems:
+            continue
         te_path = dataset_dir / f"{stem}_anima_te.safetensors"
         if not te_path.exists():
             continue
