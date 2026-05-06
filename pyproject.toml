@@ -2,7 +2,7 @@
 name = "anima-lora"
 version = "0.1.0"
 description = "Standalone Anima LoRA training pipeline"
-requires-python = "==3.13.*"
+requires-python = "==3.12.*"
 dependencies = [
     # Core ML.
     # Default: torch 2.12 nightly + CUDA 13.2 on Linux, torch 2.11 stable +
@@ -17,16 +17,8 @@ dependencies = [
     #      the three "Windows: cuda132" lines.
     #   4. uv sync
     #
-    # Linux (always cu132 nightly):
-    "torch>=2.12.0.dev0,<2.13 ; sys_platform == 'linux'",
-    "torchvision>=0.27.0.dev0,<0.28 ; sys_platform == 'linux'",
-    # Windows: stable (default).
-    "torch>=2.11.0,<2.12 ; sys_platform == 'win32'",
-    "torchvision>=0.26.0,<0.27 ; sys_platform == 'win32'",
-    # Windows: cuda132 opt-in. Uncomment to switch (and comment out the two
-    # "Windows: stable" lines above).
-    # "torch>=2.12.0.dev0,<2.13 ; sys_platform == 'win32'",
-    # "torchvision>=0.27.0.dev0,<0.28 ; sys_platform == 'win32'",
+    "torch>=2.11.0,<2.12",
+    "torchvision>=0.26.0,<0.27",
     "accelerate>=1.13.0",
     "transformers>=5.3.0",
     "diffusers>=0.37.0",
@@ -63,9 +55,7 @@ dependencies = [
     # FA2 wheel together with torch when toggling between stable and cuda132.
     # flash-attn-4 (flash-attention-sm120) is disabled — kernel is unstable
     # on our targets, see docs/methods/fa4.md.
-    "flash-attn @ https://github.com/sorryhyun/flash-attention-sm120-fix/releases/download/fa2cuda132/flash_attn-2.8.3-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux'",
-    # Windows: stable (default) — built against torch 2.11 + CUDA 13.0.
-    "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.6/flash_attn-2.8.3+cu130torch2.11-cp313-cp313-win_amd64.whl ; sys_platform == 'win32'",
+    "flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3+cu128torch2.11-cp312-cp312-linux_x86_64.whl",
     # Windows: cuda132 opt-in — trimmed FA2 (bf16 + head_dim=128 + non-causal)
     # built against torch 2.12 + CUDA 13.2. See flash-attention/repack_wheel.py.
     # "flash-attn @ https://github.com/sorryhyun/flash-attention-sm120-fix/releases/download/fa2cuda132/flash_attn-2.8.4-cp313-cp313-win_amd64.whl ; sys_platform == 'win32'",
@@ -103,8 +93,7 @@ index-strategy = "unsafe-best-match"
 # Both wheels are looked up from these indexes — the version pin in
 # `dependencies` (active vs. commented) decides which one resolves.
 extra-index-url = [
-    "https://download.pytorch.org/whl/cu130",
-    "https://download.pytorch.org/whl/nightly/cu132",
+    "https://download.pytorch.org/whl/cu128",
 ]
 prerelease = "allow"
 override-dependencies = ["numpy>=2.0.0"]
