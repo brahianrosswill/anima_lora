@@ -86,12 +86,8 @@ checkpointing_epochs = 8
 ip_diagnostics_epochs = 999
 
 # PE-LoRA owns the encoder and trains it live — pre-cached PE features can't
-# track the moving LoRA, so caching is off. cache_latents follows for the same
-# reason (the dataset must surface batch["images"] in [-1, 1] for live PE).
-
+# track the moving LoRA, so feature caching is off. 
 # ip_features_cache_to_disk = true
-cache_latents = false
-cache_latents_to_disk = false
 
 # CFG dropout for image conditioning (independent of text dropout).
 # Read by train.py when use_ip_adapter is on.

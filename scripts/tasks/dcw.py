@@ -76,7 +76,7 @@ def cmd_dcw(extra):
     (--dit, --lora_weight, --pooled_text_proj '', --guidance_scale, etc.).
     """
     n_images, extra = _pop_kv(extra, "--n_images", "100")
-    n_seeds, extra = _pop_kv(extra, "--n_seeds", "1")
+    n_seeds, extra = _pop_kv(extra, "--n_seeds", "2")
     shuffle_seed, extra = _pop_kv(extra, "--shuffle_seed", "0")
     label, extra = _pop_kv(extra, "--label", "make-dcw")
     # Match make-test-dcw's default scalar so the trained head learns

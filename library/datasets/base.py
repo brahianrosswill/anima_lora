@@ -138,6 +138,14 @@ class BaseDataset(torch.utils.data.Dataset):
         # skip live PE encoding (and the dataset can keep cache_latents=true).
         self.ip_features_cache_to_disk: bool = False
         self.ip_features_encoder: str = "pe"
+        # Force the cached-latent branches to ALSO load the source image into
+        # ``example["images"]`` (in addition to ``example["latents"]``). Used
+        # by IP-Adapter live PE encoding (PE-LoRA, or `cache_latents=true`
+        # alongside non-cached PE features) so VAE latents stay cached while
+        # the PE encoder gets a fresh image every step. Caller is responsible
+        # for ensuring `subset.random_crop=False` so the live image matches
+        # the deterministic crop baked into the cached latent.
+        self.force_load_images_for_ip: bool = False
 
         # caching
         self.caching_mode = None  # None, 'latents', 'text'
@@ -1176,6 +1184,34 @@ class BaseDataset(torch.utils.data.Dataset):
             runs.append(t.float())
         return torch.stack(runs, dim=0)  # [N_runs, S, D]
 
+    def _load_image_at_bucket(self, subset, image_info, flipped: bool) -> torch.Tensor:
+        """Reload the source image at bucket resolution for IP-Adapter live
+        PE encoding alongside cached latents.
+
+        Skips augmentation, alpha-mask, and face-crop logic — those are
+        already baked into the cached latent. PE will resize to its own
+        bucket on the GPU side, so we only need a tensor that matches the
+        latent's spatial alignment (resize to bucket + flip if the latent
+        is its flipped variant).
+        """
+        from library.datasets.image_utils import trim_and_resize_if_required
+
+        img, _, _, _, _ = self.load_image_with_face_info(
+            subset, image_info.absolute_path, subset.alpha_mask
+        )
+        if self.enable_bucket:
+            img, _, _ = trim_and_resize_if_required(
+                False,  # force deterministic crop — must match the cached latent
+                img,
+                image_info.bucket_reso,
+                image_info.resized_size,
+                resize_interpolation=image_info.resize_interpolation,
+            )
+        if flipped:
+            img = img[:, ::-1, :].copy()
+        img = img[:, :, :3]
+        return self.image_transforms(img)
+
     def __getitem__(self, index):
         bucket = self.bucket_manager.buckets[self.buckets_indices[index].bucket_index]
         bucket_batch_size = self.buckets_indices[index].bucket_batch_size
@@ -1225,7 +1261,10 @@ class BaseDataset(torch.utils.data.Dataset):
                         else torch.flip(image_info.alpha_mask, [1])
                     )
 
-                image = None
+                if self.force_load_images_for_ip:
+                    image = self._load_image_at_bucket(subset, image_info, flipped)
+                else:
+                    image = None
             elif image_info.latents_npz is not None:
                 latents, original_size, crop_ltrb, flipped_latents, alpha_mask = (
                     self.latents_caching_strategy.load_latents_from_disk(
@@ -1242,7 +1281,10 @@ class BaseDataset(torch.utils.data.Dataset):
                 if alpha_mask is not None:
                     alpha_mask = torch.FloatTensor(alpha_mask)
 
-                image = None
+                if self.force_load_images_for_ip:
+                    image = self._load_image_at_bucket(subset, image_info, flipped)
+                else:
+                    image = None
             else:
                 img, face_cx, face_cy, face_w, face_h = self.load_image_with_face_info(
                     subset, image_info.absolute_path, subset.alpha_mask

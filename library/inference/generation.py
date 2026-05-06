@@ -889,9 +889,19 @@ def _setup_ip_adapter(args, anima, device):
             )
             feats_list = encode_pe_from_imageminus1to1(bundle, img_t, same_bucket=True)
             ip_features = torch.stack(feats_list, dim=0)  # [1, T_pe, d_enc]
+            # Drop the local encoder before set_ip_tokens — the resampler is
+            # the only thing left that reads ip_features.
+            del bundle, feats_list
         ip_tokens = network.encode_ip_tokens(ip_features.to(torch.bfloat16))
 
     network.set_ip_tokens(ip_tokens)
+    # K/V are now cached per-block on the cross-attn modules — the PE encoder
+    # is dead weight for the rest of generation. Drop it and reclaim VRAM
+    # before the diffusion forward starts.
+    if getattr(network, "pe_lora_enabled", False):
+        network.release_encoder()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     logger.info(
         f"IP-Adapter: loaded {ip_weight} (encoder={network.encoder_name}, "
         f"K={network.num_ip_tokens}, scale={network.get_effective_scale():.3f})"

@@ -40,11 +40,19 @@ Hooking:
 
 Train-time contract:
   Caller invokes network.set_ip_tokens(ip_tokens) ONCE per batch before the
-  DiT forward. set_ip_tokens precomputes per-block (K, V) so the patched
-  cross-attn forward is a single SDPA call (no redundant projection on each
-  step). K/V are intentionally un-normalized — see set_ip_tokens for the
-  init-gate rationale. Pass ``None`` (or call clear_ip_tokens) for
-  unconditional passes / CFG dropout.
+  DiT forward. set_ip_tokens precomputes per-block (K, V) in SDPA layout
+  ([B, n_h, K, d_h]) plus a per-block ``gate * scale`` scalar so the patched
+  cross-attn forward is a single SDPA call followed by a single multiply —
+  no per-call transpose, dtype cast, or scalar arithmetic. K/V are
+  intentionally un-normalized — see set_ip_tokens for the init-gate
+  rationale. Pass ``None`` (or call clear_ip_tokens) for unconditional
+  passes / CFG dropout.
+
+Inference VRAM:
+  After set_ip_tokens, the PE encoder is dead weight (K/V live on the
+  cross-attn modules). _setup_ip_adapter calls release_encoder() to drop
+  ``_pe_inner`` / ``_pe_lora`` so PE-Core's ~600 MB-2 GB doesn't sit on
+  the GPU through the diffusion loop.
 """
 
 from __future__ import annotations
@@ -354,6 +362,10 @@ class IPAdapterNetwork(nn.Module):
         self.register_buffer(
             "ip_centroid", torch.zeros(encoder_dim), persistent=True
         )
+        # Cached "is centroid populated?" bit. None ⇒ recompute on next encode
+        # (one-time GPU→CPU sync). load_centroid_from_file flips it to True;
+        # load_state_dict invalidates it so a fresh checkpoint is re-checked.
+        self._centroid_active: Optional[bool] = False
 
         # Per-block IP projections. Bias=False matches the existing kv_proj.
         self.to_k_ip = nn.ModuleList(
@@ -477,6 +489,7 @@ class IPAdapterNetwork(nn.Module):
             self._original_forwards.append(cross_attn.forward)
             cross_attn._ip_k_cached = None
             cross_attn._ip_v_cached = None
+            cross_attn._ip_gate_scale_cached = None
             cross_attn._ip_gate = self.ip_gate[idx]  # 0-d Parameter, init 0
             cross_attn._ip_diag_ratio_sum = (
                 None  # 0-d float32, set by set_diagnostics_enabled
@@ -496,6 +509,7 @@ class IPAdapterNetwork(nn.Module):
             cross_attn.forward = orig
             cross_attn._ip_k_cached = None
             cross_attn._ip_v_cached = None
+            cross_attn._ip_gate_scale_cached = None
             cross_attn._ip_gate = None
             cross_attn._ip_diag_ratio_sum = None
             cross_attn._ip_diag_count = None
@@ -513,7 +527,11 @@ class IPAdapterNetwork(nn.Module):
         Returns:
             [B, K, context_dim]
         """
-        if self.ip_centroid.abs().sum() > 0:
+        # Lazy-resolve the centroid bit so subsequent encodes skip the
+        # GPU→CPU sync. load_centroid_from_file / load_weights flip it.
+        if self._centroid_active is None:
+            self._centroid_active = bool(self.ip_centroid.abs().sum().item() > 0)
+        if self._centroid_active:
             image_features = image_features - self.ip_centroid.to(
                 dtype=image_features.dtype, device=image_features.device
             )
@@ -540,6 +558,7 @@ class IPAdapterNetwork(nn.Module):
                 f"expected ({self.encoder_dim},)"
             )
         self.ip_centroid.copy_(c.to(self.ip_centroid.dtype))
+        self._centroid_active = True
         logger.info(
             f"IP-Adapter: loaded PE centroid from {path} "
             f"(‖centroid‖={float(self.ip_centroid.norm()):.3f})"
@@ -550,6 +569,13 @@ class IPAdapterNetwork(nn.Module):
 
         Pass ``None`` (or call ``clear_ip_tokens``) for unconditional / CFG
         dropout passes.
+
+        K/V are stored in SDPA layout ``[B, n_h, K, d_h]`` so the patched
+        cross-attn forward feeds them straight to ``F.scaled_dot_product_attention``
+        without a per-step transpose. ``gate * effective_scale`` is also
+        cached per block (in K/V dtype), removing the per-call dtype cast and
+        multiplication in the inner loop. The cached scalar tensor still
+        carries grad back to ``ip_gate`` at training time.
         """
         if not self._patched:
             raise RuntimeError("set_ip_tokens called before apply_to")
@@ -561,14 +587,20 @@ class IPAdapterNetwork(nn.Module):
                 f"ip_tokens must be [B, K, {self.context_dim}], got {tuple(ip_tokens.shape)}"
             )
 
-        B, K, _ = ip_tokens.shape
+        # All to_k_ip / to_v_ip Linears were created with the same dtype
+        # (see __init__), so a single cast on ip_tokens covers every block.
+        proj_dtype = self.to_k_ip[0].weight.dtype
+        ip_in = ip_tokens.to(proj_dtype)
+        n_h, d_h = self.num_heads, self.head_dim
+        eff_scale = self.ip_scale * self.multiplier
         for idx, cross_attn in enumerate(self._cross_attn_modules):
-            proj_dtype = self.to_k_ip[idx].weight.dtype
-            ip_in = ip_tokens.to(proj_dtype)
             k = self.to_k_ip[idx](ip_in)  # [B, K, hidden]
             v = self.to_v_ip[idx](ip_in)
-            k = k.unflatten(-1, (self.num_heads, self.head_dim))  # [B, K, n_h, d_h]
-            v = v.unflatten(-1, (self.num_heads, self.head_dim))
+            # Store in SDPA layout so the per-step .transpose(1,2) is gone.
+            # contiguous() materializes the small K cache (B*n_h*K*d_h
+            # elements) once here instead of letting SDPA re-stride per call.
+            k = k.unflatten(-1, (n_h, d_h)).transpose(1, 2).contiguous()
+            v = v.unflatten(-1, (n_h, d_h)).transpose(1, 2).contiguous()
             # Intentionally skip cross_attn.k_norm/v_norm here.
             # - v_norm is nn.Identity in the DiT so this is a no-op for V,
             #   listed only for symmetry with the K branch.
@@ -582,11 +614,17 @@ class IPAdapterNetwork(nn.Module):
             # by the K-norm bypass.
             cross_attn._ip_k_cached = k
             cross_attn._ip_v_cached = v
+            # Pre-cast (gate * scale) so the inner loop is one multiply.
+            # Still a tensor → autograd flows through to ip_gate at training.
+            cross_attn._ip_gate_scale_cached = (
+                self.ip_gate[idx] * eff_scale
+            ).to(proj_dtype)
 
     def clear_ip_tokens(self) -> None:
         for cross_attn in self._cross_attn_modules:
             cross_attn._ip_k_cached = None
             cross_attn._ip_v_cached = None
+            cross_attn._ip_gate_scale_cached = None
 
     def get_effective_scale(self) -> float:
         return self.ip_scale * self.multiplier
@@ -631,6 +669,28 @@ class IPAdapterNetwork(nn.Module):
             layer_from=self.pe_lora_layer_from,
         )
         self._pe_bundle_info = info  # for bucket_spec lookup at encode time
+
+    def release_encoder(self) -> None:
+        """Drop the owned PE encoder + LoRA after the reference image has been
+        encoded into ``ip_k`` / ``ip_v`` caches.
+
+        Inference-only safety valve: at generation time the PE encoder runs
+        exactly once (in ``_setup_ip_adapter``) to produce ``ip_features``;
+        ``set_ip_tokens`` then materializes the per-block K/V and the
+        encoder is never touched again. PE-Core-L14-336 is ~600 MB bf16 and
+        PE-Core-G14-448 is ~2 GB; freeing them claws back significant VRAM
+        for the actual diffusion forward.
+
+        After this call ``encode_images`` / ``encode_ip_tokens`` will fail —
+        do not call it during training.
+        """
+        had_inner = self._pe_inner is not None
+        had_lora = self._pe_lora is not None
+        self._pe_inner = None
+        self._pe_lora = None
+        self._pe_bundle_info = None
+        if (had_inner or had_lora) and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def encode_images(self, images_minus1to1: torch.Tensor) -> torch.Tensor:
         """Run the owned PE encoder on [B, 3, H, W] in [-1, 1]; gradient flows
@@ -962,6 +1022,8 @@ class IPAdapterNetwork(nn.Module):
         else:
             sd = torch.load(file, map_location="cpu")
         missing, unexpected = self.load_state_dict(sd, strict=False)
+        # Force a re-check of ip_centroid on the next encode_ip_tokens call.
+        self._centroid_active = None
         # PE base params are intentionally absent from the saved state dict
         # (see save_weights) — they come from the .pt checkpoint loaded inside
         # _build_pe_with_lora. Filter them so the warning only flags real gaps.
@@ -1001,33 +1063,33 @@ def _make_patched_forward(
             text_qkv, attn_params=attn_params
         )
 
-        ip_k = getattr(orig_attn, "_ip_k_cached", None)
-        ip_v = getattr(orig_attn, "_ip_v_cached", None)
+        ip_k = orig_attn._ip_k_cached
+        ip_v = orig_attn._ip_v_cached
         if ip_k is not None and ip_v is not None:
-            # q: [B, S, n_h, d_h] (bshd from compute_qkv).
-            # ip_k, ip_v: [B_ip, K, n_h, d_h] (cached post-norm by set_ip_tokens).
-            # Broadcast B_ip=1 -> B (free view) for inference where the same
-            # reference image conditions the whole CFG batch.
+            # q: [B, S, n_h, d_h] from compute_qkv.
+            # ip_k, ip_v: [B_ip, n_h, K, d_h] (SDPA layout, cached post-norm
+            # by set_ip_tokens). Broadcast B_ip=1 -> B (free view) for
+            # inference where the same reference image conditions every CFG
+            # branch.
             B = q.shape[0]
             if ip_k.shape[0] == 1 and B > 1:
-                ip_k = ip_k.expand(B, *ip_k.shape[1:])
-                ip_v = ip_v.expand(B, *ip_v.shape[1:])
+                ip_k = ip_k.expand(B, -1, -1, -1)
+                ip_v = ip_v.expand(B, -1, -1, -1)
             elif ip_k.shape[0] != B:
                 raise RuntimeError(
                     f"IP-Adapter K/V batch {ip_k.shape[0]} does not match q batch {B}"
                 )
             q_sdpa = q.transpose(1, 2)  # [B, n_h, S, d_h]
-            k_sdpa = ip_k.to(q_sdpa.dtype).transpose(1, 2)
-            v_sdpa = ip_v.to(q_sdpa.dtype).transpose(1, 2)
-            ip_out = F.scaled_dot_product_attention(q_sdpa, k_sdpa, v_sdpa)
+            ip_out = F.scaled_dot_product_attention(q_sdpa, ip_k, ip_v)
             # Back to [B, S, n_h*d_h] to match text_result's flattened layout.
             ip_out = ip_out.transpose(1, 2).reshape(text_result.shape)
-            scale = ip_net.get_effective_scale()
-            # Per-block 0-init learned gate. At step 0 gate=0 → IP path
-            # contributes exactly zero regardless of K/V weight magnitudes.
-            # Cast to ip_out dtype so bf16 forward stays in bf16.
-            gate = orig_attn._ip_gate.to(ip_out.dtype)
-            ip_contribution = gate * scale * ip_out
+            # Per-block 0-init learned gate, pre-multiplied by effective scale
+            # and pre-cast to ip_out dtype in set_ip_tokens. Tensor still
+            # carries grad back to ip_gate at training time. At step 0 this
+            # is exactly zero ⇒ IP path contributes nothing regardless of
+            # K/V weight magnitudes.
+            gate_scale = orig_attn._ip_gate_scale_cached
+            ip_contribution = gate_scale * ip_out
             diag_sum = orig_attn._ip_diag_ratio_sum
             if ip_net._diag_enabled and diag_sum is not None:
                 # Detached, on-device scalar update on tensors that live on
@@ -1091,26 +1153,24 @@ class IPAdapterMethodAdapter(MethodAdapter):
                     "pe_lora_enabled=true (cached features can't track a moving "
                     "encoder). Set ip_features_cache_to_disk=false."
                 )
-            if getattr(args, "cache_latents", False):
-                raise ValueError(
-                    "PE-LoRA requires cache_latents=false so batch['images'] "
-                    "carries the raw reference image for live encoding."
-                )
+            # cache_latents is fine — VAE is frozen and independent of PE.
+            # train.py sets dataset.force_load_images_for_ip=True so the
+            # dataloader still surfaces batch["images"] alongside the cached
+            # latent. Trade-off: cached latents are cropped deterministically,
+            # so subset.random_crop must stay False (the live image reload
+            # uses the same deterministic crop).
             accelerator.print(
                 f"IP-Adapter + PE-LoRA: encoder owned by network "
                 f"(rank={getattr(net, 'pe_lora_rank', None)}, "
                 f"alpha={getattr(net, 'pe_lora_alpha', None)}, "
-                f"image_drop_p={getattr(args, 'ip_image_drop_p', 0.1)})"
+                f"image_drop_p={getattr(args, 'ip_image_drop_p', 0.1)}, "
+                f"cache_latents={getattr(args, 'cache_latents', False)})"
             )
         else:
             cache_features = getattr(args, "ip_features_cache_to_disk", False)
-            if not cache_features and getattr(args, "cache_latents", False):
-                raise ValueError(
-                    "--use_ip_adapter without --ip_features_cache_to_disk requires "
-                    "--cache_latents=false so batch['images'] carries the raw reference "
-                    "image for live PE encoding. Either set ip_features_cache_to_disk=true "
-                    "(after `make preprocess-pe`) or cache_latents=false."
-                )
+            # cache_latents=true + live PE is now supported via
+            # force_load_images_for_ip — VAE stays cached, PE runs live, and
+            # the dataset surfaces batch["images"] from a fresh image decode.
             if cache_features:
                 accelerator.print(
                     f"IP-Adapter: reading cached vision features "

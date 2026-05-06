@@ -366,6 +366,20 @@ class AnimaTrainer:
                     dataset.ip_features_cache_to_disk = True
                     dataset.ip_features_encoder = ip_encoder
 
+        # IP-Adapter live PE encoding (PE-LoRA, or no cached features) needs
+        # batch["images"] every step. With cache_latents=true the dataset
+        # would normally skip image loading; this flag forces it to keep
+        # decoding the source image alongside the cached latent so the live
+        # PE forward has its input. VAE encoding still runs from cache.
+        if getattr(args, "use_ip_adapter", False) and not getattr(
+            args, "ip_features_cache_to_disk", False
+        ):
+            for dataset in train_dataset_group.datasets:
+                dataset.force_load_images_for_ip = True
+            if val_dataset_group is not None:
+                for dataset in val_dataset_group.datasets:
+                    dataset.force_load_images_for_ip = True
+
         train_dataset_group.verify_bucket_reso_steps(
             16
         )  # WanVAE spatial downscale = 8 and patch size = 2
