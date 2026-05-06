@@ -36,6 +36,11 @@ class Row:
     v_rev_LL: np.ndarray  # (n_steps,) — used for input g_obs
     v_rev_source: str  # "native" | "synthetic" | "fallback"
     sigma_i: np.ndarray  # (n_steps,) — σ schedule for the run; per-row for LSQ targets
+    # LL-only λ baked into the reverse trajectory at collection time
+    # (one_minus_sigma schedule). 0.0 = legacy no-DCW baseline; non-zero ⇒
+    # gap_LL / v_rev_LL are residuals on top of that scalar baseline, and the
+    # head's α̂ is the residual.
+    baseline_lambda: float
 
 
 def load_bench_runs(
@@ -98,6 +103,8 @@ def load_bench_runs(
                 source = "fallback"
         sigma_i = _load_sigma_schedule(run_dir, n_steps=gap_LL.shape[1])
         aspect_id = ASPECT_TABLE[(H, W)]
+        # Old runs predate --baseline_lambda; absent ⇒ 0.0 (legacy no-DCW).
+        baseline_lambda = float(a.get("baseline_lambda", 0.0))
         for r in range(len(stems)):
             img_idx = r // n_seeds
             seed_idx = r % n_seeds
@@ -113,6 +120,7 @@ def load_bench_runs(
                     v_rev_LL=np.asarray(v_rev_LL[r], dtype=np.float64),
                     v_rev_source=source,
                     sigma_i=sigma_i,
+                    baseline_lambda=baseline_lambda,
                 )
             )
     return rows

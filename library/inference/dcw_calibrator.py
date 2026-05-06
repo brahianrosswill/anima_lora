@@ -5,10 +5,13 @@ observes the LL-band Haar norm of the post-CFG ``noise_pred`` over the first
 ``k_warmup`` steps, fires the MLP at step ``k_warmup`` to predict the per-prompt
 LSQ-optimal scalar λ̂*_p, then applies::
 
-    λ_i = α_eff · gain · (1 − σ_i)        for target_start ≤ i < target_end
-    λ_i = 0                                 otherwise
+    λ_i = baseline_lambda · (1 − σ_i)                                      [all i]
+        + α_eff · gain · (1 − σ_i)        for target_start ≤ i < target_end
 
-clamped to ±0.05.
+clamped to ±0.05. ``baseline_lambda`` defaults to 0 for legacy artifacts —
+non-zero means the head was trained on data already corrected with that
+scalar, so α̂ is a residual on top of it (kills the warmup dead zone since
+the baseline applies on every step, including i < target_start).
 
 Schema compat: accepts both ``dcw_v5_lambda_scalar`` (post-cleanup) and the
 legacy ``dcw_v4_fusion_head`` schemas. Pre-``lambda_scalar`` v4 artifacts
@@ -54,6 +57,7 @@ class OnlineDCWCalibrator:
         c_pool_norm: str = "none",
         c_pool_mean: Optional[torch.Tensor] = None,
         c_pool_std: Optional[torch.Tensor] = None,
+        baseline_lambda: float = 0.0,
     ):
         self.head = head.to(device=device, dtype=dtype).eval()
         self.centroid = centroid.to(device=device, dtype=dtype)
@@ -84,6 +88,7 @@ class OnlineDCWCalibrator:
         self.g_obs_buf: list[float] = []
         self.alpha_eff: float = 0.0
         self.gain: float = 1.0
+        self.baseline_lambda: float = float(baseline_lambda)
 
     @classmethod
     def from_safetensors(
@@ -113,6 +118,9 @@ class OnlineDCWCalibrator:
         n_steps = int(meta.get("n_steps", 28))
         target_start = int(meta.get("target_start", k_warmup))
         target_end = int(meta.get("target_end", n_steps))
+        # Legacy artifacts (pre-baseline) → 0.0 = no scalar baseline applied,
+        # exactly the previous behavior.
+        baseline_lambda = float(meta.get("baseline_lambda", 0.0))
 
         head_sd = {
             k[len("head.") :]: v for k, v in tensors.items() if k.startswith("head.")
@@ -185,10 +193,11 @@ class OnlineDCWCalibrator:
             c_pool_norm=c_pool_norm,
             c_pool_mean=tensors.get("c_pool_mean"),
             c_pool_std=tensors.get("c_pool_std"),
+            baseline_lambda=baseline_lambda,
         )
         logger.info(
             "DCW calibrator: loaded %s (schema=%s, k=%d, target=[%d:%d], "
-            "%d steps, c_pool_norm=%s)",
+            "%d steps, c_pool_norm=%s, baseline_lambda=%+.4g)",
             path.name,
             schema,
             k_warmup,
@@ -196,6 +205,7 @@ class OnlineDCWCalibrator:
             target_end,
             n_steps,
             c_pool_norm,
+            baseline_lambda,
         )
         return ctrl
 
@@ -254,11 +264,12 @@ class OnlineDCWCalibrator:
         self.aux = (aux_raw - self.aux_mean) / self.aux_std
         self.is_active = True
         logger.info(
-            "DCW calibrator: setup target=[%d:%d] gain=%.4g cap_len=%d "
-            "cos_centroid=%.3f c_pool_norm=%s",
+            "DCW calibrator: setup target=[%d:%d] gain=%.4g baseline=%+.4g "
+            "cap_len=%d cos_centroid=%.3f c_pool_norm=%s",
             self.target_start,
             self.target_end,
             self.gain,
+            self.baseline_lambda,
             cap_len,
             cos_centroid,
             self.c_pool_norm,
@@ -303,8 +314,16 @@ class OnlineDCWCalibrator:
         )
 
     def lambda_for_step(self, step_i: int, sigma_i: float) -> float:
-        """Per-step λ for ``apply_dcw(..., schedule='const', lam=λ_i)``."""
-        if not self.is_active or not (self.target_start <= step_i < self.target_end):
+        """Per-step λ for ``apply_dcw(..., schedule='const', lam=λ_i)``.
+
+        Baseline applies on every step (matches the data-collection
+        scalar — no warmup dead zone). The residual α̂·gain term only
+        contributes once the head has fired, inside [target_start, target_end).
+        """
+        if not self.is_active:
             return 0.0
-        lam_i = self.alpha_eff * self.gain * (1.0 - sigma_i)
+        env = 1.0 - sigma_i
+        lam_i = self.baseline_lambda * env
+        if self.target_start <= step_i < self.target_end:
+            lam_i += self.alpha_eff * self.gain * env
         return max(-_LAMBDA_CLAMP, min(_LAMBDA_CLAMP, lam_i))

@@ -149,7 +149,10 @@ def train_one_fold(
     stem_groups_val = _build_stem_groups(stems, val_idx, device)
 
     best_val = float("inf")
-    best_state = None
+    # Snapshot init weights so a fold whose val score never becomes
+    # finite-and-improving still returns a coherent head (instead of whatever
+    # the patience-break epoch happened to produce).
+    best_state = {k: v.detach().clone() for k, v in head.state_dict().items()}
     patience, since_best = 50, 0
     last_train_aux = float("nan")
     for ep in range(epochs):
@@ -169,17 +172,22 @@ def train_one_fold(
         with torch.no_grad():
             ah_v, ls_v = head(c_v, a_v, g_v, x_v)
             val_nll = gaussian_nll(ah_v, ls_v, r_v).item()
+            # 0.0 (not NaN) when no multi-seed val groups exist — matches
+            # sigma_aux_loss's own empty-group return. Using NaN here
+            # poisoned val_score for every single-seed fold and prevented
+            # best_state from ever updating.
             val_aux = (
                 float(sigma_aux_loss(ls_v, r_v, stem_groups_val).item())
                 if stem_groups_val
-                else float("nan")
+                else 0.0
             )
         # Early-stop on the same composite loss the trainer is minimising,
         # so the aux objective actually shapes the kept checkpoint.
         val_score = val_nll + (
             lambda_sigma_aux * val_aux if lambda_sigma_aux > 0.0 else 0.0
         )
-        if val_score < best_val - 1e-4:
+        # NaN-safe: any NaN/inf val_score is rejected (falls into else branch).
+        if np.isfinite(val_score) and val_score < best_val - 1e-4:
             best_val = val_score
             best_state = {k: v.detach().clone() for k, v in head.state_dict().items()}
             since_best = 0
@@ -253,12 +261,14 @@ def main():
     p.add_argument(
         "--lambda_anchor",
         type=float,
-        default=0.015,
+        default=0.01,
         help="Target median |λ̂*_p| in λ-units. After computing raw LSQ targets "
-        "in gap-norm units (typical |raw|≈350), scale them by "
+        "in gap-norm units (typical |raw|≈28 on the 0506 fresh pool), scale them by "
         "K = lambda_anchor / median(|raw|) so the head learns to emit "
         "λ-scalars directly — no inference-side gain conversion needed. "
-        "Default 0.015 = magnitude of shipped DCW. K is saved in metadata for audit.",
+        "Default 0.01 matches the perceptual landmark from "
+        "project_dcw_perceptual_cfg4_confirmed (+0.01 at 832x1248 recovered "
+        "detail). K is saved in metadata for audit.",
     )
     p.add_argument(
         "--seed_mean_targets",
@@ -296,9 +306,18 @@ def main():
         "Raw cos_centroid aux feature is unaffected (computed on raw c_pool).",
     )
     p.add_argument(
+        "--zero_g_obs",
+        action="store_true",
+        help="Replace g_obs features with zeros (after standardization). "
+        "Ablation knob: tests whether prompt-only features (c_pool, aux, "
+        "aspect) carry any predictive signal once we have more prompts. "
+        "Memory project_dcw_g_obs_load_bearing showed r_α drops 44-49%% "
+        "without g_obs on the smaller pool — re-test on n=1025.",
+    )
+    p.add_argument(
         "--lambda_sigma_aux",
         type=float,
-        default=1.0,
+        default=0.1,
         help="Weight on the per-prompt aggregate σ̂² supervision (log-MSE "
         "of mean σ̂²_p vs unbiased seed-var of target_p, only over stems "
         "with ≥2 seeds in batch). 0 disables. Default 1.0 because the loss "
@@ -323,6 +342,39 @@ def main():
         f"  {len(rows)} rows over {len({r.run_id for r in rows})} runs, "
         f"n_steps={n_steps}"
     )
+
+    # Defensive dedupe: drop later-loaded rows that share (stem, aspect_id,
+    # seed_idx) with an earlier row. Same stem + same aspect + same seed_idx
+    # ≈ the same underlying noise sample (seed_idx is encoded as
+    # img_idx*1000 + seed_offset_in_run), so re-running a bucket on top of
+    # an existing pool would otherwise double-count those measurements.
+    # Cross-aspect rows for the same (stem, seed_idx) are kept — different
+    # aspect = different bucket size = a genuinely different measurement.
+    seen: set[tuple[str, int, int]] = set()
+    deduped: list = []
+    for r in rows:
+        key = (r.stem, r.aspect_id, r.seed_idx)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    n_dropped = len(rows) - len(deduped)
+    if n_dropped:
+        print(f"  dedupe (stem, aspect_id, seed_idx): dropped {n_dropped} dup rows")
+    rows = deduped
+
+    # baseline_lambda must be uniform across the pool. Mixing rows collected
+    # at different scalar baselines would mean the LSQ targets carry
+    # incompatible offsets and α̂ would average to nonsense at inference.
+    baselines = sorted({round(r.baseline_lambda, 8) for r in rows})
+    if len(baselines) > 1:
+        sys.exit(
+            f"baseline_lambda mismatch across pool: {baselines}. Re-collect "
+            "with a single --baseline_lambda or filter --results_root."
+        )
+    baseline_lambda = float(baselines[0])
+    print(f"  baseline_lambda = {baseline_lambda:.4g}")
+
     counts = {a: sum(1 for r in rows if r.aspect_id == a) for a in range(N_ASPECTS)}
     print(
         "  per-aspect counts: "
@@ -427,6 +479,9 @@ def main():
     g_obs_mean = g_obs_arr.mean(axis=0)
     g_obs_std = g_obs_arr.std(axis=0).clip(min=1.0)
     g_obs_n = (g_obs_arr - g_obs_mean) / g_obs_std
+    if args.zero_g_obs:
+        g_obs_n = np.zeros_like(g_obs_n)
+        print("  --zero_g_obs: g_obs features replaced with zeros")
 
     # Per-(stem, seed) LSQ fit: λ̂*_p = Σ gap·s / Σ s² over [s_start:s_end],
     # where s_i = 1 − σ_i. Single scalar per row, in raw gap-norm-per-(1−σ)
@@ -458,9 +513,7 @@ def main():
         # bucket-cosmetic memo's table), so pooling those rows would erase
         # real per-aspect signal as if it were seed noise. Within one
         # (stem, aspect) group, each row is one seed of the same setup.
-        groups_by_idx = np.array(
-            [(r.stem, r.aspect_id) for r in rows], dtype=object
-        )
+        groups_by_idx = np.array([(r.stem, r.aspect_id) for r in rows], dtype=object)
         per_group_mean: dict[tuple, float] = {}
         per_group_n: dict[tuple, int] = {}
         for i, g in enumerate(groups_by_idx):
@@ -567,9 +620,12 @@ def main():
         else float("nan")
     )
 
-    # NLL improvement vs N(0, σ²_pop) baseline
+    # NLL improvement vs the Bayes-optimal constant predictor
+    # N(mean(t), σ²_pop). Using 0 as the constant inflated the baseline by the
+    # population-mean squared (≈18% MSE on CFG=4 non-square data where target
+    # mean is +0.0035), so a head that just learned the bias looked +6%.
     nll_baseline = float(
-        ((cv_t - 0.0) ** 2 / (2 * sigma2_pop) + 0.5 * np.log(sigma2_pop)).mean()
+        ((cv_t - cv_t.mean()) ** 2 / (2 * sigma2_pop) + 0.5 * np.log(sigma2_pop)).mean()
     )
     sigma2_cv = np.exp(cv_ls)
     nll_head = float(
@@ -655,6 +711,10 @@ def main():
         "text_variant": str(args.text_variant),
         "n_train_rows": str(len(rows)),
         "c_pool_norm": args.c_pool_norm,
+        # Scalar λ baked into the reverse trajectory at data collection
+        # (one_minus_sigma schedule). Calibrator adds it on every step so
+        # α̂ acts as a residual on top — kills the v4 dead-zone mismatch.
+        "baseline_lambda": f"{baseline_lambda:.6g}",
     }
     save_file(state, str(run_dir / "fusion_head.safetensors"), metadata=meta)
 
@@ -679,12 +739,23 @@ def main():
                         r.stem,
                         ASPECT_NAMES[r.aspect_id],
                         r.seed_idx,
-                        f"{targets[i]:.4f}",
-                        f"{cv_alpha[i]:.4f}",
-                        f"{np.exp(cv_log_sigma2[i]):.4f}",
+                        f"{targets[i]:.6e}",
+                        f"{cv_alpha[i]:.6e}",
+                        f"{np.exp(cv_log_sigma2[i]):.6e}",
                         fold_of_stem[r.stem],
                     ]
                 )
+
+    # Sanitise non-finite floats (NaN / ±inf) into None so result.json stays
+    # spec-conformant — bench/_common.py serialises with json.dumps' default
+    # which emits the non-spec literals NaN / Infinity that strict parsers
+    # reject. Only NaN / inf are touched; finite values pass through.
+    def _safe(x):
+        if isinstance(x, float) and not np.isfinite(x):
+            return None
+        return x
+
+    fold_scores_safe = [_safe(s) for s in fold_scores]
 
     metrics = {
         "n_rows": len(rows),
@@ -703,19 +774,25 @@ def main():
             ASPECT_NAMES[a]: float(sigma2_prior[a]) for a in range(N_ASPECTS)
         },
         "lam_scalar": {ASPECT_NAMES[a]: float(lam_scalar[a]) for a in range(N_ASPECTS)},
-        "cv_fold_val_scores": fold_scores,
-        "r_alpha_mean_per_prompt": r_alpha_mean,
-        "r_alpha_seed_conditional": r_alpha_seed,
-        "r_sigma_per_prompt": r_sigma,
-        "nll_head": nll_head,
-        "nll_baseline": nll_baseline,
-        "nll_improvement": nll_improve,
+        "cv_fold_val_scores": fold_scores_safe,
+        "r_alpha_mean_per_prompt": _safe(r_alpha_mean),
+        "r_alpha_seed_conditional": _safe(r_alpha_seed),
+        "r_sigma_per_prompt": _safe(r_sigma),
+        "nll_head": _safe(nll_head),
+        "nll_baseline": _safe(nll_baseline),
+        "nll_improvement": _safe(nll_improve),
         "per_aspect_metrics": per_aspect_metrics,
         "gates": {
-            "r_alpha_mean_pass": r_alpha_mean >= 0.6,
-            "r_alpha_seed_pass": r_alpha_seed >= 0.7,
-            "r_sigma_pass": (r_sigma >= 0.4) if not np.isnan(r_sigma) else None,
-            "nll_improvement_pass": nll_improve >= 0.15,
+            "r_alpha_mean_pass": (
+                bool(r_alpha_mean >= 0.6) if np.isfinite(r_alpha_mean) else None
+            ),
+            "r_alpha_seed_pass": (
+                bool(r_alpha_seed >= 0.7) if np.isfinite(r_alpha_seed) else None
+            ),
+            "r_sigma_pass": (bool(r_sigma >= 0.4) if np.isfinite(r_sigma) else None),
+            "nll_improvement_pass": (
+                bool(nll_improve >= 0.15) if np.isfinite(nll_improve) else None
+            ),
         },
     }
     write_result(

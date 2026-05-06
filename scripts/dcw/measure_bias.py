@@ -245,6 +245,21 @@ def parse_args() -> argparse.Namespace:
         "v2 §A4 uses {0, -0.015, -0.020, -0.025}).",
     )
     p.add_argument(
+        "--baseline_lambda",
+        type=float,
+        default=0.0,
+        help="LL-only DCW λ applied (one_minus_sigma schedule) on every step "
+        "of the seed-batched 'baseline' reverse trajectory. Default 0 keeps "
+        "the legacy no-DCW baseline. Set to e.g. 0.01 to collect data under "
+        "the make-test-dcw scalar so the trained head emits a residual α̂ "
+        "on top — eliminates the v4 dead-zone mismatch (warmup steps see "
+        "the same correction as the rest, and g_obs is observed on the "
+        "trajectory inference will actually see). Stamped into result.json "
+        "args; the trainer reads it back and bakes it into the safetensors "
+        "meta so the calibrator applies the matching baseline at inference. "
+        "Ignored under --dcw_sweep (sweep mode tests the configured scalars).",
+    )
+    p.add_argument(
         "--dump_per_sample_gaps",
         action="store_true",
         help="Dump per-(traj, step) baseline LL/LH/HL/HH gap arrays "
@@ -475,7 +490,12 @@ def main() -> None:
     )
 
     # DCW configs: baseline + optional λ sweep (LL-only, one_minus_sigma).
-    configs: list[tuple[str, float]] = [("baseline", 0.0)]
+    # Under --dcw_sweep the baseline stays at λ=0 (sweep is the experiment).
+    # Outside sweep, --baseline_lambda lets the seed-batched reverse
+    # trajectory bake in a fixed scalar (e.g. 0.01) so the trained head
+    # learns a residual α̂ on top — eliminates the v4 dead-zone mismatch.
+    baseline_lam = 0.0 if args.dcw_sweep else float(args.baseline_lambda)
+    configs: list[tuple[str, float]] = [("baseline", baseline_lam)]
     if args.dcw_sweep:
         for lam in args.dcw_scalers:
             if lam == 0.0:
@@ -492,7 +512,7 @@ def main() -> None:
     else:
         rev_calls = len(samples)
         rev_batch = args.n_seeds * cfg_mult
-        rev_desc = f"{args.n_seeds} seed trajectories at λ=0"
+        rev_desc = f"{args.n_seeds} seed trajectories at λ={baseline_lam}"
     log.info(
         f"{len(configs)} config(s) × {len(samples)} samples × {args.n_seeds} seeds: "
         f"{fwd_calls} fwd calls (batch={fwd_batch}) + {rev_calls} rev calls "
@@ -661,7 +681,12 @@ def main() -> None:
                 )
                 if finals_to_decode is not None and final_latents is not None:
                     finals_to_decode.append(
-                        (stem, seeds[seed_idx], "baseline", final_latents[seed_idx : seed_idx + 1].clone())
+                        (
+                            stem,
+                            seeds[seed_idx],
+                            "baseline",
+                            final_latents[seed_idx : seed_idx + 1].clone(),
+                        )
                     )
             pbar.update(1)
             pbar.set_postfix_str(stem)
@@ -683,9 +708,7 @@ def main() -> None:
 
         images_dir = out_dir / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
-        log.info(
-            f"decoding {len(finals_to_decode)} final latents → {images_dir}"
-        )
+        log.info(f"decoding {len(finals_to_decode)} final latents → {images_dir}")
 
         # Free the DiT (and the encoded latent / text cache) before
         # loading the VAE — keeps peak VRAM bounded by max(DiT, VAE).
@@ -708,16 +731,12 @@ def main() -> None:
         vae.to(device)
 
         def _safe(name: str) -> str:
-            return (
-                name.replace("=", "_eq").replace("λ", "lam").replace(" ", "_")
-            )
+            return name.replace("=", "_eq").replace("λ", "lam").replace(" ", "_")
 
         with torch.no_grad():
             decode_pbar = tqdm(total=len(finals_to_decode), desc="decode")
             for stem, seed_int, cfg_name, latent in finals_to_decode:
-                pixels = vae.decode_to_pixels(
-                    latent.to(device, dtype=vae.dtype)
-                )
+                pixels = vae.decode_to_pixels(latent.to(device, dtype=vae.dtype))
                 if pixels.ndim == 5:
                     pixels = pixels.squeeze(2)  # [1, 3, H, W]
                 img_t = (

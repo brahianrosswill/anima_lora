@@ -11,6 +11,15 @@ The trainer is bucket-agnostic (single population μ_g, aspect_emb pinned
 to zero) — see `project_dcw_bucket_prior_cosmetic` memory. Per-bucket
 sampling is kept only to balance the prompt pool across aspect buckets.
 
+Reverse trajectories are collected with `--baseline_lambda 0.01`
+(one_minus_sigma) baked in, matching `make test-dcw`'s scalar default.
+The head therefore learns the residual α̂ on top of that scalar; at
+inference the calibrator applies `0.01·(1−σ)` on every step plus
+`α̂·gain·(1−σ)` once the head has fired. No dead-zone mismatch — g_obs
+is observed on the same trajectory inference will use, and warmup steps
+get the same correction as the rest. Override with `--baseline_lambda 0`
+to fall back to the legacy no-DCW baseline.
+
 `make dcw-train` skips the sampling phase and trains on the existing pool.
 
 See `docs/proposal/dcw-learnable-calibrator-v4.md` §I1.
@@ -66,17 +75,21 @@ def cmd_dcw(extra):
     Other extra args pass through to every measure_bias invocation
     (--dit, --lora_weight, --pooled_text_proj '', --guidance_scale, etc.).
     """
-    n_images, extra = _pop_kv(extra, "--n_images", "130")
+    n_images, extra = _pop_kv(extra, "--n_images", "100")
     n_seeds, extra = _pop_kv(extra, "--n_seeds", "1")
     shuffle_seed, extra = _pop_kv(extra, "--shuffle_seed", "0")
     label, extra = _pop_kv(extra, "--label", "make-dcw")
+    # Match make-test-dcw's default scalar so the trained head learns
+    # the residual α̂ on top — kills the v4 dead-zone mismatch (head
+    # observes / acts on the same trajectory inference will).
+    baseline_lambda, extra = _pop_kv(extra, "--baseline_lambda", "0.01")
 
     out_root = "output/dcw"
     for H, W in DCW_BUCKETS:
         bucket_label = f"{label}-{H}x{W}"
         print(
             f"\n=== DCW sample: bucket {H}x{W} ({n_images} imgs × {n_seeds} seeds, "
-            f"shuffle_seed={shuffle_seed}) ==="
+            f"shuffle_seed={shuffle_seed}, baseline_lambda={baseline_lambda}) ==="
         )
         run(
             [
@@ -92,6 +105,8 @@ def cmd_dcw(extra):
                 n_seeds,
                 "--shuffle_seed",
                 shuffle_seed,
+                "--baseline_lambda",
+                baseline_lambda,
                 "--dump_per_sample_gaps",
                 "--label",
                 bucket_label,

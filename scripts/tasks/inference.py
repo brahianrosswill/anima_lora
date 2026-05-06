@@ -105,10 +105,10 @@ def cmd_test_spectrum(extra):
 def cmd_test_dcw(extra):
     """Inference with latest LoRA + DCW post-step correction.
 
-    Defaults bake in λ=-0.010 + one_minus_sigma schedule (see
+    Defaults bake in λ=0.01 + one_minus_sigma schedule (see
     bench/dcw/findings.md). Override via --dcw_lambda / --dcw_schedule in extra.
     """
-    run([*INFERENCE_BASE, "--lora_weight", str(latest_lora()), "--dcw", *extra])
+    run([*INFERENCE_BASE, "--dcw", "--dcw_lambda", "0.01", *extra])
 
 
 def _latest_fusion_head() -> str:
@@ -138,10 +138,11 @@ def _latest_fusion_head() -> str:
 
 
 def cmd_test_dcw_v4(extra):
-    """Inference with latest LoRA + DCW learnable calibrator.
+    """Inference with DCW learnable calibrator (no LoRA by default).
 
     Auto-resolves the most recent fusion_head.safetensors. Pass
     --dcw_calibrator <path> (or legacy --dcw_v4 <path>) in extra to override.
+    Pass --lora_weight <path> in extra to add a LoRA on top.
     """
     extra_has_calib = any(
         a == "--dcw_calibrator" or a == "--dcw_v4" for a in extra
@@ -149,7 +150,6 @@ def cmd_test_dcw_v4(extra):
     calib_args = [] if extra_has_calib else ["--dcw_calibrator", _latest_fusion_head()]
     run([
         *INFERENCE_BASE,
-        "--lora_weight", str(latest_lora()),
         *calib_args,
         *extra,
     ])
