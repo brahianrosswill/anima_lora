@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMessageBox,
     QPushButton,
@@ -391,11 +392,14 @@ class CaptionVersionsDialog(QDialog):
 class ImageViewerTab(QWidget):
     def __init__(self):
         super().__init__()
-        self._images: list[Path] = []
+        self._all_images: list[Path] = []  # unfiltered, alphabetical (from _imgs)
+        self._images: list[Path] = []  # currently displayed (filter + sort applied)
         self._dirs = _image_dirs()
         self._current_caption_path: Path | None = None
         self._disk_text: str = ""  # last value seen on disk (for diff baseline)
         self._suspend_dirty = False  # while we set text programmatically
+        self._search_text: str = ""
+        self._sort_desc: bool = False
         lay = QVBoxLayout(self)
 
         top = QHBoxLayout()
@@ -418,9 +422,32 @@ class ImageViewerTab(QWidget):
         lay.addLayout(top)
 
         sp = QSplitter(Qt.Horizontal)
+
+        # Left panel: search + sort row, then the file list. Wrapping the
+        # list in a container lets us put the search bar directly above it
+        # while leaving the splitter's two-pane geometry intact.
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(2)
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(t("dataset_search_placeholder"))
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._on_search_changed)
+        search_row.addWidget(self.search, 1)
+        self.sort_btn = QPushButton("↑")
+        self.sort_btn.setFixedWidth(28)
+        self.sort_btn.setToolTip(t("dataset_sort_asc_tooltip"))
+        self.sort_btn.clicked.connect(self._toggle_sort)
+        search_row.addWidget(self.sort_btn)
+        ll.addLayout(search_row)
+
         self.fl = QListWidget()
         self.fl.currentRowChanged.connect(self._on_row_changed)
-        sp.addWidget(self.fl)
+        ll.addWidget(self.fl, 1)
+        sp.addWidget(left)
 
         right = QWidget()
         rl = QVBoxLayout(right)
@@ -489,25 +516,81 @@ class ImageViewerTab(QWidget):
         prev_stem: str | None = None
         if preserve_selection and self._current_caption_path is not None:
             prev_stem = self._current_caption_path.stem
-        self._images = _imgs(d)
-        self.fl.clear()
-        for p in self._images:
-            self.fl.addItem(p.stem)
-        self.cnt.setText(t("n_images", n=len(self._images)))
-        if self._images:
-            row = 0
-            if prev_stem is not None:
-                for i, p in enumerate(self._images):
-                    if p.stem == prev_stem:
-                        row = i
-                        break
-            self.fl.setCurrentRow(row)
-        else:
+        self._all_images = _imgs(d)
+        had_match = self._apply_filter_and_sort(prev_stem=prev_stem)
+        if not self._images:
             self._current_caption_path = None
             self._set_caption_text("")
             self._disk_text = ""
             self._refresh_buttons()
             self._refresh_inline_diff()
+        elif not had_match:
+            # Fresh dir, no prior selection to restore — pick the first row.
+            self.fl.setCurrentRow(0)
+
+    def _apply_filter_and_sort(self, *, prev_stem: str | None = None) -> bool:
+        """Rebuild the visible list from ``_all_images`` using the current
+        search text and sort direction.
+
+        Returns True if a row matching ``prev_stem`` was selected, False
+        otherwise. Block-signals while rebuilding so search keystrokes don't
+        trigger ``_on_row_changed`` (which would prompt to save unsaved
+        caption edits on every keystroke).
+        """
+        q = self._search_text.strip().lower()
+        if q:
+            visible = [p for p in self._all_images if q in p.stem.lower()]
+        else:
+            visible = list(self._all_images)
+        if self._sort_desc:
+            visible.reverse()
+        self._images = visible
+
+        # Try to keep the current selection visible after refilter/resort.
+        # Falls back to ``prev_stem`` when called from _load_dir.
+        target_stem: str | None = prev_stem
+        if target_stem is None and self._current_caption_path is not None:
+            target_stem = self._current_caption_path.stem
+
+        target_row = -1
+        for i, p in enumerate(visible):
+            if p.stem == target_stem:
+                target_row = i
+                break
+
+        self.fl.blockSignals(True)
+        try:
+            self.fl.clear()
+            for p in visible:
+                self.fl.addItem(p.stem)
+            if target_row >= 0:
+                self.fl.setCurrentRow(target_row)
+            else:
+                self.fl.setCurrentRow(-1)
+        finally:
+            self.fl.blockSignals(False)
+
+        total = len(self._all_images)
+        shown = len(visible)
+        if q and shown != total:
+            self.cnt.setText(t("n_images_filtered", shown=shown, total=total))
+        else:
+            self.cnt.setText(t("n_images", n=total))
+        return target_row >= 0
+
+    def _on_search_changed(self, text: str) -> None:
+        self._search_text = text
+        self._apply_filter_and_sort()
+
+    def _toggle_sort(self) -> None:
+        self._sort_desc = not self._sort_desc
+        self.sort_btn.setText("↓" if self._sort_desc else "↑")
+        self.sort_btn.setToolTip(
+            t("dataset_sort_desc_tooltip")
+            if self._sort_desc
+            else t("dataset_sort_asc_tooltip")
+        )
+        self._apply_filter_and_sort()
 
     def _reload_current_dir(self) -> None:
         """Re-scan the currently selected directory (for new/changed images)."""
