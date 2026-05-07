@@ -148,10 +148,11 @@ class ConfigTab(QWidget):
         self.new_variant_btn.setToolTip(t("new_variant_tooltip"))
         self.new_variant_btn.clicked.connect(self._create_variant)
         top.addWidget(self.new_variant_btn)
-        self.show_guide_btn = QPushButton(t("show_guide"))
-        self.show_guide_btn.setToolTip(t("show_guide_tooltip"))
-        self.show_guide_btn.clicked.connect(self._show_explain_placeholder)
-        top.addWidget(self.show_guide_btn)
+        # The right-hand panel already shows the variant guide by default
+        # (and on every variant switch via _reload → _show_explain_placeholder).
+        # A dedicated "Guide" button next to Save was visually redundant — to
+        # return to the guide after clicking a field, just switch variants or
+        # click another field.
 
         self._save_btn = QPushButton(t("save"))
         self._save_btn_idle_style = ""

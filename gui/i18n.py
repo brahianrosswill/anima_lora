@@ -13,6 +13,64 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "tab_methods": "Methods",
         "tab_images": "Dataset",
         "tab_merge": "Merge",
+        "tab_preprocess": "Preprocessing",
+        # PreprocessingTab
+        "preprocess_intro": (
+            "Configure caption shuffling and text-bubble masking, then run each "
+            "step on demand. The Training Config tab's one-click Preprocess "
+            "button still uses defaults — this tab is for tuning."
+        ),
+        "preprocess_text_caching": "Text caching",
+        "preprocess_caption_shuffle_variants": "Shuffle variants per caption (N):",
+        "preprocess_caption_shuffle_variants_tip": (
+            "Generate N caption variants per image. v0 is the pristine original; "
+            "v1..v(N-1) are smart-shuffled and (if tag-dropout > 0) have non-prefix "
+            "tags independently dropped. The dataloader picks v0 with 20% probability "
+            "and v1..v(N-1) uniformly otherwise when use_shuffled_caption_variants=true. "
+            "Set to 0 to cache a single pristine caption only."
+        ),
+        "preprocess_caption_tag_dropout_rate": "Tag dropout rate (0.0–1.0):",
+        "preprocess_caption_tag_dropout_rate_tip": (
+            "Per-tag dropout probability applied to v1..v(N-1). Tags up to and "
+            "including the first @artist marker are never dropped. Ignored when "
+            "shuffle variants ≤ 0."
+        ),
+        "preprocess_run_te": "Run text caching",
+        "preprocess_masking_sam": "SAM3 masking (text bubbles)",
+        "preprocess_masking_mit": "MIT masking (manga text)",
+        "preprocess_sam_prompts": "SAM prompts (one per line):",
+        "preprocess_sam_prompts_tip": (
+            "Text prompts SAM3 looks for. One per line. Defaults to 'speech bubble' "
+            "and 'text bubble'."
+        ),
+        "preprocess_sam_threshold": "SAM threshold (0.0–1.0):",
+        "preprocess_sam_threshold_tip": (
+            "Minimum confidence for a SAM3 detection to be kept. Lower = more masks "
+            "(may include false positives), higher = stricter. Default 0.5."
+        ),
+        "preprocess_dilate": "Dilate (px):",
+        "preprocess_dilate_tip": (
+            "Pixels of dilation applied to the binary mask. Larger values blur "
+            "mask edges outward. Default 5. Set to 0 to disable."
+        ),
+        "preprocess_mit_threshold": "MIT text threshold (0.0–1.0):",
+        "preprocess_mit_threshold_tip": (
+            "Confidence threshold for the MIT/ComicTextDetector text segmenter. "
+            "Default 0.8."
+        ),
+        "preprocess_run_sam": "Run SAM masking",
+        "preprocess_run_mit": "Run MIT masking",
+        "preprocess_run_merge": "Merge SAM + MIT → masks/merged",
+        "preprocess_status_resized": "Resized images: {n}",
+        "preprocess_status_caches": "Caches — latents: {lat}, text: {te}, PE: {pe}",
+        "preprocess_status_masks": "Masks — SAM: {sam}, MIT: {mit}, merged: {merged}",
+        "preprocess_status_no_resized": "No resized images yet — run Preprocess in the Training Config tab first.",
+        "preprocess_log_placeholder": "Preprocessing output will appear here...",
+        "preprocess_save_settings": "Save",
+        "preprocess_save_settings_tip": "Persist these settings (writes configs/sam_mask.yaml + GUI settings).",
+        "preprocess_settings_saved": "Preprocessing settings saved.",
+        "preprocess_invalid_float": "Invalid number for {field}: {value}",
+        "preprocess_already_running": "A preprocessing step is already running.",
         # ConfigTab
         "preset": "Preset:",
         "save": "Save",
@@ -215,6 +273,63 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "tab_methods": "메소드",
         "tab_images": "데이터셋",
         "tab_merge": "병합",
+        "tab_preprocess": "전처리",
+        # PreprocessingTab
+        "preprocess_intro": (
+            "캡션 셔플과 말풍선 마스킹을 설정하고, 각 단계를 원할 때 실행합니다. "
+            "학습 설정 탭의 원클릭 Preprocess 버튼은 기본값을 사용합니다 — "
+            "이 탭은 세부 조정용입니다."
+        ),
+        "preprocess_text_caching": "텍스트 캐싱",
+        "preprocess_caption_shuffle_variants": "캡션당 셔플 변형 수 (N):",
+        "preprocess_caption_shuffle_variants_tip": (
+            "이미지당 N개의 캡션 변형을 생성합니다. v0은 원본 그대로이고, "
+            "v1..v(N-1)은 스마트 셔플되며 (태그 드롭아웃 > 0이면) @artist 이후 "
+            "태그가 독립적으로 드롭됩니다. use_shuffled_caption_variants=true일 때 "
+            "데이터로더는 v0을 20% 확률로, 나머지는 v1..v(N-1) 균등 분포로 선택합니다. "
+            "0으로 설정하면 원본 캡션 하나만 캐싱합니다."
+        ),
+        "preprocess_caption_tag_dropout_rate": "태그 드롭아웃 비율 (0.0–1.0):",
+        "preprocess_caption_tag_dropout_rate_tip": (
+            "v1..v(N-1)에만 적용되는 태그별 드롭아웃 확률입니다. "
+            "첫 번째 @artist 마커까지의 태그는 절대 드롭되지 않습니다. "
+            "셔플 변형 수가 0 이하이면 무시됩니다."
+        ),
+        "preprocess_run_te": "텍스트 캐싱 실행",
+        "preprocess_masking_sam": "SAM3 마스킹 (말풍선)",
+        "preprocess_masking_mit": "MIT 마스킹 (만화 텍스트)",
+        "preprocess_sam_prompts": "SAM 프롬프트 (한 줄에 하나):",
+        "preprocess_sam_prompts_tip": (
+            "SAM3이 찾을 텍스트 프롬프트. 한 줄에 하나씩. "
+            "기본값: 'speech bubble', 'text bubble'."
+        ),
+        "preprocess_sam_threshold": "SAM 임계값 (0.0–1.0):",
+        "preprocess_sam_threshold_tip": (
+            "SAM3 탐지를 유지할 최소 신뢰도. 낮을수록 더 많은 마스크 "
+            "(오탐 포함 가능), 높을수록 엄격. 기본값 0.5."
+        ),
+        "preprocess_dilate": "팽창 (px):",
+        "preprocess_dilate_tip": (
+            "이진 마스크에 적용할 팽창 픽셀 수. 값이 클수록 마스크 가장자리가 "
+            "바깥으로 번집니다. 기본값 5. 0으로 비활성화."
+        ),
+        "preprocess_mit_threshold": "MIT 텍스트 임계값 (0.0–1.0):",
+        "preprocess_mit_threshold_tip": (
+            "MIT/ComicTextDetector 텍스트 세그멘터의 신뢰도 임계값. 기본값 0.8."
+        ),
+        "preprocess_run_sam": "SAM 마스킹 실행",
+        "preprocess_run_mit": "MIT 마스킹 실행",
+        "preprocess_run_merge": "SAM + MIT 병합 → masks/merged",
+        "preprocess_status_resized": "리사이즈된 이미지: {n}장",
+        "preprocess_status_caches": "캐시 — latents: {lat}, text: {te}, PE: {pe}",
+        "preprocess_status_masks": "마스크 — SAM: {sam}, MIT: {mit}, merged: {merged}",
+        "preprocess_status_no_resized": "리사이즈된 이미지가 없습니다 — 학습 설정 탭에서 Preprocess를 먼저 실행하세요.",
+        "preprocess_log_placeholder": "전처리 출력이 여기에 표시됩니다...",
+        "preprocess_save_settings": "저장",
+        "preprocess_save_settings_tip": "이 설정들을 디스크에 저장합니다 (configs/sam_mask.yaml + GUI 설정).",
+        "preprocess_settings_saved": "전처리 설정이 저장되었습니다.",
+        "preprocess_invalid_float": "{field}에 잘못된 숫자: {value}",
+        "preprocess_already_running": "이미 전처리 단계가 실행 중입니다.",
         # ConfigTab
         "preset": "프리셋:",
         "save": "저장",

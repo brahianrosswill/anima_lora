@@ -28,10 +28,11 @@ v0 design choices:
     ``prepare_optimizer_params_with_multiple_te_lrs`` registers it as its
     own param group with LR ``repa_lr_scale * unet_lr``.
 
-Resume-from-checkpoint: the LoRA save pipeline currently does not include
-``repa_head`` weights, so warm-starting from a previously-saved adapter
-re-inits the head from scratch. The head is small and re-converges in a few
-hundred steps; acceptable for v0.
+Resume-from-checkpoint: ``LoRANetwork.save_weights`` strips ``repa_head.*``
+from the on-disk artifact (the head is training-only, would otherwise add
+~21MB of dead weight to inference-bound files). Warm-starting from a
+previously-saved adapter re-inits the head from scratch — small, re-converges
+in a few hundred steps.
 """
 
 from __future__ import annotations

@@ -311,6 +311,188 @@ def field_help(key: str) -> str | None:
     return entry.get(lang) or entry.get("en")
 
 
+# ── Preprocessing tab field help ───────────────────────────────
+# Distinct from the training-time `caption_dropout_rate` entry above:
+# these knobs are consumed by preprocess/cache_text_embeddings.py at
+# cache-build time, not by the dataloader.
+PREPROCESS_FIELD_HELP: dict[str, dict[str, str]] = {
+    "caption_shuffle_variants": {
+        "en": (
+            "Number of caption variants generated per image during text-encoder "
+            "caching. v0 is the pristine original caption; v1..v(N-1) are smart-"
+            "shuffled (the @artist prefix and 'On the …' / 'In the …' section "
+            "anchors are preserved). The dataloader picks v0 with 20% probability "
+            "and v1..v(N-1) uniformly otherwise — but only when "
+            "use_shuffled_caption_variants=true in your method config. Set to 0 "
+            "to cache a single pristine caption only."
+        ),
+        "ko": (
+            "텍스트 인코더 캐싱 시 이미지당 생성되는 캡션 변형 수. v0은 원본 "
+            "캡션 그대로이고, v1..v(N-1)은 스마트 셔플됩니다 (@artist 접두사와 "
+            "'On the …' / 'In the …' 섹션 앵커는 보존). "
+            "데이터로더는 v0을 20% 확률로 선택하고 나머지는 v1..v(N-1) 균등 "
+            "분포로 선택합니다 — 단, 메소드 설정에 "
+            "use_shuffled_caption_variants=true 일 때만 적용됩니다. "
+            "0으로 설정하면 원본 캡션 하나만 캐싱합니다."
+        ),
+    },
+    "caption_tag_dropout_rate": {
+        "en": (
+            "Per-tag dropout probability applied only to v1..v(N-1) shuffle "
+            "variants. Tags up to and including the first @artist marker are "
+            "never dropped — the artist tag is structurally important and the "
+            "rating/character/series prefix is order-sensitive. Ignored when "
+            "shuffle variants ≤ 0. Typical: 0.05–0.15. Higher values teach the "
+            "LoRA to generalize across missing tags but can dilute the signal."
+        ),
+        "ko": (
+            "v1..v(N-1) 셔플 변형에만 적용되는 태그별 드롭아웃 확률입니다. "
+            "첫 번째 @artist 마커까지의 태그는 절대 드롭되지 않습니다 — "
+            "작가 태그는 구조적으로 중요하고, 등급/캐릭터/작품 접두사는 "
+            "순서가 중요합니다. 셔플 변형 수가 0 이하이면 무시됩니다. "
+            "일반적: 0.05–0.15. 값이 높을수록 누락된 태그에 강건해지지만 "
+            "학습 신호가 희석될 수 있습니다."
+        ),
+    },
+    "sam_prompts": {
+        "en": (
+            "Text prompts SAM3 will look for in each image. One prompt per "
+            "line. Defaults are tuned for manga-style speech / text bubbles. "
+            "Add custom prompts if your dataset has additional regions you "
+            "want masked out (e.g. 'sound effect', 'caption box'). Saved to "
+            "configs/sam_mask.yaml — read directly by "
+            "preprocess/generate_masks.py."
+        ),
+        "ko": (
+            "SAM3이 각 이미지에서 찾을 텍스트 프롬프트. 한 줄에 하나씩. "
+            "기본값은 만화 스타일 말풍선 / 텍스트 영역에 맞춰져 있습니다. "
+            "추가로 마스킹하고 싶은 영역이 있으면 커스텀 프롬프트를 "
+            "추가하세요 (예: 'sound effect', 'caption box'). "
+            "configs/sam_mask.yaml에 저장되며 "
+            "preprocess/generate_masks.py가 직접 읽습니다."
+        ),
+    },
+    "sam_threshold": {
+        "en": (
+            "Minimum confidence required for a SAM3 detection to be kept. "
+            "Range 0.0–1.0. Lower values produce more masks (with more false "
+            "positives); higher values are stricter. Default 0.5. If SAM is "
+            "missing real bubbles, lower this; if it's masking unrelated "
+            "regions, raise it."
+        ),
+        "ko": (
+            "SAM3 탐지를 유지하기 위한 최소 신뢰도. 범위 0.0–1.0. 값이 "
+            "낮을수록 더 많은 마스크가 생성되지만 오탐도 늘어나며, 값이 "
+            "높을수록 엄격해집니다. 기본값 0.5. SAM이 실제 말풍선을 "
+            "놓치면 값을 낮추고, 관련 없는 영역을 마스킹하면 높이세요."
+        ),
+    },
+    "sam_dilate": {
+        "en": (
+            "Pixels of binary dilation applied to each SAM mask after "
+            "thresholding. Larger values blur mask edges outward — useful "
+            "when the underlying segmentation undershoots the actual text "
+            "bubble border. Default 5. Set to 0 to disable dilation."
+        ),
+        "ko": (
+            "임계값 처리 후 각 SAM 마스크에 적용되는 이진 팽창 픽셀 수. "
+            "값이 클수록 마스크 가장자리가 바깥으로 번집니다 — 실제 "
+            "말풍선 경계보다 분할 결과가 작을 때 유용합니다. 기본값 5. "
+            "0으로 비활성화."
+        ),
+    },
+    "mit_text_threshold": {
+        "en": (
+            "Confidence threshold for the MIT/ComicTextDetector text "
+            "segmenter. Range 0.0–1.0. Independent of SAM threshold — MIT "
+            "uses a different model trained specifically on manga text "
+            "regions. Default 0.8. Lower if MIT is missing text inside "
+            "panels; raise if it's catching non-text artifacts."
+        ),
+        "ko": (
+            "MIT/ComicTextDetector 텍스트 분할기의 신뢰도 임계값. 범위 "
+            "0.0–1.0. SAM 임계값과는 별개입니다 — MIT는 만화 텍스트 "
+            "영역에 특화된 다른 모델을 사용합니다. 기본값 0.8. 패널 "
+            "내부 텍스트를 놓치면 낮추고, 텍스트가 아닌 부분을 잡으면 "
+            "높이세요."
+        ),
+    },
+    "mit_dilate": {
+        "en": (
+            "Pixels of binary dilation applied to each MIT mask. Same role "
+            "as SAM dilate but tuned independently — MIT typically segments "
+            "tight bounding regions around individual glyphs, so a moderate "
+            "dilate value joins them into per-bubble blobs. Default 5."
+        ),
+        "ko": (
+            "각 MIT 마스크에 적용되는 이진 팽창 픽셀 수. SAM 팽창과 같은 "
+            "역할이지만 독립적으로 조정 — MIT는 일반적으로 개별 글리프 "
+            "주변에 타이트한 경계를 분할하므로, 적당한 팽창 값으로 "
+            "말풍선 단위 블롭으로 합쳐줍니다. 기본값 5."
+        ),
+    },
+}
+
+
+def preprocess_field_help(key: str) -> str | None:
+    """Per-field help for the Preprocessing tab. Falls back to FIELD_HELP."""
+    entry = PREPROCESS_FIELD_HELP.get(key)
+    if entry is None:
+        return field_help(key)
+    lang = current_language()
+    return entry.get(lang) or entry.get("en")
+
+
+PREPROCESS_GUIDE: dict[str, str] = {
+    "en": (
+        "<h2 style='margin:0 0 10px 0; font-size:18px;'>Preprocessing</h2>"
+        "<p>Three artifact lanes feed training:</p>"
+        "<p><b>1. Text caching</b> &mdash; tokenizes captions through Qwen3 "
+        "+ T5 and writes <code>{stem}_anima_te.safetensors</code> sidecars. "
+        "When <i>shuffle variants</i> &gt; 0, each cache holds N captions and "
+        "the dataloader samples one per training step (turn on "
+        "<code>use_shuffled_caption_variants</code> in your method config to "
+        "use them).</p>"
+        "<p><b>2. SAM3 masking</b> &mdash; finds text-bubble regions using "
+        "natural-language prompts. Saved to <code>masks/sam/</code>.</p>"
+        "<p><b>3. MIT masking</b> &mdash; runs a manga-specific text "
+        "segmenter trained on glyph-level data. Saved to "
+        "<code>masks/mit/</code>.</p>"
+        "<p>The <b>Merge</b> step unions SAM + MIT into "
+        "<code>masks/merged/</code>. When the merged dir exists, training "
+        "subsets pick it up automatically (see <code>masked_loss</code> in "
+        "the method config).</p>"
+        "<p style='color:#888; font-style:italic; margin-top:12px;'>"
+        "Click any field label on the left to see its explanation here.</p>"
+    ),
+    "ko": (
+        "<h2 style='margin:0 0 10px 0; font-size:18px;'>전처리</h2>"
+        "<p>학습은 세 가지 산출물 레인을 사용합니다:</p>"
+        "<p><b>1. 텍스트 캐싱</b> &mdash; Qwen3 + T5로 캡션을 토큰화하고 "
+        "<code>{stem}_anima_te.safetensors</code> 파일로 저장합니다. "
+        "<i>셔플 변형 수</i>가 0보다 크면 각 캐시에 N개의 캡션이 들어가며 "
+        "데이터로더는 학습 스텝마다 하나를 샘플링합니다 (메소드 설정에서 "
+        "<code>use_shuffled_caption_variants</code>를 켜야 사용됩니다).</p>"
+        "<p><b>2. SAM3 마스킹</b> &mdash; 자연어 프롬프트로 말풍선 영역을 "
+        "찾습니다. <code>masks/sam/</code>에 저장.</p>"
+        "<p><b>3. MIT 마스킹</b> &mdash; 글리프 단위 데이터로 학습된 "
+        "만화 전용 텍스트 분할기를 실행합니다. <code>masks/mit/</code>에 "
+        "저장.</p>"
+        "<p><b>병합</b> 단계는 SAM + MIT의 합집합을 "
+        "<code>masks/merged/</code>에 만듭니다. 병합 디렉토리가 있으면 "
+        "학습 서브셋이 자동으로 사용합니다 (메소드 설정의 "
+        "<code>masked_loss</code> 참조).</p>"
+        "<p style='color:#888; font-style:italic; margin-top:12px;'>"
+        "왼쪽 필드 라벨을 클릭하면 여기에 설명이 표시됩니다.</p>"
+    ),
+}
+
+
+def preprocess_guide() -> str:
+    lang = current_language()
+    return PREPROCESS_GUIDE.get(lang) or PREPROCESS_GUIDE["en"]
+
+
 # ── LoRA variant guide (rich HTML) ────────────────────────────
 
 APPLY_NOTE_HTML: dict[str, str] = {

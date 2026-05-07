@@ -43,6 +43,12 @@ def cmd_preprocess_vae(extra):
 
 
 def cmd_preprocess_te(extra):
+    # CAPTION_SHUFFLE_VARIANTS / CAPTION_TAG_DROPOUT_RATE let the GUI's
+    # Preprocessing tab control these without editing this file. Defaults
+    # match the historical hardcoded values so non-GUI invocations are
+    # unchanged.
+    shuffle_variants = os.environ.get("CAPTION_SHUFFLE_VARIANTS", "4")
+    tag_dropout_rate = os.environ.get("CAPTION_TAG_DROPOUT_RATE", "0.1")
     run(
         [
             PY,
@@ -56,9 +62,9 @@ def cmd_preprocess_te(extra):
             "--dit",
             "models/diffusion_models/anima-preview3-base.safetensors",
             "--caption_shuffle_variants",
-            "4",
+            shuffle_variants,
             "--caption_tag_dropout_rate",
-            "0.1",
+            tag_dropout_rate,
             *extra,
         ]
     )

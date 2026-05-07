@@ -34,6 +34,7 @@ from gui.i18n import (
 )
 from gui.image_tab import ImageViewerTab
 from gui.merge_tab import MergeTab
+from gui.preprocess_tab import PreprocessingTab
 from gui.system_dialog import (
     GITHUB_ISSUES_URL,
     open_models_dialog,
@@ -93,9 +94,11 @@ def _dark(app: QApplication):
         QTabWidget::pane { border: 1px solid #444; }
         QTabBar::tab {
             background: #2a2a2a; color: #dcdcdc; border: 1px solid #444;
-            padding: 4px 12px; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
+            padding: 10px 24px; min-width: 110px;
+            font-size: 13px; font-weight: 500;
+            border-bottom: none; border-top-left-radius: 5px; border-top-right-radius: 5px;
         }
-        QTabBar::tab:selected { background: #1e1e1e; }
+        QTabBar::tab:selected { background: #1e1e1e; color: #ffffff; }
         QTabBar::tab:hover { background: #3a3a3a; }
         QToolTip { max-width: 400px; }
         QMenu {
@@ -256,6 +259,7 @@ class MainWindow(QMainWindow):
             ConfigTab(methods=["lora", "ortholora", "tlora", "hydralora", "reft"]),
             t("tab_config"),
         )
+        self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
 

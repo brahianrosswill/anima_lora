@@ -6,6 +6,7 @@ their per-tool dirs are missing, then always runs the merge.
 
 from __future__ import annotations
 
+import os
 import shutil
 
 from ._common import PY, ROOT, run
@@ -32,19 +33,27 @@ def cmd_mask_sam(extra):
 
 
 def cmd_mask_mit(extra):
-    run(
-        [
-            PY,
-            "preprocess/generate_masks_mit.py",
-            "--image-dir",
-            "post_image_dataset/resized",
-            "--mask-dir",
-            "masks/mit",
-            "--model-path",
-            "models/mit/model.pth",
-            *extra,
-        ]
-    )
+    # MIT_TEXT_THRESHOLD / MIT_DILATE let the GUI's Preprocessing tab tune
+    # the MIT masker without editing this file. Defaults match the script's
+    # own argparse defaults so direct CLI use is unchanged.
+    cmd = [
+        PY,
+        "preprocess/generate_masks_mit.py",
+        "--image-dir",
+        "post_image_dataset/resized",
+        "--mask-dir",
+        "masks/mit",
+        "--model-path",
+        "models/mit/model.pth",
+    ]
+    text_threshold = os.environ.get("MIT_TEXT_THRESHOLD")
+    if text_threshold:
+        cmd += ["--text-threshold", text_threshold]
+    dilate = os.environ.get("MIT_DILATE")
+    if dilate:
+        cmd += ["--dilate", dilate]
+    cmd += list(extra)
+    run(cmd)
 
 
 def cmd_mask(extra):

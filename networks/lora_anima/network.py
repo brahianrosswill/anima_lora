@@ -1826,6 +1826,13 @@ class LoRANetwork(torch.nn.Module):
                 )
 
         state_dict = self.state_dict()
+        # Drop training-only auxiliary heads from the on-disk artifact. ``repa_head``
+        # is a 3-layer MLP used only for the REPA alignment loss during training; it
+        # carries no ``lora_unet_*`` prefix, isn't consumed at inference or merge,
+        # and adds ~21MB of dead weight to the file. Resume-from-checkpoint will
+        # re-init the head from random — re-converges in a few hundred steps.
+        for key in [k for k in state_dict if k.startswith("repa_head.")]:
+            del state_dict[key]
         lora_save.save_network_weights(
             state_dict,
             file=file,
