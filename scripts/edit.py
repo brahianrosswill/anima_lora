@@ -108,8 +108,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--negative_prompt",
-        default="",
-        # default="worst quality, lowres, score_1, old, blurry, simple background, monochrome, sepia",
+        # default="",
+        default="worst quality, lowres, score_1, old, blurry, simple background, monochrome, sepia",
         help="Negative prompt for CFG on the edit pass (default empty). In "
         "--cached_embed mode, an empty value is auto-replaced with 'worst "
         "quality' so CFG can still fire (the TE is loaded briefly to encode "
@@ -127,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--guidance_scale",
         type=float,
-        default=4.0,
+        default=1.0,
         help="CFG scale for the edit (target) pass.",
     )
     p.add_argument(
