@@ -66,7 +66,6 @@ python scripts/sync_vendor.py     # from the anima_lora repo root
 | `flow_shift` | FLOAT | Sigma-shift schedule. Default 1.0 (Anima preview3 standard). |
 | `guidance_scale` | FLOAT | CFG for the edit (target) pass. Default 4.0. |
 | `invert_guidance` | FLOAT | CFG during inversion. Default 1.0 (no CFG). |
-| `seed` | INT | Reserved for future stochastic hooks; current pipeline is deterministic. |
 | `tagger` | ANIMA_TAGGER (optional) | From `AnimaTaggerLoader` in `comfyui-anima-tagger`. Required unless `prompt_src_override` is set. |
 | `prompt_src_override` | STRING (optional) | Replace the tagger's caption with your own ψ_src. Useful when the source is an Anima-generated image and you already know the original prompt. If set, the tagger socket is ignored. |
 

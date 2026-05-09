@@ -42,6 +42,54 @@ HERE = Path(__file__).resolve().parent
 ANIMA_LORA = HERE.parents[1]
 VENDOR = HERE / "_vendor"
 
+# HF repo we auto-fetch the tagger checkpoint from when ``tagger_dir`` is
+# missing required files. Mirrors the PE-Core auto-fetch already in this
+# loader — the user gets a working node out of the box without manual
+# downloads, while still being able to point ``tagger_dir`` at a
+# custom-trained checkpoint.
+_HF_TAGGER_REPO = "sorryhyun/anima-tagger"
+_REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml")
+_OPTIONAL_FILES = ("thresholds.safetensors", "groups.yaml", "pe_lora.safetensors")
+
+
+def _ensure_tagger_dir(tdir: Path) -> None:
+    """If ``tdir`` is missing any required tagger file, fetch the whole
+    checkpoint from ``sorryhyun/anima-tagger`` into it.
+
+    Optional files (``thresholds.safetensors``, ``groups.yaml``,
+    ``pe_lora.safetensors``) are best-effort — a 404 on the repo just means
+    the published checkpoint doesn't ship that file (e.g. ``pe_lora.safetensors``
+    when ``config.pe_lora=false``). The required-file gate already guarantees
+    the tagger can load.
+    """
+    if all((tdir / f).exists() for f in _REQUIRED_FILES):
+        return
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
+
+    logger.info(
+        "AnimaTaggerLoader: %s is missing required files — fetching %s "
+        "(one-time).",
+        tdir,
+        _HF_TAGGER_REPO,
+    )
+    tdir.mkdir(parents=True, exist_ok=True)
+    for fname in _REQUIRED_FILES:
+        hf_hub_download(
+            repo_id=_HF_TAGGER_REPO,
+            filename=fname,
+            local_dir=str(tdir),
+        )
+    for fname in _OPTIONAL_FILES:
+        try:
+            hf_hub_download(
+                repo_id=_HF_TAGGER_REPO,
+                filename=fname,
+                local_dir=str(tdir),
+            )
+        except EntryNotFoundError:
+            logger.debug("optional file %s not present on %s", fname, _HF_TAGGER_REPO)
+
 
 def _resolve_anima_tagger():
     """Return the ``AnimaTagger`` class from the live tree if reachable,
@@ -93,9 +141,9 @@ class AnimaTaggerLoader:
                         "tooltip": (
                             "AnimaTagger checkpoint directory. Relative paths "
                             "are resolved against the anima_lora/ project root; "
-                            "absolute paths used as-is. Must contain "
-                            "model.safetensors + config.json + vocab.json + "
-                            "thresholds.safetensors + rules.yaml."
+                            "absolute paths used as-is. If the directory is "
+                            "missing required files, the checkpoint is "
+                            f"auto-fetched from {_HF_TAGGER_REPO} on first use."
                         ),
                     },
                 ),
@@ -124,8 +172,9 @@ class AnimaTaggerLoader:
         "Load an AnimaTagger checkpoint. Output socket is consumed by "
         "AnimaTaggerCaption (image -> caption) and AnimaDirectEdit. ComfyUI "
         "memoizes the output, so re-running the graph reuses the same "
-        "instance without reloading. PE-Core-L14-336 is auto-downloaded if "
-        "the path doesn't exist yet."
+        "instance without reloading. Both the tagger checkpoint "
+        f"({_HF_TAGGER_REPO}) and the PE-Core-L14-336 vision encoder are "
+        "auto-downloaded if their paths don't exist yet."
     )
 
     def load(self, tagger_dir: str, pe_ckpt: str):
@@ -135,6 +184,7 @@ class AnimaTaggerLoader:
         pe_path = Path(pe_ckpt)
         if not pe_path.is_absolute():
             pe_path = ANIMA_LORA / pe_path
+        _ensure_tagger_dir(tdir)
         device = comfy.model_management.get_torch_device()
         logger.info(
             "AnimaTaggerLoader: loading %s on %s (pe=%s)", tdir, device, pe_path

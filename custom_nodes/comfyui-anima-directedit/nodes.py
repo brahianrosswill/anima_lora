@@ -206,7 +206,6 @@ class AnimaDirectEdit:
                         ),
                     },
                 ),
-                "seed": ("INT", {"default": 42, "min": 0, "max": 2**63 - 1}),
                 "t_inj": (
                     "INT",
                     {
@@ -278,7 +277,6 @@ class AnimaDirectEdit:
         flow_shift: float,
         guidance_scale: float,
         invert_guidance: float,
-        seed: int,
         t_inj: int = 0,
         tagger: AnimaTagger | None = None,
         prompt_src_override: str = "",
@@ -319,8 +317,6 @@ class AnimaDirectEdit:
         # eviction — we don't move it back.
         comfy.model_management.load_models_gpu([model])
         unet = model.model.diffusion_model
-
-        torch.manual_seed(seed)
 
         with torch.no_grad():
             embed_src = _encode_prompt_comfy(clip, unet, psi_src, device, dtype)

@@ -24,7 +24,10 @@ The node works in two install shapes:
 1. **Inside the anima_lora repo** (dev / monorepo). It imports the live `library.captioning.anima_tagger`, so edits in the parent repo are picked up immediately.
 2. **Standalone** (just this directory dropped into a vanilla ComfyUI `custom_nodes/`). It falls back to a bundled inference subset under `_vendor/` — no need to clone the parent repo or run `uv sync`. Pip deps are listed in `pyproject.toml` (ComfyUI ships everything except possibly `einops` / `timm` / `pyyaml`, all small).
 
-The PE-Core-L14-336 vision encoder checkpoint (~1 GB) is auto-fetched from `facebook/PE-Core-L14-336` on first use into the `pe_ckpt` path on the loader node.
+Both checkpoints auto-download on first use:
+
+- **Tagger checkpoint** (~26 MB) is fetched from [`sorryhyun/anima-tagger`](https://huggingface.co/sorryhyun/anima-tagger) into `tagger_dir` (default `models/captioners/anima-tagger-v1`) when any required file is missing.
+- **PE-Core-L14-336** vision encoder (~1 GB) is fetched from `facebook/PE-Core-L14-336` into `pe_ckpt` (default `models/pe/PE-Core-L14-336.pt`).
 
 ### For maintainers — keeping the vendor copy fresh
 
@@ -36,19 +39,20 @@ python scripts/sync_vendor.py     # from the anima_lora repo root (refreshes bot
 
 ## Checkpoint layout
 
-`tagger_dir` must contain (produced by `python -m scripts.anima_tagger.cli` in the parent repo):
+`tagger_dir` should contain (the published `sorryhyun/anima-tagger` checkpoint already does — auto-downloaded if missing):
 
 ```
 <tagger_dir>/
-  config.json              # model config + training metadata
-  model.safetensors        # AnimaTaggerHead state dict
-  pe_lora.safetensors      # PE-LoRA delta on PE-Core trailing blocks (optional)
-  thresholds.safetensors   # per-tag F1-optimal thresholds
-  vocab.json               # tag list with category + median_pos info
-  rules.yaml               # caption-normalization rules snapshot
+  config.json              # model config + training metadata           (required)
+  model.safetensors        # AnimaTaggerHead state dict                 (required)
+  vocab.json               # tag list with category + median_pos info   (required)
+  rules.yaml               # caption-normalization rules snapshot       (required)
+  thresholds.safetensors   # per-tag F1-optimal thresholds              (optional, falls back to 0.5)
+  groups.yaml              # tag-group taxonomy → softmax argmax mode   (optional)
+  pe_lora.safetensors      # PE-LoRA delta on PE-Core trailing blocks   (optional, gated on config.pe_lora=true)
 ```
 
-Default `tagger_dir` is `models/captioners/anima-tagger-v1` (relative to the `anima_lora/` repo root). Absolute paths used as-is.
+Default `tagger_dir` is `models/captioners/anima-tagger-v1` (relative to the `anima_lora/` repo root in dev install, or to ComfyUI root in standalone install). Absolute paths used as-is. Re-train via `python -m scripts.anima_tagger.cli` in the parent repo to produce a custom checkpoint.
 
 ## Usage
 
