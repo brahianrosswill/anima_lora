@@ -42,6 +42,13 @@ class TagRules:
     # GFL character tags stored as type_id=0 ``general``). Empty by default
     # — overrides only apply when the curator lists the tag explicitly.
     category_overrides: Dict[str, str]
+    # Substring patterns suppressed from the build-time "top-20
+    # uncategorized" coverage log. Pure logging filter — does not change
+    # categorization. Use for noisy general descriptors the booru cache
+    # doesn't track (e.g. ``"another's"`` catches "grabbing another's
+    # breast", "holding another's hair", etc.). Substring match is
+    # case-sensitive; booru tags are already lowercase.
+    coverage_ignore: Tuple[str, ...]
 
     def to_dict(self) -> dict:
         """Round-trippable dict for snapshotting into the checkpoint dir."""
@@ -51,6 +58,8 @@ class TagRules:
         }
         if self.category_overrides:
             out["category_overrides"] = dict(self.category_overrides)
+        if self.coverage_ignore:
+            out["coverage_ignore"] = list(self.coverage_ignore)
         out.update(
             {base: sorted(variants) for base, variants in self.dedup.items()}
         )
@@ -59,7 +68,12 @@ class TagRules:
 
 # Top-level YAML keys that are NOT dedup base→variants entries. Centralized
 # so :func:`load_rules` and :func:`from_dict` agree on what to exclude.
-_RESERVED_KEYS = frozenset({"replacements", "remove", "category_overrides"})
+_RESERVED_KEYS = frozenset({
+    "replacements",
+    "remove",
+    "category_overrides",
+    "coverage_ignore",
+})
 
 
 def load_rules(path: str | Path) -> TagRules:
@@ -70,6 +84,7 @@ def load_rules(path: str | Path) -> TagRules:
     repl_map = raw.pop("replacements", {}) or {}
     remove = frozenset(raw.pop("remove", []) or [])
     overrides = dict(raw.pop("category_overrides", {}) or {})
+    coverage_ignore = tuple(str(s) for s in (raw.pop("coverage_ignore", []) or []))
     # Everything else in the YAML is a dedup base→variants entry.
     dedup = {str(base): frozenset(variants) for base, variants in raw.items()}
     replacements = tuple((str(k), str(v)) for k, v in repl_map.items())
@@ -78,6 +93,7 @@ def load_rules(path: str | Path) -> TagRules:
         remove=remove,
         dedup=dedup,
         category_overrides={str(k): str(v) for k, v in overrides.items()},
+        coverage_ignore=coverage_ignore,
     )
 
 
@@ -86,6 +102,7 @@ def from_dict(d: dict) -> TagRules:
     repl_map = d.get("replacements", {}) or {}
     remove = frozenset(d.get("remove", []) or [])
     overrides = dict(d.get("category_overrides", {}) or {})
+    coverage_ignore = tuple(str(s) for s in (d.get("coverage_ignore", []) or []))
     dedup = {
         k: frozenset(v)
         for k, v in d.items()
@@ -97,6 +114,7 @@ def from_dict(d: dict) -> TagRules:
         remove=remove,
         dedup=dedup,
         category_overrides={str(k): str(v) for k, v in overrides.items()},
+        coverage_ignore=coverage_ignore,
     )
 
 

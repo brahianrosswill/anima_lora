@@ -109,9 +109,18 @@ def load_tag_cache(path: Path) -> Dict[str, str]:
     return out
 
 
+# Categories the user is allowed to assign via ``category_overrides:`` in
+# tag_rules.yaml. ``rating`` and ``count`` are intentionally excluded:
+# rating is a separate field on the corpus and shouldn't be retrofitted
+# onto a tag, and count tags are matched by regex (overriding would just
+# create dead aliases).
+_OVERRIDABLE_CATEGORIES = frozenset(TAG_TYPE_NAMES.values())
+
+
 def categorize(
     tag: str,
     cache: Dict[str, str],
+    overrides: Optional[Dict[str, str]] = None,
 ) -> str:
     """Return ``rating`` / ``count`` / ``character`` / ``copyright`` /
     ``artist`` / ``general`` / ``metadata`` / ``deprecated`` for ``tag``.
@@ -126,8 +135,11 @@ def categorize(
        so cache lookups need the bare name.
     3. Count-tag regex → ``count`` (overrides ``general`` typing for
        ``1girl`` etc.).
-    4. Cache lookup.
-    5. Fallback: ``general``.
+    4. ``category_overrides`` lookup (curator-supplied via tag_rules.yaml).
+       Fixes booru cache mistypings — e.g. GFL character tags stored as
+       ``general`` (type_id=0) get corrected here.
+    5. Cache lookup.
+    6. Fallback: ``general``.
     """
     # Note: rating literals collide with the "general" category name. We
     # treat them as their own slot regardless of cache typing — the cache
@@ -140,10 +152,32 @@ def categorize(
     if is_count_tag(tag):
         return "count"
     bare = tag[1:] if tag.startswith("@") else tag
+    if overrides:
+        ov = overrides.get(tag) or overrides.get(bare)
+        if ov is not None:
+            return ov
     cat = cache.get(bare)
     if cat is None:
         return "general"
     return cat
+
+
+def validate_overrides(overrides: Dict[str, str]) -> List[str]:
+    """Return a list of human-readable validation errors for overrides.
+
+    Empty list → all entries are well-formed. Catches typos like
+    ``caracter`` and unsupported categories (``rating`` / ``count``) up
+    front so :func:`cmd_build_vocab` can fail loudly rather than silently
+    typing tags into a slot the trainer doesn't understand.
+    """
+    errors: List[str] = []
+    for tag, cat in overrides.items():
+        if cat not in _OVERRIDABLE_CATEGORIES:
+            errors.append(
+                f"category_overrides[{tag!r}] = {cat!r} — must be one of "
+                f"{sorted(_OVERRIDABLE_CATEGORIES)}"
+            )
+    return errors
 
 
 # ── Vocab build ───────────────────────────────────────────────────────────
@@ -153,6 +187,7 @@ def build_vocab(
     caption_index: Dict[str, Tuple[Path, Optional[Path], List[str]]],
     tag_cache: Dict[str, str],
     min_freq: int,
+    category_overrides: Optional[Dict[str, str]] = None,
 ) -> Dict:
     """Compute frequencies, categories, median emit positions; cut by min_freq."""
     freq: Counter = Counter()
@@ -191,7 +226,7 @@ def build_vocab(
     cat_buckets: Counter = Counter()
     cache_hits = 0
     for tag in kept:
-        cat = categorize(tag, tag_cache)
+        cat = categorize(tag, tag_cache, category_overrides)
         cat_buckets[cat] += 1
         bare = tag[1:] if tag.startswith("@") else tag
         if bare in tag_cache:
@@ -199,7 +234,7 @@ def build_vocab(
 
     tags_payload: List[Dict] = []
     for idx, tag in enumerate(kept):
-        cat = categorize(tag, tag_cache)
+        cat = categorize(tag, tag_cache, category_overrides)
         median_pos = sum_pos[tag] / max(pos_counts[tag], 1)
         tags_payload.append(
             {
@@ -323,18 +358,31 @@ def build_manifest(
 def scan_cache_coverage(
     caption_index: Dict[str, Tuple[Path, Optional[Path], List[str]]],
     tag_cache: Dict[str, str],
+    category_overrides: Optional[Dict[str, str]] = None,
+    coverage_ignore: Optional[Tuple[str, ...]] = None,
 ) -> Dict:
     """How many caption tags lack a category in gelcrawl's cache?
 
     A high miss rate would mean ``categorize()`` is falling back to
     ``general`` for too many tags and we should run the gelbooru API fill-in
     pass before training. <5 % miss → safe to default-to-general.
+
+    Tags listed in ``category_overrides`` are treated as covered (they
+    *are* explicitly typed — just by the curator rather than the cache).
+    Tags whose name contains any substring in ``coverage_ignore`` are
+    silently skipped from both the seen and missing tallies — used to
+    drop noisy general descriptors ("grabbing another's …") that the
+    booru cache doesn't track but the curator knows are general.
     """
+    overrides = category_overrides or {}
+    ignore_subs = tuple(coverage_ignore or ())
     seen: Counter = Counter()
     missing: Counter = Counter()
     for _, (_, _, tags) in caption_index.items():
         for tag in tags:
             if tag in RATINGS:
+                continue
+            if ignore_subs and any(sub in tag for sub in ignore_subs):
                 continue
             seen[tag] += 1
             bare = tag[1:] if tag.startswith("@") else tag
@@ -342,6 +390,8 @@ def scan_cache_coverage(
                 tag.startswith("@")
                 or is_count_tag(tag)
                 or bare in tag_cache
+                or tag in overrides
+                or bare in overrides
             ):
                 continue
             missing[tag] += 1
@@ -364,11 +414,28 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
     rules_src = Path(args.rules)
     rules = tr.load_rules(rules_src)
     logger.info(
-        "rules: %d replacements, %d remove, %d dedup base tags",
+        "rules: %d replacements, %d remove, %d dedup base tags, "
+        "%d category overrides",
         len(rules.replacements),
         len(rules.remove),
         len(rules.dedup),
+        len(rules.category_overrides),
     )
+    override_errors = validate_overrides(rules.category_overrides)
+    if override_errors:
+        for e in override_errors:
+            logger.error(e)
+        raise SystemExit(
+            f"category_overrides has {len(override_errors)} invalid entry(ies) "
+            f"in {rules_src} — fix and re-run"
+        )
+    if rules.category_overrides:
+        # Distribution of override targets, useful as a sanity printout.
+        target_counts: Counter = Counter(rules.category_overrides.values())
+        logger.info(
+            "category_overrides targets: %s",
+            {k: target_counts[k] for k in sorted(target_counts)},
+        )
 
     roots = [Path(r) for r in args.caption_roots]
     cap_paths = find_caption_files(roots)
@@ -379,7 +446,12 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
     tag_cache = load_tag_cache(Path(args.tag_cache))
     logger.info("loaded tag cache with %d entries", len(tag_cache))
 
-    coverage = scan_cache_coverage(index, tag_cache)
+    coverage = scan_cache_coverage(
+        index,
+        tag_cache,
+        rules.category_overrides,
+        rules.coverage_ignore,
+    )
     miss_rate = coverage["n_missing_occurrences"] / max(
         coverage["n_total_tag_occurrences"], 1
     )
@@ -395,7 +467,12 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
         for tag, n in coverage["missing_top20"]:
             logger.info("  %5d × %s", n, tag)
 
-    vocab = build_vocab(index, tag_cache, min_freq=args.min_freq)
+    vocab = build_vocab(
+        index,
+        tag_cache,
+        min_freq=args.min_freq,
+        category_overrides=rules.category_overrides,
+    )
     vocab["caption_roots"] = [str(r.resolve()) for r in roots]
     vocab["tag_cache_path"] = str(Path(args.tag_cache).resolve())
     vocab["rules_source_path"] = str(rules_src.resolve())
