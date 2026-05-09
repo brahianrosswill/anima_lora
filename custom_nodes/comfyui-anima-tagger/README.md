@@ -19,7 +19,20 @@ Two nodes in the `anima` category:
 
 Drop `custom_nodes/comfyui-anima-tagger/` into your ComfyUI `custom_nodes/`, restart ComfyUI. The nodes appear under the `anima` category.
 
-The package imports from the parent `anima_lora/` repo (it lives at `anima_lora/custom_nodes/comfyui-anima-tagger/`), so keep the directory inside the repo or symlink so that `Path(__file__).resolve().parents[2]` lands on the `anima_lora/` root.
+The node works in two install shapes:
+
+1. **Inside the anima_lora repo** (dev / monorepo). It imports the live `library.captioning.anima_tagger`, so edits in the parent repo are picked up immediately.
+2. **Standalone** (just this directory dropped into a vanilla ComfyUI `custom_nodes/`). It falls back to a bundled inference subset under `_vendor/` — no need to clone the parent repo or run `uv sync`. Pip deps are listed in `pyproject.toml` (ComfyUI ships everything except possibly `einops` / `timm` / `pyyaml`, all small).
+
+The PE-Core-L14-336 vision encoder checkpoint (~1 GB) is auto-fetched from `facebook/PE-Core-L14-336` on first use into the `pe_ckpt` path on the loader node.
+
+### For maintainers — keeping the vendor copy fresh
+
+The `_vendor/` tree is generated from the live anima_lora source. Regenerate it before bumping the node version:
+
+```bash
+python scripts/sync_vendor.py     # from the anima_lora repo root (refreshes both tagger + directedit vendor trees)
+```
 
 ## Checkpoint layout
 

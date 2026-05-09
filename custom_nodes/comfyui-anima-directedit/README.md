@@ -37,7 +37,20 @@ Result: regions the prompt *doesn't change* stay locked to the source; regions i
 
 Drop `custom_nodes/comfyui-anima-directedit/` into your ComfyUI `custom_nodes/`. For image-driven ψ_src, also install the sibling [`comfyui-anima-tagger`](https://github.com/sorryhyun/anima_lora/tree/main/custom_nodes/comfyui-anima-tagger) package (which provides `AnimaTaggerLoader` → the `ANIMA_TAGGER` socket this node consumes). Restart ComfyUI; the node appears as **Anima DirectEdit** in the `anima` category.
 
-The package imports from the parent `anima_lora/` repo (it lives at `anima_lora/custom_nodes/comfyui-anima-directedit/`), so keep the directory inside the repo or symlink so that `Path(__file__).resolve().parents[2]` lands on the `anima_lora/` root.
+The node works in two install shapes:
+
+1. **Inside the anima_lora repo** (dev / monorepo). It imports the live `library.inference.directedit` etc., so edits in the parent repo are picked up immediately.
+2. **Standalone** (just this directory dropped into a vanilla ComfyUI `custom_nodes/`). It falls back to a bundled inference subset under `_vendor/` — no need to clone the parent repo or run `uv sync`. Pip deps are listed in `pyproject.toml` (ComfyUI ships everything except possibly `einops` / `timm` / `pyyaml`).
+
+PE-Core-L14-336 (used by the optional AnimaTagger socket) is auto-fetched on first use if missing.
+
+### For maintainers — keeping the vendor copy fresh
+
+The `_vendor/` tree is generated from the live anima_lora source. Regenerate it before bumping the node version:
+
+```bash
+python scripts/sync_vendor.py     # from the anima_lora repo root
+```
 
 ## Inputs
 

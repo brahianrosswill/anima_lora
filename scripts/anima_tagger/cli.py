@@ -135,7 +135,7 @@ def parse_args() -> argparse.Namespace:
 
     # Train-mode knobs.
     p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--d_hidden", type=int, default=1024)
