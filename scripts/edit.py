@@ -20,9 +20,11 @@ under ``make exp-test-directedit`` — that task picks a random source image,
 runs the wd-tagger to seed ``--prompt_src``, and forms ``--prompt_tar`` from
 ``PROMPT`` env (the user's edit instruction).
 
-v1 caveats (left as TODO hooks in ``library/inference/directedit.py``):
-  * No V-injection — ``--t_inj`` reserved but inactive.
-  * No mask blending — ``--mask`` reserved but inactive.
+v1.1 status:
+  * V-injection: WIRED. ``--t_inj N`` injects src self-attn V into the tar
+    pass for the first N steps (paper Eq. 13). ``--t_inj_blocks`` selects
+    the block subset (default = all but the final block, SD3.5-style).
+  * Mask blending: still inactive — ``--mask`` reserved (paper Eq. 12 v3).
   * Inversion runs at ``--invert_guidance 1.0`` (no CFG); the edit pass uses
     the user's ``--guidance_scale`` (default 4.0, Anima preview3 standard).
 """
@@ -124,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--guidance_scale",
         type=float,
-        default=4.0,
+        default=2.0,
         help="CFG scale for the edit (target) pass.",
     )
     p.add_argument(
@@ -137,8 +139,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--t_inj",
         type=int,
-        default=0,
-        help="Reserved — V-injection step count (v2). Currently ignored.",
+        default=12,
+        help="Number of early editing steps to inject src self-attn V into "
+        "the tar pass (paper Eq. 13). Default 0 = pure ΔZ-anchored edit. "
+        "Typical paper setting: t_inj ≈ T/10..T/3 (e.g. 3..9 at T=28). "
+        "Higher = stronger source-feature preservation.",
+    )
+    p.add_argument(
+        "--t_inj_blocks",
+        default="all_but_last",
+        help="Which DiT blocks V-injection targets. Accepts 'all', "
+        "'all_but_last' (default, SD3.5-style), or a comma/range string like "
+        "'8-22' or '8,9,12,14-18'. Ignored when --t_inj 0.",
     )
     p.add_argument(
         "--image_size",
@@ -190,6 +202,44 @@ def _pick_bucket(img: Image.Image) -> tuple[int, int]:
     target = rw / rh
     best = min(CONSTANT_TOKEN_BUCKETS, key=lambda wh: abs(wh[0] / wh[1] - target))
     return best[1], best[0]  # bucket is (W, H); we return (H, W)
+
+
+def _parse_t_inj_blocks(spec: str, n_blocks: int) -> list[int] | None:
+    """Parse `--t_inj_blocks` into a list of block indices.
+
+    'all' → every block (0..n-1). 'all_but_last' → 0..n-2 (default; matches
+    paper's SD3.5 placement). Otherwise parses comma-separated entries that
+    are either a single int or a closed range 'A-B'. Returns None for the
+    'all_but_last' default so the directedit module's own default applies
+    (and the log message stays consistent across callers).
+    """
+    spec = spec.strip().lower()
+    if spec in ("", "all_but_last"):
+        return None  # → directedit default
+    if spec == "all":
+        return list(range(n_blocks))
+    out: list[int] = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            lo_s, hi_s = chunk.split("-", 1)
+            lo, hi = int(lo_s), int(hi_s)
+            if lo > hi:
+                raise ValueError(f"--t_inj_blocks range {chunk!r}: lo > hi")
+            out.extend(range(lo, hi + 1))
+        else:
+            out.append(int(chunk))
+    if not out:
+        raise ValueError(f"--t_inj_blocks={spec!r} parsed to empty set")
+    bad = [i for i in out if i < 0 or i >= n_blocks]
+    if bad:
+        raise ValueError(
+            f"--t_inj_blocks={spec!r}: indices {sorted(set(bad))} out of "
+            f"range (model has {n_blocks} blocks; valid 0..{n_blocks - 1})"
+        )
+    return sorted(set(out))
 
 
 def _parse_variant_selector(selector: str, n_available: int) -> list[int]:
@@ -310,14 +360,21 @@ def _load_cached_embed_variants(
 def main() -> None:
     args = parse_args()
 
-    if args.t_inj:
-        logger.warning(
-            "--t_inj %d ignored: V-injection is a v2 feature (see "
-            "library/inference/directedit.py docstring).",
+    if args.mask:
+        logger.warning("--mask ignored: background-lock blending is v3.")
+    if args.t_inj > 0 and args.compile_blocks:
+        # The V-injection scope monkey-patches Attention.forward at runtime,
+        # which would invalidate dynamo's cached graph for every block on the
+        # first call. Recompile cost > the speedup compile would give us, so
+        # turn it off for editing. (Inversion would still benefit, but the
+        # compile state is per-process — flipping mid-run isn't worth the
+        # complexity.)
+        logger.info(
+            "--t_inj %d > 0: disabling --compile_blocks for V-injection "
+            "(monkey-patch breaks dynamo graph cache).",
             args.t_inj,
         )
-    if args.mask:
-        logger.warning("--mask ignored: background-lock blending is v2.")
+        args.compile_blocks = False
 
     device = torch.device(
         args.device
@@ -505,6 +562,11 @@ def main() -> None:
             sigmas=sigmas,
             guidance_scale=args.invert_guidance,
         )
+        t_inj_blocks = (
+            _parse_t_inj_blocks(args.t_inj_blocks, len(anima.blocks))
+            if args.t_inj > 0
+            else None
+        )
         z_edit = directedit.edit_forward(
             anima=anima,
             z_init=z_inv[0],
@@ -513,6 +575,9 @@ def main() -> None:
             embed_neg=embed_neg,
             sigmas=sigmas,
             guidance_scale=args.guidance_scale,
+            embed_src=e_src if args.t_inj > 0 else None,
+            t_inj=args.t_inj,
+            t_inj_blocks=t_inj_blocks,
         )
         z_edits.append((variant, z_edit))
 

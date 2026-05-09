@@ -115,6 +115,16 @@ def cmd_update(extra):
     run([PY, "scripts/update.py", *extra])
 
 
+def cmd_vendor_sync(extra):
+    """Refresh custom_nodes/*/_vendor/ trees from the live library.* sources.
+
+    Run before bumping a custom-node version / publishing — the bundled
+    vendor copies (tagger + directedit) are how the ComfyUI nodes import
+    their inference subset when not running inside the anima_lora repo.
+    """
+    run([PY, "scripts/sync_vendor.py", *extra])
+
+
 def cmd_export_logs(extra):
     """Dump TB scalar logs to JSON. RUN=<dir> (default output/logs), ALL=1, JSONL=1."""
     run_path = os.environ.get("RUN", "output/logs")

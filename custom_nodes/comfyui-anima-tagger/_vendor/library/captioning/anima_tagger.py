@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -59,6 +60,12 @@ from library.vision.encoder import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches "1girl", "2girls", …, "6+girls" (digit-prefixed girls counts).
+# "multiple girls" is intentionally not matched — it carries no exact count
+# so we leave the character head's output untouched in that case.
+_GIRLS_COUNT_RE = re.compile(r"^(\d+)\+?girls?$")
+
 
 # Canonical caption-format slot order (matches Anima training captions).
 SLOT_ORDER: Tuple[str, ...] = (
@@ -109,6 +116,7 @@ class AnimaTagger:
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.bfloat16,
         pe_ckpt: str | Path | None = None,
+        character_floor: float = 0.5,
     ):
         self.ckpt_dir = Path(ckpt_dir)
         if device is None:
@@ -116,6 +124,13 @@ class AnimaTagger:
         self.device = torch.device(device)
         self.dtype = dtype
         self.pe_ckpt = Path(pe_ckpt) if pe_ckpt else None
+        # Absolute confidence floor for character predictions. Sits *above*
+        # the per-tag F1-optimal threshold for the low-confidence end of the
+        # character vocab (some F1 thresholds are as low as 0.05 — chasing
+        # F1 there produces visible false positives on gender-ambiguous /
+        # stylized art). Below the floor → suppress and fall back to the
+        # `original` copyright tag.
+        self._character_floor = float(character_floor)
 
         with open(self.ckpt_dir / "config.json") as f:
             cfg_d = json.load(f)
@@ -141,6 +156,17 @@ class AnimaTagger:
             for t in vocab["tags"]
         ]
         self.ratings: List[str] = list(vocab["ratings"])
+        # Vocab index of the canonical "original" copyright tag, or None
+        # when absent. Used by predict() as the uncertainty-fallback when
+        # a character was guessed but didn't clear `_character_floor`.
+        self._original_idx: Optional[int] = next(
+            (
+                e.index
+                for e in self.tag_entries
+                if e.name == "original" and e.category == "copyright"
+            ),
+            None,
+        )
         # Map category → list of (index, median_pos, name) sorted by median_pos.
         self._by_cat: Dict[str, List[Tuple[int, float, str]]] = {}
         for e in self.tag_entries:
@@ -356,6 +382,78 @@ class AnimaTagger:
                 group_preds[name] = winner_name
             out["kept"] = kept
             out["groups"] = group_preds
+
+        # Cap character-tag predictions by the largest digit-prefixed
+        # girls-count tag in `kept`. The character head emits an independent
+        # sigmoid per tag, so on gender-ambiguous art where both `1boy` and
+        # `1girl` fire it can still admit several borderline character
+        # matches for what is actually a single subject. Trim to top-N by
+        # score where N is parsed from `1girl`/`2girls`/`6+girls`/...; if no
+        # digit-prefixed girls tag is in `kept` (e.g. only `1boy`, or only
+        # `multiple girls`) leave the character set alone.
+        girl_caps = [
+            int(m.group(1))
+            for name in kept
+            if (m := _GIRLS_COUNT_RE.match(name))
+        ]
+        if girl_caps:
+            cap = max(girl_caps)
+            char_scored = sorted(
+                (
+                    (kept[e.name], e.name)
+                    for e in self.tag_entries
+                    if e.category == "character" and e.name in kept
+                ),
+                reverse=True,
+            )
+            for _, name in char_scored[cap:]:
+                kept.pop(name, None)
+            out["kept"] = kept
+
+        # Suppress uncertain character predictions and fall back to the
+        # `original` copyright tag. Any kept character whose score is below
+        # `_character_floor` is treated as a guess and dropped. When that
+        # empties the character slot AND no copyright tag is in `kept`,
+        # add "original" (using its raw sigmoid score) so the caption has
+        # a slot-filling copyright — booru convention for non-IP work.
+        # Confident characters are preserved; the floor only fires on
+        # borderline admits where the F1 threshold lets a noisy guess
+        # through.
+        dropped_any = False
+        for e in self.tag_entries:
+            if e.category != "character" or e.name not in kept:
+                continue
+            if kept[e.name] < self._character_floor:
+                kept.pop(e.name, None)
+                dropped_any = True
+        if dropped_any and self._original_idx is not None:
+            has_char = any(
+                e.category == "character" and e.name in kept
+                for e in self.tag_entries
+            )
+            has_copy = any(
+                e.category == "copyright" and e.name in kept
+                for e in self.tag_entries
+            )
+            if not has_char and not has_copy:
+                kept["original"] = float(tag_probs_cpu[self._original_idx])
+
+        # Cap artist and copyright slots to top-1 by score. Both heads emit
+        # independent sigmoids, so multiple borderline tags can clear their
+        # F1 thresholds on a single image — booru convention is one artist
+        # / one copyright per work, and downstream callers expect that.
+        for cat in ("artist", "copyright"):
+            cat_scored = sorted(
+                (
+                    (kept[e.name], e.name)
+                    for e in self.tag_entries
+                    if e.category == cat and e.name in kept
+                ),
+                reverse=True,
+            )
+            for _, name in cat_scored[1:]:
+                kept.pop(name, None)
+        out["kept"] = kept
         return out
 
     def predict_caption(self, pil_img: Image.Image) -> str:

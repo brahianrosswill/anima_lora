@@ -165,6 +165,10 @@ COMMANDS = {
         "Update from GitHub release (preserves datasets/output/models, prompts on "
         "config conflicts, runs uv sync). Pass --dry-run / --version v1.0 / --no-sync.",
     ),
+    "vendor-sync": (
+        utilities.cmd_vendor_sync,
+        "Refresh custom_nodes/*/_vendor/ from live library/* (run before publishing nodes)",
+    ),
     # ── Experimental ──────────────────────────────────────────────────
     # Unstable methods kept under exp-* so they don't pollute the main command
     # surface. May produce broken output, change without notice, or be removed.
