@@ -66,6 +66,19 @@ logger = logging.getLogger(__name__)
 # so we leave the character head's output untouched in that case.
 _GIRLS_COUNT_RE = re.compile(r"^(\d+)\+?girls?$")
 
+# Trailing parenthesized suffix on a tag name, e.g. "nejet (kawakami rokkaku)".
+# Booru OC naming convention: when the copyright is `original` (or a meta
+# imprint), the parens content is the artist's name.
+_OC_SUFFIX_RE = re.compile(r"\(([^()]+)\)\s*$")
+
+# Copyrights that mean "no franchise" — `original` plus the meta-publisher /
+# store imprints that booru tags alongside `original` on store-bonus and
+# anthology art (melonbooks / toranoana store releases, comic kairakuten
+# anthology submissions). All three appear in the trained vocab; other
+# meta tags (comiket NN, dengeki <pub>, ...) are out-of-vocab and can't be
+# predicted. Membership is exact (no regex) — vocab is small and stable.
+_META_COPYRIGHTS = frozenset({"original", "melonbooks", "toranoana", "comic kairakuten"})
+
 
 # Canonical caption-format slot order (matches Anima training captions).
 SLOT_ORDER: Tuple[str, ...] = (
@@ -135,6 +148,7 @@ class AnimaTagger:
         pe_ckpt: str | Path | None = None,
         character_floor: float = 0.5,
         pe_lora_path: str | Path | None = None,
+        pe_lora_disabled: bool = False,
     ):
         self.ckpt_dir = Path(ckpt_dir)
         if device is None:
@@ -148,6 +162,12 @@ class AnimaTagger:
         # delta outside the tagger checkpoint (e.g. swapping between several
         # PE-LoRA variants against the same base head).
         self._pe_lora_path_override = Path(pe_lora_path) if pe_lora_path else None
+        # Hard off-switch for PE-LoRA injection. When True, _maybe_apply_pe_lora
+        # is a no-op even if config.pe_lora=true and a sidecar exists — the
+        # encoder runs as the bare frozen PE-Core. Lets the ComfyUI node
+        # bypass PE-LoRA cleanly when the dropdown selection is invalid /
+        # empty without warning spam from the missing-file fallback path.
+        self._pe_lora_disabled = bool(pe_lora_disabled)
         # Absolute confidence floor for character predictions. Sits *above*
         # the per-tag F1-optimal threshold for the low-confidence end of the
         # character vocab (some F1 thresholds are as low as 0.05 — chasing
@@ -270,6 +290,8 @@ class AnimaTagger:
         is the inference path.
         """
         cfg_d = self._cfg_d
+        if self._pe_lora_disabled:
+            return
         if not cfg_d.get("pe_lora", False):
             return
         if self._pe_lora_path_override is not None:
@@ -480,6 +502,39 @@ class AnimaTagger:
             )
             for _, name in cat_scored[1:]:
                 kept.pop(name, None)
+
+        # When the surviving copyright is `original` (or a meta-publisher
+        # imprint that rides alongside it — see `_META_COPYRIGHTS`), keep a
+        # character only when its parens-suffix matches the surviving
+        # artist tag (sans `@`). Booru convention: `original` means no
+        # franchise, so the only legitimate co-tagged character is the
+        # artist's named OC `<name> (<artist>)`. Empirically on
+        # `image_dataset/` (n=148 vocab-character tags co-occurring with
+        # `original`), 145/148 (98%) match this pattern. No-paren names
+        # (`hatsune miku`, `frieren`) and franchise-suffixed names
+        # (`kisaki (blue archive)`) paired with `original` are misfires.
+        if any(c in kept for c in _META_COPYRIGHTS):
+            artist_suffix = next(
+                (
+                    e.name[1:].lower()
+                    for e in self.tag_entries
+                    if e.category == "artist"
+                    and e.name in kept
+                    and e.name.startswith("@")
+                ),
+                None,
+            )
+            for e in self.tag_entries:
+                if e.category != "character" or e.name not in kept:
+                    continue
+                m = _OC_SUFFIX_RE.search(e.name)
+                if (
+                    m is None
+                    or artist_suffix is None
+                    or m.group(1).strip().lower() != artist_suffix
+                ):
+                    kept.pop(e.name, None)
+
         out["kept"] = kept
         return out
 

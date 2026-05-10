@@ -51,6 +51,50 @@ _HF_TAGGER_REPO = "sorryhyun/anima-tagger"
 _REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml")
 _OPTIONAL_FILES = ("thresholds.safetensors", "groups.yaml", "pe_lora.safetensors")
 
+# Sentinel shown at the top of the pe_lora dropdown — empty string survives
+# the existing "if pe_lora_path.strip():" gate in load(), which falls back
+# to <tagger_dir>/pe_lora.safetensors. Kept readable as a label rather than
+# bare "" so the UI doesn't show a blank first row.
+_PE_LORA_DEFAULT_LABEL = "(default: <tagger_dir>/pe_lora.safetensors)"
+
+
+def _list_pe_lora_files() -> list[str]:
+    """Discoverable PE-LoRA safetensors candidates, as repo-relative paths.
+
+    Globs the locations where PE-LoRA deltas naturally live:
+
+    * ``models/captioners/<ckpt>/pe_lora*.safetensors`` — colocated with
+      a tagger checkpoint, the train-pe-lora default. Most common case.
+    * ``models/pe_loras/*.safetensors`` — optional dedicated dir for
+      users who keep multiple deltas around without nesting them under
+      a tagger checkpoint.
+    * ``output/ckpt/*pe_lora*.safetensors`` — training output sweeps.
+
+    Returns paths relative to ``ANIMA_LORA`` so the load() resolver
+    (which already prepends ``ANIMA_LORA`` for non-absolute inputs)
+    accepts them unchanged.
+
+    Empty when running standalone (no anima_lora repo) — caller adds the
+    default sentinel so the dropdown is never empty.
+    """
+    if not ANIMA_LORA.exists():
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    glob_patterns = (
+        "models/captioners/*/pe_lora*.safetensors",
+        "models/captioners/*/*pe_lora*.safetensors",
+        "models/pe_loras/*.safetensors",
+        "output/ckpt/*pe_lora*.safetensors",
+    )
+    for pattern in glob_patterns:
+        for p in sorted(ANIMA_LORA.glob(pattern)):
+            rel = str(p.relative_to(ANIMA_LORA))
+            if rel not in seen:
+                seen.add(rel)
+                out.append(rel)
+    return out
+
 
 def _ensure_tagger_dir(tdir: Path) -> None:
     """If ``tdir`` is missing any required tagger file, fetch the whole
@@ -161,21 +205,36 @@ class AnimaTaggerLoader:
                         ),
                     },
                 ),
-                "pe_lora_path": (
-                    "STRING",
+                "use_pe_lora": (
+                    "BOOLEAN",
                     {
-                        "default": "",
+                        "default": True,
+                        "label_on": "on",
+                        "label_off": "off",
                         "tooltip": (
-                            "Optional override for the PE-LoRA sidecar "
-                            "(safetensors). Leave empty to use "
-                            "<tagger_dir>/pe_lora.safetensors (the default "
-                            "shipped / auto-fetched by train-pe-lora). When "
-                            "set, this file is loaded instead. Relative "
-                            "paths resolve against the anima_lora/ root; "
-                            "absolute paths used as-is. Has no effect "
-                            "unless config.json in tagger_dir has "
-                            "'pe_lora: true' (rank / alpha / target layers "
-                            "all come from that config)."
+                            "Master on/off for PE-LoRA injection. When off, "
+                            "the encoder runs as the bare frozen PE-Core and "
+                            "pe_lora_path is ignored — useful when the "
+                            "selected sidecar is missing / renamed and "
+                            "ComfyUI would otherwise reject the empty "
+                            "dropdown selection."
+                        ),
+                    },
+                ),
+                "pe_lora_path": (
+                    [_PE_LORA_DEFAULT_LABEL] + _list_pe_lora_files(),
+                    {
+                        "tooltip": (
+                            "PE-LoRA sidecar override (safetensors). The "
+                            "default entry uses "
+                            "<tagger_dir>/pe_lora.safetensors (shipped or "
+                            "auto-fetched by train-pe-lora); the remaining "
+                            "rows are PE-LoRA files discovered under "
+                            "models/captioners/*/, models/pe_loras/, and "
+                            "output/ckpt/. Has no effect when use_pe_lora "
+                            "is off, or unless config.json in tagger_dir "
+                            "has 'pe_lora: true' (rank / alpha / target "
+                            "layers all come from that config)."
                         ),
                     },
                 ),
@@ -195,19 +254,31 @@ class AnimaTaggerLoader:
         "auto-downloaded if their paths don't exist yet."
     )
 
-    def load(self, tagger_dir: str, pe_ckpt: str, pe_lora_path: str = ""):
+    def load(
+        self,
+        tagger_dir: str,
+        pe_ckpt: str,
+        use_pe_lora: bool = True,
+        pe_lora_path: str = "",
+    ):
         tdir = Path(tagger_dir)
         if not tdir.is_absolute():
             tdir = ANIMA_LORA / tdir
         pe_path = Path(pe_ckpt)
         if not pe_path.is_absolute():
             pe_path = ANIMA_LORA / pe_path
+        # Dropdown's "default" sentinel maps to the colocated fallback inside
+        # AnimaTagger (None override -> <ckpt_dir>/pe_lora.safetensors). When
+        # use_pe_lora is off, the dropdown is ignored entirely and the
+        # tagger is told to skip PE-LoRA injection.
         pe_lora_resolved: Path | None = None
-        if pe_lora_path.strip():
-            pl = Path(pe_lora_path.strip())
-            if not pl.is_absolute():
-                pl = ANIMA_LORA / pl
-            pe_lora_resolved = pl
+        if use_pe_lora:
+            pl_str = pe_lora_path.strip()
+            if pl_str and pl_str != _PE_LORA_DEFAULT_LABEL:
+                pl = Path(pl_str)
+                if not pl.is_absolute():
+                    pl = ANIMA_LORA / pl
+                pe_lora_resolved = pl
         _ensure_tagger_dir(tdir)
         device = comfy.model_management.get_torch_device()
         logger.info(
@@ -215,13 +286,14 @@ class AnimaTaggerLoader:
             tdir,
             device,
             pe_path,
-            pe_lora_resolved,
+            "<disabled>" if not use_pe_lora else pe_lora_resolved,
         )
         tagger = AnimaTagger(
             ckpt_dir=tdir,
             device=device,
             pe_ckpt=pe_path,
             pe_lora_path=pe_lora_resolved,
+            pe_lora_disabled=not use_pe_lora,
         )
         return (tagger,)
 

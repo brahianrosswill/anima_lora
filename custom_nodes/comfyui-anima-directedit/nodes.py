@@ -177,7 +177,7 @@ class AnimaDirectEdit:
                     "STRING",
                     {"multiline": True, "default": "worst quality"},
                 ),
-                "infer_steps": ("INT", {"default": 28, "min": 1, "max": 200}),
+                "infer_steps": ("INT", {"default": 20, "min": 1, "max": 200}),
                 "flow_shift": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.05},
@@ -185,7 +185,7 @@ class AnimaDirectEdit:
                 "guidance_scale": (
                     "FLOAT",
                     {
-                        "default": 4.0,
+                        "default": 2.0,
                         "min": 1.0,
                         "max": 20.0,
                         "step": 0.1,
@@ -209,7 +209,7 @@ class AnimaDirectEdit:
                 "t_inj": (
                     "INT",
                     {
-                        "default": 0,
+                        "default": 6,
                         "min": 0,
                         "max": 200,
                         "tooltip": (

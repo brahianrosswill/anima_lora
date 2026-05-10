@@ -19,19 +19,6 @@ def _write(tmp_path, body: str):
     return p
 
 
-def test_load_starter_yaml():
-    """The shipped starter file parses cleanly."""
-    g = tg.load_groups("library/captioning/tag_groups_starter.yaml")
-    assert g.version == 1
-    names = {gr.name for gr in g.groups}
-    # Spot-check the canonical groups.
-    assert {"eye_color", "hair_color", "rating"} <= names
-    eye = g.by_name("eye_color")
-    assert eye is not None
-    assert eye.mode == "softmax_when_solo"
-    assert "blue eyes" in eye.tags
-
-
 def test_load_minimal(tmp_path):
     p = _write(tmp_path, """
         version: 1

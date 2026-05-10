@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-anima-directedit"
 description = "Anima DirectEdit for ComfyUI: image + 'tag to add' -> edited image. Performs flow inversion + delta_z-anchored resampling on stock MODEL/CLIP/VAE sockets. Pair with the comfyui-anima-tagger package for image-driven psi_src derivation, or supply psi_src directly via prompt_src_override."
-version = "0.1.2"
+version = "0.1.3"
 license = { file = "LICENSE" }
 # torch / numpy / pillow / torchvision / safetensors / huggingface_hub / tqdm
 # are already shipped with any ComfyUI install. We list them anyway so a
