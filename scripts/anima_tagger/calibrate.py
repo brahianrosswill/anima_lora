@@ -17,7 +17,7 @@ from typing import Optional, Tuple
 
 import torch
 
-from .train_common import GroupRouter, eval_split
+from .train_common import GroupRouter
 
 logger = logging.getLogger(__name__)
 
@@ -84,19 +84,14 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     from safetensors.torch import load_file as st_load
     from safetensors.torch import save_file as st_save
 
-    from library.captioning.anima_tagger_data import (
-        CachedFeatureDataset,
-        TaggerManifest,
-    )
     from library.captioning.anima_tagger_model import (
         AnimaTaggerConfig,
         AnimaTaggerHead,
     )
 
+    from .caches import cache_dir_for
+
     out_dir = Path(args.out_dir)
-    manifest = TaggerManifest.from_path(out_dir / "dataset.json")
-    cache_dir = out_dir / ".cache" / f"pooled-{args.encoder}"
-    val_ds = CachedFeatureDataset(manifest, cache_dir, stems_subset=manifest.val_stems)
 
     with open(out_dir / "config.json") as f:
         cfg_d = json.load(f)
@@ -107,26 +102,91 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model.to(device).eval()
 
-    val_feats = val_ds.features.to(device)
-    val_mh = val_ds.multi_hot.to(device)
-    # Build the same router the trainer used so we can:
+    # Pool kind drives the cache layout + eval iteration shape. CLI
+    # default is 'map'; respect the saved config.json so calibrate matches
+    # what was actually trained when the user ran train+calibrate as a
+    # batch without thinking about flags.
+    pool_kind = str(cfg_d.get("pool_kind", cfg.pool_kind))
+
+    cache_dir = cache_dir_for(out_dir, pool_kind, args.encoder)
+    if not cache_dir.exists():
+        raise SystemExit(
+            f"missing {cache_dir} — calibrate needs the same cache the "
+            f"trainer used (pool_kind={pool_kind!r}). Re-run "
+            f"`--mode build_features --pool_kind={pool_kind}` if you "
+            f"deleted it."
+        )
+
+    from library.captioning.anima_tagger_data import TaggerManifest
+    manifest = TaggerManifest.from_path(out_dir / "dataset.json")
+
+    if pool_kind == "mean":
+        from library.captioning.anima_tagger_data import CachedFeatureDataset
+
+        val_ds = CachedFeatureDataset(manifest, cache_dir, stems_subset=manifest.val_stems)
+        val_feats = val_ds.features.to(device)
+        val_mh = val_ds.multi_hot.to(device)
+        with torch.no_grad():
+            tag_logits, _rating_logits, _people_logits = model(val_feats)
+    else:
+        from torch.utils.data import DataLoader
+
+        from library.captioning.anima_tagger_data import (
+            BucketBatchSampler,
+            CachedTokenDataset,
+            collate_token_batch,
+        )
+        from library.vision.encoders import get_encoder_info
+
+        spec = get_encoder_info(args.encoder).bucket_spec
+        val_ds = CachedTokenDataset(
+            manifest, cache_dir, spec, stems_subset=manifest.val_stems
+        )
+        val_mh = val_ds.multi_hot.to(device)
+        sampler = BucketBatchSampler(
+            val_ds.buckets, batch_size=args.batch_size, seed=args.seed, shuffle=False
+        )
+        loader = DataLoader(
+            val_ds,
+            batch_sampler=sampler,
+            num_workers=args.feature_cache_workers,
+            collate_fn=collate_token_batch,
+            pin_memory=True,
+        )
+        chunks: list[torch.Tensor] = []
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            for tokens, _mh, _rate, _people, _bucket in loader:
+                tokens = tokens.to(device, non_blocking=True)
+                tl, _rl, _pl = model(tokens)
+                chunks.append(tl.float())
+        tag_logits = torch.cat(chunks, dim=0)
+        # CachedTokenDataset's multi_hot is already aligned with iter order
+        # (BucketBatchSampler shuffles within bucket only when shuffle=True;
+        # we set shuffle=False above so iter order == dataset index order).
+        # But sampler reshuffles batches across buckets even when shuffle=False:
+        # check the source — actually it only reshuffles when self.shuffle.
+        # With shuffle=False, batches are emitted in sorted-bucket order,
+        # within-bucket in dataset order. Reorder val_mh to match.
+        order_indices: list[int] = []
+        for batch_idx_list in sampler:
+            order_indices.extend(batch_idx_list)
+        val_mh = val_mh[torch.as_tensor(order_indices, device=val_mh.device)]
+
+    scores = tag_logits.sigmoid().cpu()
+    val_mh_cpu = val_mh.cpu()
+    # Build the router so we can:
     #   (a) skip softmax-group tags from the per-tag F1 sweep, and
     #   (b) report eval F1 over residual tags only (matching training).
     with open(out_dir / "vocab.json") as f:
         vocab_dict = json.load(f)
-    train_mh = val_ds.multi_hot.to(device)  # router only needs the shape; pos_weight is unused here
-    router = GroupRouter.from_vocab(vocab_dict, train_mh, device=device)
+    router = GroupRouter.from_vocab(vocab_dict, val_mh, device=device)
     if router.is_active() and router.softmax_member_indices is not None:
         all_softmax_idx = router.softmax_member_indices
     else:
         all_softmax_idx = torch.empty(0, dtype=torch.long)
-
-    with torch.no_grad():
-        tag_logits, _rating_logits, _people_logits = model(val_feats)
-        scores = tag_logits.sigmoid().cpu()
     sweep = torch.linspace(0.05, 0.95, 19)
     thresh, f1 = calibrate_thresholds(
-        scores, val_mh.cpu(), sweep,
+        scores, val_mh_cpu, sweep,
         default=0.5,
         skip_indices=all_softmax_idx,
     )
@@ -141,13 +201,30 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         n_active,
         thresh.shape[0],
     )
+    # Baseline macro-F1 at the default 0.5 threshold (residual tags only
+    # when softmax groups are active) — derived directly from the
+    # already-collected logits rather than rerunning the model. Matches
+    # both the mean and map paths.
+    if all_softmax_idx.numel() > 0:
+        keep_mask = torch.ones(scores.shape[1], dtype=torch.bool)
+        keep_mask[all_softmax_idx.cpu()] = False
+        kept = keep_mask.nonzero(as_tuple=False).squeeze(1)
+        baseline_scores = scores.index_select(1, kept)
+        baseline_target = val_mh_cpu.index_select(1, kept)
+    else:
+        baseline_scores = scores
+        baseline_target = val_mh_cpu
+    pred = (baseline_scores > 0.5).float()
+    tp = (pred * baseline_target).sum(dim=0)
+    fp = (pred * (1 - baseline_target)).sum(dim=0)
+    fn = ((1 - pred) * baseline_target).sum(dim=0)
+    prec_b = tp / (tp + fp).clamp_min(1.0)
+    rec_b = tp / (tp + fn).clamp_min(1.0)
+    f1_b = 2 * prec_b * rec_b / (prec_b + rec_b).clamp_min(1e-8)
     logger.info(
         "macro-F1 (calibrated) = %.4f  vs default 0.5 macro-F1 = %.4f",
         f1.mean().item(),
-        eval_split(
-            model, val_feats, val_mh, val_ds.rating_idx.to(device),
-            router=router,
-        )["macro_f1"],
+        f1_b.mean().item(),
     )
     print(f"  thresholds: {out_dir / 'thresholds.safetensors'}")
     print(f"  active tags (F1>0): {n_active} / {thresh.shape[0]}")

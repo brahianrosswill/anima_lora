@@ -106,8 +106,19 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
         n_people_counts=train_ds.n_people_counts,
         d_hidden=args.d_hidden,
         dropout=args.dropout,
+        pool_kind=args.pool_kind,
+        pool_n_queries=args.pool_n_queries,
+        pool_n_heads=args.pool_n_heads,
+        pool_use_cls=args.pool_use_cls,
+        pool_use_mean=args.pool_use_mean,
     )
     model = AnimaTaggerHead(cfg).to(device)
+    logger.info(
+        "head: pool_kind=%s n_queries=%d n_heads=%d use_cls=%s use_mean=%s "
+        "trunk_in=%d d_hidden=%d",
+        cfg.pool_kind, cfg.pool_n_queries, cfg.pool_n_heads,
+        cfg.pool_use_cls, cfg.pool_use_mean, cfg.trunk_in_dim, cfg.d_hidden,
+    )
 
     # Optional warm-start from a Stage-1 cached-feature run. Loads strict —
     # any key mismatch (different vocab / hidden dim) errors out instead of
@@ -219,13 +230,21 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
     )
 
     def _forward_pool(images_u8: torch.Tensor) -> torch.Tensor:
-        """images_u8 [B, C, H, W] uint8 (CPU) → pooled [B, d_enc] (device, fp32)."""
+        """images_u8 [B, C, H, W] uint8 (CPU) → encoder features (device, fp32).
+
+        Output shape depends on ``pool_kind``:
+          * ``mean`` → ``[B, d_enc]`` (mean-pooled, matches FeatureCacheBuilder)
+          * ``map``  → ``[B, T, d_enc]`` (full token sequence; the head's
+            MAPHead pools internally)
+        """
         x = _u8_to_minus1to1(images_u8.to(device, non_blocking=True))
         x = x.to(bundle.dtype)
         # pe_inner.encode returns (last_hidden_state[B,T,D], pooled[B,D_pool]).
-        # We use last_hidden_state mean-pooled — matches FeatureCacheBuilder.
         feats, _pooled = pe_inner.encode(x)                    # [B, T, D_enc]
-        return feats.to(torch.float32).mean(dim=1)             # [B, D_enc]
+        feats = feats.to(torch.float32)
+        if cfg.pool_kind == "mean":
+            return feats.mean(dim=1)                           # [B, D_enc]
+        return feats                                           # [B, T, D_enc]
 
     best_f1 = -1.0
     best_head_state: Dict[str, torch.Tensor] = {}
@@ -464,6 +483,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
                 "init_head_from": (
                     str(args.init_head_from) if args.init_head_from else None
                 ),
+                "pool_kind": args.pool_kind,
             },
             f,
             indent=2,

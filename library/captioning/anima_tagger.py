@@ -349,13 +349,23 @@ class AnimaTagger:
 
     @torch.no_grad()
     def _encode_image(self, pil_img: Image.Image) -> torch.Tensor:
-        """Image → pooled feature ``[d_in]`` on ``self.device``."""
+        """Image → encoder feature on ``self.device``.
+
+        Shape depends on ``cfg.pool_kind``:
+          * ``mean`` (legacy) → ``[d_enc]`` mean-pooled feature; ``predict``
+            unsqueezes a batch dim and ``AnimaTaggerHead.forward`` takes
+            the rank-2 path through the trunk directly.
+          * ``map`` → ``[T, d_enc]`` token sequence; ``predict`` unsqueezes
+            a batch dim and the head's MAPHead pools internally.
+        """
         bundle = self._bundle()
         pil_img = pil_resize_to_bucket(pil_img.convert("RGB"), bundle.bucket_spec)
         tensor = IMAGE_TRANSFORMS(np.array(pil_img)).unsqueeze(0)
         feats_list = encode_pe_from_imageminus1to1(bundle, tensor, same_bucket=True)
         feats = feats_list[0]                # [T, d_enc]
-        return feats.mean(dim=0).to(torch.float32)
+        if self.cfg.pool_kind == "mean":
+            return feats.mean(dim=0).to(torch.float32)
+        return feats.to(torch.float32)        # [T, d_enc]
 
     # ── Public API (mirrors WDTagger) ──────────────────────────────────
 

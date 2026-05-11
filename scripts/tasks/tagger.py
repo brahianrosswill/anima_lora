@@ -42,30 +42,35 @@ def cmd_preprocess_tagger(extra):
 
     1. ``--mode build_vocab`` — scans caption sources, emits ``vocab.json`` +
        ``dataset.json``.
-    2. ``--mode build_features`` — encodes each manifest image through frozen
-       PE-Core, mean-pools patches, writes per-stem safetensors. Consumed by
-       the Stage-1 cached-encoder training path.
-    3. ``--mode build_resized`` — LANCZOS-resizes each manifest image to its
-       PE bucket, writes uint8 safetensors. Consumed by the Stage-2 PE-LoRA
-       training path (where the encoder is unfrozen and pre-pooled features
-       can't track it).
+    2. ``--mode build_resized`` — LANCZOS-resizes each manifest image to its
+       PE bucket, writes uint8 safetensors. Consumed directly by the Stage-2
+       PE-LoRA training path; ``build_features`` also auto-shortcuts through
+       this cache when present (skips a redundant decode + LANCZOS pass).
+    3. ``--mode build_features`` — encodes each manifest image through frozen
+       PE-Core and writes per-stem safetensors. Format depends on
+       ``--pool_kind`` (full token sequence for ``map`` / pooled vector for
+       ``mean``); consumed by the Stage-1 cached-encoder training path.
 
     Requires ``CAPTION_CORPUS_DIR`` set in ``anima_lora/.env`` (or the relevant
     paths passed via flags). Extra args are forwarded to ALL three stages —
     pass only flags they share (e.g. ``--out_dir``, ``--encoder``, ``--device``).
     """
     _tagger("build_vocab", extra)
-    _tagger("build_features", extra)
+    # Resized first so build_features can short-circuit through the uint8
+    # cache (auto-detected — no flag needed; see caches.py:cmd_build_features).
     _tagger("build_resized", extra)
+    _tagger("build_features", extra)
 
 
 def cmd_tagger(extra):
     """Two-stage Anima Tagger train: head-only on cached features → PE-LoRA warm-start.
 
     **Stage 1** (``--pe_lora_rank 0``) — head only, encoder frozen.
-        Reads pre-pooled features from ``<out_dir>/.cache/pooled-pe/``. Fast
-        (no encoder forward per step). Saves the head to
-        ``<out_dir>/model.safetensors``.
+        Reads from the cache subdir matching ``--pool_kind`` —
+        ``<out_dir>/.cache/tokens-pe/`` for the default ``pool_kind=map``
+        (MAP attention head) or ``<out_dir>/.cache/pooled-pe/`` for the
+        legacy ``pool_kind=mean`` head. Fast (no encoder forward per
+        step). Saves the head to ``<out_dir>/model.safetensors``.
 
     **Stage 2** (``--pe_lora_rank > 0``) — PE-LoRA, warm-started from Stage 1.
         Reads pre-resized images from ``<out_dir>/.cache/resized-<encoder>/``

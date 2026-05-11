@@ -1,31 +1,40 @@
 """Dataset plumbing for the Anima tagger.
 
-Five pieces:
+Six pieces:
 
 * :class:`TaggerManifest` — loads ``dataset.json`` (the per-stem
   image-path + multi-hot tag indices + rating-class index + people-count
   class index emitted by ``python -m scripts.anima_tagger.cli --mode
   build_vocab``).
-* :class:`FeatureCacheBuilder` — encodes each manifest image through a
-  frozen PE-Core trunk, mean-pools over patch tokens, and writes a
-  per-stem ``.safetensors`` to the cache dir. Idempotent: skips entries
-  that already exist.
-* :class:`CachedFeatureDataset` — reads the per-stem cache into one
-  in-memory tensor and exposes ``(feature, multi_hot, rating_idx, people_idx)``
-  tuples for the trainer.
-* :class:`ImageCacheBuilder` — LANCZOS-resizes each manifest image to its
-  PE bucket and writes a per-stem ``uint8 [C,H,W]`` safetensors. Pairs
+* :class:`FeatureCacheBuilder` — legacy mean-pool cache. Encodes each
+  manifest image through a frozen PE-Core trunk, mean-pools over patch
+  tokens, writes a per-stem ``[d_enc] fp32`` safetensors. Idempotent.
+  Used by ``pool_kind="mean"`` checkpoints.
+* :class:`CachedFeatureDataset` — reads the legacy mean-pool cache into
+  one in-memory tensor and exposes
+  ``(feature, multi_hot, rating_idx, people_idx)`` tuples.
+* :class:`TokenCacheBuilder` — full token cache for ``pool_kind="map"``.
+  Encodes each manifest image through frozen PE-Core, writes a per-stem
+  ``[T, d_enc] bf16`` safetensors (CLS at row 0). Storage is ~1.2 MB /
+  stem at PE-Core-L14-336 (~14 GB for a 12K-stem dataset); the win is
+  that swapping pool architectures no longer requires re-encoding.
+* :class:`CachedTokenDataset` + :func:`collate_token_batch` — lazy
+  bucket-grouped token dataset for the MAP-pool trainer (mirrors the
+  PE-LoRA :class:`CachedImageDataset` pattern; T is constant within a
+  bucket so the collate just stacks).
+* :class:`ImageCacheBuilder` — LANCZOS-resizes each manifest image to
+  its PE bucket and writes per-stem ``uint8 [C,H,W]`` safetensors. Pairs
   with PE-LoRA training where the encoder is unfrozen and pre-pooled
   features can't track it.
 * :class:`CachedImageDataset` + :class:`BucketBatchSampler` — bucket-grouped
   image dataset for end-to-end PE-LoRA training. Each yielded batch is
   shape-homogeneous so the encoder can be called once per batch.
 
-The pooling decision (mean over patch tokens) is locked into the
-``FeatureCacheBuilder`` cache file format. Swap pooling → invalidate the
-cache dir → rebuild. The image cache file format is plain ``uint8`` HWC
-post-LANCZOS-resize, no normalization — the trainer applies
-``(x/127.5) - 1`` at load time to recover ``[-1, 1]``.
+Cache layout is locked into each builder's file format — swap pooling /
+storage layout → invalidate the cache dir → rebuild. The image cache
+file format is plain ``uint8`` HWC post-LANCZOS-resize, no
+normalization — the trainer applies ``(x/127.5) - 1`` at load time to
+recover ``[-1, 1]``.
 """
 
 from __future__ import annotations
@@ -81,6 +90,15 @@ def pil_resize_to_bucket(img: Image.Image, spec: BucketSpec) -> Image.Image:
 class _ResizeDataset(Dataset):
     """CPU-side decode + bucket-resize + IMAGE_TRANSFORMS for one stem.
 
+    When ``resized_cache_dir`` is given AND the per-stem uint8 sidecar
+    exists, skips the PIL decode + LANCZOS path and loads the cached
+    tensor directly, applying the same ``(x/127.5) - 1`` recovery the
+    PE-LoRA trainer uses. This lets ``build_features`` ride on a
+    pre-existing ``.cache/resized-<encoder>/`` (built by
+    ``build_resized``) without any cost — output is bit-equivalent up to
+    uint8 quantization (≤1/127.5 per channel), which is well below the
+    encoder's bf16 noise floor.
+
     Returns ``(stem, tensor[C,H,W] | None, err)``. Errors are surfaced as
     a non-empty string so the consumer can log and continue.
     """
@@ -90,10 +108,12 @@ class _ResizeDataset(Dataset):
         stems: Sequence[str],
         image_paths: Sequence[Path],
         spec: BucketSpec,
+        resized_cache_dir: Optional[Path] = None,
     ):
         self._stems = list(stems)
         self._paths = list(image_paths)
         self._spec = spec
+        self._resized_cache_dir = resized_cache_dir
 
     def __len__(self) -> int:
         return len(self._stems)
@@ -102,6 +122,12 @@ class _ResizeDataset(Dataset):
         stem = self._stems[k]
         path = self._paths[k]
         try:
+            if self._resized_cache_dir is not None:
+                cache_file = _image_cache_path(self._resized_cache_dir, stem)
+                if cache_file.exists():
+                    u8 = st_load(str(cache_file))["image"]    # [C, H, W] uint8
+                    tensor = u8.to(torch.float32) / 127.5 - 1.0
+                    return stem, tensor, ""
             with Image.open(path) as im:
                 im = pil_resize_to_bucket(im.convert("RGB"), self._spec)
                 arr = np.array(im)
@@ -175,6 +201,11 @@ class FeatureCacheBuilder:
     image is fast enough that 12K stems finish in ~10–20 minutes on a
     single GPU; a bucketed-batch path can be added later if it shows up
     in profiling.
+
+    ``resized_cache_dir`` (optional) — when supplied and the per-stem
+    uint8 sidecar exists, skips PIL decode + LANCZOS for that stem and
+    loads the cached tensor instead. Lets the cache build ride on the
+    PE-LoRA path's ``.cache/resized-<encoder>/`` for free.
     """
 
     def __init__(
@@ -185,6 +216,7 @@ class FeatureCacheBuilder:
         encoder_name: str = "pe",
         dtype: torch.dtype = torch.bfloat16,
         num_workers: int = 4,
+        resized_cache_dir: Optional[Path] = None,
     ):
         self.manifest = manifest
         self.cache_dir = cache_dir
@@ -193,6 +225,7 @@ class FeatureCacheBuilder:
         self.encoder_name = encoder_name
         self.dtype = dtype
         self.num_workers = num_workers
+        self.resized_cache_dir = resized_cache_dir
         self._bundle: Optional[VisionEncoderBundle] = None
 
     def _bundle_lazy(self) -> VisionEncoderBundle:
@@ -235,6 +268,7 @@ class FeatureCacheBuilder:
             stems=[self.manifest.stems[i] for i in missing],
             image_paths=[self.manifest.image_paths[i] for i in missing],
             spec=spec,
+            resized_cache_dir=self.resized_cache_dir,
         )
         loader = DataLoader(
             ds,
@@ -345,6 +379,253 @@ class CachedFeatureDataset(Dataset):
             self.rating_idx[idx],
             self.people_idx[idx],
         )
+
+
+# ── Token cache (for MAP-pool / pool_kind="map" training) ────────────────
+
+
+def _token_cache_path(cache_dir: Path, stem: str) -> Path:
+    return cache_dir / f"{stem}.safetensors"
+
+
+class TokenCacheBuilder:
+    """Build per-stem full-token PE-Core caches into ``cache_dir``.
+
+    Writes each stem as ``{"tokens": bf16 [T, d_enc]}`` with the encoder's
+    native CLS token at row 0 (use_cls=True). T varies per aspect-bucket
+    (~576–588 for PE-Core-L14-336).
+
+    Storage per stem ≈ ``T * d_enc * 2`` bytes; ~1.2 MB at PE-Core defaults.
+    At 12K stems that's ~14 GB total — pay once, iterate on pool design
+    freely. Per-image encoder forwards are fast enough that 12K stems
+    finishes in ~10–20 minutes on a single GPU.
+
+    ``resized_cache_dir`` (optional) — when supplied and the per-stem
+    uint8 sidecar exists, skips PIL decode + LANCZOS for that stem and
+    loads the cached tensor instead. Lets the cache build ride on the
+    PE-LoRA path's ``.cache/resized-<encoder>/`` for free.
+    """
+
+    def __init__(
+        self,
+        manifest: TaggerManifest,
+        cache_dir: Path,
+        device: torch.device,
+        encoder_name: str = "pe",
+        dtype: torch.dtype = torch.bfloat16,
+        num_workers: int = 4,
+        resized_cache_dir: Optional[Path] = None,
+    ):
+        self.manifest = manifest
+        self.cache_dir = cache_dir
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.device = device
+        self.encoder_name = encoder_name
+        self.dtype = dtype
+        self.num_workers = num_workers
+        self.resized_cache_dir = resized_cache_dir
+        self._bundle: Optional[VisionEncoderBundle] = None
+
+    def _bundle_lazy(self) -> VisionEncoderBundle:
+        if self._bundle is None:
+            self._bundle = load_pe_encoder(
+                self.device, name=self.encoder_name, dtype=self.dtype
+            )
+        return self._bundle
+
+    def missing_stems(self) -> List[int]:
+        return [
+            i
+            for i, stem in enumerate(self.manifest.stems)
+            if not _token_cache_path(self.cache_dir, stem).exists()
+        ]
+
+    @torch.no_grad()
+    def build(self) -> int:
+        """Encode + cache every stem missing from ``cache_dir``.
+
+        Returns the count of newly cached entries (0 if everything was
+        already cached). Errors on individual images are logged and the
+        loop continues — a single corrupt image shouldn't tank the run.
+        """
+        missing = self.missing_stems()
+        if not missing:
+            logger.info("token cache: all %d entries present", len(self.manifest.stems))
+            return 0
+
+        logger.info(
+            "token cache: encoding %d missing entries (out of %d total)",
+            len(missing),
+            len(self.manifest.stems),
+        )
+        bundle = self._bundle_lazy()
+        spec = bundle.bucket_spec
+        d_enc = bundle.d_enc
+
+        ds = _ResizeDataset(
+            stems=[self.manifest.stems[i] for i in missing],
+            image_paths=[self.manifest.image_paths[i] for i in missing],
+            spec=spec,
+            resized_cache_dir=self.resized_cache_dir,
+        )
+        loader = DataLoader(
+            ds,
+            batch_size=1,
+            num_workers=self.num_workers,
+            prefetch_factor=2 if self.num_workers > 0 else None,
+            collate_fn=_identity_collate,
+            pin_memory=False,
+        )
+
+        n_done = 0
+        for stem, tensor, err in tqdm(loader, desc="tokens-pe", unit="img", total=len(ds)):
+            if tensor is None:
+                logger.warning("failed to decode %s: %s", stem, err)
+                continue
+            try:
+                tensor = tensor.unsqueeze(0)
+                feats_list = encode_pe_from_imageminus1to1(
+                    bundle, tensor, same_bucket=True
+                )
+                feats = feats_list[0]                              # [T, d_enc]
+                assert feats.shape[-1] == d_enc, feats.shape
+                # Stash as bf16 — encoder's native dtype, halves cache size
+                # vs fp32 with no quality loss on the downstream pool (the
+                # MAP head's LayerNorm + Linear projects back into fp32 /
+                # autocast-bf16 anyway).
+                tokens = feats.to(torch.bfloat16).cpu().contiguous()
+                st_save(
+                    {"tokens": tokens},
+                    str(_token_cache_path(self.cache_dir, stem)),
+                )
+                n_done += 1
+            except Exception as e:
+                logger.warning("failed to encode %s: %s", stem, e)
+        logger.info("token cache: wrote %d new entries", n_done)
+        return n_done
+
+
+class CachedTokenDataset(Dataset):
+    """Lazy per-stem ``(tokens [T,D], multi_hot, rating_idx, people_idx, bucket_key)``.
+
+    Loads each token sidecar on demand (the full corpus is ~14 GB at
+    PE-Core-L14-336, too big for RAM-resident eager loading on most
+    cards). Pairs with :class:`BucketBatchSampler` so each yielded batch
+    is bucket-homogeneous — within-bucket T is constant, so the collate
+    just stacks without padding masks.
+
+    ``bucket_key`` is the ``(h_patches, w_patches)`` tuple derived from
+    each cache file's stored token count (read from the safetensors
+    header, no full tensor read at init time).
+    """
+
+    def __init__(
+        self,
+        manifest: TaggerManifest,
+        cache_dir: Path,
+        spec: BucketSpec,
+        stems_subset: Optional[Sequence[str]] = None,
+    ):
+        idx_of = manifest.stem_index()
+        if stems_subset is None:
+            stems_subset = manifest.stems
+        kept_stems: List[str] = []
+        kept_paths: List[Path] = []
+        kept_tag_idx: List[List[int]] = []
+        kept_rating_idx: List[int] = []
+        kept_people_idx: List[int] = []
+        kept_buckets: List[tuple[int, int]] = []
+        # Map T (token count) → bucket. Only buckets that match the
+        # encoder's spec are kept; unexpected token counts are flagged.
+        token_to_bucket: Dict[int, tuple[int, int]] = {
+            h * w + (1 if spec.use_cls else 0): (h, w) for h, w in spec.buckets
+        }
+        has_people = bool(manifest.people_count_indices)
+        n_missing = 0
+        n_unknown_bucket = 0
+        for stem in stems_subset:
+            i = idx_of.get(stem)
+            if i is None:
+                n_missing += 1
+                continue
+            cache_file = _token_cache_path(cache_dir, stem)
+            if not cache_file.exists():
+                n_missing += 1
+                continue
+            with safe_open(str(cache_file), framework="pt") as f:
+                shape = f.get_slice("tokens").get_shape()
+            T = int(shape[0])
+            bucket = token_to_bucket.get(T)
+            if bucket is None:
+                n_unknown_bucket += 1
+                continue
+            kept_stems.append(stem)
+            kept_paths.append(cache_file)
+            kept_tag_idx.append(manifest.tag_indices[i])
+            kept_rating_idx.append(manifest.rating_indices[i])
+            kept_people_idx.append(manifest.people_count_indices[i] if has_people else 0)
+            kept_buckets.append(bucket)
+        if not kept_stems:
+            raise RuntimeError(
+                f"no cached token sidecars found in {cache_dir} for the requested "
+                f"stems (n_requested={len(stems_subset)}, n_missing={n_missing}, "
+                f"n_unknown_bucket={n_unknown_bucket})"
+            )
+        if n_missing:
+            logger.warning(
+                "CachedTokenDataset: %d stems missing from cache (out of %d "
+                "requested) - they will not contribute to training",
+                n_missing,
+                len(stems_subset),
+            )
+        if n_unknown_bucket:
+            logger.warning(
+                "CachedTokenDataset: %d stems had unexpected token counts "
+                "(not in spec.buckets) and were skipped",
+                n_unknown_bucket,
+            )
+        self.stems = kept_stems
+        self.paths = kept_paths
+        self.buckets = kept_buckets
+        self.multi_hot = torch.zeros(len(kept_stems), manifest.n_tags)
+        for row, idxs in enumerate(kept_tag_idx):
+            self.multi_hot[row, idxs] = 1.0
+        self.rating_idx = torch.tensor(kept_rating_idx, dtype=torch.long)
+        self.people_idx = torch.tensor(kept_people_idx, dtype=torch.long)
+        self.n_tags = manifest.n_tags
+        self.n_ratings = manifest.n_ratings
+        self.n_people_counts = manifest.n_people_counts
+        self.spec = spec
+        # d_in is the token D — peek the first file to read it.
+        with safe_open(str(kept_paths[0]), framework="pt") as f:
+            self.d_in = int(f.get_slice("tokens").get_shape()[-1])
+
+    def __len__(self) -> int:
+        return len(self.stems)
+
+    def __getitem__(self, idx: int):
+        tokens = st_load(str(self.paths[idx]))["tokens"]    # [T, D] bf16
+        return (
+            tokens,
+            self.multi_hot[idx],
+            self.rating_idx[idx],
+            self.people_idx[idx],
+            self.buckets[idx],
+        )
+
+
+def collate_token_batch(batch):
+    """Stack a same-bucket batch into ``(tokens[B,T,D], multi_hot, rating, people, bucket)``.
+
+    Asserts shape homogeneity (BucketBatchSampler guarantees same T) and
+    leaves the tokens as bf16; trainer casts as needed under autocast.
+    """
+    tokens = torch.stack([b[0] for b in batch], dim=0)        # [B, T, D] bf16
+    multi_hot = torch.stack([b[1] for b in batch], dim=0)     # [B, n_tags]
+    rating_idx = torch.stack([b[2] for b in batch], dim=0)    # [B]
+    people_idx = torch.stack([b[3] for b in batch], dim=0)    # [B]
+    bucket = batch[0][4]
+    return tokens, multi_hot, rating_idx, people_idx, bucket
 
 
 # ── Pre-resized image cache (for end-to-end PE-LoRA training) ─────────────

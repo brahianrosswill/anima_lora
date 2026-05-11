@@ -13,8 +13,11 @@ Modes (selected by ``--mode``):
                        cache, snapshot ``tag_rules.yaml``, emit
                        ``vocab.json`` plus a fixed train/val split and a
                        per-stem ``dataset.json`` manifest.
-* ``build_features`` — encode every manifest image through frozen PE-Core,
-                       mean-pool over patch tokens, write per-stem cache.
+* ``build_features`` — encode every manifest image through frozen PE-Core
+                       and write per-stem cache. ``--pool_kind=map`` (default)
+                       writes the full token sequence (consumed by the MAP
+                       attention-pool head); ``--pool_kind=mean`` writes the
+                       legacy mean-pooled vector.
 * ``build_resized``  — LANCZOS-resize every manifest image to its PE bucket,
                        cache as ``uint8 [C, H, W]`` for end-to-end PE-LoRA.
 * ``train``          — train the multi-label head + 3-class rating head + 8-class people-count head.
@@ -88,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--feature_cache_workers",
         type=int,
-        default=4,
+        default=6,
         help="DataLoader workers for build_features CPU-side decode + LANCZOS "
         "resize (default: 4). Set to 0 to run inline on the main process.",
     )
@@ -134,7 +137,7 @@ def parse_args() -> argparse.Namespace:
 
     # Train-mode knobs.
     p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--batch_size", type=int, default=48)
+    p.add_argument("--batch_size", type=int, default=64)
     p.add_argument(
         "--postfix_every",
         type=int,
@@ -147,6 +150,50 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--d_hidden", type=int, default=1024)
     p.add_argument("--dropout", type=float, default=0.1)
+
+    # Pool architecture. ``map`` = K learnable queries attend over PE patch
+    # tokens (CLS + mean concatenated as auxiliary channels). ``mean`` =
+    # legacy mean-pool path (head consumes a pre-pooled [B, d_enc] feature).
+    # build_features / train / calibrate all read --pool_kind to pick the
+    # cache subdir and the head shape.
+    p.add_argument(
+        "--pool_kind",
+        choices=["map", "mean"],
+        default="map",
+        help="Pool head over PE-Core tokens. 'map' (default): K-query "
+        "attention pool + CLS + mean concat → trunk. 'mean': legacy "
+        "single-vector mean-pool. Selects cache subdir "
+        "(.cache/tokens-<encoder>/ vs pooled-<encoder>/) and head arch.",
+    )
+    p.add_argument(
+        "--pool_n_queries",
+        type=int,
+        default=4,
+        help="MAP pool: number of learnable queries (default 4). Each query "
+        "produces one [d_enc] vector; trunk input is "
+        "(K + use_cls + use_mean) * d_enc.",
+    )
+    p.add_argument(
+        "--pool_n_heads",
+        type=int,
+        default=8,
+        help="MAP pool: number of attention heads (default 8). Must divide "
+        "the encoder dim (d_enc=1024 for PE-Core).",
+    )
+    p.add_argument(
+        "--pool_use_cls",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="MAP pool: concat the encoder's CLS token as an aux channel "
+        "(default on).",
+    )
+    p.add_argument(
+        "--pool_use_mean",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="MAP pool: concat the patch-token mean as an aux channel "
+        "(default on — gives the legacy baseline as a residual).",
+    )
     p.add_argument(
         "--lambda_rating",
         type=float,
