@@ -176,7 +176,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--pool_n_heads",
         type=int,
-        default=4,
+        default=8,
         help="MAP pool: number of attention heads (default 8). Must divide "
         "the encoder dim (d_enc=1024 for PE-Core).",
     )
