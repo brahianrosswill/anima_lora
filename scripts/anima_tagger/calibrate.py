@@ -122,7 +122,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         all_softmax_idx = torch.empty(0, dtype=torch.long)
 
     with torch.no_grad():
-        tag_logits, _ = model(val_feats)
+        tag_logits, _rating_logits, _people_logits = model(val_feats)
         scores = tag_logits.sigmoid().cpu()
     sweep = torch.linspace(0.05, 0.95, 19)
     thresh, f1 = calibrate_thresholds(

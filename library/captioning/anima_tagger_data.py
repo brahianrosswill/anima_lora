@@ -3,15 +3,16 @@
 Five pieces:
 
 * :class:`TaggerManifest` — loads ``dataset.json`` (the per-stem
-  image-path + multi-hot tag indices + rating-class index emitted by
-  ``python -m scripts.anima_tagger.cli --mode build_vocab``).
+  image-path + multi-hot tag indices + rating-class index + people-count
+  class index emitted by ``python -m scripts.anima_tagger.cli --mode
+  build_vocab``).
 * :class:`FeatureCacheBuilder` — encodes each manifest image through a
   frozen PE-Core trunk, mean-pools over patch tokens, and writes a
   per-stem ``.safetensors`` to the cache dir. Idempotent: skips entries
   that already exist.
 * :class:`CachedFeatureDataset` — reads the per-stem cache into one
-  in-memory tensor and exposes ``(feature, multi_hot, rating_idx)`` tuples
-  for the trainer.
+  in-memory tensor and exposes ``(feature, multi_hot, rating_idx, people_idx)``
+  tuples for the trainer.
 * :class:`ImageCacheBuilder` — LANCZOS-resizes each manifest image to its
   PE bucket and writes a per-stem ``uint8 [C,H,W]`` safetensors. Pairs
   with PE-LoRA training where the encoder is unfrozen and pre-pooled
@@ -123,24 +124,36 @@ class TaggerManifest:
     image_paths: List[Path]
     tag_indices: List[List[int]]
     rating_indices: List[int]
+    people_count_indices: List[int]
     train_stems: List[str]
     val_stems: List[str]
     n_tags: int
     n_ratings: int
+    n_people_counts: int
 
     @classmethod
     def from_path(cls, path: Path) -> "TaggerManifest":
         with open(path) as f:
             d = json.load(f)
+        # ``people_count_indices`` / ``n_people_counts`` were added late; old
+        # manifests rebuild on next ``build_vocab``. Until then, default to a
+        # zero-length head so the trainer can detect "no people supervision"
+        # cleanly (rather than crashing with a KeyError).
+        people_idx = list(d.get("people_count_indices") or [])
+        n_people = int(d.get("n_people_counts", 0))
+        if people_idx and not n_people:
+            n_people = max(people_idx) + 1
         return cls(
             stems=list(d["stems"]),
             image_paths=[Path(p) for p in d["image_paths"]],
             tag_indices=[list(idxs) for idxs in d["tag_indices"]],
             rating_indices=list(d["rating_indices"]),
+            people_count_indices=people_idx,
             train_stems=list(d["split"]["train"]),
             val_stems=list(d["split"]["val"]),
             n_tags=int(d["n_tags"]),
             n_ratings=int(d["n_ratings"]),
+            n_people_counts=n_people,
         )
 
     def stem_index(self) -> Dict[str, int]:
@@ -257,7 +270,7 @@ class FeatureCacheBuilder:
 
 
 class CachedFeatureDataset(Dataset):
-    """In-memory ``(feature, multi_hot, rating_idx)`` tuples.
+    """In-memory ``(feature, multi_hot, rating_idx, people_idx)`` tuples.
 
     Loads every cached feature for the requested stems into one tensor at
     init. The full training feature tensor at 12K × 1024 × float32 is ~48
@@ -277,6 +290,11 @@ class CachedFeatureDataset(Dataset):
         kept_features: List[torch.Tensor] = []
         kept_tag_idx: List[List[int]] = []
         kept_rating_idx: List[int] = []
+        kept_people_idx: List[int] = []
+        # Old manifests built before the people-count head: per-stem labels
+        # not present. Populate with zeros so positional unpacking stays sound;
+        # the trainer detects n_people_counts==0 and skips the people loss.
+        has_people = bool(manifest.people_count_indices)
         n_missing = 0
         for stem in stems_subset:
             i = idx_of.get(stem)
@@ -292,6 +310,7 @@ class CachedFeatureDataset(Dataset):
             kept_features.append(t)
             kept_tag_idx.append(manifest.tag_indices[i])
             kept_rating_idx.append(manifest.rating_indices[i])
+            kept_people_idx.append(manifest.people_count_indices[i] if has_people else 0)
         if not kept_stems:
             raise RuntimeError(
                 f"no cached features found in {cache_dir} for the requested "
@@ -310,15 +329,22 @@ class CachedFeatureDataset(Dataset):
         for row, idxs in enumerate(kept_tag_idx):
             self.multi_hot[row, idxs] = 1.0
         self.rating_idx = torch.tensor(kept_rating_idx, dtype=torch.long)
+        self.people_idx = torch.tensor(kept_people_idx, dtype=torch.long)
         self.n_tags = manifest.n_tags
         self.n_ratings = manifest.n_ratings
+        self.n_people_counts = manifest.n_people_counts
         self.d_in = self.features.shape[-1]
 
     def __len__(self) -> int:
         return self.features.shape[0]
 
     def __getitem__(self, idx: int):
-        return self.features[idx], self.multi_hot[idx], self.rating_idx[idx]
+        return (
+            self.features[idx],
+            self.multi_hot[idx],
+            self.rating_idx[idx],
+            self.people_idx[idx],
+        )
 
 
 # ── Pre-resized image cache (for end-to-end PE-LoRA training) ─────────────
@@ -412,7 +438,7 @@ class ImageCacheBuilder:
 
 
 class CachedImageDataset(Dataset):
-    """Per-stem ``(image_uint8, multi_hot, rating_idx, bucket_key)``.
+    """Per-stem ``(image_uint8, multi_hot, rating_idx, people_idx, bucket_key)``.
 
     Loads the cached uint8 tensor lazily per ``__getitem__`` (faster than
     holding ~4 GB of images in RAM for 12k stems at PE-Core-L14-336).
@@ -437,7 +463,9 @@ class CachedImageDataset(Dataset):
         kept_paths: List[Path] = []
         kept_tag_idx: List[List[int]] = []
         kept_rating_idx: List[int] = []
+        kept_people_idx: List[int] = []
         kept_buckets: List[tuple[int, int]] = []
+        has_people = bool(manifest.people_count_indices)
         n_missing = 0
         for stem in stems_subset:
             i = idx_of.get(stem)
@@ -458,6 +486,7 @@ class CachedImageDataset(Dataset):
             kept_paths.append(cache_file)
             kept_tag_idx.append(manifest.tag_indices[i])
             kept_rating_idx.append(manifest.rating_indices[i])
+            kept_people_idx.append(manifest.people_count_indices[i] if has_people else 0)
             kept_buckets.append((h_p, w_p))
         if not kept_stems:
             raise RuntimeError(
@@ -478,8 +507,10 @@ class CachedImageDataset(Dataset):
         for row, idxs in enumerate(kept_tag_idx):
             self.multi_hot[row, idxs] = 1.0
         self.rating_idx = torch.tensor(kept_rating_idx, dtype=torch.long)
+        self.people_idx = torch.tensor(kept_people_idx, dtype=torch.long)
         self.n_tags = manifest.n_tags
         self.n_ratings = manifest.n_ratings
+        self.n_people_counts = manifest.n_people_counts
         self.spec = spec
 
     def __len__(self) -> int:
@@ -487,7 +518,13 @@ class CachedImageDataset(Dataset):
 
     def __getitem__(self, idx: int):
         u8 = st_load(str(self.paths[idx]))["image"]
-        return u8, self.multi_hot[idx], self.rating_idx[idx], self.buckets[idx]
+        return (
+            u8,
+            self.multi_hot[idx],
+            self.rating_idx[idx],
+            self.people_idx[idx],
+            self.buckets[idx],
+        )
 
 
 class BucketBatchSampler(Sampler[List[int]]):
@@ -543,7 +580,7 @@ class BucketBatchSampler(Sampler[List[int]]):
 
 
 def collate_image_batch(batch):
-    """Stack a same-bucket batch into ``(image[B,C,H,W], multi_hot, rating, bucket)``.
+    """Stack a same-bucket batch into ``(image[B,C,H,W], multi_hot, rating, people, bucket)``.
 
     Asserts shape homogeneity — the bucket sampler is expected to produce
     only same-bucket batches. The image tensor is left as ``uint8``; the
@@ -552,5 +589,6 @@ def collate_image_batch(batch):
     images = torch.stack([b[0] for b in batch], dim=0)            # [B, C, H, W] uint8
     multi_hot = torch.stack([b[1] for b in batch], dim=0)         # [B, T]
     rating_idx = torch.stack([b[2] for b in batch], dim=0)        # [B]
-    bucket = batch[0][3]
-    return images, multi_hot, rating_idx, bucket
+    people_idx = torch.stack([b[3] for b in batch], dim=0)        # [B]
+    bucket = batch[0][4]
+    return images, multi_hot, rating_idx, people_idx, bucket

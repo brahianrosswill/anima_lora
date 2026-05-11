@@ -1,143 +1,205 @@
-# DirectEdit smart-edit integration plan
+# DirectEdit smart-edit integration — status + next steps
 
-Make DirectEdit's edit-instruction handling do replacement and removal (not just
-appending), with the auto-replace driven by Qwen3 text-encoder geometry rather
-than a hand-curated tag-families YAML.
+DirectEdit's edit-instruction handling now does REPLACE, REMOVE, and NOOP in
+addition to APPEND, with auto-replace driven by Qwen3 last-token cosine
+geometry rather than a hand-curated tag-families YAML. Slot-level surgery
+on `crossattn_emb` is wired but off by default.
 
-## TL;DR
+## TL;DR (shipped)
 
-- **Detection**: Qwen3 last-non-padding-token cosine. Best-effort. Probe scored 6/9.
-- **Execution**: slot-level surgery on `crossattn_emb`. Probe scored 10/10 clean diff spans.
-- **Dispatcher**: default APPEND, explicit `-X` / `no X` for REMOVE, last-token similarity for REPLACE (only when both top-1 sim and gap exceed thresholds).
-- **Failure mode is graceful**: when detection is uncertain, fall through to APPEND. We never silently replace the wrong tag.
+- **Detection**: Qwen3 last-non-padding-token cosine, threshold + gap-to-#2
+  gate. Probe `scripts/probes/edit_nearest_tag.py` scored 7/17 confident
+  REPLACE matches with **zero false positives** at the shipped defaults
+  (`replace_threshold=0.92`, `replace_gap=0.04`); the remaining 10 are
+  graceful APPEND fallbacks. Real-caption sub-probe (cases 11–21) matches
+  these numbers under realistic tag density.
+- **Execution**: slot-level surgery on `crossattn_emb` (`directedit_splice.py`).
+  Probe `scripts/probes/edit_slot_alignment.py` scored 10/10 clean
+  contiguous diff spans. Wired behind `--use_slot_surgery` / a node toggle,
+  default off — needs Phase 6 A/B before becoming the default.
+- **Dispatcher**: REMOVE on explicit `-X` or `no X` (matching tag); NOOP when
+  edit phrase is already in ψ_src; REPLACE on confident cosine match; APPEND
+  otherwise.
+- **Failure mode is graceful**: when detection is uncertain, fall through to
+  APPEND — same as the pre-dispatcher world, no regression.
 
-## Decisions and the reasoning behind them
+## Decisions (resolved)
 
 | Decision | Why |
 |---|---|
 | Drop YAML tag-families. | Brittle, never complete; can't handle out-of-vocab concepts. |
-| Use last-non-padding-token pool, not mean pool. | Probe: mean-pool 4/9, last-pool 6/9. Decoder-only LMs concentrate phrase semantics in the final token. Common tags ("blue eyes", "indoors") dominate mean-pool similarity. |
-| Threshold + gap gating on detection. | Probe shows true-conflict cosine spans ~0.75–0.98, no-conflict spans ~0.78–0.88 — overlapping. A single threshold can't separate them; require BOTH high absolute sim AND a notable gap to second-best before triggering REPLACE. |
-| Slot-level surgery on crossattn_emb (not full re-encode). | Probe: T5 tokenization produces a clean contiguous diff span for every edit kind (replace/remove/add). Surgery preserves untouched slots from ψ_src's encoding; only the diff range is transplanted from ψ_tar's encoding. |
-| Default to APPEND when uncertain. | Honest failure mode. The current code already appends; this preserves baseline behavior when detection isn't confident. |
-| Skip the LLM-dispatcher option for now. | Adds latency + dep + hallucination. Revisit only if last-token + slot surgery isn't enough in practice. |
+| Use last-non-padding-token pool, not mean pool. | Probe: mean-pool 7/17, last-pool 12/17. Decoder-only LMs concentrate phrase semantics in the final token. |
+| Threshold + gap gating on detection. | Probe shows ambiguous and no-conflict cases sit at gap < 0.01; real REPLACE cases sit at gap ≳ 0.07. Requiring both top-1 cosine AND a notable gap to #2 separates them honestly. |
+| Slot-level surgery on crossattn_emb, not full re-encode. | T5 tokenization produces a clean contiguous diff span for every edit kind in the probe. Surgery preserves untouched slots from ψ_src; only the diff range is transplanted from ψ_tar. |
+| Default to APPEND when uncertain. | Honest failure mode — preserves baseline behaviour. |
+| Default `use_slot_surgery` OFF. | Cross-attn drift outside the diff span hasn't been A/B'd against full re-encode. Phase 6 territory. |
+| `use_dispatcher` defaults ON in the comfy node. | Worst case = APPEND = legacy behaviour. Only cost is one batched Qwen3 forward over the tag list. |
+| NOOP short-circuits before the encoder forward. | Cheaper, AND avoids the dispatcher picking a *different* cosine-near tag (e.g. user retypes "smile" while caption has "grin" — REPLACE would corrupt; NOOP keeps caption clean). |
 
-## Architecture
+## Dispatcher behaviour table
 
-### New: `library/inference/edit_dispatcher.py` (~150 LOC)
+| Edit input | Caption has it (exact, case-insensitive)? | Intent |
+|---|---|---|
+| `-X` | yes | REMOVE (strip) |
+| `-X` | no | REMOVE (no-op, caption unchanged) |
+| `no X` | yes | REMOVE (strip) |
+| `no X` | no | falls through; `no X` literal goes to NOOP/DETECT/APPEND |
+| `X` (plain) | yes | **NOOP** (caption unchanged, no encoder call) |
+| `X` (plain) | no, but cosine-near another tag (top1 ≥ 0.92, gap ≥ 0.04) | REPLACE |
+| `X` (plain) | no, far from everything | APPEND |
+
+## Architecture (shipped)
+
+### `library/inference/edit_dispatcher.py`
 
 ```python
-@dataclass
-class EditPlan:
-    tar_caption: str
-    intent: Literal["append", "remove", "replace"]
-    detected_conflict_tag: str | None   # for "replace"
-    detection_top1_sim: float | None
-    detection_gap: float | None         # top1 - top2
-
 def derive_target_caption(
     src_caption: str,
     edit_instruction: str,
     *,
-    text_encoder,
-    tokenize_strategy,
-    encoding_strategy,
-    device: torch.device,
-    replace_threshold: float = 0.92,   # top1 cosine must exceed this
-    replace_gap: float = 0.04,          # top1 - top2 must exceed this
+    encode_last_pooled: EncodeLastPooledFn,   # (list[str]) -> (N, D) fp32
+    replace_threshold: float = 0.92,
+    replace_gap: float = 0.04,
 ) -> EditPlan
 ```
 
-Behavior:
+Encoder shim is caller-supplied so the Anima CLI (strategy trio) and the
+ComfyUI node (comfy `CLIP` socket) share this code path. Anima callers wrap
+`encode_last_pooled_via_anima_strategy`; the comfy node uses
+`_comfy_encode_last_pooled` which does **one batched** Qwen3 forward via
+the bare `cond_stage_model.qwen3_06b` (bypassing `encode_from_tokens` to
+avoid N+1 `load_models_gpu` spam).
 
-1. Parse `edit_instruction` for explicit syntax:
-   - `-X` or `no X` → REMOVE. Drop the literal tag from `src_caption` (case-insensitive, leading-space-tolerant).
-   - Else → continue to detection.
-2. Detection:
-   - Split `src_caption` into tags by `,`.
-   - Encode `[edit_instruction, *src_tags]` through Qwen3, last-non-padding-token pool.
-   - Cosine to each src tag; rank.
-   - If `top1_sim > replace_threshold` AND `(top1_sim − top2_sim) > replace_gap`: REPLACE — produce `tar_caption` by string-level substitution of the top-1 tag with `edit_instruction`.
-   - Else: APPEND — `tar_caption = src_caption + ", " + edit_instruction`.
-3. Return the plan with diagnostics so callers can log which branch fired.
-
-Thresholds tuned against the probe set (`scripts/probes/edit_nearest_tag.py`); should be revisited once we have a larger labeled set.
-
-### New: `library/inference/directedit_splice.py` (~80 LOC)
+### `library/inference/directedit_splice.py`
 
 ```python
-def find_t5_diff_span(
-    src_ids: list[int], tar_ids: list[int], pad_id: int,
-) -> tuple[int, int, int]:
-    """Longest common prefix + longest common suffix on trimmed token sequences.
-    Returns (common_start, src_end, tar_end)."""
-
-def splice_crossattn_emb(
-    *,
-    crossattn_emb_src: torch.Tensor,   # (1, 512, D)
-    crossattn_emb_tar: torch.Tensor,   # (1, 512, D)
-    t5_ids_src: torch.Tensor,           # (1, 512)
-    t5_ids_tar: torch.Tensor,           # (1, 512)
-    pad_id: int,
-) -> torch.Tensor:
-    """Build edit conditioning by keeping src slots outside the diff span and
-    overwriting the span with tar slots. Re-pads to 512 with zeros."""
+def find_t5_diff_span(src_ids, tar_ids, pad_id) -> T5DiffSpan
+def splice_crossattn_emb(*, crossattn_emb_src, crossattn_emb_tar,
+                         t5_ids_src, t5_ids_tar, pad_id) -> (Tensor, T5DiffSpan)
 ```
 
-Reused logic already prototyped in `scripts/probes/edit_slot_alignment.py`.
+`T5DiffSpan` carries `(start, src_end, tar_end, src_len, tar_len)` for both
+the splice machinery and downstream logging.
 
-### Wiring changes
+### Wiring
 
-| File | Change |
+| File | What changed |
 |---|---|
-| `scripts/experimental_tasks/inference.py:263-265` (`cmd_test_directedit`) | Replace `tar_caption = f"{src_caption}, {edit_prompt}"` with `derive_target_caption(...)`. Log the chosen intent. Pass `--prompt_src` AND `--prompt_tar` to `scripts/edit.py` as today; surgery happens downstream. |
-| `scripts/edit.py:350-357` (`_load_embed_variants`) | Add `--use_slot_surgery` flag. When set: encode ψ_src AND ψ_tar fully through Qwen3 + LLMAdapter, call `splice_crossattn_emb(...)`, pass the spliced tensor into `invert()` / `edit_forward()` as `embed_tar`. |
-| `library/inference/directedit.py` | No API change. Continues to accept pre-encoded `embed_src` / `embed_tar`; the splicing is upstream. |
-| `custom_nodes/comfyui-anima-directedit/nodes.py:305` | Same dispatcher call. Add input sockets for `replace_threshold`, `replace_gap`, `use_slot_surgery` (with sensible defaults so basic users don't need to touch them). Bundle `library/inference/edit_dispatcher.py` + `directedit_splice.py` into `_vendor/` via `make vendor-sync`. |
+| `scripts/edit.py` | `--edit_instruction`, `--replace_threshold`, `--replace_gap`, `--use_slot_surgery` flags. TE loaded once, shared between dispatcher and prompt encoding. |
+| `scripts/experimental_tasks/inference.py` (`cmd_test_directedit`) | Passes `--edit_instruction` so the dispatcher runs in-process — avoids double-loading Qwen3. |
+| `custom_nodes/comfyui-anima-directedit/nodes.py` | Sockets: `use_dispatcher` (default ON), `replace_threshold`, `replace_gap`, `use_slot_surgery` (default OFF). `_encode_prompt_comfy` returns T5 IDs alongside the embedding for surgery. |
+| `scripts/sync_vendor.py` | Bundles `edit_dispatcher.py` + `directedit_splice.py` into the directedit `_vendor/` tree. |
+| `tests/test_edit_dispatcher.py` | 23 unit tests covering REMOVE/REPLACE/APPEND/NOOP, threshold gating, span finder, splice replace/add/remove + shape guards. |
 
-## Phases
+## What's left
 
-1. **Library: dispatcher** — `edit_dispatcher.py` + unit tests reusing the 11 probe cases as a regression suite. ~150 LOC.
-2. **Library: splice** — `directedit_splice.py`. ~80 LOC.
-3. **CLI: `scripts/edit.py`** — `--edit_instruction` flag (sugar for "derive ψ_tar from ψ_src + edit") and `--use_slot_surgery` flag. ~50 LOC.
-4. **Task wrapper: `scripts/experimental_tasks/inference.py`** — call dispatcher, surface logs. ~20 LOC change.
-5. **ComfyUI node: `custom_nodes/comfyui-anima-directedit/nodes.py`** — dispatcher + optional surgery. ~30 LOC change. Refresh `_vendor/` with `make vendor-sync`.
-6. **Empirical validation** — bench-style script in `bench/directedit/` (or `scripts/probes/`): run a fixed set of reference images × edit instructions × {current append-only, dispatcher-only string-level, dispatcher + slot surgery}; subjective image grid for review.
-7. **Docs** — update `docs/experimental/directedit_editing_v3.md` with the new edit-instruction syntax and dispatcher behavior. Add a "failure modes" section honestly listing the 3/9 probe misses.
+### Phase 6 — empirical validation (the big one)
 
-## Open questions / risks
+Bench-style script in `bench/directedit/` (or `scripts/probes/`): fixed set
+of reference images × edit instructions × variants:
 
-- **Threshold calibration is undersized.** 11 hand-written probe cases is enough to set sane defaults but not enough to trust the operating point. Phase 6 should expand to ~50 cases including failures from real use (twintails-vs-long-hair, sitting-vs-standing — the probe's known misses).
-- **Cross-attn drift outside the diff span.** The LLM Adapter is cross-attention, so even slots OUTSIDE the diff range can have slightly different values between ψ_src's and ψ_tar's encodings. We're keeping ψ_src's slots there. Whether that introduces visible artifacts is empirical — Phase 6 must compare slot-surgery vs full-re-encode head-to-head, not just both vs the current baseline.
-- **T5 tokenizer leading-space quirk for the REPLACE substitution.** When we do string-level replacement of "medium breasts" with "large breasts" inside ψ_src, T5 retokenization should produce the same prefix/suffix; the slot-alignment probe confirms this for our cases but is not exhaustive. Edge case: a tag at the very start of the caption (no leading comma) might tokenize differently.
-- **REMOVE syntax disambiguation.** `no X` is ambiguous — could be a removal directive OR could literally be the user wanting to add a tag like "no shoes" (which is a valid danbooru tag). Initial heuristic: `-X` is unambiguous removal; `no X` is only treated as removal if `X` matches a tag in ψ_src exactly. Otherwise treat as a literal add.
-- **The 3/9 detection misses are not random.** Probe misses are: "twintails"/"long blonde hair" (no surface word overlap), "standing"/"sitting" (semantic opposites but cosine drops them), "large breasts" with "breast tattoo" present (spurious match risk on a different tag). All three are real failure modes; APPEND-fallback is the safety net.
-- **What does the dispatcher say in logs?** Should print one line: `[dispatcher] intent=REPLACE src_tag='medium breasts' top1=0.96 gap=0.12` so users can audit and tune.
+1. baseline: current append-only (legacy behaviour)
+2. dispatcher-only, string-level (REPLACE/REMOVE/APPEND/NOOP, no surgery)
+3. dispatcher + slot surgery
+4. dispatcher + **full re-encode** (no surgery, but uses the dispatcher's
+   ψ_tar)
 
-## Probe-case regression set
+The (3)-vs-(4) comparison is the load-bearing one — it tells us whether
+slot surgery is worth the complexity over just re-encoding the
+dispatcher-derived ψ_tar. The plan currently assumes surgery preserves
+unchanged content better; that's untested. **Don't promote
+`use_slot_surgery` to default-on without this.**
 
-Reused from `scripts/probes/edit_nearest_tag.py` as the initial test suite. Last-pool results from the run:
+Expand the probe regression set from ~22 cases to ~50, including the known
+miss modes: pose swaps (sitting/standing), fine hair-length granularity
+(medium ↔ long), and hairstyle-vs-length conflicts (twintails vs long+ponytail).
 
-| # | ψ_src | edit | expected intent | mean | last |
-|---|---|---|---|---|---|
-| 0 | …medium breasts… | large breasts | REPLACE medium breasts | OK | OK |
-| 1 | …short hair… | long hair | REPLACE short hair | OK | OK |
-| 2 | …blonde hair… | red hair | REPLACE blonde hair | MISS | OK |
-| 3 | …medium breasts… | huge breasts | REPLACE medium breasts | OK | OK |
-| 4 | …sad… | happy | REPLACE sad | MISS | OK |
-| 5 | …long blonde hair… | twintails | REPLACE long blonde hair | MISS | MISS |
-| 6 | …sitting… | standing | REPLACE sitting | MISS | MISS |
-| 7 | …(no holding tag)… | holding sword | APPEND | OK | OK |
-| 8 | …(no ears tag)… | cat ears | APPEND | OK | OK |
-| 9 | …breast tattoo… | large breasts | (spurious-match risk) | MISS | MISS |
-| 10 | …hair ornament… | hair ornament | REPLACE (self) / removal sanity | OK | OK |
+### Phase 7 — docs
 
-Last-pool 6/9; the 3 misses fall back to APPEND, which is benign.
+Update `docs/experimental/directedit_editing_v3.md` with:
+- The new edit-instruction syntax (`-X`, `no X`, plain tag).
+- Dispatcher behaviour table (copy from this file).
+- A "failure modes" section listing the 3 probe misses by category:
+  pose swaps, fine hair-length, no-surface-overlap synonyms.
+- Slot-surgery caveats (the list below).
 
-## Explicitly out of scope (deferred)
+## Known issues / follow-ups (deferred)
 
-- **LLM dispatcher.** Falls into the toolbox if detection accuracy proves insufficient after Phase 6.
-- **Post-LLM-Adapter (crossattn_emb) similarity probe.** Last-token-pool on Qwen3 is good enough; the marginal lift from the post-adapter space isn't worth loading the DiT for detection.
-- **SEGA-style score-space guidance.** Different mechanic; could compose later as an independent feature.
-- **Continuous-slider style edits ("30% larger").** Out of scope; APPEND/REMOVE/REPLACE only.
-- **General paraphrasing / natural-language edit rewriting.** Out of scope; edit-instruction is treated as a single tag or short tag phrase.
+These are documented now so the next pass knows where to look:
+
+**Slot-surgery semantic edge cases** (all silent — would produce
+suboptimal results, not crashes):
+
+1. **Cross-attn drift outside the diff span.** The LLM Adapter cross-attends
+   Qwen3's whole hidden state, so even the "unchanged prefix" slots of
+   ψ_src and ψ_tar differ subtly. We keep ψ_src's. Phase 6's (3)-vs-(4)
+   tells us if this is visible.
+2. **REMOVE leaves residual context in the suffix.** The slots we keep
+   from ψ_src "saw" the removed tag through Qwen3's causal context. Faint
+   echo of the removed concept may survive.
+3. **Two-or-more non-contiguous edits widen the span.** Diff = LCP + LCS,
+   so unchanged tags between two edits get engulfed in the diff range and
+   come from ψ_tar's encoding instead. Not wrong, just weakens the
+   "minimal perturbation" sales pitch.
+4. **First-tag edits hit T5 leading-space quirks.** Position-0 tokens
+   (e.g. `1girl → 2girls` without a leading comma) may tokenize
+   asymmetrically. Probe case 9 happened to be clean; not exhaustive.
+5. **Wildly different ψ_src/ψ_tar degenerates to ~full re-encode.** If
+   captions share almost nothing, LCP ≈ 0 and LCS ≈ just `</s>`. Surgery
+   transplants ~all of ψ_tar with a 1-token ψ_src tail.
+
+**Cheap fixes available** (haven't shipped yet):
+
+- **NOOP + use_slot_surgery fast-path.** When the dispatcher returns NOOP,
+  `tar_caption == src_caption` and splice produces something equal to
+  `embed_src`. Skip the second TE pass entirely. ~5 LOC.
+- **>512-token-caption guard in `splice_crossattn_emb`.** T5 truncation can
+  land mid-tag. Assert non-pad length < 512 and abort surgery cleanly if
+  violated. ~10 LOC.
+- **REMOVE + use_slot_surgery warning.** When `intent == "remove"` and
+  surgery is on, log the residual-context caveat so users know the
+  tradeoff. ~5 LOC.
+- **T5 pad_id validation in the comfy node.** Currently hardcoded to 0
+  (correct across the T5 family but unvalidated). Tiny audit: read it from
+  the loaded tokenizer if accessible. ~10 LOC.
+
+**Dispatcher detection gaps** (real, would need a different approach to fix):
+
+- **Pose swaps** (sitting/standing, lying/standing). Cosine geometry
+  doesn't separate these well. Probe case 6 + 14 both miss.
+- **No-surface-overlap synonyms** (twintails vs long blonde hair, hairstyle
+  vs hair-length). Cosine sees them as distant tags. Probe case 5 + 17.
+- **Fine hair-length granularity** (medium ↔ long, near-tie at gap ≈ 0.003).
+  Threshold correctly abstains into APPEND — honest, but not a "fix".
+- **Single-letter typos / paraphrases.** Out of scope — dispatcher is for
+  tag-level edits only.
+
+## Explicitly out of scope (long-term parking lot)
+
+- **LLM dispatcher.** Falls into the toolbox if cosine detection + Phase 6
+  surgery still aren't enough. Adds latency + dep + hallucination risk.
+- **Post-LLM-Adapter (crossattn_emb) similarity probe.** Last-token-pool on
+  Qwen3 is good enough; loading the DiT just to compute detection scores
+  isn't worth it.
+- **SEGA-style score-space guidance.** Different mechanic; could compose
+  later as an independent feature.
+- **Continuous-slider edits** ("30% larger"). Not in the APPEND/REMOVE/
+  REPLACE/NOOP universe.
+- **General natural-language edit rewriting.** Dispatcher treats the edit
+  instruction as a single tag or short tag phrase; full free-form requires
+  the deferred LLM path.
+
+## Probe regression set (last run)
+
+`scripts/probes/edit_nearest_tag.py` — 22 cases. Last-pool 12/17 (the 5
+no-conflict APPEND cases aren't scored).
+
+| # | edit | expected | result |
+|---|---|---|---|
+| 0–4, 10 | various REPLACE cases | various | last-pool OK |
+| 5, 6 | twintails / sitting→standing | hairstyle / pose | last-pool MISS (graceful APPEND) |
+| 7, 8 | holding sword / cat ears | no-conflict | OK (APPEND) |
+| 9 | large breasts (w/ "breast tattoo" present) | breast tattoo | MISS (real-caption case 19 with denser context lands correctly) |
+| 11–21 | real-caption cases | various | 12 wins, 10 graceful APPEND fallbacks |
+
+Phase 6 should grow this to ~50.

@@ -8,11 +8,13 @@ Two targets:
 
 * ``custom_nodes/comfyui-anima-tagger/_vendor/`` — captioning + PE encoder
   inference path (AnimaTagger, tag rules/groups, vision encoder, vendored PE).
-* ``custom_nodes/comfyui-anima-directedit/_vendor/`` — superset of the
-  tagger vendor (DirectEdit pulls in AnimaTagger for type hints) PLUS the
-  directedit primitives, trimmed sampling helper, the trimmed
-  ``CONSTANT_TOKEN_BUCKETS`` constant, and a tiny ``library.anima.models``
-  stub so the lazy ``Anima`` annotation resolves.
+* ``custom_nodes/comfyui-anima-directedit/_vendor/`` — directedit primitives,
+  trimmed sampling helper, the trimmed ``CONSTANT_TOKEN_BUCKETS`` constant,
+  and a tiny ``library.anima.models`` stub so the lazy ``Anima`` annotation
+  resolves. DirectEdit no longer pulls in AnimaTagger / vision / edit
+  dispatcher — its node consumes ``source_tag`` / ``target_tag`` STRINGs
+  directly, with image-driven captioning handled externally by
+  ``AnimaTaggerCaption``.
 
 Run before bumping a node version / publishing:
 
@@ -32,10 +34,12 @@ TAGGER_VENDOR = ROOT / "custom_nodes" / "comfyui-anima-tagger" / "_vendor"
 DIRECTEDIT_VENDOR = ROOT / "custom_nodes" / "comfyui-anima-directedit" / "_vendor"
 
 # ---------------------------------------------------------------------------
-# Shared captioning + vision subset (used by both nodes).
+# Tagger-only captioning + vision subset. After the directedit node was
+# refactored to take ``source_tag``/``target_tag`` STRINGs directly (no
+# embedded tagger), this whole tree is only needed by the tagger vendor.
 # ---------------------------------------------------------------------------
 
-SHARED_VERBATIM: list[tuple[str, str]] = [
+TAGGER_VERBATIM: list[tuple[str, str]] = [
     ("library/captioning/anima_tagger.py", "library/captioning/anima_tagger.py"),
     ("library/captioning/anima_tagger_model.py", "library/captioning/anima_tagger_model.py"),
     ("library/captioning/tag_rules.py", "library/captioning/tag_rules.py"),
@@ -47,7 +51,7 @@ SHARED_VERBATIM: list[tuple[str, str]] = [
     ("networks/methods/ip_adapter_pe_lora.py", "networks/methods/ip_adapter_pe_lora.py"),
 ]
 
-SHARED_PACKAGE_DIRS: list[str] = [
+TAGGER_PACKAGE_DIRS: list[str] = [
     "library",
     "library/captioning",
     "library/vision",
@@ -101,24 +105,25 @@ def pil_resize_to_bucket(img: Image.Image, spec: BucketSpec) -> Image.Image:
     return img
 '''
 
-SHARED_TRIMMED: list[tuple[str, str]] = [
+TAGGER_TRIMMED: list[tuple[str, str]] = [
     ("library/datasets/image_utils.py", TRIMMED_IMAGE_UTILS),
     ("library/captioning/anima_tagger_data.py", TRIMMED_ANIMA_TAGGER_DATA),
 ]
 
 # ---------------------------------------------------------------------------
-# DirectEdit-only additions.
+# DirectEdit vendor files.
 # ---------------------------------------------------------------------------
 
 DIRECTEDIT_VERBATIM: list[tuple[str, str]] = [
     ("library/inference/directedit.py", "library/inference/directedit.py"),
-    ("library/inference/edit_dispatcher.py", "library/inference/edit_dispatcher.py"),
     ("library/inference/directedit_splice.py", "library/inference/directedit_splice.py"),
 ]
 
 DIRECTEDIT_PACKAGE_DIRS: list[str] = [
+    "library",
     "library/inference",
     "library/anima",
+    "library/datasets",
 ]
 
 # Trimmed extract: only ``get_timesteps_sigmas`` from the full sampling
@@ -256,9 +261,9 @@ def build_tagger_vendor() -> None:
         "Synced by scripts/sync_vendor.py — do not edit by hand.\n"
         '"""\n'
     )
-    _write_pkg_markers(TAGGER_VENDOR, SHARED_PACKAGE_DIRS)
-    _copy_verbatim(TAGGER_VENDOR, SHARED_VERBATIM)
-    _write_trimmed(TAGGER_VENDOR, SHARED_TRIMMED)
+    _write_pkg_markers(TAGGER_VENDOR, TAGGER_PACKAGE_DIRS)
+    _copy_verbatim(TAGGER_VENDOR, TAGGER_VERBATIM)
+    _write_trimmed(TAGGER_VENDOR, TAGGER_TRIMMED)
 
 
 def build_directedit_vendor() -> None:
@@ -271,13 +276,9 @@ def build_directedit_vendor() -> None:
         "Synced by scripts/sync_vendor.py — do not edit by hand.\n"
         '"""\n'
     )
-    _write_pkg_markers(
-        DIRECTEDIT_VENDOR, SHARED_PACKAGE_DIRS + DIRECTEDIT_PACKAGE_DIRS
-    )
-    _copy_verbatim(DIRECTEDIT_VENDOR, SHARED_VERBATIM + DIRECTEDIT_VERBATIM)
-    _write_trimmed(
-        DIRECTEDIT_VENDOR, SHARED_TRIMMED + _resolve_directedit_trimmed()
-    )
+    _write_pkg_markers(DIRECTEDIT_VENDOR, DIRECTEDIT_PACKAGE_DIRS)
+    _copy_verbatim(DIRECTEDIT_VENDOR, DIRECTEDIT_VERBATIM)
+    _write_trimmed(DIRECTEDIT_VENDOR, _resolve_directedit_trimmed())
 
 
 def main() -> None:

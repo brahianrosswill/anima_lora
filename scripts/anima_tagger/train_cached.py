@@ -20,6 +20,7 @@ from .train_common import (
     GroupRouter,
     compute_grouped_loss,
     eval_split,
+    people_class_weights,
     rating_class_weights,
     save_history_plot,
 )
@@ -58,12 +59,13 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
     train_ds = CachedFeatureDataset(manifest, cache_dir, stems_subset=manifest.train_stems)
     val_ds = CachedFeatureDataset(manifest, cache_dir, stems_subset=manifest.val_stems)
     logger.info(
-        "train (cached features): N=%d  val: N=%d  d_in=%d  n_tags=%d  n_ratings=%d",
+        "train (cached features): N=%d  val: N=%d  d_in=%d  n_tags=%d  n_ratings=%d  n_people=%d",
         len(train_ds),
         len(val_ds),
         train_ds.d_in,
         train_ds.n_tags,
         train_ds.n_ratings,
+        train_ds.n_people_counts,
     )
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -71,6 +73,7 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
         d_in=train_ds.d_in,
         n_tags=train_ds.n_tags,
         n_ratings=train_ds.n_ratings,
+        n_people_counts=train_ds.n_people_counts,
         d_hidden=args.d_hidden,
         dropout=args.dropout,
     )
@@ -81,13 +84,26 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
     train_feats = train_ds.features.to(device)
     train_mh = train_ds.multi_hot.to(device)
     train_rate = train_ds.rating_idx.to(device)
+    train_people = train_ds.people_idx.to(device)
     val_feats = val_ds.features.to(device)
     val_mh = val_ds.multi_hot.to(device)
     val_rate = val_ds.rating_idx.to(device)
+    val_people = val_ds.people_idx.to(device)
 
     router = GroupRouter.from_vocab(vocab_dict, train_mh, device=device)
     rating_w = rating_class_weights(train_rate, train_ds.n_ratings).to(device)
     ce = torch.nn.CrossEntropyLoss(weight=rating_w)
+    if train_ds.n_people_counts > 0:
+        people_w = people_class_weights(train_people, train_ds.n_people_counts).to(device)
+        ce_people = torch.nn.CrossEntropyLoss(weight=people_w)
+        logger.info(
+            "people-count head: %d classes, sqrt-inverse weights=%s",
+            train_ds.n_people_counts,
+            [round(float(w), 3) for w in people_w.cpu().tolist()],
+        )
+    else:
+        ce_people = None
+        logger.info("no people-count labels in manifest — skipping people head")
     if router.is_active():
         n_softmax_tags = (
             int(router.softmax_member_indices.numel())
@@ -129,6 +145,7 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
         ep_loss = 0.0
         ep_tag_loss = 0.0
         ep_rate_loss = 0.0
+        ep_people_loss = 0.0
         n_batches = 0
         n_steps = (n_train + args.batch_size - 1) // args.batch_size
         bar = _tqdm(
@@ -143,10 +160,15 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
             feat = train_feats[idx]
             mh = train_mh[idx]
             rate = train_rate[idx]
-            tag_logits, rating_logits = model(feat)
+            people = train_people[idx]
+            tag_logits, rating_logits, people_logits = model(feat)
             l_tag, _per_group = compute_grouped_loss(tag_logits, mh, router)
             l_rate = ce(rating_logits, rate)
             loss = l_tag + args.lambda_rating * l_rate
+            if ce_people is not None and people_logits is not None:
+                l_people = ce_people(people_logits, people)
+                loss = loss + args.lambda_people * l_people
+                ep_people_loss += l_people.item()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -154,35 +176,48 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
             ep_tag_loss += l_tag.item()
             ep_rate_loss += l_rate.item()
             n_batches += 1
-            bar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                tag=f"{l_tag.item():.4f}",
-                rate=f"{l_rate.item():.4f}",
-            )
+            postfix = {
+                "loss": f"{loss.item():.4f}",
+                "tag": f"{l_tag.item():.4f}",
+                "rate": f"{l_rate.item():.4f}",
+            }
+            if ce_people is not None and people_logits is not None:
+                postfix["ppl"] = f"{l_people.item():.4f}"
+            bar.set_postfix(**postfix)
         sched.step()
-        avg_loss = ep_loss / max(n_batches, 1)
-        avg_tag = ep_tag_loss / max(n_batches, 1)
-        avg_rate = ep_rate_loss / max(n_batches, 1)
+        denom = max(n_batches, 1)
+        avg_loss = ep_loss / denom
+        avg_tag = ep_tag_loss / denom
+        avg_rate = ep_rate_loss / denom
+        avg_people = ep_people_loss / denom
         val_metrics = eval_split(
             model, val_feats, val_mh, val_rate,
             ce=ce, lambda_rating=args.lambda_rating, router=router,
+            people_idx=val_people if ce_people is not None else None,
+            ce_people=ce_people,
+            lambda_people=args.lambda_people,
         )
+        people_acc = val_metrics.get("people_acc", float("nan"))
+        people_loss = val_metrics.get("val_people_loss", float("nan"))
         logger.info(
-            "epoch %2d/%d  loss=%.4f (tag=%.4f rate=%.4f)  "
-            "val_loss=%.4f (tag=%.4f rate=%.4f)  "
-            "val_f1=%.4f  val_p=%.4f  val_r=%.4f  rate_acc=%.4f  lr=%.2e",
+            "epoch %2d/%d  loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
+            "val_loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
+            "val_f1=%.4f  val_p=%.4f  val_r=%.4f  rate_acc=%.4f  people_acc=%.4f  lr=%.2e",
             epoch + 1,
             args.epochs,
             avg_loss,
             avg_tag,
             avg_rate,
+            avg_people,
             val_metrics["val_loss"],
             val_metrics["val_tag_loss"],
             val_metrics["val_rate_loss"],
+            people_loss,
             val_metrics["macro_f1"],
             val_metrics["macro_precision"],
             val_metrics["macro_recall"],
             val_metrics["rating_acc"],
+            people_acc,
             sched.get_last_lr()[0],
         )
         history.append({
@@ -190,6 +225,7 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
             "loss": avg_loss,
             "tag_loss": avg_tag,
             "rate_loss": avg_rate,
+            "people_loss": avg_people,
             **val_metrics,
         })
         if val_metrics["macro_f1"] > best_f1:
@@ -216,6 +252,7 @@ def cmd_train_cached(args: argparse.Namespace) -> None:
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
                 "lambda_rating": args.lambda_rating,
+                "lambda_people": args.lambda_people,
                 "seed": args.seed,
                 "pe_lora": False,
             },

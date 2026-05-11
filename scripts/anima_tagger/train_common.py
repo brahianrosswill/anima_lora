@@ -34,6 +34,23 @@ def rating_class_weights(rating_idx: torch.Tensor, n_ratings: int) -> torch.Tens
     return inv
 
 
+def people_class_weights(people_idx: torch.Tensor, n_people: int) -> torch.Tensor:
+    """Sqrt-inverse-frequency weights for the people-count head.
+
+    Sqrt-inverse (vs the rating head's straight inverse) is the right choice
+    here because the people-count distribution is much heavier-tailed than
+    rating: ``1girl`` typically dominates 60–80 % of an anime corpus while
+    ``1girl_1boy`` / ``2girls_1boy`` may sit at <2 %. Inverse-frequency would
+    weight rare classes ~30× the dominant one and make CE volatile. Sqrt
+    softens that to ~5×, comparable to ``pos_weight_sqrt`` for the BCE head.
+    Normalized so mean weight = 1 (same convention as ``rating_class_weights``).
+    """
+    counts = torch.bincount(people_idx, minlength=n_people).float().clamp_min(1.0)
+    inv = 1.0 / counts.sqrt()
+    inv = inv * n_people / inv.sum()
+    return inv
+
+
 # ── Group routing ─────────────────────────────────────────────────────────
 
 
@@ -264,18 +281,27 @@ def eval_split(
     ce: Optional[torch.nn.Module] = None,
     lambda_rating: float = 0.0,
     router: Optional[GroupRouter] = None,
+    people_idx: Optional[torch.Tensor] = None,
+    ce_people: Optional[torch.nn.Module] = None,
+    lambda_people: float = 0.0,
 ) -> Dict[str, float]:
-    """Macro-F1 over tags + rating accuracy at the given threshold.
+    """Macro-F1 over tags + rating accuracy + people-count accuracy.
 
     When ``router`` carries softmax groups, F1 is computed over residual
     (BCE-supervised) tags only — softmax-group tags are evaluated by
     per-group argmax accuracy instead, since their sigmoid scores are
-    untrained noise. The rating-CE loss is reported when ``ce`` is given.
-    The combined val tag-loss matches the training objective:
-    ``residual BCE + Σ ce_per_softmax_group``.
+    untrained noise. The rating-CE / people-CE losses are reported when
+    their CE modules are given. The combined val tag-loss matches the
+    training objective: ``residual BCE + Σ ce_per_softmax_group``.
+
+    People-head metrics (``people_acc`` / ``val_people_loss``) are
+    reported only when the model has a people head (i.e. ``forward``
+    returned a third tensor) AND ``people_idx`` is supplied. Backwards-
+    compatible: omitting these arguments matches the pre-people behavior
+    exactly.
     """
     model.eval()
-    tag_logits, rating_logits = model(feats)
+    tag_logits, rating_logits, people_logits = model(feats)
 
     if router is not None and router.is_active() and router.softmax_member_indices is not None:
         # Macro-F1 excludes softmax-group tags — those are argmax-only at
@@ -332,6 +358,11 @@ def eval_split(
             out[f"acc_{g.name}"] = acc
             out[f"n_{g.name}"] = n_keep
 
+    # People-head accuracy (independent of the CE-loss reporting branch).
+    if people_logits is not None and people_idx is not None:
+        people_pred = people_logits.argmax(dim=-1)
+        out["people_acc"] = (people_pred == people_idx).float().mean().item()
+
     if ce is not None:
         l_rate = ce(rating_logits, rating_idx)
         if router is not None:
@@ -342,7 +373,16 @@ def eval_split(
             l_tag = tag_logits.new_zeros(())
         out["val_tag_loss"] = l_tag.item()
         out["val_rate_loss"] = l_rate.item()
-        out["val_loss"] = (l_tag + lambda_rating * l_rate).item()
+        l_total = l_tag + lambda_rating * l_rate
+        if (
+            ce_people is not None
+            and people_logits is not None
+            and people_idx is not None
+        ):
+            l_people = ce_people(people_logits, people_idx)
+            out["val_people_loss"] = l_people.item()
+            l_total = l_total + lambda_people * l_people
+        out["val_loss"] = l_total.item()
     return out
 
 
@@ -383,6 +423,11 @@ def save_history_plot(history: List[Dict[str, float]], path: Path) -> None:
                 epochs, [h["val_rate_loss"] for h in history],
                 label="val rate (CE)", color="C1", alpha=0.4, linestyle="--",
             )
+        if all("val_people_loss" in h for h in history):
+            ax_loss.plot(
+                epochs, [h["val_people_loss"] for h in history],
+                label="val people (CE)", color="C4", alpha=0.4, linestyle="--",
+            )
     ax_loss.set_ylabel("loss")
     ax_loss.legend(loc="best", fontsize=8)
     ax_loss.grid(alpha=0.3)
@@ -393,6 +438,11 @@ def save_history_plot(history: List[Dict[str, float]], path: Path) -> None:
     ax_acc.plot(
         epochs, [h["rating_acc"] for h in history], label="val rating acc", color="C3"
     )
+    if all("people_acc" in h for h in history):
+        ax_acc.plot(
+            epochs, [h["people_acc"] for h in history],
+            label="val people acc", color="C4",
+        )
     ax_acc.set_xlabel("epoch")
     ax_acc.set_ylabel("metric")
     ax_acc.set_ylim(0, 1)

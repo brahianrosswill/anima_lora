@@ -28,9 +28,11 @@ from library.captioning import tag_groups as tg
 from library.captioning import tag_rules as tr
 
 from .constants import (
+    PEOPLE_COUNT_LABELS,
     RATINGS,
     SLOT_ORDER,
     TAG_TYPE_NAMES,
+    classify_people,
     find_image_for_caption,
     is_count_tag,
 )
@@ -199,6 +201,7 @@ def build_vocab(
 
     rating_freq: Counter = Counter()
     n_with_rating = 0
+    people_freq: Counter = Counter()
 
     for stem, (_, _, tags) in caption_index.items():
         # Pull rating off the front if present; everything else feeds the
@@ -212,6 +215,12 @@ def build_vocab(
         if rating_seen is not None:
             rating_freq[rating_seen] += 1
             n_with_rating += 1
+
+        # People-count bucket — derived from count tags. Distribution is
+        # informational; the per-stem label is recomputed at manifest-build
+        # time so it stays in sync with the labelling rule (don't read this
+        # at training).
+        people_freq[PEOPLE_COUNT_LABELS[classify_people(tags)]] += 1
 
         for i, tag in enumerate(tags):
             if tag in RATINGS:
@@ -252,6 +261,7 @@ def build_vocab(
     return {
         "tags": tags_payload,
         "ratings": list(RATINGS),
+        "people_count_labels": list(PEOPLE_COUNT_LABELS),
         "slot_order": list(SLOT_ORDER),
         "min_freq": min_freq,
         "n_captions_seen": len(caption_index),
@@ -262,6 +272,7 @@ def build_vocab(
         "cache_hit_rate": round(cache_hits / max(len(kept), 1), 4),
         "rating_distribution": dict(rating_freq),
         "rating_coverage": round(n_with_rating / max(len(caption_index), 1), 4),
+        "people_count_distribution": dict(people_freq),
     }
 
 
@@ -291,12 +302,14 @@ def build_manifest(
     vocab: Dict,
     split: Dict,
 ) -> Dict:
-    """Compact dataset.json: per-stem image path, multi-hot indices, rating.
+    """Compact dataset.json: per-stem image path, multi-hot indices, rating, people-count.
 
     Stems lacking a sibling image file are dropped from the manifest (the
     coverage scan in :func:`scan_cache_coverage` still counts them in vocab
     statistics — we just can't *train* on captions without pixels). The split
-    is filtered to match.
+    is filtered to match. Per-stem people-count label is recomputed from
+    parsed tags via :func:`classify_people` so the bucketing rule is the
+    single source of truth (no plumbing through vocab).
     """
     tag_to_idx: Dict[str, int] = {t["name"]: t["index"] for t in vocab["tags"]}
     rating_to_idx: Dict[str, int] = {r: i for i, r in enumerate(vocab["ratings"])}
@@ -305,6 +318,7 @@ def build_manifest(
     image_paths: List[str] = []
     tag_indices: List[List[int]] = []
     rating_indices: List[int] = []
+    people_count_indices: List[int] = []
     n_no_image = 0
     n_no_rating = 0
     n_no_tags = 0
@@ -332,6 +346,7 @@ def build_manifest(
         image_paths.append(str(image_path.resolve()))
         tag_indices.append(idxs)
         rating_indices.append(rating_idx)
+        people_count_indices.append(classify_people(tags))
 
     kept = set(stems)
     filtered_split = {
@@ -346,9 +361,11 @@ def build_manifest(
         "image_paths": image_paths,
         "tag_indices": tag_indices,
         "rating_indices": rating_indices,
+        "people_count_indices": people_count_indices,
         "split": filtered_split,
         "n_tags": len(vocab["tags"]),
         "n_ratings": len(vocab["ratings"]),
+        "n_people_counts": len(PEOPLE_COUNT_LABELS),
         "dropped_no_image": n_no_image,
         "dropped_no_rating": n_no_rating,
         "dropped_no_invocab_tags": n_no_tags,
@@ -585,6 +602,7 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
         print(f"    {cat:<12} {n}")
     print(f"  rating coverage:        {vocab['rating_coverage']}")
     print(f"  rating distribution:    {vocab['rating_distribution']}")
+    print(f"  people distribution:    {vocab['people_count_distribution']}")
     print(f"  split:                  {len(split['train'])} train / {len(split['val'])} val")
     print(f"  cache miss rate:        {miss_rate:.2%}")
     print(f"  trainable samples:      {len(manifest['stems'])}")

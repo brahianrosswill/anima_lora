@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 from .train_common import (
     GroupRouter,
     compute_grouped_loss,
+    people_class_weights,
     rating_class_weights,
     save_history_plot,
 )
@@ -84,7 +85,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
     )
     logger.info(
         "train (PE-LoRA r=%d, last %d blocks): N=%d  val: N=%d  d_enc=%d  "
-        "n_tags=%d  n_ratings=%d",
+        "n_tags=%d  n_ratings=%d  n_people=%d",
         args.pe_lora_rank,
         args.pe_lora_layers,
         len(train_ds),
@@ -92,6 +93,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
         d_enc,
         train_ds.n_tags,
         train_ds.n_ratings,
+        train_ds.n_people_counts,
     )
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -101,6 +103,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
         d_in=d_enc,
         n_tags=train_ds.n_tags,
         n_ratings=train_ds.n_ratings,
+        n_people_counts=train_ds.n_people_counts,
         d_hidden=args.d_hidden,
         dropout=args.dropout,
     )
@@ -122,7 +125,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
                 f"--init_head_from: state_dict mismatch against current "
                 f"AnimaTaggerHead config "
                 f"(d_in={cfg.d_in}, n_tags={cfg.n_tags}, n_ratings={cfg.n_ratings}, "
-                f"d_hidden={cfg.d_hidden}). "
+                f"n_people_counts={cfg.n_people_counts}, d_hidden={cfg.d_hidden}). "
                 f"missing={list(missing)[:5]}{'...' if len(missing) > 5 else ''}  "
                 f"unexpected={list(unexpected)[:5]}{'...' if len(unexpected) > 5 else ''}"
             )
@@ -143,14 +146,26 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
     )
     pe_lora.to(device=device, dtype=torch.float32)
 
-    # Loss weights — the multi-hot / rating tensors live on the dataset
-    # already in fp32 / int64; aggregate over the train split for pos /
-    # class weights once.
+    # Loss weights — the multi-hot / rating / people tensors live on the
+    # dataset already in fp32 / int64; aggregate over the train split for
+    # pos / class weights once.
     train_mh_full = train_ds.multi_hot.to(device)
     train_rate_full = train_ds.rating_idx.to(device)
+    train_people_full = train_ds.people_idx.to(device)
     router = GroupRouter.from_vocab(vocab_dict, train_mh_full, device=device)
     rating_w = rating_class_weights(train_rate_full, train_ds.n_ratings).to(device)
     ce = torch.nn.CrossEntropyLoss(weight=rating_w)
+    if train_ds.n_people_counts > 0:
+        people_w = people_class_weights(train_people_full, train_ds.n_people_counts).to(device)
+        ce_people = torch.nn.CrossEntropyLoss(weight=people_w)
+        logger.info(
+            "people-count head: %d classes, sqrt-inverse weights=%s",
+            train_ds.n_people_counts,
+            [round(float(w), 3) for w in people_w.cpu().tolist()],
+        )
+    else:
+        ce_people = None
+        logger.info("no people-count labels in manifest — skipping people head")
     if router.is_active():
         n_softmax_tags = (
             int(router.softmax_member_indices.numel())
@@ -232,6 +247,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
         ep_loss = torch.zeros((), device=device)
         ep_tag_loss = torch.zeros((), device=device)
         ep_rate_loss = torch.zeros((), device=device)
+        ep_people_loss = torch.zeros((), device=device)
         n_batches = 0
         bar = _tqdm(
             train_loader,
@@ -239,33 +255,44 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
             leave=False,
             unit="step",
         )
-        for step, (images_u8, mh_cpu, rate_cpu, _bucket) in enumerate(bar):
+        for step, (images_u8, mh_cpu, rate_cpu, people_cpu, _bucket) in enumerate(bar):
             mh = mh_cpu.to(device, non_blocking=True)
             rate = rate_cpu.to(device, non_blocking=True)
+            people = people_cpu.to(device, non_blocking=True)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 feat = _forward_pool(images_u8)
-                tag_logits, rating_logits = model(feat)
+                tag_logits, rating_logits, people_logits = model(feat)
                 l_tag, _per_group = compute_grouped_loss(tag_logits, mh, router)
                 l_rate = ce(rating_logits, rate)
                 loss = l_tag + args.lambda_rating * l_rate
+                if ce_people is not None and people_logits is not None:
+                    l_people = ce_people(people_logits, people)
+                    loss = loss + args.lambda_people * l_people
+                else:
+                    l_people = loss.new_zeros(())
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             ep_loss += loss.detach()
             ep_tag_loss += l_tag.detach()
             ep_rate_loss += l_rate.detach()
+            ep_people_loss += l_people.detach()
             n_batches += 1
             if step % postfix_every == 0:
-                bar.set_postfix(
-                    loss=f"{loss.item():.4f}",
-                    tag=f"{l_tag.item():.4f}",
-                    rate=f"{l_rate.item():.4f}",
-                )
+                postfix = {
+                    "loss": f"{loss.item():.4f}",
+                    "tag": f"{l_tag.item():.4f}",
+                    "rate": f"{l_rate.item():.4f}",
+                }
+                if ce_people is not None and people_logits is not None:
+                    postfix["ppl"] = f"{l_people.item():.4f}"
+                bar.set_postfix(**postfix)
         sched.step()
         denom = max(n_batches, 1)
         avg_loss = (ep_loss / denom).item()
         avg_tag = (ep_tag_loss / denom).item()
         avg_rate = (ep_rate_loss / denom).item()
+        avg_people = (ep_people_loss / denom).item()
 
         # Eval — collect logits over val in mini-batches, then reuse the
         # existing macro-F1 helper. Threshold sweep happens at calibrate.
@@ -273,20 +300,29 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
         pe_lora.eval()
         val_tag_logits: List[torch.Tensor] = []
         val_rating_logits: List[torch.Tensor] = []
+        val_people_logits: List[torch.Tensor] = []
         val_mh_chunks: List[torch.Tensor] = []
         val_rate_chunks: List[torch.Tensor] = []
+        val_people_chunks: List[torch.Tensor] = []
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            for images_u8, mh_cpu, rate_cpu, _bucket in val_loader:
+            for images_u8, mh_cpu, rate_cpu, people_cpu, _bucket in val_loader:
                 feat = _forward_pool(images_u8)
-                tl, rl = model(feat)
+                tl, rl, pl = model(feat)
                 val_tag_logits.append(tl.float())
                 val_rating_logits.append(rl.float())
+                if pl is not None:
+                    val_people_logits.append(pl.float())
                 val_mh_chunks.append(mh_cpu.to(device, non_blocking=True))
                 val_rate_chunks.append(rate_cpu.to(device, non_blocking=True))
+                val_people_chunks.append(people_cpu.to(device, non_blocking=True))
         tag_logits_all = torch.cat(val_tag_logits, dim=0)
         rating_logits_all = torch.cat(val_rating_logits, dim=0)
+        people_logits_all = (
+            torch.cat(val_people_logits, dim=0) if val_people_logits else None
+        )
         val_mh = torch.cat(val_mh_chunks, dim=0)
         val_rate = torch.cat(val_rate_chunks, dim=0)
+        val_people = torch.cat(val_people_chunks, dim=0)
         # F1 excludes softmax-group tags when the router is active — those
         # are argmax-only at inference, so their sigmoid threshold isn't
         # the right metric. Per-group accuracy is reported separately.
@@ -313,6 +349,15 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
             val_l_tag, _ = compute_grouped_loss(tag_logits_all, val_mh, router)
             val_l_rate = ce(rating_logits_all, val_rate)
             val_l_total = val_l_tag + args.lambda_rating * val_l_rate
+            if ce_people is not None and people_logits_all is not None:
+                val_l_people = ce_people(people_logits_all, val_people)
+                val_l_total = val_l_total + args.lambda_people * val_l_people
+                people_acc = (
+                    people_logits_all.argmax(dim=-1) == val_people
+                ).float().mean().item()
+            else:
+                val_l_people = None
+                people_acc = float("nan")
         val_metrics = {
             "macro_f1": f1.mean().item(),
             "macro_precision": prec.mean().item(),
@@ -322,6 +367,9 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
             "val_rate_loss": val_l_rate.item(),
             "val_loss": val_l_total.item(),
         }
+        if val_l_people is not None:
+            val_metrics["val_people_loss"] = val_l_people.item()
+            val_metrics["people_acc"] = people_acc
         # Per-softmax-group argmax accuracy.
         if router.is_active():
             solo_mask = router.solo_mask(val_mh)
@@ -345,21 +393,24 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
                 val_metrics[f"acc_{g.name}"] = (pred_idx == true_idx).float().mean().item()
                 val_metrics[f"n_{g.name}"] = n_keep
         logger.info(
-            "epoch %2d/%d  loss=%.4f (tag=%.4f rate=%.4f)  "
-            "val_loss=%.4f (tag=%.4f rate=%.4f)  "
-            "val_f1=%.4f  val_p=%.4f  val_r=%.4f  rate_acc=%.4f  lr=%.2e",
+            "epoch %2d/%d  loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
+            "val_loss=%.4f (tag=%.4f rate=%.4f people=%.4f)  "
+            "val_f1=%.4f  val_p=%.4f  val_r=%.4f  rate_acc=%.4f  people_acc=%.4f  lr=%.2e",
             epoch + 1,
             args.epochs,
             avg_loss,
             avg_tag,
             avg_rate,
+            avg_people,
             val_metrics["val_loss"],
             val_metrics["val_tag_loss"],
             val_metrics["val_rate_loss"],
+            val_metrics.get("val_people_loss", float("nan")),
             val_metrics["macro_f1"],
             val_metrics["macro_precision"],
             val_metrics["macro_recall"],
             val_metrics["rating_acc"],
+            val_metrics.get("people_acc", float("nan")),
             sched.get_last_lr()[0],
         )
         history.append({
@@ -367,6 +418,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
             "loss": avg_loss,
             "tag_loss": avg_tag,
             "rate_loss": avg_rate,
+            "people_loss": avg_people,
             **val_metrics,
         })
         if val_metrics["macro_f1"] > best_f1:
@@ -399,6 +451,7 @@ def cmd_train_pe_lora(args: argparse.Namespace) -> None:
                 "lr": args.lr,
                 "weight_decay": args.weight_decay,
                 "lambda_rating": args.lambda_rating,
+                "lambda_people": args.lambda_people,
                 "seed": args.seed,
                 "pe_lora": True,
                 "pe_lora_rank": args.pe_lora_rank,

@@ -3,18 +3,15 @@
 Image in, edited LATENT out. Consumes ComfyUI's stock ``MODEL`` / ``CLIP`` /
 ``VAE`` sockets - pipe in the same loaders you'd use for a normal Anima
 KSampler workflow (``UNETLoader``/``CLIPLoader``/``VAELoader`` or
-``CheckpointLoaderSimple``). The tagger socket comes from the
-``comfyui-anima-tagger`` package (``AnimaTaggerLoader``) - install it
-alongside this package if you want on-image psi_src derivation; otherwise
-use ``prompt_src_override`` to supply psi_src directly.
+``CheckpointLoaderSimple``). Both ``source_tag`` and ``target_tag`` are
+plain STRING inputs — any node that emits STRING can drive them. Empty
+``target_tag`` -> reconstruction sanity-check (target = source).
 
 Pipeline mirrors ``scripts/edit.py``:
 
   IMAGE -> PIL                        (ComfyUI [B,H,W,C] in [0,1] -> PIL.RGB)
-  tagger.predict_caption -> psi_src   (skipped if prompt_src_override is set;
-                                       tagger comes from AnimaTaggerLoader in
-                                       comfyui-anima-tagger)
-  psi_tar = psi_src + ", " + edit_text
+  psi_src = source_tag                (caller-supplied string)
+  psi_tar = target_tag or psi_src     (empty target_tag -> reconstruction)
   bucket pick from source aspect ratio
   CLIP.tokenize / encode_from_tokens(return_dict=True) for psi_src/tar/neg
   diffusion_model.preprocess_text_embeds -> 512-padded crossattn embeds
@@ -62,16 +59,11 @@ def _resolve_anima_modules():
         sys.path.insert(0, str(ANIMA_LORA))
 
     def _imports():
-        anima_tagger = importlib.import_module("library.captioning.anima_tagger")
         buckets_mod = importlib.import_module("library.datasets.buckets")
         directedit_mod = importlib.import_module("library.inference.directedit")
         sampling_mod = importlib.import_module("library.inference.sampling")
-        dispatcher_mod = importlib.import_module("library.inference.edit_dispatcher")
         splice_mod = importlib.import_module("library.inference.directedit_splice")
-        return (
-            anima_tagger, buckets_mod, directedit_mod, sampling_mod,
-            dispatcher_mod, splice_mod,
-        )
+        return (buckets_mod, directedit_mod, sampling_mod, splice_mod)
 
     try:
         return _imports()
@@ -97,16 +89,12 @@ import comfy.model_management  # noqa: E402  ComfyUI module; only resolvable ins
 import comfy.utils  # noqa: E402  ComfyUI module; only resolvable inside ComfyUI
 
 (
-    _anima_tagger_mod,
     _buckets_mod,
     directedit,
     inference_utils,
-    _dispatcher_mod,
     _splice_mod,
 ) = _resolve_anima_modules()
-AnimaTagger = _anima_tagger_mod.AnimaTagger
 CONSTANT_TOKEN_BUCKETS = _buckets_mod.CONSTANT_TOKEN_BUCKETS
-derive_target_caption = _dispatcher_mod.derive_target_caption
 splice_crossattn_emb = _splice_mod.splice_crossattn_emb
 
 # T5 (T5xxl) PAD token id is 0 across the T5 family; vendor doesn't bundle the
@@ -176,74 +164,8 @@ def _encode_prompt_comfy(
     return embed, t5xxl_ids
 
 
-_QWEN3_PAD_ID = 151643  # see comfy/text_encoders/anima.py::Qwen3Tokenizer
-
-
-def _comfy_encode_last_pooled(clip, phrases: list[str]) -> torch.Tensor:
-    """Dispatcher's ``EncodeLastPooledFn`` over the comfy ``CLIP`` socket.
-
-    Naive approach (one ``clip.encode_from_tokens`` per phrase) makes comfy's
-    ``CLIP.load_model`` fire N+1 times — each call logs "Model AnimaTEModel_
-    prepared for dynamic VRAM loading" and re-walks the patcher, which spams
-    the terminal and is needlessly slow on long captions.
-
-    Instead we:
-      1. Tokenize each phrase (CPU-only).
-      2. Pad all chunks to the longest length with the Qwen3 pad token
-         (151643). The mask logic in ``SDClipModel.process_tokens`` treats
-         pad as EOS — masked attention from the first pad onward — so each
-         row's "last non-pad" index is well-defined.
-      3. ``comfy.model_management.load_models_gpu(...)`` once.
-      4. Call the bare ``Qwen3_06BModel`` (``clip.cond_stage_model.qwen3_06b``)
-         once on the (N+1, T) batch. The wrapper ``encode_token_weights``
-         concatenates rows along the time dim — bypass it.
-      5. For each row, slice the actual last non-pad token by its tokenized
-         length.
-
-    Same Qwen3 last-hidden-state semantics as the probe — just batched.
-    """
-    qwen3_tok = clip.tokenizer.qwen3_06b
-    chunks: list[list[tuple]] = []
-    seq_lens: list[int] = []
-    for phrase in phrases:
-        # Tokenizer config: pad_to_max_length=False, min_length=1, no
-        # start/end tokens — one chunk per short phrase. Tag-length phrases
-        # never spill into multi-chunk; assert defensively.
-        tw = qwen3_tok.tokenize_with_weights(phrase, return_word_ids=False)
-        if len(tw) != 1:
-            raise RuntimeError(
-                f"comfy qwen3 tokenizer produced {len(tw)} chunks for "
-                f"phrase {phrase!r}; dispatcher assumes 1. Phrase too long?"
-            )
-        chunk = list(tw[0])
-        chunks.append(chunk)
-        seq_lens.append(len(chunk))
-
-    max_len = max(seq_lens) if seq_lens else 0
-    for i, chunk in enumerate(chunks):
-        if len(chunk) < max_len:
-            chunks[i] = chunk + [(_QWEN3_PAD_ID, 1.0)] * (max_len - len(chunk))
-
-    comfy.model_management.load_models_gpu([clip.patcher])
-    qwen3 = clip.cond_stage_model.qwen3_06b
-    qwen3.set_clip_options({"execution_device": clip.patcher.load_device})
-    # forward() returns (z, pooled[, extra]); z has shape (B=N+1, T, D).
-    result = qwen3(chunks)
-    z = result[0].float()
-    qwen3.reset_clip_options()
-
-    vecs: list[torch.Tensor] = []
-    for i, seqlen in enumerate(seq_lens):
-        # seqlen-1 is the last real (non-pad) position. SDClipModel.process_tokens
-        # already masks attention from the first pad onward, so column index
-        # seqlen-1 is the genuine last Qwen3 hidden state for this phrase.
-        idx = max(seqlen - 1, 0)
-        vecs.append(z[i, idx])
-    return torch.stack(vecs, dim=0)
-
-
 class AnimaDirectEdit:
-    """Image + tag-to-add -> edited image, driven by stock MODEL/CLIP/VAE sockets."""
+    """Image + source/target tag strings -> edited image, on stock MODEL/CLIP/VAE sockets."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -253,16 +175,30 @@ class AnimaDirectEdit:
                 "clip": ("CLIP", {"tooltip": "Anima CLIP (Qwen3 06B + T5xxl tokenizer)."}),
                 "vae": ("VAE", {"tooltip": "Qwen Image VAE."}),
                 "image": ("IMAGE",),
-                "edit_text": (
+                "source_tag": (
                     "STRING",
                     {
                         "multiline": True,
-                        "default": "double peace",
+                        "default": "",
                         "tooltip": (
-                            "Tag(s) to add to the source caption. "
-                            "psi_tar = psi_src + ', ' + edit_text. Leave "
-                            "empty to use psi_src as-is (sanity-check; "
-                            "should reconstruct the source)."
+                            "psi_src — caption describing the source image. "
+                            "Any STRING source works (paste the original "
+                            "prompt for an Anima-generated image, pipe in "
+                            "a captioner, etc.). Required (empty raises)."
+                        ),
+                    },
+                ),
+                "target_tag": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "psi_tar — caption for the edited image. Empty -> "
+                            "target_tag falls back to source_tag (reconstruction "
+                            "sanity check; should reproduce the source). "
+                            "Typical usage: copy source_tag and add / replace "
+                            "/ remove tags to describe the edit."
                         ),
                     },
                 ),
@@ -318,72 +254,6 @@ class AnimaDirectEdit:
                 ),
             },
             "optional": {
-                "tagger": (
-                    "ANIMA_TAGGER",
-                    {
-                        "tooltip": (
-                            "AnimaTagger from AnimaTaggerLoader (in the "
-                            "comfyui-anima-tagger package). Required unless "
-                            "prompt_src_override is set."
-                        ),
-                    },
-                ),
-                "prompt_src_override": (
-                    "STRING",
-                    {
-                        "multiline": True,
-                        "default": "",
-                        "tooltip": (
-                            "Optional: replace the tagger's caption with your "
-                            "own psi_src. Leave empty to use the tagger output. "
-                            "Useful when the source is an Anima-generated image "
-                            "and you already know the original prompt. If set, "
-                            "the tagger socket is ignored."
-                        ),
-                    },
-                ),
-                "use_dispatcher": (
-                    "BOOLEAN",
-                    {
-                        "default": True,
-                        "tooltip": (
-                            "Run the smart-edit dispatcher: explicit '-X' / "
-                            "'no X' (matching an existing tag) does REMOVE; "
-                            "Qwen3 last-pool cosine fires REPLACE on confident "
-                            "matches; otherwise APPEND (= legacy behaviour). "
-                            "Off = always APPEND. Adds N+1 short encode "
-                            "passes through the CLIP socket."
-                        ),
-                    },
-                ),
-                "replace_threshold": (
-                    "FLOAT",
-                    {
-                        "default": 0.92,
-                        "min": 0.5,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "tooltip": (
-                            "Dispatcher REPLACE gate: top-1 cosine must "
-                            "exceed this. Tuned against scripts/probes/"
-                            "edit_nearest_tag.py."
-                        ),
-                    },
-                ),
-                "replace_gap": (
-                    "FLOAT",
-                    {
-                        "default": 0.04,
-                        "min": 0.0,
-                        "max": 0.5,
-                        "step": 0.005,
-                        "tooltip": (
-                            "Dispatcher REPLACE gate: top1-top2 cosine gap "
-                            "must exceed this. Probe ambiguous near-ties "
-                            "sit at gap<0.01 and abstain into APPEND."
-                        ),
-                    },
-                ),
                 "use_slot_surgery": (
                     "BOOLEAN",
                     {
@@ -400,17 +270,16 @@ class AnimaDirectEdit:
             },
         }
 
-    RETURN_TYPES = ("LATENT", "STRING", "STRING")
-    RETURN_NAMES = ("latent", "prompt_src", "prompt_tar")
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
     FUNCTION = "edit"
     CATEGORY = "anima"
     DESCRIPTION = (
-        "DirectEdit (Yang & Ye arXiv:2605.02417) editor for Anima. Runs the "
-        "AnimaTagger on the source image to derive psi_src, appends edit_text "
-        "to form psi_tar, then performs flow inversion + delta_z-anchored "
-        "resampling on the MODEL/CLIP/VAE sockets you wire in. Returns the "
-        "edited LATENT in the comfy convention (raw VAE space) - wire it "
-        "into VAEDecode to render."
+        "DirectEdit (Yang & Ye arXiv:2605.02417) editor for Anima. Takes "
+        "explicit source/target caption STRINGs and runs flow inversion + "
+        "delta_z-anchored resampling on the MODEL/CLIP/VAE sockets you wire "
+        "in. Returns the edited LATENT in the comfy convention (raw VAE "
+        "space) - wire it into VAEDecode to render."
     )
 
     def edit(
@@ -419,18 +288,14 @@ class AnimaDirectEdit:
         clip,
         vae,
         image: torch.Tensor,
-        edit_text: str,
+        source_tag: str,
+        target_tag: str,
         negative_prompt: str,
         infer_steps: int,
         flow_shift: float,
         guidance_scale: float,
         invert_guidance: float,
         t_inj: int = 0,
-        tagger: AnimaTagger | None = None,
-        prompt_src_override: str = "",
-        use_dispatcher: bool = True,
-        replace_threshold: float = 0.92,
-        replace_gap: float = 0.04,
         use_slot_surgery: bool = False,
     ):
         device = comfy.model_management.get_torch_device()
@@ -438,43 +303,21 @@ class AnimaDirectEdit:
 
         pil_src = _comfy_image_to_pil(image)
 
-        if prompt_src_override.strip():
-            psi_src = prompt_src_override.strip()
-            logger.info("DirectEdit: using prompt_src_override: %r", psi_src)
-        else:
-            if tagger is None:
-                raise ValueError(
-                    "AnimaDirectEdit needs either a `tagger` socket "
-                    "(from AnimaTaggerLoader in the comfyui-anima-tagger "
-                    "package) or a non-empty `prompt_src_override` to "
-                    "derive psi_src."
-                )
-            logger.info("DirectEdit: running AnimaTagger from %s", tagger.ckpt_dir)
-            psi_src = tagger.predict_caption(pil_src)
-            logger.info("DirectEdit: psi_src = %r", psi_src)
-
-        edit = (edit_text or "").strip()
-        if edit and use_dispatcher:
-            plan = derive_target_caption(
-                psi_src,
-                edit,
-                encode_last_pooled=lambda phrases: _comfy_encode_last_pooled(
-                    clip, phrases,
-                ),
-                replace_threshold=replace_threshold,
-                replace_gap=replace_gap,
-            )
-            psi_tar = plan.tar_caption
-            logger.info(plan.log_line())
-        else:
-            psi_tar = f"{psi_src}, {edit}" if edit else psi_src
-        logger.info("DirectEdit: psi_tar = %r", psi_tar)
-
-        if use_slot_surgery and not psi_src.strip():
+        psi_src = (source_tag or "").strip()
+        if not psi_src:
             raise ValueError(
-                "use_slot_surgery requires a non-empty psi_src — surgery "
-                "transplants from the source encoding."
+                "AnimaDirectEdit: `source_tag` is empty. Provide a caption "
+                "describing the source image (any STRING source — e.g. paste "
+                "the prompt the source was generated with)."
             )
+        psi_tar = (target_tag or "").strip() or psi_src
+        if psi_tar == psi_src:
+            logger.info(
+                "DirectEdit: target_tag empty or identical to source_tag — "
+                "reconstruction pass (edit should reproduce the source)."
+            )
+        logger.info("DirectEdit: psi_src = %r", psi_src)
+        logger.info("DirectEdit: psi_tar = %r", psi_tar)
 
         h_pix, w_pix = _pick_bucket(pil_src)
         pil_src_resized = pil_src.resize((w_pix, h_pix), Image.LANCZOS)
@@ -533,12 +376,11 @@ class AnimaDirectEdit:
             embed_tar.float().norm().item(),
             tuple(embed_src.shape),
         )
-        if d_st < 1e-4:
+        if d_st < 1e-4 and psi_src != psi_tar:
             logger.warning(
-                "DirectEdit: |src-tar| < 1e-4 - embeddings are effectively "
-                "identical, edit pass will reconstruct the source. Check "
-                "psi_src/psi_tar strings (logged above) - likely the tagger "
-                "produced an empty/identical caption to edit_text."
+                "DirectEdit: |src-tar| < 1e-4 but psi_src != psi_tar — "
+                "encoder collapsed two different captions into the same "
+                "embedding. Edit pass will reconstruct the source."
             )
 
         logger.info("DirectEdit: encoding source image via VAE")
@@ -594,7 +436,7 @@ class AnimaDirectEdit:
         # KSampler pipeline). Wire into VAEDecode to render.
         z_edit_raw = model.model.process_latent_out(z_edit.to(dtype=dtype))
         logger.info("DirectEdit: returning edited latent %s", tuple(z_edit_raw.shape))
-        return ({"samples": z_edit_raw.cpu()}, psi_src, psi_tar)
+        return ({"samples": z_edit_raw.cpu()},)
 
 
 NODE_CLASS_MAPPINGS = {

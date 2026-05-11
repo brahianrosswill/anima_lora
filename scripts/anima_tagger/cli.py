@@ -17,7 +17,7 @@ Modes (selected by ``--mode``):
                        mean-pool over patch tokens, write per-stem cache.
 * ``build_resized``  — LANCZOS-resize every manifest image to its PE bucket,
                        cache as ``uint8 [C, H, W]`` for end-to-end PE-LoRA.
-* ``train``          — train the multi-label head + 3-class rating head.
+* ``train``          — train the multi-label head + 3-class rating head + 8-class people-count head.
                        Dispatches to the cached path or PE-LoRA path based
                        on ``--pe_lora_rank``.
 * ``calibrate``      — sweep per-tag F1-optimal thresholds on the val split.
@@ -138,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--postfix_every",
         type=int,
-        default=2,
+        default=8,
         help="PE-LoRA training: refresh the tqdm postfix (and force a "
         "host-device sync) every N steps. Higher = fewer syncs / faster "
         "training; lower = more responsive progress bar (default: 10).",
@@ -152,6 +152,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help="Weight on the rating CE loss relative to multi-label BCE.",
+    )
+    p.add_argument(
+        "--lambda_people",
+        type=float,
+        default=0.1,
+        help="Weight on the people-count CE loss relative to multi-label BCE. "
+        "0 disables the head's gradient contribution (still runs forward "
+        "if the manifest carries labels).",
     )
 
     # PE-LoRA knobs (end-to-end PE-Core fine-tuning on the trailing N blocks).
@@ -211,7 +219,7 @@ def parse_args() -> argparse.Namespace:
         help="PE-LoRA training: warm-start the head from a Stage-1 "
         "checkpoint (path to model.safetensors). The head state_dict layout "
         "must match the new run's AnimaTaggerHead config (same n_tags, "
-        "n_ratings, d_hidden, d_in). Optimizer state is NOT loaded — "
+        "n_ratings, n_people_counts, d_hidden, d_in). Optimizer state is NOT loaded — "
         "Stage 2 re-builds Adam from scratch.",
     )
 

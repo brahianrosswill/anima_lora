@@ -39,6 +39,7 @@ def cmd_predict(args: argparse.Namespace) -> None:
 
     gt_tags: Optional[List[str]] = None
     gt_rating: Optional[str] = None
+    gt_people: Optional[str] = None
     if args.image:
         image_path = Path(args.image)
         if not image_path.exists():
@@ -62,6 +63,8 @@ def cmd_predict(args: argparse.Namespace) -> None:
         idx_to_name = {t["index"]: t["name"] for t in vocab["tags"]}
         gt_tags = [idx_to_name[k] for k in manifest.tag_indices[i] if k in idx_to_name]
         gt_rating = vocab["ratings"][manifest.rating_indices[i]]
+        if manifest.people_count_indices and "people_count_labels" in vocab:
+            gt_people = vocab["people_count_labels"][manifest.people_count_indices[i]]
         print(f"sampled stem: {stem}")
         print(f"image:        {image_path}")
         print(f"split:        {'val' if stem in set(manifest.val_stems) else 'train'}")
@@ -78,12 +81,19 @@ def cmd_predict(args: argparse.Namespace) -> None:
         gt_caption = ", ".join([gt_rating] + gt_tags).replace("_", " ")
         print()
         print(f"ground truth: {gt_caption}")
+        if gt_people is not None:
+            print(f"gt people:    {gt_people}")
     if args.show_scores:
         rating_scores = out["rating_scores"]
         print()
         print("rating:")
         for r, p in sorted(rating_scores.items(), key=lambda kv: -kv[1]):
             print(f"  {r:<10} {p:.3f}")
+        people_scores = out.get("people_count_scores")
+        if people_scores:
+            print("people_count:")
+            for r, p in sorted(people_scores.items(), key=lambda kv: -kv[1]):
+                print(f"  {r:<14} {p:.3f}")
         kept = out["kept"]
         top = sorted(kept.items(), key=lambda kv: -kv[1])[: args.top_k]
         print(f"top {len(top)} kept tags (of {len(kept)} above threshold):")

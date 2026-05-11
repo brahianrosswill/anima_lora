@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 # Booru-style tag-type integers from the corpus's tag-taxonomy cache.
 TAG_TYPE_NAMES: Dict[int, str] = {
@@ -36,11 +36,30 @@ SLOT_ORDER: Tuple[str, ...] = (
 # 3-class rating set (post-``questionable→sensitive`` collapse).
 RATINGS: Tuple[str, ...] = ("general", "sensitive", "explicit")
 
-# Count-tag detection. Matches ``1girl``, ``2girls``, ``1boy``, ``3others``,
-# ``multiple_girls``, ``multiple_boys``. Underscores or spaces both fine.
-_COUNT_RE = re.compile(
-    r"^(?:\d+(?:girl|boy|other)s?|multiple[_ ](?:girls|boys|others))$"
+# 8-class people-count bucket. Derived from parsed-tag count tags
+# (``classify_people``); trained as a dedicated softmax head separate from
+# the multi-label tag head, same shape as ``rating``. Order is the
+# canonical class index — do not reorder without re-running build_vocab.
+PEOPLE_COUNT_LABELS: Tuple[str, ...] = (
+    "no_people",   # 0 — no count tag at all
+    "1girl",       # 1 — 1girl, no boy
+    "1girl_1boy",  # 2 — exactly one of each
+    "2girls",      # 3 — 2girls, no boy
+    "2girls_1boy", # 4 — 2girls + 1boy
+    "2boys_1girl", # 5 — 2boys + 1girl  (mirror of 2girls_1boy)
+    "1boy",        # 6 — 1boy, no girl (solo male)
+    "multi",       # 7 — 3+girls / 3+boys / 2g-2b+ / multiple_* / Nothers
 )
+
+# Count-tag detection. Matches ``1girl``, ``2girls``, ``1boy``, ``3others``,
+# ``multiple_girls``, ``multiple_boys``. Also matches ``6+girls`` /
+# ``6+boys`` (booru convention for "≥6 of"). Underscores or spaces both fine.
+_COUNT_RE = re.compile(
+    r"^(?:\d+\+?(?:girl|boy|other)s?|multiple[_ ](?:girls|boys|others))$"
+)
+
+# Pull the leading integer off a count tag like "3girls" / "6+girls" → 3 / 6.
+_LEADING_INT_RE = re.compile(r"^(\d+)")
 
 # Image extensions we look for next to each .txt caption file. Order is
 # preference; first hit wins.
@@ -58,3 +77,65 @@ def find_image_for_caption(caption_path: Path) -> Optional[Path]:
 
 def is_count_tag(tag: str) -> bool:
     return bool(_COUNT_RE.match(tag))
+
+
+def classify_people(tags: Iterable[str]) -> int:
+    """Derive the 8-class :data:`PEOPLE_COUNT_LABELS` index for a parsed-tag list.
+
+    Bucketing rules:
+
+    * ``no_people`` (0) — no count tag at all
+    * ``1girl`` (1), ``2girls`` (3), ``1boy`` (6) — exact-girls-no-boy /
+      exact-boys-no-girl combos
+    * ``1girl_1boy`` (2), ``2girls_1boy`` (4), ``2boys_1girl`` (5) —
+      the three explicit mixed combos
+    * ``multi`` (7) — anything else with a count tag: ``3+girls``,
+      ``3+boys``, ``2girls+2+boys``, ``multiple_*``, ``Nothers``, etc.
+      ``others`` count tags ride into ``multi`` since the head is
+      girls/boys-shaped.
+
+    Tag order in ``tags`` doesn't matter — counts are reduced first.
+    """
+    girls = boys = 0
+    saw_multi = False
+    for t in tags:
+        if not is_count_tag(t):
+            continue
+        if t.startswith("multiple"):
+            saw_multi = True
+            if "girl" in t:
+                girls = max(girls, 3)
+            elif "boy" in t:
+                boys = max(boys, 3)
+            continue
+        m = _LEADING_INT_RE.match(t)
+        if m is None:                    # e.g. malformed; defensive
+            continue
+        n = int(m.group(1))
+        if "girl" in t:
+            girls = max(girls, n)
+        elif "boy" in t:
+            boys = max(boys, n)
+        # "others" count tags are recorded as a "multi" indicator without
+        # changing girls/boys directly — they don't fit the 7 buckets.
+        elif "other" in t:
+            saw_multi = True
+    # multi catches the heavy cases first. (1g, 2b) is now its own bucket
+    # so it's excluded here — it's handled by the explicit checks below.
+    if saw_multi or girls >= 3 or boys >= 3 or (boys >= 2 and girls >= 2):
+        return 7                          # multi: 3+girls / 3+boys / 2g+2b+ / multiple_* / Nothers
+    if girls == 0 and boys == 0:
+        return 0                          # no_people (only when no count tag fired)
+    if girls == 1 and boys == 0:
+        return 1                          # 1girl
+    if girls == 1 and boys == 1:
+        return 2                          # 1girl_1boy
+    if girls == 2 and boys == 0:
+        return 3                          # 2girls
+    if girls == 2 and boys == 1:
+        return 4                          # 2girls_1boy
+    if girls == 1 and boys == 2:
+        return 5                          # 2boys_1girl
+    if girls == 0 and boys == 1:
+        return 6                          # 1boy
+    return 7                              # fallback (e.g. 0g/2b without "others")

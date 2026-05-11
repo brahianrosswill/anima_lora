@@ -11,10 +11,10 @@ separately in [`anima_tagger.md`](./anima_tagger.md).
 |---|---|
 | `library/inference/directedit.py` — invert + edit_forward primitive | **wired** |
 | V-injection (paper Eq. 13) | **wired** in both CLI and ComfyUI node |
-| ψ_src tagger (Anima Tagger replacing wd-tagger) | **wired** with auto-fallback |
+| ψ_src tagger (Anima Tagger replacing wd-tagger), CLI side | **wired** with auto-fallback |
 | `scripts/edit.py` — standalone CLI | **wired** |
 | `make exp-test-directedit` / `exp-test-directedit-dry` driver | **wired** |
-| `comfyui-anima-directedit` ComfyUI node (stock MODEL/CLIP/VAE sockets) | **wired** |
+| `comfyui-anima-directedit` ComfyUI node (stock MODEL/CLIP/VAE sockets) | **wired**, 0.2.0 took caption inputs as plain STRINGs (no embedded tagger / dispatcher) |
 | Mask blending (paper Eq. 12) | **stub** — `--mask` accepted but ignored |
 | Embedding inversion fallback (v2.1) | **deferred** — `archive/inversion/` not yet promoted |
 
@@ -185,17 +185,47 @@ the tagger and the text encoder.
 
 `AnimaDirectEdit` consumes stock ComfyUI sockets: `MODEL` (DiT via
 `UNETLoader`/`CheckpointLoaderSimple`), `CLIP` (Anima Qwen3 + T5 via
-`CLIPLoader`), `VAE` (Qwen Image VAE via `VAELoader`), `IMAGE`. ψ_src
-comes from either an `ANIMA_TAGGER` socket (the sibling
-`comfyui-anima-tagger` package's `AnimaTaggerLoader`) or a non-empty
-`prompt_src_override` STRING.
+`CLIPLoader`), `VAE` (Qwen Image VAE via `VAELoader`), `IMAGE`. As of
+0.2.0 (the "remove tagger implant" pass), ψ_src and ψ_tar are plain
+STRING inputs (`source_tag`, `target_tag`) — any node that emits STRING
+can drive them. Empty `target_tag` falls back to `source_tag` for the
+reconstruction sanity check. Empty `source_tag` raises.
 
-Returns `(LATENT, prompt_src, prompt_tar)` — wire `LATENT` into
-`VAEDecode` to render. Returning latent (rather than IMAGE) keeps the
-node composable with downstream KSampler-style refiners.
+Returns `(LATENT,)` — wire it into `VAEDecode` to render. Returning
+latent (rather than IMAGE) keeps the node composable with downstream
+KSampler-style refiners. The pre-0.2.0 debug `prompt_src` / `prompt_tar`
+STRING outputs were dropped; the same values are already on canvas
+upstream of the node's STRING inputs.
 
-The node's pipeline mirrors `scripts/edit.py` but routes through
-ComfyUI's CLIP socket:
+#### What 0.2.0 removed
+
+The 0.1.x node embedded captioning + edit-target derivation inside
+`AnimaDirectEdit` itself:
+
+* `tagger` (`ANIMA_TAGGER`) socket — ran `AnimaTagger.predict_caption`
+  on the image to derive ψ_src.
+* `prompt_src_override` STRING — escape hatch when the user wanted to
+  paste ψ_src directly.
+* `edit_text` STRING — short edit instruction; ψ_tar built as
+  `psi_src + ", " + edit_text` (or via the dispatcher below).
+* `use_dispatcher` / `replace_threshold` / `replace_gap` — ran
+  `library.inference.edit_dispatcher.derive_target_caption`, which used
+  Qwen3 last-pool cosine similarity to choose between REPLACE / REMOVE
+  / APPEND from `edit_text` against an existing tag in ψ_src.
+
+All of the above were removed in 0.2.0. The node is now agnostic about
+where its caption strings come from — pipe in `AnimaTaggerCaption` from
+the sibling `comfyui-anima-tagger` package if you want image-driven
+captioning, paste the original generation prompt, hand-type the
+captions, or run any other STRING-producing node. The dispatcher's
+intent (RANK / REPLACE / REMOVE / APPEND from a single edit instruction)
+becomes the caller's responsibility — typically expressed as a hand-
+edited `target_tag` that mirrors `source_tag` with the relevant tag(s)
+added, swapped, or removed.
+
+#### Pipeline
+
+Mirrors `scripts/edit.py` but routes through ComfyUI's CLIP socket:
 
 * `_encode_prompt_comfy` — `clip.tokenize` →
   `clip.encode_from_tokens(return_dict=True)` → mirror
@@ -217,6 +247,8 @@ ComfyUI's CLIP socket:
 Two-phase progress bar: invert occupies `[0, T)`, edit occupies
 `[T, 2T)`.
 
+#### Install shapes + vendor
+
 The package supports two install shapes:
 
 1. **Inside the anima_lora repo** (dev / monorepo). Imports the live
@@ -227,6 +259,14 @@ The package supports two install shapes:
    before bumping the node version. The vendor resolution drops any
    partially-imported `library.*` modules from `sys.modules` before
    re-importing so vendor copies actually take effect.
+
+After 0.2.0, the directedit vendor only carries `library/inference/
+directedit*.py`, the trimmed `sampling.py` / `buckets.py`, and a stub
+`library/anima/models.py` — no `captioning/`, no `vision/`, no
+`edit_dispatcher.py`. Pip deps shrank to `torch / numpy / pillow / tqdm`
+(all ComfyUI-bundled). `scripts/sync_vendor.py` reflects this split:
+the previously-shared `SHARED_*` lists were renamed `TAGGER_*` since
+only the tagger node's vendor needs them.
 
 ## What hasn't shipped (deferred from v2)
 

@@ -92,7 +92,7 @@ def cmd_tagger(extra):
     # Stage 1: head-only on cached pooled features.
     stage1_defaults = [
         "--pe_lora_rank", "0",
-        "--epochs", "60",
+        "--epochs", "75",
         "--batch_size", "64",
         "--lr", "2e-4",
     ]
@@ -117,7 +117,7 @@ def cmd_tagger(extra):
         "--epochs", "12",
         "--batch_size", "32",
         "--lr", "1e-4",
-        "--pe_lora_lr", "1e-4",
+        "--pe_lora_lr", "5e-5",
         "--init_head_from", str(head_path),
     ]
     print(f"[tagger] stage 2 / 2: PE-LoRA fine-tune, warm-starting head from {head_path}")

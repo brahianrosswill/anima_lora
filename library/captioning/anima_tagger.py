@@ -200,6 +200,11 @@ class AnimaTagger:
             for t in vocab["tags"]
         ]
         self.ratings: List[str] = list(vocab["ratings"])
+        # Optional — older vocab.json builds didn't carry the people-count
+        # labels, in which case the people head is also absent on the
+        # checkpoint side (cfg.n_people_counts == 0). Empty list is the
+        # legacy / disabled signal.
+        self.people_count_labels: List[str] = list(vocab.get("people_count_labels") or [])
         # Vocab index of the canonical "original" copyright tag, or None
         # when absent. Used by predict() as the uncertainty-fallback when
         # a character was guessed but didn't clear `_character_floor`.
@@ -362,6 +367,10 @@ class AnimaTagger:
 
         * ``rating``: predicted rating string (one of ``self.ratings``)
         * ``rating_scores``: dict ``{rating: prob}``
+        * ``people_count`` / ``people_count_scores``: argmax label and
+          ``{label: prob}`` distribution from the 8-class people-count head.
+          Both are absent when the loaded checkpoint was trained without
+          the people head (legacy ``cfg.n_people_counts == 0``).
         * ``scores``: dict ``{tag: prob}`` for *all* in-vocab tags
         * ``kept``: dict ``{tag: prob}`` for tags emitted as positives.
           When typed groups are loaded, softmax-group winners are picked
@@ -370,7 +379,7 @@ class AnimaTagger:
           present when typed groups are loaded.
         """
         feat = self._encode_image(pil_img).unsqueeze(0).to(self.device)
-        tag_logits, rating_logits = self.model(feat)
+        tag_logits, rating_logits, people_logits = self.model(feat)
         tag_logits_row = tag_logits[0]                       # [n_tags]
         tag_probs = tag_logits_row.sigmoid()                 # [n_tags]
         rating_probs = rating_logits.softmax(dim=-1)[0]      # [n_ratings]
@@ -394,6 +403,14 @@ class AnimaTagger:
             "scores": scores,
             "kept": kept,
         }
+        if people_logits is not None and self.people_count_labels:
+            people_probs = people_logits.softmax(dim=-1)[0]
+            people_idx = int(people_probs.argmax().item())
+            out["people_count"] = self.people_count_labels[people_idx]
+            out["people_count_scores"] = {
+                lbl: float(people_probs[i].cpu())
+                for i, lbl in enumerate(self.people_count_labels)
+            }
 
         # Group-aware refinement of `kept`. Replaces softmax-group sigmoid
         # threshold output with one argmax winner per applicable group.
