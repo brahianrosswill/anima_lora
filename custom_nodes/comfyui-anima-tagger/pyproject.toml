@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-anima-tagger"
 description = "Anima Tagger for ComfyUI: a multi-label image tagger trained on the Anima caption distribution. Provides a loader (image -> tagger socket) and a captioner (image -> caption string), reusable in DirectEdit, prompt pre-fill, and any workflow that needs Anima-formatted tags."
-version = "0.1.3"
+version = "0.2.0"
 license = { file = "LICENSE" }
 # torch / numpy / pillow / torchvision / safetensors / huggingface_hub / tqdm
 # are already shipped with any ComfyUI install, but we list them anyway so a

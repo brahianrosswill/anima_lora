@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -50,6 +51,19 @@ VENDOR = HERE / "_vendor"
 _HF_TAGGER_REPO = "sorryhyun/anima-tagger"
 _REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml")
 _OPTIONAL_FILES = ("thresholds.safetensors", "groups.yaml", "pe_lora.safetensors")
+
+# Selectable checkpoint versions on the HF repo. ``v1`` lives at the repo root
+# (single-encoder PE-Core only, legacy default). ``v2`` lives under ``v2/``
+# (dual-encoder PE-Core + PE-Spatial). When adding a future version, list it
+# here and the loader dropdown picks it up automatically — the only assumption
+# is that v1 sits at the root while everything else is in a subfolder of the
+# same name.
+_HF_VERSIONS = ("v1", "v2")
+_DEFAULT_HF_VERSION = "v1"
+# Local-dir prefix used to scope downloads per version so v1 / v2 weights
+# don't clobber each other when the user leaves ``tagger_dir`` on the default.
+# Any explicit ``tagger_dir`` override skips the auto-rewrite.
+_DEFAULT_TAGGER_DIR_BASE = "models/captioners/anima-tagger"
 
 # Sentinel shown at the top of the pe_lora dropdown — empty string survives
 # the existing "if pe_lora_path.strip():" gate in load(), which falls back
@@ -96,9 +110,14 @@ def _list_pe_lora_files() -> list[str]:
     return out
 
 
-def _ensure_tagger_dir(tdir: Path) -> None:
+def _ensure_tagger_dir(tdir: Path, hf_subfolder: str = "") -> None:
     """If ``tdir`` is missing any required tagger file, fetch the whole
     checkpoint from ``sorryhyun/anima-tagger`` into it.
+
+    ``hf_subfolder`` (e.g. ``"v2"``) prefixes the repo path so different
+    versions can be pulled from the same repo; downloaded files are flattened
+    into ``tdir`` regardless of the source layout so the loader's directory
+    contract (``tdir/config.json`` etc.) stays uniform across versions.
 
     Optional files (``thresholds.safetensors``, ``groups.yaml``,
     ``pe_lora.safetensors``) are best-effort - a 404 on the repo just means
@@ -112,27 +131,41 @@ def _ensure_tagger_dir(tdir: Path) -> None:
     from huggingface_hub.utils import EntryNotFoundError
 
     logger.info(
-        "AnimaTaggerLoader: %s is missing required files - fetching %s "
+        "AnimaTaggerLoader: %s is missing required files - fetching %s%s "
         "(one-time).",
         tdir,
         _HF_TAGGER_REPO,
+        f"/{hf_subfolder}" if hf_subfolder else "",
     )
     tdir.mkdir(parents=True, exist_ok=True)
-    for fname in _REQUIRED_FILES:
-        hf_hub_download(
-            repo_id=_HF_TAGGER_REPO,
-            filename=fname,
-            local_dir=str(tdir),
-        )
-    for fname in _OPTIONAL_FILES:
-        try:
+
+    def _fetch_flat(fname: str) -> Path:
+        repo_path = f"{hf_subfolder}/{fname}" if hf_subfolder else fname
+        downloaded = Path(
             hf_hub_download(
                 repo_id=_HF_TAGGER_REPO,
-                filename=fname,
+                filename=repo_path,
                 local_dir=str(tdir),
             )
+        )
+        dest = tdir / fname
+        if downloaded.resolve() != dest.resolve():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(downloaded), str(dest))
+        return dest
+
+    for fname in _REQUIRED_FILES:
+        _fetch_flat(fname)
+    for fname in _OPTIONAL_FILES:
+        try:
+            _fetch_flat(fname)
         except EntryNotFoundError:
-            logger.debug("optional file %s not present on %s", fname, _HF_TAGGER_REPO)
+            logger.debug(
+                "optional file %s not present on %s%s",
+                fname,
+                _HF_TAGGER_REPO,
+                f"/{hf_subfolder}" if hf_subfolder else "",
+            )
 
 
 def _resolve_anima_tagger():
@@ -181,13 +214,34 @@ class AnimaTaggerLoader:
                 "tagger_dir": (
                     "STRING",
                     {
-                        "default": "models/captioners/anima-tagger-v1",
+                        "default": f"{_DEFAULT_TAGGER_DIR_BASE}-{_DEFAULT_HF_VERSION}",
                         "tooltip": (
                             "AnimaTagger checkpoint directory. Relative paths "
                             "are resolved against the anima_lora/ project root; "
                             "absolute paths used as-is. If the directory is "
                             "missing required files, the checkpoint is "
-                            f"auto-fetched from {_HF_TAGGER_REPO} on first use."
+                            f"auto-fetched from {_HF_TAGGER_REPO} on first use. "
+                            "When left at the default, the trailing version "
+                            "segment is auto-aligned with the `version` "
+                            "dropdown so v1 / v2 checkpoints don't collide "
+                            "locally."
+                        ),
+                    },
+                ),
+                "version": (
+                    list(_HF_VERSIONS),
+                    {
+                        "default": _DEFAULT_HF_VERSION,
+                        "tooltip": (
+                            "Which checkpoint version to fetch from "
+                            f"{_HF_TAGGER_REPO}. "
+                            "v1 = single-encoder (PE-Core only), files at the "
+                            "repo root. "
+                            "v2 = dual-encoder (PE-Core + PE-Spatial), files "
+                            "under v2/ on HF. The version is also used to "
+                            "auto-adjust the default tagger_dir so v1 and v2 "
+                            "weights don't share a local cache; any explicit "
+                            "tagger_dir override is honored verbatim."
                         ),
                     },
                 ),
@@ -275,11 +329,21 @@ class AnimaTaggerLoader:
         self,
         tagger_dir: str,
         pe_ckpt: str,
+        version: str = _DEFAULT_HF_VERSION,
         use_pe_lora: bool = True,
         pe_lora_path: str = "",
         pe_aux_ckpt: str = "",
     ):
-        tdir = Path(tagger_dir)
+        # Auto-align the default tagger_dir's trailing version segment with
+        # the selected ``version`` dropdown — only when the user left the
+        # path on the canonical "<base>-vN" default. Any custom path is
+        # passed through verbatim so power users can pin their own layout.
+        tagger_dir_raw = tagger_dir.strip()
+        for v in _HF_VERSIONS:
+            if tagger_dir_raw == f"{_DEFAULT_TAGGER_DIR_BASE}-{v}":
+                tagger_dir_raw = f"{_DEFAULT_TAGGER_DIR_BASE}-{version}"
+                break
+        tdir = Path(tagger_dir_raw)
         if not tdir.is_absolute():
             tdir = ANIMA_LORA / tdir
         pe_path = Path(pe_ckpt)
@@ -306,11 +370,15 @@ class AnimaTaggerLoader:
                 if not pl.is_absolute():
                     pl = ANIMA_LORA / pl
                 pe_lora_resolved = pl
-        _ensure_tagger_dir(tdir)
+        # v1 is at the repo root (no subfolder); every other listed version
+        # lives under a subfolder of the same name on HF.
+        hf_subfolder = "" if version == "v1" else version
+        _ensure_tagger_dir(tdir, hf_subfolder=hf_subfolder)
         device = comfy.model_management.get_torch_device()
         logger.info(
-            "AnimaTaggerLoader: loading %s on %s (pe=%s, pe_lora=%s, pe_aux=%s)",
+            "AnimaTaggerLoader: loading %s (version=%s) on %s (pe=%s, pe_lora=%s, pe_aux=%s)",
             tdir,
+            version,
             device,
             pe_path,
             "<disabled>" if not use_pe_lora else pe_lora_resolved,
