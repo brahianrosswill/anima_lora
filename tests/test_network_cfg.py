@@ -33,7 +33,9 @@ def test_defaults_when_all_kwargs_absent():
     assert cfg.train_llm_adapter is False
     assert cfg.add_reft is False
     assert cfg.use_timestep_mask is False
-    assert cfg.use_sigma_router is False
+    assert cfg.use_moe_style is False
+    assert cfg.route_per_layer is False
+    assert cfg.router_source == "none"
     # exclude regex always appended
     assert any("_modulation" in p for p in cfg.exclude_patterns)
     assert cfg.include_patterns is None
@@ -47,13 +49,16 @@ def test_defaults_when_all_kwargs_absent():
 def test_string_bool_parsing_matches_old_factory_path():
     """Every bool kwarg used to come in as a literal "true"/"false" string
     from train.py's net_kwargs. Make sure the canonical 'true' parses true,
-    arbitrary other strings parse false, and bool/None still work.
+    arbitrary other strings parse false, and bool/None still work. Legacy
+    ``use_sigma_router`` still translates into ``router_source="sigma"``
+    via from_kwargs (task #3 keeps the TOMLs working until task #6).
     """
     kwargs = {
         "train_llm_adapter": "true",
         "add_reft": "True",  # case-insensitive
         "use_timestep_mask": "TRUE",
-        "use_sigma_router": True,  # already a bool
+        "use_hydra": True,  # legacy; routes to use_moe_style="shared_A"
+        "use_sigma_router": True,  # legacy; routes to router_source="sigma"
         "verbose": "false",
     }
     cfg = LoRANetworkCfg.from_kwargs(
@@ -66,7 +71,9 @@ def test_string_bool_parsing_matches_old_factory_path():
     assert cfg.train_llm_adapter is True
     assert cfg.add_reft is True
     assert cfg.use_timestep_mask is True
-    assert cfg.use_sigma_router is True
+    assert cfg.use_moe_style == "shared_A"
+    assert cfg.route_per_layer is True
+    assert cfg.router_source == "sigma"
     assert cfg.verbose is False
 
 
@@ -182,7 +189,9 @@ def test_from_weights_warm_start_shape():
     assert cfg.reft_dim == 8
     assert cfg.reft_layers == [0, 1, 2]
     assert cfg.num_experts == 8
-    assert cfg.use_sigma_router is True
+    assert cfg.use_moe_style == "shared_A"
+    assert cfg.route_per_layer is True
+    assert cfg.router_source == "sigma"
     assert cfg.sigma_feature_dim == 16
     assert cfg.sigma_router_names == ["foo"]
     # Training-time schedules off in warm-start
@@ -211,7 +220,8 @@ def test_from_weights_no_reft_no_sigma():
     assert cfg.reft_dim == 4  # default fallback
     assert cfg.reft_layers == "all"
     assert cfg.num_experts == 4  # default fallback (not 0)
-    assert cfg.use_sigma_router is False
+    assert cfg.use_moe_style is False
+    assert cfg.router_source == "none"
 
 
 def test_from_weights_sigma_band_partition_off_by_default():

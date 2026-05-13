@@ -121,7 +121,7 @@ class LoRANetwork(torch.nn.Module):
         self._sigma_router_re = (
             re.compile(cfg.sigma_router_layers)
             if (
-                cfg.use_sigma_router
+                cfg.router_source == "sigma"
                 and cfg.sigma_router_layers
                 and self._sigma_router_names is None
             )
@@ -139,14 +139,17 @@ class LoRANetwork(torch.nn.Module):
         self._fei_router_re = (
             re.compile(cfg.fei_router_layers)
             if (
-                cfg.use_fei_router
+                cfg.router_source == "fei"
                 and cfg.fei_router_layers
                 and self._fei_router_names is None
             )
             else None
         )
         self._fei_router_hits = 0
-        self.use_fei_router = bool(cfg.use_fei_router)
+        # Retained as a network attr (library/inference/adapters.py reads it
+        # via getattr); derived from cfg.router_source.
+        self.use_fei_router = cfg.router_source == "fei"
+        self.use_sigma_router = cfg.router_source == "sigma"
 
         # Per-module HydraLoRA gating. Matching modules get the Hydra class;
         # non-matching modules fall back to plain LoRA / OrthoLoRAExp so MoE
@@ -398,7 +401,7 @@ class LoRANetwork(torch.nn.Module):
                 # over original_name. Gated on the effective class so a
                 # hydra-excluded module can't pick up σ either.
                 if (
-                    cfg.use_sigma_router
+                    cfg.router_source == "sigma"
                     and effective_module_class
                     in (
                         HydraLoRAModule,
@@ -423,7 +426,7 @@ class LoRANetwork(torch.nn.Module):
                 # itself is computed once per step in the train/inference loop
                 # and propagated via ``LoRANetwork.set_fei``.
                 if (
-                    cfg.use_fei_router
+                    cfg.router_source == "fei"
                     and effective_module_class
                     in (
                         HydraLoRAModule,
@@ -807,7 +810,8 @@ class LoRANetwork(torch.nn.Module):
         # (sigma_feature_dim>0) and hard σ-band expert partition. Skip the
         # propagation entirely when neither is configured.
         if not (
-            self.cfg.use_sigma_router or self.cfg.specialize_experts_by_sigma_buckets
+            self.cfg.router_source == "sigma"
+            or self.cfg.specialize_experts_by_sigma_buckets
         ):
             return
         sigma_loras = self._sigma_aware_loras
@@ -1160,7 +1164,7 @@ class LoRANetwork(torch.nn.Module):
         num_buckets = self.cfg.num_sigma_buckets
         bucket_w = float(self.cfg.per_bucket_balance_weight or 0.0)
         want_per_bucket = (
-            self.cfg.use_sigma_router
+            self.cfg.router_source == "sigma"
             and sigma is not None
             and num_buckets > 1
             and bucket_w > 0.0
@@ -2002,7 +2006,9 @@ class LoRANetwork(torch.nn.Module):
         # ``lora_dim + sigma_feature_dim + fei_feature_dim``, and the from-
         # weights factory has to know the ``fei_feature_dim`` slice width to
         # reserve for FEI vs σ before falling back to σ-only assumptions.
-        if self.cfg.use_fei_router and self.cfg.fei_feature_dim > 0:
+        # Save stamp name remains ``ss_use_fei_router`` for task #3 — task #4
+        # will switch save metadata to the new three-axis stamps.
+        if self.cfg.router_source == "fei" and self.cfg.fei_feature_dim > 0:
             metadata["ss_use_fei_router"] = "true"
             metadata["ss_fei_feature_dim"] = str(int(self.cfg.fei_feature_dim))
             metadata["ss_fei_sigma_low_div"] = str(float(self.cfg.fei_sigma_low_div))

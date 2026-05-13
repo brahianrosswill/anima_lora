@@ -61,6 +61,25 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
+def _copy_or_rebind_buffer(
+    module: nn.Module, name: str, value: torch.Tensor
+) -> None:
+    """Update ``module.<name>`` in place when shape+device match, else rebind.
+
+    Same pattern as ``networks/lora_modules/hydra.py`` — keeps the buffer's
+    memory address stable across calls so cudagraph capture sees a single
+    fixed address it can reference on every replay. Falling back to
+    ``setattr`` on shape/device mismatch (e.g. resolution-bucket change)
+    means a recapture, but that's correct: the old graph wouldn't fit
+    the new shape anyway.
+    """
+    buf = getattr(module, name)
+    if buf.shape == value.shape and buf.device == value.device:
+        buf.copy_(value.to(buf.dtype))
+    else:
+        setattr(module, name, value.to(buf.dtype).clone())
+
+
 # Author's reference defaults: attn q/k/v + output. Anima uses fused
 # ``qkv_proj`` for self-attn and ``q_proj``/``kv_proj`` for cross-attn, plus
 # ``output_proj`` and the ``mlp.layer{1,2}`` Linears. Default regex below
@@ -163,6 +182,196 @@ class SoftFrequencyRouter(nn.Module):
         # e_t: (B, num_bands) fp32. Logits in fp32; cast to caller dtype later.
         logits = self.net(e_t.float())
         return F.softmax(logits / self.tau, dim=-1)
+
+
+class FeRAPrep(nn.Module):
+    """Per-step router + batched Cayley solve, designed to run *inside* the
+    compiled block-stack region (``Anima._run_blocks``).
+
+    Why this exists. The legacy path computes router gates and the Cayley
+    rotation of every ortho FeRALinear in eager code (``prepare_forward``),
+    then assigns the fresh tensors to per-Linear Python attributes. Under
+    ``compile_mode='full' + compile_inductor_mode='reduce-overhead'`` the
+    cudagraph capture sees a different memory address every step and
+    re-records the graph each iteration — GPU goes idle while the CPU
+    traces. Both grad-carrying tensors (gates → router params,
+    R_q/R_p → S_q/S_p) rule out the ``_copy_or_rebind_buffer`` pattern
+    HydraLoRA uses for σ-features, because ``detach()+copy_()`` would
+    cut the autograd chain.
+
+    The fix is to move the grad-carrying compute *inside* the compile
+    boundary. Dynamo traces the side-effect assignments
+    (``self._gates = …``, ``self._R_q = …``) as graph SSA values that
+    cudagraph captures at allocator-managed (stable) addresses. The
+    autograd chain to router/S_q/S_p is preserved because the whole
+    region is one autograd scope. Downstream ``FeRALinear.forward``
+    reads ``self._fera_prep._gates`` / ``._R_q[self._idx]`` — also inside
+    compile, so the read resolves to the captured SSA, not a Python
+    attribute fetched at trace time.
+
+    Lifecycle.
+
+      * ``set_fei(fei)`` (eager, called from ``FeRANetwork.prepare_forward``):
+        copies the per-step FEI into ``self._fei``. ``_copy_or_rebind_buffer``
+        keeps the address stable across steps so cudagraph captures it
+        once.
+      * ``forward()`` (compiled, called from ``Anima._run_blocks``):
+        ``gates = router(self._fei)`` → ``self._gates``;
+        batched Cayley over every ortho FeRALinear's stacked ``S_q``/``S_p``
+        → ``self._R_q`` / ``self._R_p``.
+      * Python attributes hold the graph SSA values across the compiled
+        call return — read by ``block._forward``'s recompute under
+        gradient checkpointing. They get overwritten on every subsequent
+        compiled invocation, so staleness is bounded to a single step.
+
+    The router stays as an ``nn.Module`` child of ``FeRANetwork`` so
+    ``state_dict`` continues to emit it under ``router.*``. ``FeRAPrep``
+    holds a non-Module reference via ``object.__setattr__`` to avoid
+    duplicate registration. Ortho-layer references are tracked the same
+    way — we only need to read their ``S_q``/``S_p`` Parameters, not own
+    them, and registering them as children would emit duplicate
+    state_dict keys for the same Parameter.
+
+    One graph break. ``torch.linalg.solve`` is not Dynamo-supported, so
+    the prep's ``forward`` emits one graph break at the solve. That
+    keeps the *block stack* graph-clean (no per-FeRALinear breaks),
+    which is the dominant cost path. The break is at the top of
+    ``_run_blocks`` before the block loop, so the block region itself
+    stays cudagraph-captured.
+    """
+
+    def __init__(self, num_experts: int, num_bands: int, rank: int):
+        super().__init__()
+        self.num_experts = int(num_experts)
+        self.num_bands = int(num_bands)
+        self.rank = int(rank)
+
+        # Pointer-stable FEI buffer. ``set_fei`` keeps the address fixed
+        # via ``_copy_or_rebind_buffer`` so cudagraph capture references
+        # one allocator-stable address across replays. (1, num_bands)
+        # placeholder until the first prepare_forward.
+        self.register_buffer(
+            "_fei",
+            torch.zeros(1, num_bands, dtype=torch.float32),
+            persistent=False,
+        )
+        # Pre-allocated identity for the batched Cayley solve — saves
+        # 2 tiny ``torch.eye`` kernel launches per step.
+        self.register_buffer(
+            "_eye_r",
+            torch.eye(self.rank, dtype=torch.float32),
+            persistent=False,
+        )
+
+        # Per-step graph-SSA outputs. Written inside ``forward`` (compiled
+        # scope); read inside the block loop's FeRALinear forwards. The
+        # Python attribute outlives the compiled call so backward replay
+        # under gradient checkpointing sees the same tensor.
+        self._gates: Optional[torch.Tensor] = None
+        self._R_q: Optional[torch.Tensor] = None
+        self._R_p: Optional[torch.Tensor] = None
+
+        # Non-Module references — wired by ``FeRANetwork.apply_to``.
+        # ``object.__setattr__`` bypasses ``nn.Module.__setattr__``'s
+        # auto-registration; otherwise the router would appear under both
+        # ``router.*`` (FeRANetwork's child) and ``prep._router_ref.*``
+        # (this), doubling param count and breaking state_dict round-trip.
+        object.__setattr__(self, "_router_ref", None)
+        object.__setattr__(self, "_ortho_layers", ())
+
+    def wire(
+        self,
+        router: nn.Module,
+        ortho_layers: List["FeRALinear"],
+    ) -> None:
+        """Attach the router and the ordered list of ortho FeRALinears.
+
+        ``ortho_layers`` ordering becomes the batched-Cayley index. Each
+        ortho FeRALinear's ``_idx`` is set here so its ``forward`` can
+        look up ``R_q[self._idx]`` / ``R_p[self._idx]`` directly.
+        """
+        object.__setattr__(self, "_router_ref", router)
+        ortho = tuple(l for l in ortho_layers if l.ortho)
+        object.__setattr__(self, "_ortho_layers", ortho)
+        for i, layer in enumerate(ortho):
+            layer._idx = i
+
+    def set_fei(self, fei: torch.Tensor) -> None:
+        """Eager: stable-address copy of this step's FEI into ``_fei``."""
+        _copy_or_rebind_buffer(self, "_fei", fei.detach())
+
+    @torch.compiler.disable(recursive=True)
+    def _batched_cayley_eager(self) -> Optional[torch.Tensor]:
+        """Force-eager Cayley solve over every ortho FeRALinear.
+
+        ``torch.linalg.solve`` lowers to cusolver's LU + TRSM, which is
+        NOT stream-capturable: under ``compile_inductor_mode='reduce-overhead'``
+        (cudagraph capture), Inductor inlines ``_linalg_solve_ex`` into
+        the captured partition and the capture aborts with
+        ``cudaErrorStreamCaptureUnsupported``. The ``@torch.compiler.disable``
+        annotation makes Dynamo emit a graph break here so the solve
+        runs eagerly between two cudagraph-captured regions. The
+        ``cudagraph_trees`` allocator stitches the cross-partition
+        tensor (``R``) at a stable address pool across replays —
+        autograd remains intact because ``@compiler.disable`` is a
+        tracing concern only.
+
+        Returns ``None`` (caller short-circuits) when there are no ortho
+        FeRALinears or when block-swap has split S_q across devices.
+        """
+        layers = self._ortho_layers
+        if not layers:
+            return None
+        device = layers[0].S_q.device
+        for l in layers:
+            if l.S_q.device != device:
+                # Block-swap mid-flight; FeRALinear.forward's per-layer
+                # inline solve covers it. compile_mode='full' isn't
+                # compatible with block swap anyway.
+                return None
+        S_q = torch.stack([l.S_q for l in layers], dim=0)  # (N, E, r, r)
+        S_p = torch.stack([l.S_p for l in layers], dim=0)  # (N, E, r, r)
+        skew = torch.cat([S_q, S_p], dim=1)                 # (N, 2E, r, r)
+        A = skew - skew.transpose(-2, -1)
+        eye = self._eye_r                                    # (r, r) broadcasts
+        return torch.linalg.solve(eye + A, eye - A)          # (N, 2E, r, r)
+
+    def forward(self) -> None:
+        """Compute gates + batched Cayley R. Called from inside the
+        compiled ``_run_blocks``. Writes ``self._gates`` / ``._R_q`` /
+        ``._R_p`` as side effects so downstream FeRALinears can read
+        them via their back-ref to this prep.
+
+        Two regions cross the compile boundary here:
+          1. router(FEI) → gates: captured by cudagraph (matmul + softmax).
+          2. ``_batched_cayley_eager`` is ``@compiler.disable``'d so
+             the cusolver call runs eager and the surrounding cudagraph
+             partitions stitch together via ``cudagraph_trees``.
+        """
+        router = self._router_ref
+        if router is None:
+            # Pre-wire path (shouldn't happen in normal flow — apply_to
+            # wires before any forward). Keep the read sites safe.
+            self._gates = None
+        else:
+            self._gates = router(self._fei)
+
+        R = self._batched_cayley_eager()
+        if R is None:
+            self._R_q = None
+            self._R_p = None
+            return
+        E = self.num_experts
+        self._R_q = R[:, :E]  # (N, E, r, r)
+        self._R_p = R[:, E:]  # (N, E, r, r)
+
+    def clear_step_state(self) -> None:
+        """Drop the per-step transients between training steps so the
+        captured graph's tensors don't outlive their step (mirrors the
+        rationale postfix.py spells out for cudagraph hygiene)."""
+        self._gates = None
+        self._R_q = None
+        self._R_p = None
 
 
 class FeRALinear(nn.Module):
@@ -295,11 +504,32 @@ class FeRALinear(nn.Module):
         self.org_module = base_layer
 
         # Per-Linear cache of the active routing weights for this step.
-        # Set once per DiT forward by ``FeRANetwork.prepare_forward``;
-        # the same tensor reference is shared by every FeRALinear in the
-        # network so a single write propagates to all sites.
+        # Used by the *legacy* (non-inline) path: set once per DiT forward
+        # by ``FeRANetwork.prepare_forward._push_gates``; the same tensor
+        # reference is shared by every FeRALinear so a single write
+        # propagates to all sites. The inline-prep path leaves this at
+        # ``None`` and reads from ``self._fera_prep._gates`` instead.
         self._routing_weights: Optional[torch.Tensor] = None
         self._multiplier: float = 1.0
+
+        # Cached Cayley-rotated bases (legacy ortho-mode path). Populated
+        # once per step by ``FeRANetwork._compute_cayley_all`` from a
+        # single batched solve. Inline-prep mode leaves these at ``None``
+        # and reads from ``self._fera_prep._R_q[self._idx]`` /
+        # ``._R_p[self._idx]`` instead. Save-time ``_cayley_effective``
+        # and tests that bypass ``prepare_forward`` still get the
+        # in-forward fallback solve.
+        self._cached_R_q: Optional[torch.Tensor] = None
+        self._cached_R_p: Optional[torch.Tensor] = None
+
+        # Inline-prep back-ref (set in ``FeRANetwork.apply_to`` when
+        # ``inline_prep=True``) and the layer's slot in the prep's
+        # ortho-layer list (set by ``FeRAPrep.wire``). Non-Module so
+        # state_dict doesn't see them. ``None`` means "legacy path" —
+        # ``forward`` reads ``_routing_weights`` / ``_cached_R_q``
+        # exactly like before.
+        self._fera_prep: Optional["FeRAPrep"] = None
+        self._idx: int = -1
 
     def apply_to(self) -> None:
         """LoRA-style monkey-patch — keep ``org_module`` in place inside the
@@ -372,7 +602,21 @@ class FeRALinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self.org_forward(x)
-        w = self._routing_weights
+
+        # Two read paths for the per-step routing state:
+        #   * legacy (``_fera_prep is None``): read from ``self._routing_weights``
+        #     / ``self._cached_R_q`` — populated eagerly by
+        #     ``FeRANetwork.prepare_forward``.
+        #   * inline (``_fera_prep`` wired): read from the prep's per-step
+        #     graph-SSA attributes — populated inside the compiled
+        #     ``_run_blocks`` so cudagraph capture sees stable addresses.
+        # Both paths produce numerically-identical outputs; only the
+        # autograd region and tensor lifetimes differ.
+        prep = self._fera_prep
+        if prep is None:
+            w = self._routing_weights
+        else:
+            w = prep._gates
         if w is None or self._multiplier == 0.0:
             return base_out
 
@@ -395,13 +639,29 @@ class FeRALinear(nn.Module):
             #     (E, r) = (3, 4) since the (in→r) projection now runs once.
             # Mathematically bit-equivalent to the naive form; only the
             # autograd graph shape and FLOP count change.
-            skew = torch.cat([self.S_q, self.S_p], dim=0)
-            A = skew - skew.transpose(-2, -1)
-            eye = self._eye_r
-            R = torch.linalg.solve(eye + A, eye - A)  # (2E, r, r)
+            # Hot-path lookup priority:
+            #   1. Inline prep (compiled-scope batched solve, this step's
+            #      graph SSA).
+            #   2. Legacy ``_compute_cayley_all`` cache (eager-scope batched
+            #      solve from ``prepare_forward``).
+            #   3. In-forward fallback solve (save-time / unit tests /
+            #      block-swap mid-flight).
+            # All three produce mathematically-identical R_q / R_p; only
+            # the autograd graph topology differs.
             E = self.num_experts
-            R_q = R[:E]  # (E, r, r)
-            R_p = R[E:]  # (E, r, r)
+            if prep is not None and prep._R_q is not None:
+                R_q = prep._R_q[self._idx]  # (E, r, r)
+                R_p = prep._R_p[self._idx]  # (E, r, r)
+            else:
+                R_q = self._cached_R_q
+                R_p = self._cached_R_p
+            if R_q is None or R_p is None:
+                skew = torch.cat([self.S_q, self.S_p], dim=0)
+                A = skew - skew.transpose(-2, -1)
+                eye = self._eye_r
+                R = torch.linalg.solve(eye + A, eye - A)  # (2E, r, r)
+                R_q = R[:E]  # (E, r, r)
+                R_p = R[E:]  # (E, r, r)
 
             compute_dtype = self.P_basis.dtype  # follow OrthoLoRA Exp convention
             x_c = x if x.dtype == compute_dtype else x.to(compute_dtype)
@@ -663,6 +923,12 @@ def create_network(
     ortho_raw = kwargs.get("fera_ortho", False)
     ortho = ortho_raw if isinstance(ortho_raw, bool) else str(ortho_raw).lower() == "true"
     ortho_init_std = float(kwargs.get("fera_ortho_init_std", 0.02))
+    inline_prep_raw = kwargs.get("fera_inline_prep", False)
+    inline_prep = (
+        inline_prep_raw
+        if isinstance(inline_prep_raw, bool)
+        else str(inline_prep_raw).lower() == "true"
+    )
 
     network = FeRANetwork(
         unet=unet,
@@ -678,6 +944,7 @@ def create_network(
         target_modules_regex=target_modules,
         ortho=ortho,
         ortho_init_std=ortho_init_std,
+        inline_prep=inline_prep,
     )
     return network
 
@@ -751,6 +1018,16 @@ def create_network_from_weights(
     else:
         ortho = str(ortho_kw).lower() == "true"
     ortho_init_std = float(kwargs.get("fera_ortho_init_std", 0.02))
+    # ``inline_prep`` is a *runtime* knob (cudagraph compatibility under
+    # compile_mode='full' + reduce-overhead), not a saved hyperparameter.
+    # We accept it from the loader kwargs but don't read from metadata —
+    # the stamp lives there for reproducibility only.
+    inline_prep_kw = kwargs.get("fera_inline_prep", False)
+    inline_prep = (
+        inline_prep_kw
+        if isinstance(inline_prep_kw, bool)
+        else str(inline_prep_kw).lower() == "true"
+    )
 
     network = FeRANetwork(
         unet=unet,
@@ -766,6 +1043,7 @@ def create_network_from_weights(
         target_modules_regex=str(target_modules),
         ortho=bool(ortho),
         ortho_init_std=float(ortho_init_std),
+        inline_prep=bool(inline_prep),
     )
     return network, weights_sd
 
@@ -795,6 +1073,7 @@ class FeRANetwork(nn.Module):
         target_modules_regex: str = _DEFAULT_TARGET_REGEX,
         ortho: bool = False,
         ortho_init_std: float = 0.02,
+        inline_prep: bool = False,
     ):
         super().__init__()
         self.rank = int(rank)
@@ -809,6 +1088,21 @@ class FeRANetwork(nn.Module):
         self.target_modules_regex = str(target_modules_regex)
         self.ortho = bool(ortho)
         self.ortho_init_std = float(ortho_init_std)
+        # FECL composability gate: the inline path holds gates / R as graph
+        # SSA inside the compiled ``_run_blocks``. The FECL base pass
+        # overwrites that SSA with zeros, and there's no clean way to
+        # restore the pre-base SSA tensors for backward recompute (a fresh
+        # eager re-run would build a different autograd graph). Until that's
+        # resolved (plan.md Phase 2+), force-legacy whenever FECL is on so
+        # users don't get silent gradient corruption.
+        if bool(inline_prep) and float(fecl_weight) > 0.0:
+            logger.warning(
+                "FeRA: inline_prep=True is incompatible with fecl_weight > 0 "
+                "(would corrupt backward through the FECL base pass). "
+                "Falling back to legacy eager prep for this run."
+            )
+            inline_prep = False
+        self.inline_prep = bool(inline_prep)
 
         self.fei_indicator = FrequencyEnergyIndicator(
             num_bands=self.num_bands, fei_sigma_low_div=self.fei_sigma_low_div
@@ -829,6 +1123,19 @@ class FeRANetwork(nn.Module):
 
         # ModuleDict keyed by lora_name → FeRALinear; built in apply_to.
         self.fera_layers: nn.ModuleDict = nn.ModuleDict()
+
+        # Inline-prep submodule. Owns the FEI buffer + the batched Cayley
+        # solve, and runs *inside* the compiled ``_run_blocks`` via
+        # ``Anima._fera_prep_ref``. Built unconditionally so resume/load
+        # paths can rebind via ``object.__setattr__`` if needed; left
+        # unwired (``_router_ref is None``, ``_ortho_layers == ()``) when
+        # ``inline_prep`` is off, in which case ``forward()`` is never
+        # called on it and it carries zero per-step cost.
+        self.prep = FeRAPrep(
+            num_experts=self.num_experts,
+            num_bands=self.num_bands,
+            rank=self.rank,
+        )
 
         # Most recent gates produced by the router this step. Useful for
         # telemetry / FECL.
@@ -859,7 +1166,7 @@ class FeRANetwork(nn.Module):
             f"{self.num_experts} experts × rank {self.rank} each, "
             f"router({self.num_bands} bands → {self.router_hidden} → "
             f"{self.num_experts}, τ={self.router_tau:.2f}), "
-            f"σ_low = min(H,W)/{self.fei_sigma_low_div:.1f}, "
+            f"σ_low = min(H_lat,W_lat)/{self.fei_sigma_low_div:.1f}, "
             f"fecl_weight={self.fecl_weight}, {ortho_str}"
         )
 
@@ -930,9 +1237,39 @@ class FeRANetwork(nn.Module):
             fera_layer.apply_to()
             self.fera_layers[lora_name] = fera_layer
 
+        if self.inline_prep:
+            # Wire prep against the network's router and the ordered list
+            # of FeRALinears (the ortho subset is filtered inside ``wire``).
+            self.prep.wire(self.router, list(self.fera_layers.values()))
+            # Back-reference from each FeRALinear to the prep. Use
+            # ``object.__setattr__`` so the assignment doesn't go through
+            # ``nn.Module.__setattr__`` and register prep as a submodule of
+            # each FeRALinear (which would emit duplicate state_dict keys
+            # for the prep's buffers).
+            for layer in self.fera_layers.values():
+                object.__setattr__(layer, "_fera_prep", self.prep)
+            # Install the back-reference on the DiT so its ``_run_blocks``
+            # can call ``prep()`` at the top of the compiled stack. The
+            # setter uses ``object.__setattr__`` for the same reason: prep
+            # is owned by us, not by the DiT.
+            if hasattr(unet, "set_fera_prep"):
+                unet.set_fera_prep(self.prep)
+            else:
+                logger.warning(
+                    "FeRA inline_prep: DiT lacks ``set_fera_prep`` — the "
+                    "prep won't run inside ``_run_blocks`` and the cudagraph "
+                    "stability fix is inactive. Falling back to legacy "
+                    "eager prep semantics."
+                )
+                self.inline_prep = False
+                # Unwire to keep FeRALinear.forward on the legacy read path.
+                for layer in self.fera_layers.values():
+                    object.__setattr__(layer, "_fera_prep", None)
+
         logger.info(
             f"FeRA: patched {len(self.fera_layers)} Linears (base modules "
-            f"remain in DiT tree for block-swap compatibility)"
+            f"remain in DiT tree for block-swap compatibility); "
+            f"inline_prep={self.inline_prep}"
         )
 
     # ---- per-step routing ----------------------------------------------------
@@ -942,25 +1279,109 @@ class FeRANetwork(nn.Module):
         for layer in self.fera_layers.values():
             layer.set_routing_weights(weights)
 
-    def prepare_forward(self, z_t: torch.Tensor) -> torch.Tensor:
-        """Compute FEI on ``z_t``, run the router, broadcast gates.
+    def _compute_cayley_all(self) -> None:
+        """Batched Cayley solve across every ortho FeRALinear, once per step.
 
-        Call once per DiT forward — before ``set_hydra_sigma`` would fire
-        in the existing pipeline. Squeezes a singleton temporal dim if the
-        caller hands a 5D Anima latent.
+        Hoists ``torch.linalg.solve`` out of the FeRALinear forward (and
+        thus out of the compiled block stack) and collapses N independent
+        per-Linear solves into one batched kernel launch.
 
-        Returns the ``(B, num_experts)`` routing weights so callers can
-        log / record them if useful.
+        All ortho FeRALinears share ``(num_experts, rank)`` by construction,
+        so per-layer ``(S_q, S_p)`` of shape ``(E, r, r)`` stack cleanly
+        into ``(N, E, r, r)`` and the Cayley transform becomes a single
+        ``(N, 2E, r, r)`` solve. Per-layer ``R_q`` / ``R_p`` views are
+        scattered back as plain attributes; ``FeRALinear.forward`` reads
+        them directly.
+
+        Autograd through ``R`` back to ``S_q`` / ``S_p`` is preserved —
+        ``torch.stack`` and the per-layer slice both keep grad history,
+        so backward routes grads to the unstacked ``nn.Parameter`` of each
+        Linear correctly.
+
+        Skipped (callers fall back to the in-forward inline solve) when:
+          * no ortho FeRALinears (nothing to batch),
+          * S_q tensors live on multiple devices (block swap mid-flight).
+        """
+        layers = [l for l in self.fera_layers.values() if l.ortho]
+        if not layers:
+            return
+        device = layers[0].S_q.device
+        for l in layers:
+            if l.S_q.device != device:
+                # Block swap mid-flight: per-layer fallback solve covers it.
+                # Compile-mode='full' isn't compatible with block swap anyway,
+                # so the optimization's primary target (single compile graph)
+                # doesn't apply here.
+                return
+        # Stack along a new leading dim. Shape: (N, E, r, r).
+        S_q = torch.stack([l.S_q for l in layers], dim=0)
+        S_p = torch.stack([l.S_p for l in layers], dim=0)
+        # Single batched solve over (N · 2E, r, r) at the kernel level.
+        skew = torch.cat([S_q, S_p], dim=1)            # (N, 2E, r, r)
+        A = skew - skew.transpose(-2, -1)
+        eye = layers[0]._eye_r                          # (r, r), broadcasts
+        R = torch.linalg.solve(eye + A, eye - A)        # (N, 2E, r, r)
+        E = self.num_experts
+        R_q_all = R[:, :E]                              # (N, E, r, r)
+        R_p_all = R[:, E:]                              # (N, E, r, r)
+        for i, layer in enumerate(layers):
+            # Views into R — backward through the slice sums grad back to
+            # the unstacked S_q/S_p Parameters via stack's autograd rule.
+            layer._cached_R_q = R_q_all[i]
+            layer._cached_R_p = R_p_all[i]
+
+    def prepare_forward(self, z_t: torch.Tensor) -> Optional[torch.Tensor]:
+        """Compute FEI on ``z_t`` and stage the per-step routing state.
+
+        Two code paths share this entry:
+
+        * **Legacy** (``inline_prep=False``): runs the router and the
+          batched Cayley solve eagerly and assigns the results to per-Linear
+          Python attributes. ``FeRALinear.forward`` reads them. Returns
+          the gates so callers can log them. Used by older configs and by
+          paths where the prep submodule isn't wired into the DiT.
+        * **Inline** (``inline_prep=True``): only updates the FEI buffer
+          on the prep submodule via ``_copy_or_rebind_buffer`` (stable
+          address for cudagraph). The router + batched Cayley fire later,
+          *inside* the compiled ``Anima._run_blocks``, when the DiT calls
+          ``self._fera_prep_ref()`` at the top of the block stack. Returns
+          ``None`` because gates are graph SSA at this point.
+
+        Call once per DiT forward, before ``set_hydra_sigma`` would fire
+        in the existing pipeline. Squeezes a singleton temporal dim if
+        the caller hands a 5D Anima latent.
         """
         if z_t.dim() == 5:
             z_t = z_t.squeeze(2)
         fei = self.fei_indicator(z_t)  # (B, num_bands), fp32
-        # Router runs in fp32 — gate weights cast in FeRALinear.forward.
-        gates = self.router(fei)
         self._last_fei = fei.detach()
+
+        if self.inline_prep:
+            # Pointer-stable FEI copy. Gates / R are computed inside the
+            # compiled block stack so cudagraph captures their addresses
+            # via allocator-managed SSA — no Python attribute address to
+            # invalidate per step.
+            self.prep.set_fei(fei)
+            # Router-stats accumulator wants gates; under inline prep we
+            # don't have them eagerly. Run a small no-grad router pass
+            # for telemetry only — cheap, doesn't enter the autograd
+            # graph that backward replays. The compiled prep computes
+            # the *training* gates separately inside _run_blocks.
+            with torch.no_grad():
+                gates_for_stats = self.router(fei)
+            self._last_gates = gates_for_stats.detach()
+            self._update_router_stats(self._last_gates)
+            return None
+
+        # Legacy path — eager router + Cayley.
+        gates = self.router(fei)
         self._last_gates = gates.detach()
         self._update_router_stats(self._last_gates)
         self._push_gates(gates)
+        # Batched Cayley solve — moves linalg.solve out of the compiled
+        # block stack and collapses N solves to one. No-op when ortho mode
+        # isn't active or block swap is mid-flight (forward falls back).
+        self._compute_cayley_all()
         return gates
 
     @torch.no_grad()
@@ -1036,8 +1457,19 @@ class FeRANetwork(nn.Module):
 
     def clear_routing(self) -> None:
         """Drop routing weights (and step caches) — used at the end of an
-        inference loop or before a base-pass FECL forward."""
+        inference loop or before a base-pass FECL forward.
+
+        FECL composition: in legacy mode this puts every FeRALinear's
+        ``_routing_weights`` to ``None`` so the FECL no-grad forward
+        sees the frozen base. In inline mode FECL is blocked at
+        ``__init__`` (see the ``fecl_weight > 0`` branch), so reaching
+        this from a base-pass site is a legacy-only flow — but we still
+        zero the prep's transient ``_gates`` for inference-loop cleanup
+        paths that call this between samples.
+        """
         self._push_gates(None)
+        if self.inline_prep:
+            self.prep.clear_step_state()
         self._last_fei = None
         self._last_gates = None
 
@@ -1047,6 +1479,8 @@ class FeRANetwork(nn.Module):
         cudagraph rationale."""
         self._last_fei = None
         self._last_gates = None
+        if self.inline_prep:
+            self.prep.clear_step_state()
 
     # ---- FECL (optional aux loss; opt-in via fecl_weight > 0) ---------------
 
@@ -1238,6 +1672,7 @@ class FeRANetwork(nn.Module):
             metadata["ss_fera_target_modules"] = self.target_modules_regex
             metadata["ss_fera_ortho"] = str(self.ortho)
             metadata["ss_fera_ortho_init_std"] = str(self.ortho_init_std)
+            metadata["ss_fera_inline_prep"] = str(self.inline_prep)
 
             model_hash, legacy_hash = precalculate_safetensors_hashes(
                 state_dict, metadata

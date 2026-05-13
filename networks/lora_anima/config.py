@@ -16,11 +16,15 @@ from __future__ import annotations
 import ast
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Type
+from typing import Any, Dict, List, Literal, Mapping, Optional, Type, Union
 
 import torch
 
 from networks.lora_modules import LoRAModule
+
+# Three-axis routing config (see plan2.md §three-axis-config).
+MoEStyle = Union[Literal[False], Literal["shared_A"], Literal["independent_A"]]
+RouterSource = Literal["input", "sigma", "fei", "none"]
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,40 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).lower() == "true"
+
+
+def _as_moe_style(value: Any) -> MoEStyle:
+    """Parse the three-valued ``use_moe_style`` kwarg.
+
+    Accepts: ``False`` / ``None`` / ``"false"`` / ``""`` → ``False``;
+    the literal strings ``"shared_A"`` / ``"independent_A"`` pass through.
+    """
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        v = value.strip()
+        if v.lower() in ("false", "none", ""):
+            return False
+        if v in ("shared_A", "independent_A"):
+            return v
+    raise ValueError(
+        f"use_moe_style={value!r}: expected False, 'shared_A', or 'independent_A'."
+    )
+
+
+def _as_router_source(value: Any) -> RouterSource:
+    """Parse the ``router_source`` kwarg. Empty / None → ``"none"``."""
+    if value is None:
+        return "none"
+    if isinstance(value, str):
+        v = value.strip()
+        if v == "":
+            return "none"
+        if v in ("input", "sigma", "fei", "none"):
+            return v  # type: ignore[return-value]
+    raise ValueError(
+        f"router_source={value!r}: expected 'input', 'sigma', 'fei', or 'none'."
+    )
 
 
 def _as_str_list(value: Any) -> Optional[List[str]]:
@@ -204,21 +242,32 @@ class LoRANetworkCfg:
     # narrower mid/high-σ bands while expert count per band stays equal.
     sigma_bucket_boundaries: Optional[List[float]] = None
 
-    # σ-conditional router (hydra add-on)
-    use_sigma_router: bool = False
+    # Three-axis routing config (see plan2.md). ``use_moe_style`` picks the
+    # expert layout — ``False`` (no experts), ``"shared_A"`` (Hydra: one
+    # ``lora_down`` + per-expert ``lora_up``), ``"independent_A"`` (FeRA:
+    # stacked per-expert ``lora_down`` and ``lora_up``). ``route_per_layer``
+    # picks router location: ``True`` (today's Hydra per-Linear default) or
+    # ``False`` (one network-level router, FeRA-style). ``router_source``
+    # picks the gate input: ``"input"`` (per-Linear input vector — only valid
+    # with ``route_per_layer=True``), ``"sigma"`` (sinusoidal σ features),
+    # ``"fei"`` (FEI(z_t) simplex), or ``"none"``.
+    use_moe_style: MoEStyle = False
+    route_per_layer: bool = False
+    router_source: RouterSource = "none"
+
+    # σ-conditional router parameters (consumed when ``router_source="sigma"``).
     sigma_feature_dim: int = 16
     sigma_hidden_dim: int = 128
     sigma_router_layers: Optional[str] = None
     sigma_router_names: Optional[List[str]] = None
 
-    # FEI-conditional router (FeRA-style content-aware routing on hydra).
+    # FEI-conditional router parameters (consumed when ``router_source="fei"``).
     # ``fei_feature_dim`` defaults to 2 = the simplex ``(e_low, e_high)`` from
     # ``library.runtime.fei.compute_fei_2band``. Default
     # ``fei_sigma_low_div=4.0`` for σ_low scaling — chosen by the
     # 2026-05-13 dataset sweep on real training latents (highest
     # std(e_low) at low/mid t). 8.0 remains a Pareto choice. See
     # ``[[project_fera_probe_2band_decision]]``.
-    use_fei_router: bool = False
     fei_feature_dim: int = 2
     fei_sigma_low_div: float = 4.0
     fei_router_layers: Optional[str] = None
@@ -334,14 +383,12 @@ class LoRANetworkCfg:
             )
             sigma_bucket_boundaries = None
 
-        use_sigma_router = _as_bool(kwargs.get("use_sigma_router"))
         sigma_feature_dim = int(kwargs.get("sigma_feature_dim", 16))
         sigma_hidden_dim = int(kwargs.get("sigma_hidden_dim", 128))
         sigma_router_layers = kwargs.get(
             "sigma_router_layers", _DEFAULT_SIGMA_ROUTER_LAYERS
         )
 
-        use_fei_router = _as_bool(kwargs.get("use_fei_router"))
         fei_feature_dim = int(kwargs.get("fei_feature_dim", 2))
         fei_sigma_low_div = float(kwargs.get("fei_sigma_low_div", 4.0))
         # Default to the same regex as σ — most users want one FEI router per
@@ -349,6 +396,74 @@ class LoRANetworkCfg:
         fei_router_layers = kwargs.get(
             "fei_router_layers", _DEFAULT_SIGMA_ROUTER_LAYERS
         )
+
+        # Three-axis routing resolution. Translate legacy ``use_hydra`` /
+        # ``use_sigma_router`` / ``use_fei_router`` kwargs into the new axes
+        # when the new keys aren't supplied. Legacy + new in the same call
+        # is rejected so the cutover can't silently mask a stale TOML.
+        use_hydra_legacy = _as_bool(kwargs.get("use_hydra"))
+        use_sigma_router_legacy_raw = kwargs.get("use_sigma_router")
+        use_fei_router_legacy_raw = kwargs.get("use_fei_router")
+        use_sigma_router_legacy = _as_bool(use_sigma_router_legacy_raw)
+        use_fei_router_legacy = _as_bool(use_fei_router_legacy_raw)
+
+        raw_moe_style = kwargs.get("use_moe_style")
+        raw_route_per_layer = kwargs.get("route_per_layer")
+        raw_router_source = kwargs.get("router_source")
+        new_axes_supplied = any(
+            v is not None for v in (raw_moe_style, raw_route_per_layer, raw_router_source)
+        )
+        legacy_axes_supplied = (
+            use_sigma_router_legacy_raw is not None
+            or use_fei_router_legacy_raw is not None
+        )
+        if new_axes_supplied and legacy_axes_supplied:
+            raise ValueError(
+                "Mixing legacy router kwargs (use_sigma_router / use_fei_router) "
+                "with new three-axis kwargs (use_moe_style / route_per_layer / "
+                "router_source) is not supported. Pick one. "
+                "See plan2.md §three-axis-config for the new keys."
+            )
+
+        if raw_moe_style is not None:
+            use_moe_style: MoEStyle = _as_moe_style(raw_moe_style)
+        elif use_hydra_legacy:
+            use_moe_style = "shared_A"
+        else:
+            use_moe_style = False
+
+        if raw_router_source is not None:
+            router_source: RouterSource = _as_router_source(raw_router_source)
+        elif use_fei_router_legacy:
+            router_source = "fei"
+        elif use_sigma_router_legacy:
+            router_source = "sigma"
+        elif use_moe_style is not False:
+            # Hydra's default router input is the per-Linear input vector.
+            router_source = "input"
+        else:
+            router_source = "none"
+
+        if raw_route_per_layer is not None:
+            route_per_layer = _as_bool(raw_route_per_layer)
+        else:
+            # Legacy Hydra is per-layer routing; no-MoE means no router at all.
+            route_per_layer = use_moe_style is not False
+
+        # Validate impossible combos.
+        if use_moe_style is False and (
+            route_per_layer or router_source != "none"
+        ):
+            raise ValueError(
+                "Routing config requires use_moe_style != False; got "
+                f"use_moe_style={use_moe_style!r}, route_per_layer={route_per_layer}, "
+                f"router_source={router_source!r}."
+            )
+        if not route_per_layer and router_source == "input":
+            raise ValueError(
+                "router_source='input' requires route_per_layer=True — no "
+                "network-level 'input' signal exists per DiT forward."
+            )
 
         reg_dims_str = kwargs.get("network_reg_dims")
         reg_dims = _parse_kv_pairs(reg_dims_str, is_int=True) if reg_dims_str else None
@@ -389,11 +504,12 @@ class LoRANetworkCfg:
             num_sigma_buckets=num_sigma_buckets,
             specialize_experts_by_sigma_buckets=specialize_experts_by_sigma_buckets,
             sigma_bucket_boundaries=sigma_bucket_boundaries,
-            use_sigma_router=use_sigma_router,
+            use_moe_style=use_moe_style,
+            route_per_layer=route_per_layer,
+            router_source=router_source,
             sigma_feature_dim=sigma_feature_dim,
             sigma_hidden_dim=sigma_hidden_dim,
             sigma_router_layers=sigma_router_layers,
-            use_fei_router=use_fei_router,
             fei_feature_dim=fei_feature_dim,
             fei_sigma_low_div=fei_sigma_low_div,
             fei_router_layers=fei_router_layers,
@@ -421,7 +537,7 @@ class LoRANetworkCfg:
         specialize_experts_by_sigma_buckets: bool = False,
         num_sigma_buckets: Optional[int] = None,
         sigma_bucket_boundaries: Optional[List[float]] = None,
-        use_fei_router: bool = False,
+        use_fei_router_legacy: bool = False,
         fei_feature_dim: int = 0,
         fei_sigma_low_div: Optional[float] = None,
         fei_router_names: Optional[List[str]] = None,
@@ -439,7 +555,29 @@ class LoRANetworkCfg:
         ``save_weights`` — the partition leaves no tensor footprint
         (``_expert_band`` / ``_sigma_edges`` are non-persistent) so it has to
         be reconstructed from those scalars at load time.
+
+        Translates the legacy boolean ``use_fei_router_legacy`` /
+        ``sigma_router_names`` presence into the new three-axis fields. Task
+        #4 will switch save metadata to stamp the new keys directly; until
+        then the legacy stamps drive this translation.
         """
+        # Translate legacy stamps → new axes. The from-weights path always
+        # runs on an existing Hydra/OrthoHydra checkpoint, so MoE+per-layer
+        # are pinned for any checkpoint that carries router state.
+        if is_hydra_or_ortho_hydra:
+            use_moe_style: MoEStyle = "shared_A"
+            route_per_layer = True
+            if use_fei_router_legacy:
+                router_source: RouterSource = "fei"
+            elif sigma_router_names:
+                router_source = "sigma"
+            else:
+                router_source = "input"
+        else:
+            use_moe_style = False
+            route_per_layer = False
+            router_source = "none"
+
         return cls(
             lora_dim=4,
             alpha=1.0,
@@ -452,7 +590,9 @@ class LoRANetworkCfg:
             reft_layers=sorted(reft_block_indices) if has_reft else "all",
             num_experts=hydra_num_experts if is_hydra_or_ortho_hydra else 4,
             channel_scales_dict=channel_scales_dict,
-            use_sigma_router=bool(sigma_router_names),
+            use_moe_style=use_moe_style,
+            route_per_layer=route_per_layer,
+            router_source=router_source,
             sigma_feature_dim=sigma_feature_dim_detected or 128,
             sigma_hidden_dim=128,
             sigma_router_names=sigma_router_names,
@@ -462,7 +602,6 @@ class LoRANetworkCfg:
                 int(num_sigma_buckets) if num_sigma_buckets else 3
             ),
             sigma_bucket_boundaries=sigma_bucket_boundaries,
-            use_fei_router=bool(use_fei_router),
             fei_feature_dim=int(fei_feature_dim),
             fei_sigma_low_div=(
                 float(fei_sigma_low_div) if fei_sigma_low_div is not None else 4.0

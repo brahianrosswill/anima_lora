@@ -7,13 +7,17 @@ class it instantiates and a ``save_variant`` label consumed by
 
 Flag precedence (evaluated top to bottom, first match wins):
 
-    use_hydra + use_ortho → ortho_hydra
-    use_hydra             → hydra
-    use_dora              → dora
-    use_ortho             → ortho
-    (none)                → lora
+    use_moe_style="independent_A"        → stacked_experts_global_fei
+    use_moe_style="shared_A" + use_ortho → ortho_hydra
+    use_moe_style="shared_A"             → hydra
+    use_hydra (legacy) + use_ortho       → ortho_hydra
+    use_hydra (legacy)                   → hydra
+    use_dora                             → dora
+    use_ortho                            → ortho
+    (none)                               → lora
 
-Ambiguous combinations (``use_dora`` + ``use_ortho``, …) raise.
+Ambiguous combinations (``use_dora`` + ``use_ortho``, ``use_hydra`` + ``use_moe_style``,
+…) raise.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from networks.lora_modules import (
     LoRAModule,
     OrthoHydraLoRAExpModule,
     OrthoLoRAExpModule,
+    StackedExpertsLoRAModule,
 )
 
 
@@ -96,6 +101,12 @@ SHARED_KWARG_FLAGS: Tuple[str, ...] = (
     "use_dora",
     "use_hydra",
     "use_ortho",
+    # New three-axis routing config (see plan2.md §three-axis-config). Drives
+    # `LoRANetworkCfg.from_kwargs` translation; `resolve_network_spec` also
+    # dispatches on `use_moe_style="independent_A"` → `stacked_experts_global_fei`.
+    "use_moe_style",
+    "route_per_layer",
+    "router_source",
     # ReFT add-on (composes with any variant)
     "add_reft",
     "reft_dim",
@@ -181,6 +192,18 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         kwarg_flags=_HYDRA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),
+    # FeRA paper-faithful: independent-A stacked experts, single network-level
+    # router fed by FEI(z_t). See plan2.md §three-axis-config — selected via
+    # ``use_moe_style="independent_A"``. Save handler stub: task #4 wires the
+    # real serialization path; until then this spec is reachable only via the
+    # gui-methods/fera.toml variant (also a task #6 deliverable).
+    "stacked_experts_global_fei": NetworkSpec(
+        name="stacked_experts_global_fei",
+        module_class=StackedExpertsLoRAModule,
+        save_variant="stacked_experts_global_fei",
+        kwarg_flags=_HYDRA_KWARG_FLAGS,
+        post_init=_post_init_hydra,
+    ),
     "dora": NetworkSpec(
         name="dora",
         module_class=DoRAModule,
@@ -217,18 +240,51 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
 
     Precedence is deterministic and documented in the module docstring.
     Raises on mutually-exclusive combinations.
+
+    Honors the new ``use_moe_style`` axis (plan2.md): ``"independent_A"``
+    routes to ``stacked_experts_global_fei`` (FeRA); ``"shared_A"`` plus
+    ``use_ortho`` routes to ``ortho_hydra``; bare ``"shared_A"`` routes to
+    ``hydra``. Legacy ``use_hydra=true`` is still accepted and treated as
+    ``use_moe_style="shared_A"``.
     """
     use_hydra = _parse_bool_flag(kwargs, "use_hydra")
     use_dora = _parse_bool_flag(kwargs, "use_dora")
     use_ortho = _parse_bool_flag(kwargs, "use_ortho")
 
-    # Reject ambiguous combinations early so the user gets a clear message
-    # instead of silently-picked winner.
-    if use_dora and (use_hydra or use_ortho):
+    # New axis: ``use_moe_style`` = False / "shared_A" / "independent_A".
+    raw_moe = kwargs.get("use_moe_style")
+    if isinstance(raw_moe, str):
+        moe_style = raw_moe.strip()
+        if moe_style.lower() in ("false", "none", ""):
+            moe_style = ""
+    elif raw_moe is False or raw_moe is None:
+        moe_style = ""
+    else:
         raise ValueError(
-            "use_dora is mutually exclusive with use_hydra / use_ortho"
+            f"use_moe_style={raw_moe!r}: expected False, 'shared_A', or 'independent_A'."
+        )
+    if moe_style not in ("", "shared_A", "independent_A"):
+        raise ValueError(
+            f"use_moe_style={raw_moe!r}: expected False, 'shared_A', or 'independent_A'."
         )
 
+    # Reject ambiguous combinations early so the user gets a clear message
+    # instead of silently-picked winner.
+    if use_dora and (use_hydra or use_ortho or moe_style):
+        raise ValueError(
+            "use_dora is mutually exclusive with use_hydra / use_ortho / use_moe_style"
+        )
+    if moe_style and use_hydra:
+        raise ValueError(
+            "use_hydra (legacy) and use_moe_style cannot both be set — pick one."
+        )
+
+    if moe_style == "independent_A":
+        return NETWORK_REGISTRY["stacked_experts_global_fei"]
+    if moe_style == "shared_A":
+        return (
+            NETWORK_REGISTRY["ortho_hydra"] if use_ortho else NETWORK_REGISTRY["hydra"]
+        )
     if use_hydra and use_ortho:
         return NETWORK_REGISTRY["ortho_hydra"]
     if use_hydra:

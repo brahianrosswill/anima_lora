@@ -168,26 +168,26 @@ def create_network(
         logger.info(
             f"Timestep-dependent rank masking: min_rank={cfg.min_rank}, alpha={cfg.alpha_rank_scale}"
         )
-    if cfg.use_sigma_router and network._sigma_router_hits > 0:
+    if cfg.router_source == "sigma" and network._sigma_router_hits > 0:
         logger.info(
             f"σ-conditional HydraLoRA router: {network._sigma_router_hits} modules "
             f"with sinusoidal(σ) concatenated to router input (feat={cfg.sigma_feature_dim}), "
             f"per-bucket balance w={cfg.per_bucket_balance_weight}, buckets={cfg.num_sigma_buckets}"
         )
-    elif cfg.use_sigma_router:
+    elif cfg.router_source == "sigma":
         logger.warning(
-            "use_sigma_router=true but no modules matched sigma_router_layers "
+            "router_source='sigma' but no modules matched sigma_router_layers "
             f"regex {cfg.sigma_router_layers!r} — σ-routing is inactive"
         )
-    if cfg.use_fei_router and network._fei_router_hits > 0:
+    if cfg.router_source == "fei" and network._fei_router_hits > 0:
         logger.info(
             f"FEI-conditional HydraLoRA router: {network._fei_router_hits} modules "
             f"with FEI ({cfg.fei_feature_dim}-band simplex) concatenated to router input "
             f"(σ_low_div={cfg.fei_sigma_low_div}). FeRA-style content-aware routing."
         )
-    elif cfg.use_fei_router:
+    elif cfg.router_source == "fei":
         logger.warning(
-            "use_fei_router=true but no modules matched fei_router_layers "
+            "router_source='fei' but no modules matched fei_router_layers "
             f"regex {cfg.fei_router_layers!r} — FEI-routing is inactive"
         )
     if cfg.specialize_experts_by_sigma_buckets:
@@ -604,7 +604,7 @@ def create_network_from_weights(
         specialize_experts_by_sigma_buckets=band_partition_on,
         num_sigma_buckets=band_num_buckets if band_partition_on else None,
         sigma_bucket_boundaries=band_boundaries if band_partition_on else None,
-        use_fei_router=use_fei_router_meta,
+        use_fei_router_legacy=use_fei_router_meta,
         fei_feature_dim=int(fei_feature_dim_detected or 0),
         fei_sigma_low_div=fei_sigma_low_div_meta,
         fei_router_names=fei_router_names,

@@ -74,6 +74,21 @@ output_name = "anima_fera"
 #                          experts start farther apart at the cost of
 #                          larger initial Cayley rotation away from
 #                          identity. 0.02 is conservative; bench-tune.
+#   fera_inline_prep     : run router + batched Cayley solve *inside* the
+#                          compiled ``Anima._run_blocks`` so cudagraph
+#                          (``compile_inductor_mode=reduce-overhead``)
+#                          sees stable allocator-managed addresses for
+#                          gates / R_q / R_p. Without this the legacy
+#                          path's per-step Python attribute writes
+#                          force cudagraph to re-record every step,
+#                          which manifests as a 0% GPU plummet under
+#                          ``compile_mode='full'``. Auto-disabled when
+#                          ``fera_fecl_weight > 0`` (FECL base-pass
+#                          stomps the inline SSA gates and there's no
+#                          clean restore for backward recompute — see
+#                          plan.md edge-cases). Default ``true`` once
+#                          parity tests passed
+#                          (tests/test_fera_inline_prep.py, 2026-05-13).
 network_args = [
     "fera_num_experts=4",
     "fera_num_bands=2",
@@ -83,6 +98,7 @@ network_args = [
     "fera_target_modules=.*\\.(qkv_proj|q_proj|kv_proj|output_proj|layer[12])$",
     "fera_ortho=true",
     "fera_ortho_init_std=0.1",
+    "fera_inline_prep=true",
 ]
 
 # Bucket-adaptive σ_low. 4.0 chosen from the 2026-05-13 dataset sweep
@@ -102,12 +118,12 @@ checkpointing_epochs = 4
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
-
+# network_router_lr_scale = 10
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-# compile_mode = "full"
-# compile_inductor_mode = "reduce-overhead"
+compile_mode = "full"
+compile_inductor_mode = "default"
 
 blocks_to_swap=0
 
