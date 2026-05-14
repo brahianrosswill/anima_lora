@@ -304,7 +304,9 @@ def invert_tail(
         s_init = torch.randn(K, dtype=torch.float32, device=device) * cfg.init_std
     s = torch.nn.Parameter(s_init)
 
-    optimizer = torch.optim.AdamW([s], lr=cfg.lr, weight_decay=0.0)
+    optimizer = torch.optim.AdamW(
+        [s], lr=cfg.lr, weight_decay=0.0, fused=(device.type == "cuda")
+    )
     scheduler = (
         torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=cfg.steps, eta_min=cfg.lr * 0.01

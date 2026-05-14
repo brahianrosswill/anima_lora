@@ -22,7 +22,6 @@ resized_image_dir = "post_image_dataset/resized"
 lora_cache_dir = "post_image_dataset/lora"
 
 optimizer_type = "AdamW"
-optimizer_args = ["fused=True"]
 lr_scheduler = "constant"
 
 timestep_sampling = "sigmoid"

@@ -697,7 +697,11 @@ def main():
     )
 
     # --- Optimizer ---
-    optimizer = torch.optim.AdamW(model.pooled_text_proj.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(
+        model.pooled_text_proj.parameters(),
+        lr=args.lr,
+        fused=torch.cuda.is_available(),
+    )
 
     # Warmup + cosine annealing
     warmup_steps = (
