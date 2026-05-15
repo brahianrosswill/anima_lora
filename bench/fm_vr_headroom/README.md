@@ -89,7 +89,7 @@ Anima's latent space and you should not pursue the training A/B.
 
 ```bash
 uv run python bench/fm_vr_headroom/run_bench.py \
-    --dit models/diffusion_models/anima-preview3-base.safetensors \
+    --dit models/diffusion_models/anima-base-v1.0.safetensors \
     --data_dir post_image_dataset/lora \
     --num_samples 16 --num_timesteps 8 --num_noise 64 \
     --bucket 1024x1024 \
@@ -104,7 +104,7 @@ For a smoke run that finishes in seconds:
 
 ```bash
 uv run python bench/fm_vr_headroom/run_bench.py \
-    --dit models/diffusion_models/anima-preview3-base.safetensors \
+    --dit models/diffusion_models/anima-base-v1.0.safetensors \
     --data_dir post_image_dataset/lora \
     --num_samples 2 --num_timesteps 3 --num_noise 8 \
     --label smoke

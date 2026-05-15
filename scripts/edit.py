@@ -10,7 +10,7 @@ Usage:
         --image path/to/source.png \
         --prompt_src "1girl, smile, school_uniform" \
         --prompt_tar "1girl, smile, school_uniform, double peace" \
-        --dit models/diffusion_models/anima-preview3-base.safetensors \
+        --dit models/diffusion_models/anima-base-v1.0.safetensors \
         --text_encoder models/text_encoders/qwen_3_06b_base.safetensors \
         --vae models/vae/qwen_image_vae.safetensors \
         --save_path output/tests/directedit/
@@ -26,7 +26,7 @@ v1.1 status:
     the block subset (default = all but the final block, SD3.5-style).
   * Mask blending: still inactive — ``--mask`` reserved (paper Eq. 12 v3).
   * Inversion runs at ``--invert_guidance 1.0`` (no CFG); the edit pass uses
-    the user's ``--guidance_scale`` (default 4.0, Anima preview3 standard).
+    the user's ``--guidance_scale`` (default 4.0, Anima base-v1.0 standard).
 """
 
 from __future__ import annotations

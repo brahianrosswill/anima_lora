@@ -60,7 +60,7 @@ def cmd_preprocess_te(extra):
             "--qwen3",
             "models/text_encoders/qwen_3_06b_base.safetensors",
             "--dit",
-            "models/diffusion_models/anima-preview3-base.safetensors",
+            "models/diffusion_models/anima-base-v1.0.safetensors",
             "--caption_shuffle_variants",
             shuffle_variants,
             "--caption_tag_dropout_rate",

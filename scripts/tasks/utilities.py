@@ -94,7 +94,7 @@ def cmd_distill_mod(extra):
             "--data_dir",
             "post_image_dataset/lora",
             "--dit_path",
-            "models/diffusion_models/anima-preview3-base.safetensors",
+            "models/diffusion_models/anima-base-v1.0.safetensors",
             "--output_path",
             "output/ckpt/pooled_text_proj.safetensors",
             "--attn_mode",

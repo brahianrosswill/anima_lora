@@ -382,7 +382,7 @@ def main():
     parser.add_argument(
         "--dit_path",
         type=str,
-        default="models/diffusion_models/anima-preview3-base.safetensors",
+        default="models/diffusion_models/anima-base-v1.0.safetensors",
     )
     parser.add_argument(
         "--output_path",
@@ -390,7 +390,7 @@ def main():
         default="output/ckpt/pooled_text_proj.safetensors",
         help="Where to save the trained projection weights",
     )
-    parser.add_argument("--iterations", type=int, default=30000)
+    parser.add_argument("--iterations", type=int, default=1500)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(

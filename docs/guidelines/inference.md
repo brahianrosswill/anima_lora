@@ -4,7 +4,7 @@
 
 ```bash
 python inference.py \
-    --dit models/diffusion_models/anima-preview3-base.safetensors \
+    --dit models/diffusion_models/anima-base-v1.0.safetensors \
     --text_encoder models/text_encoders/qwen_3_06b_base.safetensors \
     --vae models/vae/qwen_image_vae.safetensors \
     --lora_weight output/anima_lora.safetensors \

@@ -17,8 +17,8 @@ def parse_args(description: str | None = None) -> argparse.Namespace:
     p.add_argument(
         "--dit",
         type=str,
-        default="models/diffusion_models/anima-preview3-base.safetensors",
-        help="DiT .safetensors path (default: anima-preview3-base).",
+        default="models/diffusion_models/anima-base-v1.0.safetensors",
+        help="DiT .safetensors path (default: anima-base-v1.0).",
     )
     p.add_argument(
         "--lora_weight",

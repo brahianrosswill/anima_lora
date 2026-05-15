@@ -73,7 +73,7 @@ bench exists.
 ```bash
 # Minimal — base DiT + a LoRA-family adapter
 uv run python bench/vr_grad_diagnostics/run_bench.py \
-    --dit models/diffusion_models/anima-preview3-base.safetensors \
+    --dit models/diffusion_models/anima-base-v1.0.safetensors \
     --adapter output/ckpt/<your-vr-trained-lora>.safetensors \
     --data_dir post_image_dataset/lora \
     --num_batches 24 \
@@ -95,7 +95,7 @@ Smoke run (~minutes):
 
 ```bash
 uv run python bench/vr_grad_diagnostics/run_bench.py \
-    --dit models/diffusion_models/anima-preview3-base.safetensors \
+    --dit models/diffusion_models/anima-base-v1.0.safetensors \
     --adapter output/ckpt/<your-lora>.safetensors \
     --num_batches 4 --num_timesteps 2 --label smoke
 ```

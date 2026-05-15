@@ -34,7 +34,7 @@ Populate inverted `s` vectors first:
 
 ```bash
 uv run python scripts/inversion/invert_postfix_tail.py \
-    --dit models/diffusion_models/anima-preview3-base.safetensors \
+    --dit models/diffusion_models/anima-base-v1.0.safetensors \
     --image_dir post_image_dataset/lora \
     --num_images 128 --shuffle --seed 0 \
     --K 48 --basis svd_te \

@@ -38,7 +38,7 @@ _MODEL_GROUPS: list[tuple[str, str, list[str]]] = [
         "anima",
         "model_anima",
         [
-            "models/diffusion_models/anima-preview3-base.safetensors",
+            "models/diffusion_models/anima-base-v1.0.safetensors",
             "models/text_encoders/qwen_3_06b_base.safetensors",
             "models/vae/qwen_image_vae.safetensors",
         ],

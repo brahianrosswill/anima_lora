@@ -293,7 +293,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument(
-        "--dit", default="models/diffusion_models/anima-preview3-base.safetensors"
+        "--dit", default="models/diffusion_models/anima-base-v1.0.safetensors"
     )
     p.add_argument(
         "--text_encoder",
