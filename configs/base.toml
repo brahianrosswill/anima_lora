@@ -80,3 +80,8 @@ validation_seed = 42
   image_dir = '{resized_image_dir}'
   cache_dir = '{lora_cache_dir}'
   num_repeats = 1
+  # Walk subfolders under image_dir. Caches and resized output stay flat in
+  # cache_dir / resized_image_dir (stem-keyed filenames), so image stems must
+  # be unique across the entire tree. Preprocess scripts accept the matching
+  # --recursive flag.
+  # recursive = true

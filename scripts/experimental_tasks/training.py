@@ -10,11 +10,32 @@ vars + extra argv into the right ``train.py`` (via ``accelerate launch``) or
 from __future__ import annotations
 
 from scripts.tasks import preprocess as _preprocess
-from scripts.tasks._common import PY, run, train
+from scripts.tasks._common import PY, _preset, bespoke_preset_flags, run, train
 
 
 def cmd_postfix(extra):
     train("postfix", extra)
+
+
+def cmd_turbo(extra):
+    """Turbo Anima — Decoupled DMD2 distillation (proposal: docs/proposal/turbo_anima_dmd_lora.md).
+
+    Bypasses train.py / accelerate (single-GPU bespoke loop, like distill-mod).
+    Reads ``configs/methods/turbo.toml``; trailing args are forwarded so user
+    CLI flags override TOML values, e.g.::
+
+        make exp-turbo                                  # defaults: rank=48, 4-step
+        make exp-turbo ARGS="--student_rank 64 --iterations 5000"
+        make exp-turbo ARGS="--single_prompt_idx 0"     # Phase 0 single-prompt overfit
+
+    Honors ``PRESET`` (default ``default``) — translates ``blocks_to_swap`` and
+    ``gradient_checkpointing`` from ``configs/presets.toml`` into CLI flags so
+    ``make exp-turbo PRESET=low_vram`` enables grad ckpt + unsloth offload, and
+    ``PRESET=half/quarter/tenth`` shrinks the dataset via ``--sample_ratio``.
+    ``extra`` is appended last, so user CLI overrides win.
+    """
+    preset_flags = bespoke_preset_flags(_preset())
+    run([PY, "scripts/distill_turbo.py", *preset_flags, *extra])
 
 
 def cmd_fera(extra):

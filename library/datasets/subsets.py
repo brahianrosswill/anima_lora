@@ -177,10 +177,12 @@ class BaseSubset:
         validation_split: Optional[float] = 0.0,
         validation_split_num: int = 0,
         resize_interpolation: Optional[str] = None,
+        recursive: bool = False,
     ) -> None:
         self.image_dir = image_dir
         self.alpha_mask = alpha_mask if alpha_mask is not None else False
         self.num_repeats = num_repeats
+        self.recursive = recursive
         self.sample_ratio = sample_ratio
         self.caption_separator = caption_separator
         self.keep_tokens = keep_tokens
@@ -247,6 +249,7 @@ class DreamBoothSubset(BaseSubset):
         resize_interpolation: Optional[str] = None,
         mask_dir: Optional[str] = None,
         cache_dir: Optional[str] = None,
+        recursive: bool = False,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified"
 
@@ -276,6 +279,7 @@ class DreamBoothSubset(BaseSubset):
             validation_split=validation_split,
             validation_split_num=validation_split_num,
             resize_interpolation=resize_interpolation,
+            recursive=recursive,
         )
 
         self.is_reg = is_reg

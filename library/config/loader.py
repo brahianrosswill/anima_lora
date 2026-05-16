@@ -75,6 +75,7 @@ class BaseSubsetParams:
     validation_split: float = 0.0
     validation_split_num: int = 0
     resize_interpolation: Optional[str] = None
+    recursive: bool = False
 
 
 @dataclass
@@ -190,6 +191,7 @@ class ConfigSanitizer:
         "alpha_mask": bool,
         "cache_dir": str,
         "mask_dir": str,
+        "recursive": bool,
     }
     # datasets schema
     DATASET_ASCENDABLE_SCHEMA = {

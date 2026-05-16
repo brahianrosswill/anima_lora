@@ -331,6 +331,7 @@ def run_validation(
             else:
                 if model.blocks_to_swap:
                     model.prepare_block_swap_before_forward()
+                torch.compiler.cudagraph_mark_step_begin()
                 with torch.autocast("cuda", dtype=dtype):
                     teacher_pred = model.forward_mini_train_dit(
                         noisy,
@@ -339,11 +340,13 @@ def run_validation(
                         padding_mask=padding_mask,
                         skip_pooled_text_proj=True,
                     )
+                teacher_pred = teacher_pred.clone()
                 if teacher_cache is not None:
                     teacher_cache.put(i, s_idx, teacher_pred)
 
             if model.blocks_to_swap:
                 model.prepare_block_swap_before_forward()
+            torch.compiler.cudagraph_mark_step_begin()
             with torch.autocast("cuda", dtype=dtype):
                 student_pred = model.forward_mini_train_dit(
                     noisy,
@@ -391,7 +394,7 @@ def main():
         help="Where to save the trained projection weights",
     )
     parser.add_argument("--iterations", type=int, default=25000)
-    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(
         "--blocks_to_swap",
@@ -440,7 +443,7 @@ def main():
         "--compile_mode",
         type=str,
         choices=["blocks", "full"],
-        default="full",
+        default="blocks",
         help="'blocks': compile each block._forward (default). "
         "'full': compile the constant-shape _run_blocks stack (one CUDAGraph "
         "across buckets — requires --no_grad_ckpt and --blocks_to_swap 0).",
@@ -448,7 +451,7 @@ def main():
     parser.add_argument(
         "--compile_inductor_mode",
         type=str,
-        default="reduce-overhead",
+        default="",
         help="Inductor preset, e.g. 'reduce-overhead' for CUDAGraphs",
     )
     parser.add_argument(
@@ -919,6 +922,8 @@ def main():
             else:
                 if model.blocks_to_swap:
                     model.prepare_block_swap_before_forward()
+                # Fresh CUDA-graph epoch so teacher_pred outlives the student call.
+                torch.compiler.cudagraph_mark_step_begin()
                 with torch.no_grad(), torch.autocast("cuda", dtype=dtype):
                     teacher_pred = model.forward_mini_train_dit(
                         noisy_input,
@@ -927,6 +932,9 @@ def main():
                         padding_mask=padding_mask,
                         skip_pooled_text_proj=True,
                     )
+                # Detach from the static buffer in case a future caller adds
+                # a third compiled-fn invocation in the same step.
+                teacher_pred = teacher_pred.clone()
                 if teacher_cache is not None:
                     for i in range(B):
                         if cached_list[i] is None:
@@ -940,6 +948,7 @@ def main():
             if model.blocks_to_swap:
                 model.prepare_block_swap_before_forward()
             uncond_crossattn = torch.zeros_like(crossattn_emb)
+            torch.compiler.cudagraph_mark_step_begin()
             with torch.autocast("cuda", dtype=dtype):
                 student_pred = model.forward_mini_train_dit(
                     noisy_input,

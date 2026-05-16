@@ -29,6 +29,7 @@ from library.datasets.image_utils import (
     validate_interpolation_fn,
     IMAGE_TRANSFORMS,
     glob_images,
+    _assert_unique_stems,
     is_disk_cached_latents_is_expected,
     load_image,
     trim_and_resize_if_required,
@@ -1763,16 +1764,27 @@ class DreamBoothDataset(BaseDataset):
                     meta["resolution"] for meta in metas.values()
                 ]
             else:
-                img_paths = glob_images(subset.image_dir, "*")
+                recursive = getattr(subset, "recursive", False)
+                img_paths = glob_images(subset.image_dir, "*", recursive=recursive)
+                if recursive:
+                    _assert_unique_stems(img_paths, source_label=subset.image_dir)
                 sizes: List[Optional[Tuple[int, int]]] = [None] * len(img_paths)
 
                 strategy = LatentsCachingStrategy.get_strategy()
                 if strategy is not None:
                     logger.info("get image size from name of cache files")
 
-                    npz_paths = glob.glob(
-                        os.path.join(subset.image_dir, "*" + strategy.cache_suffix)
-                    )
+                    if recursive:
+                        npz_paths = glob.glob(
+                            os.path.join(
+                                subset.image_dir, "**", "*" + strategy.cache_suffix
+                            ),
+                            recursive=True,
+                        )
+                    else:
+                        npz_paths = glob.glob(
+                            os.path.join(subset.image_dir, "*" + strategy.cache_suffix)
+                        )
                     npz_paths.sort(key=lambda item: item.rsplit("_", maxsplit=2)[0])
                     npz_path_index = 0
 
