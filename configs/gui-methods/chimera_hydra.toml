@@ -52,13 +52,15 @@ num_experts_freq = 2
 balance_loss_weight = 1.0
 balance_w_content = 2e-7
 balance_w_freq = 1e-7
+network_content_router_lr_scale = 10
+network_freq_router_lr_scale = 2.0
 
 # FreqRouter input. FEI = 2-band simplex; σ-features = 16-dim sinusoidal.
 # Total input dim = 18 (within the proposal's "F ≈ 32" target).
 fei_feature_dim = 2
 fei_sigma_low_div = 4.0
 sigma_feature_dim = 0
-freq_router_init_std = 0.1
+freq_router_init_std = 0.02
 
 # Routing scope: same default as the other hydra variants — every Linear
 # matched by the regex becomes a chimera leaf; non-matching layers fall
@@ -69,7 +71,7 @@ output_name = "anima_chimera"
 
 blocks_to_swap = 0
 
-use_cmmd = true
+use_cmmd = false
 
 [variant]
 family = "chimera"

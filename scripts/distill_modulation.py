@@ -390,7 +390,7 @@ def main():
         default="output/ckpt/pooled_text_proj.safetensors",
         help="Where to save the trained projection weights",
     )
-    parser.add_argument("--iterations", type=int, default=2500)
+    parser.add_argument("--iterations", type=int, default=25000)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(
@@ -466,7 +466,7 @@ def main():
     parser.add_argument(
         "--warmup",
         type=float,
-        default=0.05,
+        default=0.02,
         help="Warmup steps: int >= 1 for absolute steps, float < 1 for ratio of iterations",
     )
     parser.add_argument(

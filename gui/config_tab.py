@@ -650,6 +650,7 @@ class ConfigTab(QWidget):
 
         self.log.clear()
         self._reset_progress()
+        self._progress_tracker.mark_starting(t("starting"))
         self._log(f"> python {' '.join(args)}\n")
         self._running_mode = "test"
         self._proc.start(python, args)
@@ -697,6 +698,7 @@ class ConfigTab(QWidget):
 
         self.log.clear()
         self._reset_progress()
+        self._progress_tracker.mark_starting(t("starting"))
         self._log(
             f"> METHOD={variant} METHODS_SUBDIR=gui-methods python {' '.join(args)}\n"
         )
@@ -740,6 +742,10 @@ class ConfigTab(QWidget):
         self.new_variant_btn.setEnabled(False)
         self.log.clear()
         self._reset_progress()
+        # Indeterminate "busy" bar bridges the gap until the child's first
+        # tqdm line — without it, Windows reads the gray button + still GUI
+        # as "Not Responding" during the multi-second torch import.
+        self._progress_tracker.mark_starting(t("starting"))
         QApplication.processEvents()
 
         try:
