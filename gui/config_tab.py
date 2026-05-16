@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -748,9 +749,11 @@ class ConfigTab(QWidget):
         self._progress_tracker.mark_starting(t("starting"))
         QApplication.processEvents()
 
-        try:
-            import accelerate.commands.accelerate_cli  # noqa: F401
-        except ImportError:
+        # find_spec, not import: actually importing accelerate transitively
+        # imports torch, which blocks the GUI thread for several seconds on
+        # Windows and freezes the marquee. find_spec just resolves the module
+        # location without executing it.
+        if importlib.util.find_spec("accelerate.commands.accelerate_cli") is None:
             QMessageBox.warning(self, t("error"), t("accelerate_not_found"))
             self._restore_train_idle()
             return
