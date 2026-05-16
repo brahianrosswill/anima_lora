@@ -5,5 +5,5 @@
 Concentrates capacity where structure is being decided. The mask is training-only — inference uses full rank at every t by design — so the saved <code>.safetensors</code> is a regular bakeable LoRA. See <code>docs/methods/timestep_mask.md</code>.</p>
 <p>Toggle: <code>use_timestep_mask = true</code>.</p>
 <p><b>Variants</b><br>
-&bull; <b>tlora</b> &mdash; pure T-LoRA, no orthogonality constraint.<br>
-&bull; <b>tlora_ortho</b> &mdash; T-LoRA stacked on OrthoLoRA (<code>use_ortho = true</code> + <code>use_timestep_mask = true</code>). Recommended general-purpose pick when you want both rank-by-σ scheduling and orthogonal regularization. Still fully bakeable.</p>
+&bull; <b>tlora</b> &mdash; T-LoRA stacked on OrthoLoRA (<code>use_ortho = true</code> + <code>use_timestep_mask = true</code>). Default mergeable combo &mdash; rank-by-σ scheduling with orthogonal regularization. Fully bakeable.<br>
+&bull; <b>tlora-8gb</b> &mdash; same architecture, low-VRAM profile (gradient checkpointing + offload); pick this if you OOM on the default.</p>

@@ -38,6 +38,8 @@ _LEGACY_ROUTER_KEYS = ("use_hydra", "use_sigma_router", "use_fei_router")
 # budgets). Listed here as (family, output_name) pairs.
 _INTENTIONAL_OUTPUT_NAME_COLLISIONS: set[tuple[str, str]] = {
     ("lora", "anima"),
+    ("tlora", "anima_tlora_ortho"),
+    ("hydralora", "anima_hydra"),
 }
 
 

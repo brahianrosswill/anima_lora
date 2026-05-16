@@ -250,13 +250,13 @@ class MainWindow(QMainWindow):
         # Both sets stay alive across switches so subprocess state and log
         # buffers survive toggling between modes.
         # Standard set: the official adapter families — plain LoRA (with
-        # hardware variants), OrthoLoRA, T-LoRA (incl. T-LoRA + OrthoLoRA
-        # combo), HydraLoRA, and ReFT. Postfix and the image-conditioning
-        # adapters (IP-Adapter / EasyControl) live behind the experimental
-        # toggle.
+        # hardware variants), T-LoRA (stacked with OrthoLoRA by default, plus
+        # a low-VRAM sibling), HydraLoRA, and ReFT. Postfix and the
+        # image-conditioning adapters (IP-Adapter / EasyControl) live behind
+        # the experimental toggle.
         self.tabs = QTabWidget()
         self.tabs.addTab(
-            ConfigTab(methods=["lora", "ortholora", "tlora", "hydralora", "reft"]),
+            ConfigTab(methods=["lora", "tlora", "hydralora", "reft"]),
             t("tab_config"),
         )
         self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))

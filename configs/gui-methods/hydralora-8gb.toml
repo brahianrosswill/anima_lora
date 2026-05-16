@@ -1,10 +1,8 @@
-# gui-methods/hydralora_experimental.toml — HydraLoRA + σ-conditional router
-# with hard σ-bucket expert partition (experimental).
+# gui-methods/hydralora-8gb.toml — HydraLoRA tuned for 8GB cards.
 #
-# Same shared-A MoE shape as ``hydralora_sigma.toml``, but with
-# ``specialize_experts_by_sigma_buckets = true`` and an explicit bucket-edge
-# vector pinning experts to disjoint σ regions. Use when you want hard
-# specialization instead of soft σ-conditional routing.
+# Same architecture as `hydralora` (shared-A MoE + σ-bucket expert partition)
+# with the low-VRAM knobs flipped on — gradient checkpointing + Unsloth
+# offload checkpointing. Pick this if you OOM on the default hydralora variant.
 
 network_dim = 32
 network_alpha = 32
@@ -40,15 +38,16 @@ num_sigma_buckets = 3
 specialize_experts_by_sigma_buckets = true
 sigma_bucket_boundaries = [0.0, 0.5, 0.8, 1.0]
 
-output_name = "anima_hydra_experimental"
+output_name = "anima_hydra"
 
 blocks_to_swap = 0
+gradient_checkpointing = true
+unsloth_offload_checkpointing = true
 
 use_cmmd = false
 
 [variant]
 family = "hydralora"
-label = "HydraLoRA (sigma + buckets)"
-description = "HydraLoRA + hard sigma-bucket expert partition (experimental)."
+label = "HydraLoRA (8GB hardware)"
+description = "HydraLoRA tuned for low-VRAM cards (gradient checkpointing + offload)."
 order = 20
-experimental = true

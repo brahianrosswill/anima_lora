@@ -20,10 +20,10 @@ network_alpha = 32
 network_dim = 32
 
 
-learning_rate = 3e-5
-max_train_epochs = 2
-save_every_n_epochs = 2
-checkpointing_epochs = 2
+learning_rate = 2e-5
+max_train_epochs = 4
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -70,7 +70,7 @@ num_experts_freq = 2
 balance_loss_warmup_ratio = 0.2
 balance_loss_weight = 1.0
 balance_w_content = 2e-7
-balance_w_freq = 2e-7
+balance_w_freq = 5e-7
 network_content_router_lr_scale = 10
 network_freq_router_lr_scale = 2.0
 
@@ -92,7 +92,7 @@ freq_router_init_std = 0.02
 # leaf; non-matching layers fall back to OrthoLoRAExp (single-pool Cayley,
 # no router). Same default as the other hydra variants.
 router_targets = ".*(mlp\\.layer[12])$"
-# compile_mode = "full"
+compile_mode = "full"
 # compile_inductor_mode = "reduce-overhead"
 output_name = "anima_chimera"
 
