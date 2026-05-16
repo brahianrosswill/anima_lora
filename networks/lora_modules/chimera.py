@@ -330,14 +330,16 @@ class ChimeraHydraLoRAExpModule(BaseLoRAModule):
         Q_eff_f = R_q_f @ self.Q_basis_f  # (r, in)
 
         if self.use_custom_down_autograd and self.training:
-            # Avoids materializing a per-Linear rebalanced ``x_lora``
-            # (B, L, in) — saved-for-backward becomes the upstream ``x``
-            # (already held by the parent block) + the small ``inv_scale``
-            # buffer. ``x`` and ``inv_scale`` dedupe across the two
-            # Functions; only Q_eff_{c,f} are saved per call.
-            inv_scale = self.inv_scale if self._has_channel_scale else None
-            lx_c = lora_down_project(x, Q_eff_c, inv_scale).to(work)
-            lx_f = lora_down_project(x, Q_eff_f, inv_scale).to(work)
+            # Apply the SmoothQuant rebalance ONCE upstream of both pools so
+            # ``grad_x`` aggregates over `c` + `f` *before* the bf16 multiply
+            # backward — matches the legacy `_rebalance(x).then(F.linear×2)`
+            # autograd order bitwise. Saved-for-backward is the same shape /
+            # dtype as raw ``x`` (bf16), so no memory regression vs the prior
+            # per-pool scaled path; ``x_in`` dedupes across the two unscaled
+            # Functions, only Q_eff_{c,f} are saved per call.
+            x_in = self._rebalance(x.to(work)) if self._has_channel_scale else x
+            lx_c = lora_down_project(x_in, Q_eff_c, None).to(work)
+            lx_f = lora_down_project(x_in, Q_eff_f, None).to(work)
         else:
             x_lora = self._rebalance(x.to(work))
             lx_c = torch.nn.functional.linear(x_lora, Q_eff_c)
