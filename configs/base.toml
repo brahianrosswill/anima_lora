@@ -82,6 +82,6 @@ validation_seed = 42
   num_repeats = 1
   # Walk subfolders under image_dir. Caches and resized output stay flat in
   # cache_dir / resized_image_dir (stem-keyed filenames), so image stems must
-  # be unique across the entire tree. Preprocess scripts accept the matching
-  # --recursive flag.
-  # recursive = true
+  # be unique across the entire tree — the trainer enforces this and the
+  # matching preprocess scripts pass --recursive automatically.
+  recursive = true

@@ -7,6 +7,10 @@ import os
 from ._common import PY, _path, run
 
 
+# Subfolders under the source dir are walked by default — matches the
+# `recursive = true` subset default in configs/base.toml. Stems must stay
+# unique across the tree (cache filenames are stem-keyed and flat). Pass
+# `--no_recursive` (or edit configs) to opt out.
 def cmd_preprocess_resize(extra):
     run(
         [
@@ -17,6 +21,7 @@ def cmd_preprocess_resize(extra):
             "--dst",
             _path("resized_image_dir", "post_image_dataset/resized"),
             "--no_copy_captions",
+            "--recursive",
             *extra,
         ]
     )
@@ -37,6 +42,7 @@ def cmd_preprocess_vae(extra):
             "4",
             "--chunk_size",
             "64",
+            "--recursive",
             *extra,
         ]
     )
@@ -65,6 +71,7 @@ def cmd_preprocess_te(extra):
             shuffle_variants,
             "--caption_tag_dropout_rate",
             tag_dropout_rate,
+            "--recursive",
             *extra,
         ]
     )
@@ -111,13 +118,17 @@ def cmd_preprocess_pe(extra):
             _path("lora_cache_dir", "post_image_dataset/lora"),
             "--encoder",
             "pe",
+            "--recursive",
             *extra,
         ]
     )
 
 
 def cmd_preprocess(extra):
+    # PE features are intentionally NOT cached here — only REPA / IP-Adapter /
+    # CMMD need them, and those paths chain `preprocess-pe` explicitly (see
+    # `exp-ip-adapter-preprocess`). Leaving PE out keeps the default LoRA
+    # preprocess fast on machines that won't ever use the vision tower.
     cmd_preprocess_resize(extra)
     cmd_preprocess_vae(extra)
     cmd_preprocess_te(extra)
-    cmd_preprocess_pe(extra)

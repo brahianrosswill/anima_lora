@@ -139,7 +139,7 @@ def is_custom_variant(name: str) -> bool:
 
 def custom_variant_path(name: str) -> Path:
     """Resolve 'custom/<name>' (or bare '<name>') to the on-disk file path."""
-    stem = name[len("custom/"):] if name.startswith("custom/") else name
+    stem = name[len("custom/") :] if name.startswith("custom/") else name
     return CUSTOM_VARIANTS_DIR / f"{stem}.toml"
 
 
@@ -282,7 +282,7 @@ _BASIC = {
     "blocks_to_swap",
     "mixed_precision",
     "source_image_dir",
-    "resized_image_dir",
+    "lora_cache_dir",
     "output_dir",
     "use_valid",
 }
@@ -290,6 +290,7 @@ _BASIC = {
 
 def is_basic_field(key: str) -> bool:
     return key in _BASIC
+
 
 # flash4 is not supported yet (flash-attention-sm120 disabled)
 _ATTN_MODES = ["flex", "flash"]
@@ -325,9 +326,7 @@ def merged_method_preset(method: str, preset: str) -> tuple[dict, dict[str, str]
     return merged, origin
 
 
-def merged_gui_variant_preset(
-    variant: str, preset: str
-) -> tuple[dict, dict[str, str]]:
+def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str, str]]:
     """Merge base + preset + gui-methods/<variant>.toml. The GUI uses this
     instead of `merged_method_preset` so edits/training target the clean
     per-variant file, not the toggle-block methods/ tree."""
@@ -514,8 +513,8 @@ def confirm_existing_caches(
     or missing, so the call site can wrap every preprocess launch in this.
     """
     counts = count_preprocess_caches(cache_dir)
-    has_any = counts["latents"] > 0 or counts["te"] > 0 or (
-        require_pe and counts["pe"] > 0
+    has_any = (
+        counts["latents"] > 0 or counts["te"] > 0 or (require_pe and counts["pe"] > 0)
     )
     if not has_any:
         return True
@@ -575,10 +574,17 @@ def find_resumable_checkpoint(merged: dict) -> tuple[Path, int] | None:
 
 
 def _imgs(d: Path) -> list[Path]:
-    return (
-        sorted(p for p in d.iterdir() if p.suffix.lower() in IMAGE_EXTS)
-        if d.exists()
-        else []
+    """Return every image file under ``d`` (recursively).
+
+    Walks subfolders so users who organize ``image_dataset/`` by character /
+    series see the full pool in the browser. Cache filenames are stem-keyed
+    and flat, so stems must stay unique across the tree — the trainer enforces
+    this via ``_assert_unique_stems``; here we just sort and return.
+    """
+    if not d.exists():
+        return []
+    return sorted(
+        p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
 
 

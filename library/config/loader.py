@@ -430,6 +430,19 @@ def generate_dataset_group_by_blueprint(
             **asdict(dataset_blueprint.params),
             is_training_dataset=False,
         )
+        # When validation_split_num >= subset image count, split_train_val
+        # disables the val slice for that subset (see library/datasets/subsets.py).
+        # If every subset ended up empty, the val dataset has no images — drop
+        # it so make_buckets / CMMD don't run against a zero-image group.
+        if getattr(dataset, "num_train_images", 0) == 0:
+            logging.warning(
+                "Validation dataset is empty after applying validation_split_num "
+                "/ validation_split — skipping validation. (validation_split_num=%s, "
+                "validation_split=%s)",
+                dataset_blueprint.params.validation_split_num,
+                dataset_blueprint.params.validation_split,
+            )
+            continue
         val_datasets.append(dataset)
 
     def print_info(_datasets, dataset_type: str):

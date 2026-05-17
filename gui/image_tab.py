@@ -201,7 +201,9 @@ class BoxedCaptionEdit(QTextEdit):
         # ProportionalHeight = 1 (Qt's QTextBlockFormat.LineHeightTypes).
         # 140% gives clear vertical separation between wrapped lines without
         # making the editor feel stretched.
-        fmt.setLineHeight(140, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        fmt.setLineHeight(
+            140, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
+        )
         cursor.mergeBlockFormat(fmt)
 
     def viewportEvent(self, event) -> bool:  # noqa: N802 — Qt API
@@ -371,9 +373,7 @@ class CaptionVersionsDialog(QDialog):
         prev = self._history[row]["text"]
         html = _unified_diff_html(prev, self._current)
         if not html:
-            self.diff.setHtml(
-                f'<i style="color:#aaa;">{t("caption_diff_clean")}</i>'
-            )
+            self.diff.setHtml(f'<i style="color:#aaa;">{t("caption_diff_clean")}</i>')
         else:
             self.diff.setHtml(html)
         self.restore_btn.setEnabled(True)
@@ -395,6 +395,9 @@ class ImageViewerTab(QWidget):
         self._all_images: list[Path] = []  # unfiltered, alphabetical (from _imgs)
         self._images: list[Path] = []  # currently displayed (filter + sort applied)
         self._dirs = _image_dirs()
+        self._current_dir: Path | None = (
+            None  # base of the loaded directory (for relative labels)
+        )
         self._current_caption_path: Path | None = None
         self._disk_text: str = ""  # last value seen on disk (for diff baseline)
         self._suspend_dirty = False  # while we set text programmatically
@@ -516,6 +519,7 @@ class ImageViewerTab(QWidget):
         prev_stem: str | None = None
         if preserve_selection and self._current_caption_path is not None:
             prev_stem = self._current_caption_path.stem
+        self._current_dir = d
         self._all_images = _imgs(d)
         had_match = self._apply_filter_and_sort(prev_stem=prev_stem)
         if not self._images:
@@ -528,6 +532,24 @@ class ImageViewerTab(QWidget):
             # Fresh dir, no prior selection to restore — pick the first row.
             self.fl.setCurrentRow(0)
 
+    def _display_label(self, p: Path) -> str:
+        """``stem`` for top-level images, ``parent/stem`` for nested ones.
+
+        Lets users tell apart shards organized by character/series subfolder
+        in ``image_dataset/`` (the trainer enforces unique stems across the
+        tree, so the stem itself is still a valid unique key — the prefix is
+        purely a display affordance).
+        """
+        if self._current_dir is None:
+            return p.stem
+        try:
+            rel = p.relative_to(self._current_dir)
+        except ValueError:
+            return p.stem
+        if rel.parent == Path("."):
+            return p.stem
+        return f"{rel.parent.as_posix()}/{p.stem}"
+
     def _apply_filter_and_sort(self, *, prev_stem: str | None = None) -> bool:
         """Rebuild the visible list from ``_all_images`` using the current
         search text and sort direction.
@@ -539,7 +561,9 @@ class ImageViewerTab(QWidget):
         """
         q = self._search_text.strip().lower()
         if q:
-            visible = [p for p in self._all_images if q in p.stem.lower()]
+            visible = [
+                p for p in self._all_images if q in self._display_label(p).lower()
+            ]
         else:
             visible = list(self._all_images)
         if self._sort_desc:
@@ -562,7 +586,7 @@ class ImageViewerTab(QWidget):
         try:
             self.fl.clear()
             for p in visible:
-                self.fl.addItem(p.stem)
+                self.fl.addItem(self._display_label(p))
             if target_row >= 0:
                 self.fl.setCurrentRow(target_row)
             else:
@@ -727,9 +751,7 @@ class ImageViewerTab(QWidget):
                 _append_history(cp, self._disk_text)
             cp.write_text(new_text, encoding="utf-8")
         except OSError as e:
-            QMessageBox.warning(
-                self, t("error"), t("caption_save_failed", err=str(e))
-            )
+            QMessageBox.warning(self, t("error"), t("caption_save_failed", err=str(e)))
             return
         self._disk_text = new_text
         self._refresh_buttons()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import toml
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
@@ -295,15 +296,12 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _toggle_experimental(self, on: bool):
-        self.tab_stack.setCurrentWidget(
-            self.experimental_tabs if on else self.tabs
-        )
+        self.tab_stack.setCurrentWidget(self.experimental_tabs if on else self.tabs)
         self._update_experimental_btn_style(on)
 
     def _update_experimental_btn_style(self, on: bool):
         self.experimental_btn.setStyleSheet(
-            self._experimental_active_style if on
-            else self._experimental_idle_style
+            self._experimental_active_style if on else self._experimental_idle_style
         )
 
     def _open_guidebook(self):
@@ -327,8 +325,34 @@ class MainWindow(QMainWindow):
         )
 
 
+def _ensure_source_image_dir() -> None:
+    """Create the training source dir on launch so first-time users hit an
+    empty folder rather than a confusing "no images found" error from the
+    preprocess pipeline. Path comes from base.toml's `source_image_dir`
+    so preset/method overrides are respected; falls back to `image_dataset/`.
+    """
+    src = "image_dataset"
+    base_path = _REPO_ROOT / "configs" / "base.toml"
+    try:
+        if base_path.exists():
+            raw = toml.loads(base_path.read_text(encoding="utf-8"))
+            cfg_src = raw.get("source_image_dir")
+            if isinstance(cfg_src, str) and cfg_src.strip():
+                src = cfg_src
+    except (OSError, toml.TomlDecodeError):
+        pass
+    src_path = Path(src)
+    if not src_path.is_absolute():
+        src_path = _REPO_ROOT / src_path
+    try:
+        src_path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"warn: could not create {src_path}: {e}", file=sys.stderr)
+
+
 def main():
     load_language()
+    _ensure_source_image_dir()
     app = QApplication(sys.argv)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))

@@ -36,10 +36,17 @@ def split_train_val(
 
     Shuffle the dataset based on ``validation_seed`` (or current RNG when
     None), then carve off a validation slice. When ``validation_split_num > 0``
-    the count-based split wins over the fractional ``validation_split``
-    (clamped to ``len(paths)``); otherwise the original fraction-based split
-    is used. For example, with ``validation_split=0.2`` on 100 paths:
-    [0:80] = 80 training, [80:] = 20 validation.
+    the count-based split wins over the fractional ``validation_split``;
+    otherwise the original fraction-based split is used. For example, with
+    ``validation_split=0.2`` on 100 paths: [0:80] = 80 training, [80:] = 20
+    validation.
+
+    Guardrail: when ``validation_split_num >= len(paths)`` (or
+    ``validation_split >= 1.0``) the requested val slice would consume the
+    entire training pool — surface that as a warning and disable validation
+    for this subset (training gets all paths, val gets none). The val-side
+    caller's empty return is dropped by ``load_dreambooth_dir``'s "no images
+    found" branch, so the trainer simply runs without a val pass.
     """
     dataset = list(zip(paths, sizes))
     if validation_seed is not None:
@@ -55,8 +62,27 @@ def split_train_val(
     paths = list(paths)
     sizes = list(sizes)
 
+    val_would_exhaust = (
+        validation_split_num
+        and validation_split_num > 0
+        and validation_split_num >= len(paths)
+    ) or (validation_split and validation_split >= 1.0)
+    if val_would_exhaust:
+        if is_training_dataset:
+            # Log only on the training pass so the warning surfaces once per
+            # subset (split_train_val is called twice — once per is_training).
+            logger.warning(
+                "validation_split_num=%s / validation_split=%s would consume the "
+                "entire subset (size=%d); disabling validation for this subset.",
+                validation_split_num,
+                validation_split,
+                len(paths),
+            )
+            return paths, sizes
+        return [], []
+
     if validation_split_num and validation_split_num > 0:
-        n_val = min(int(validation_split_num), len(paths))
+        n_val = int(validation_split_num)
         split = len(paths) - n_val
     elif is_training_dataset:
         split = math.ceil(len(paths) * (1 - validation_split))
