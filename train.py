@@ -290,14 +290,6 @@ class AnimaTrainer:
         train_dataset_group: Union[DatasetGroup, MinimalDataset],
         val_dataset_group: Optional[DatasetGroup],
     ):
-        # FP8 is not supported yet -- force-disable all fp8 flags.
-        if getattr(args, "fp8_base", False):
-            logger.warning("fp8_base is not supported yet -- disabling.")
-            args.fp8_base = False
-        if getattr(args, "fp8_base_unet", False):
-            logger.warning("fp8_base_unet is not supported yet -- disabling.")
-            args.fp8_base_unet = False
-
         if (
             args.cache_text_encoder_outputs_to_disk
             and not args.cache_text_encoder_outputs
@@ -496,12 +488,6 @@ class AnimaTrainer:
             lora_multipliers=lora_multipliers,
             attn_softmax_scale=attn_softmax_scale,
         )
-
-        # FP8 base weights (fp8_base_unet) are not supported yet -- the fp8 path is disabled.
-        # if args.fp8_base_unet:
-        #     from library.anima.models import quantize_to_fp8
-        #     n = quantize_to_fp8(model)
-        #     logger.info(f"fp8_base_unet: quantized {n} linear layers to float8_e4m3fn")
 
         # Bucketed KV trimming for cross-attention
         model.trim_crossattn_kv = getattr(args, "trim_crossattn_kv", False)
@@ -1140,11 +1126,6 @@ class AnimaTrainer:
         first_param = next(text_encoder.parameters())
         first_param.requires_grad_(True)
 
-    def prepare_text_encoder_fp8(
-        self, index, text_encoder, te_weight_dtype, weight_dtype
-    ):
-        text_encoder.text_model.embeddings.to(dtype=weight_dtype)
-
     def get_text_encoders_train_flags(self, args, text_encoders):
         return (
             [True] * len(text_encoders)
@@ -1174,7 +1155,7 @@ class AnimaTrainer:
         return True
 
     def cast_unet(self, args):
-        return not getattr(args, "fp8_base_unet", False)
+        return True
 
     def call_unet(
         self,
@@ -1708,15 +1689,9 @@ class AnimaTrainer:
         for i, t_enc in enumerate(text_encoders):
             t_enc.requires_grad_(False)
 
-            # in case of cpu, dtype is already set to fp32 because cpu does not support fp8/fp16/bf16
+            # in case of cpu, dtype is already set to fp32 because cpu does not support fp16/bf16
             if t_enc.device.type != "cpu" and self.cast_text_encoder(args):
                 t_enc.to(dtype=te_weight_dtype)
-
-                # nn.Embedding not support FP8
-                if te_weight_dtype != weight_dtype:
-                    self.prepare_text_encoder_fp8(
-                        i, t_enc, te_weight_dtype, weight_dtype
-                    )
 
         # accelerator preparation (no deepspeed)
         if train_unet:
@@ -2628,12 +2603,6 @@ def setup_parser() -> argparse.ArgumentParser:
         default=None,
         nargs="*",
         help="learning rate for Text Encoder, can be multiple",
-    )
-    # FP8 is not supported yet -- flag is kept for CLI compatibility but force-disabled in assert_extra_args.
-    parser.add_argument(
-        "--fp8_base_unet",
-        action="store_true",
-        help="(not supported yet) use fp8 for U-Net (or DiT). This flag is force-disabled.",
     )
 
     add_network_arguments(parser)

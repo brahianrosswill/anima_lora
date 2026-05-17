@@ -136,7 +136,6 @@ def prepare_text_inputs(
         conds_cache[cache_key] = negative_embed
 
     if not (shared_models and "text_encoder" in shared_models):  # if loaded locally
-        # There is a bug text_encoder is not freed from GPU memory when text encoder is fp8
         del text_encoder
         gc.collect()
     else:  # if shared, move back to original device (likely CPU)

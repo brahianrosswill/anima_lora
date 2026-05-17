@@ -233,7 +233,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = p.parse_args()
-    args.fp8 = False
     args.compile = False
     return args
 

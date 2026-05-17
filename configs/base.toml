@@ -27,7 +27,6 @@ lr_scheduler = "constant"
 timestep_sampling = "sigmoid"
 discrete_flow_shift = 1.0
 mixed_precision = "bf16"
-# fp8_base_unet=true
 
 # gradient_checkpointing = true
 # unsloth_offload_checkpointing = true

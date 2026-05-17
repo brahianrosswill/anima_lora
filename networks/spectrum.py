@@ -239,7 +239,6 @@ def spectrum_denoise(
     lam: float = 0.1,
     stop_caching_step: int = -1,
     calibration_strength: float = 0.0,
-    autocast_enabled: bool = False,
     pgraft_network=None,
     lora_cutoff_step: Optional[int] = None,
     pooled_text_pos: Optional[torch.Tensor] = None,
@@ -316,14 +315,7 @@ def spectrum_denoise(
 
                 if actual:
                     # --- Full forward pass ---
-                    with (
-                        torch.no_grad(),
-                        torch.autocast(
-                            device_type=device.type,
-                            dtype=torch.bfloat16,
-                            enabled=autocast_enabled,
-                        ),
-                    ):
+                    with torch.no_grad():
                         _pos_kw = (
                             {"pooled_text_override": pooled_text_pos}
                             if pooled_text_pos is not None
@@ -343,14 +335,7 @@ def spectrum_denoise(
                     cond_fc.update(float(i), feat)
 
                     if do_cfg:
-                        with (
-                            torch.no_grad(),
-                            torch.autocast(
-                                device_type=device.type,
-                                dtype=torch.bfloat16,
-                                enabled=autocast_enabled,
-                            ),
-                        ):
+                        with torch.no_grad():
                             _neg_kw = (
                                 {"pooled_text_override": pooled_text_neg}
                                 if pooled_text_neg is not None

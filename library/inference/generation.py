@@ -221,7 +221,6 @@ def generate_body_tiled(
         er_sde = inference_utils.LCMSampler(sigmas, seed=args.seed, device=device)
 
     do_cfg = args.guidance_scale != 1.0
-    autocast_enabled = args.fp8
 
     # P-GRAFT: get network reference for mid-denoising cutoff
     pgraft_network = getattr(anima, "_pgraft_network", None)
@@ -275,14 +274,7 @@ def generate_body_tiled(
                     # Conditional pass
                     if anima.blocks_to_swap:
                         anima.prepare_block_swap_before_forward()
-                    with (
-                        torch.no_grad(),
-                        torch.autocast(
-                            device_type=device.type,
-                            dtype=torch.bfloat16,
-                            enabled=autocast_enabled,
-                        ),
-                    ):
+                    with torch.no_grad():
                         tile_pred = anima(
                             tile_latent,
                             t_expand,
@@ -300,14 +292,7 @@ def generate_body_tiled(
                     if do_cfg:
                         if anima.blocks_to_swap:
                             anima.prepare_block_swap_before_forward()
-                        with (
-                            torch.no_grad(),
-                            torch.autocast(
-                                device_type=device.type,
-                                dtype=torch.bfloat16,
-                                enabled=autocast_enabled,
-                            ),
-                        ):
+                        with torch.no_grad():
                             uncond_tile_pred = anima(
                                 tile_latent,
                                 t_expand,
@@ -528,7 +513,6 @@ def generate_body(
 
     # Denoising loop
     do_cfg = args.guidance_scale != 1.0
-    autocast_enabled = args.fp8
 
     # P-GRAFT: get network reference for mid-denoising cutoff
     pgraft_network = getattr(anima, "_pgraft_network", None)
@@ -561,7 +545,6 @@ def generate_body(
             lam=getattr(args, "spectrum_lam", 0.1),
             stop_caching_step=getattr(args, "spectrum_stop_caching_step", -1),
             calibration_strength=getattr(args, "spectrum_calibration", 0.0),
-            autocast_enabled=autocast_enabled,
             pgraft_network=pgraft_network,
             pooled_text_pos=_pooled_text_pos,
             pooled_text_neg=_pooled_text_neg,
@@ -591,14 +574,7 @@ def generate_body(
                     set_hydra_sigma(anima, t_expand)
                     compute_and_set_hydra_fei(anima, latents)
 
-                    with (
-                        torch.no_grad(),
-                        torch.autocast(
-                            device_type=device.type,
-                            dtype=torch.bfloat16,
-                            enabled=autocast_enabled,
-                        ),
-                    ):
+                    with torch.no_grad():
                         _pos_kw = (
                             {"pooled_text_override": _pooled_text_pos}
                             if _pooled_text_pos is not None
@@ -613,14 +589,7 @@ def generate_body(
                         )
 
                     if do_cfg:
-                        with (
-                            torch.no_grad(),
-                            torch.autocast(
-                                device_type=device.type,
-                                dtype=torch.bfloat16,
-                                enabled=autocast_enabled,
-                            ),
-                        ):
+                        with torch.no_grad():
                             _neg_kw = (
                                 {"pooled_text_override": _pooled_text_neg}
                                 if _pooled_text_neg is not None

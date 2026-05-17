@@ -160,6 +160,16 @@ def main():
     )
     parser.add_argument("--student_lr", type=float, default=-1.0)
     parser.add_argument("--fake_lr", type=float, default=-1.0)
+    parser.add_argument(
+        "--fake_steps_per_student_step",
+        type=int,
+        default=-1,
+        help="Number of fake (DM regularizer) updates per student step. "
+        "Standard DMD2 practice keeps the fake ahead of the moving x_pred "
+        "distribution; >1 gives the fake extra SGD iterations on resampled "
+        "(τ, ε) noise against the same x_pred.detach(). Default: TOML "
+        "(optim.fake_steps_per_student_step, default 1).",
+    )
     parser.add_argument("--alpha", type=float, default=-1.0, help="DMD CFG-bake α (overrides dmd.teacher_cfg)")
     parser.add_argument("--alpha_warmup_steps", type=int, default=-1)
     parser.add_argument("--student_steps", type=int, default=-1, help="Sampler step count baked into the student")
@@ -224,6 +234,13 @@ def main():
 
     student_lr = float(pick(args.student_lr, "optim.student_lr", 1e-5))
     fake_lr = float(pick(args.fake_lr, "optim.fake_lr", 1e-5))
+    fake_steps_per_student_step = int(
+        pick(args.fake_steps_per_student_step, "optim.fake_steps_per_student_step", 1)
+    )
+    if fake_steps_per_student_step < 1:
+        raise ValueError(
+            f"optim.fake_steps_per_student_step={fake_steps_per_student_step}: must be ≥ 1"
+        )
     alpha_warmup_steps = int(pick(args.alpha_warmup_steps, "optim.alpha_warmup_steps", 1000))
     weight_decay = float(_flatten(cfg, "optim.weight_decay", 0.0))
     grad_clip = float(_flatten(cfg, "optim.grad_clip", 1.0))
@@ -331,7 +348,11 @@ def main():
         )
 
     student_sched = _make_scheduler(student_opt, iterations, student_lr)
-    fake_sched = _make_scheduler(fake_opt, iterations, fake_lr)
+    # Fake gets ``fake_steps_per_student_step`` updates per outer iteration.
+    # Cosine should anneal across the actual update count, not the student's.
+    fake_sched = _make_scheduler(
+        fake_opt, iterations * fake_steps_per_student_step, fake_lr
+    )
 
     # ---------------- Dataset ----------------
     dataset = CachedDataset(
@@ -382,6 +403,7 @@ def main():
                     "student_steps": student_steps, "teacher_cfg": teacher_cfg,
                     "alpha_warmup_steps": alpha_warmup_steps,
                     "student_lr": student_lr, "fake_lr": fake_lr,
+                    "fake_steps_per_student_step": fake_steps_per_student_step,
                     "iterations": iterations, "batch_size": batch_size,
                     "tau_ca_strategy": tau_ca_strategy,
                     "tau_dm_strategy": tau_dm_strategy,
@@ -395,10 +417,33 @@ def main():
         logger.info(f"TB logs -> {run_log}")
 
     # ---------------- Training loop ----------------
+    # Per-step caches keyed by tensor shape. ``pad`` is a zero tensor in the
+    # spatial shape of ``latents``; with constant-token bucketing the shape is
+    # stable within a step (and constant in single-prompt mode), so we recycle
+    # it instead of re-allocating per forward. Same idea for ``c_null`` — the
+    # CFG uncond branch reads ``zeros_like(crossattn_emb)`` 1×/step at most.
+    _pad_cache: dict[tuple[int, int, int], torch.Tensor] = {}
+    _c_null_cache: dict[tuple, torch.Tensor] = {}
+
+    def _get_pad(x: torch.Tensor) -> torch.Tensor:
+        key = (x.shape[0], x.shape[-2], x.shape[-1])
+        pad = _pad_cache.get(key)
+        if pad is None or pad.dtype != dtype or pad.device != x.device:
+            pad = torch.zeros(
+                x.shape[0], 1, x.shape[-2], x.shape[-1], dtype=dtype, device=x.device
+            )
+            _pad_cache[key] = pad
+        return pad
+
     def _forward(view: str, x: torch.Tensor, t_b: torch.Tensor, c: torch.Tensor, *, no_grad: bool):
         """Helper: switch view, prepare block swap, run forward.
 
         ``x`` is (B, 16, H, W); we unsqueeze to (B, 16, 1, H, W) inside.
+
+        Per-forward CPU prep is the GPU-idle window between launches —
+        ``set_view`` short-circuits when already in ``view`` (see
+        ``TurboDMDNetwork.set_view``), and the cudagraph step-begin marker
+        is hoisted to once per outer step in the loop below.
         """
         turbo.set_view(view)
         if model.blocks_to_swap:
@@ -408,11 +453,8 @@ def main():
             # state within a few steps and per-forward empty_cache() is pure
             # sync + refragmentation overhead.
             model.prepare_block_swap_before_forward(free_cache=False)
-        pad = torch.zeros(
-            x.shape[0], 1, x.shape[-2], x.shape[-1], dtype=dtype, device=x.device
-        )
+        pad = _get_pad(x)
         x_in = x.unsqueeze(2)  # add temporal dim
-        torch.compiler.cudagraph_mark_step_begin()
         ctx = torch.no_grad() if no_grad else torch.enable_grad()
         with ctx, torch.autocast("cuda", dtype=dtype):
             return model.forward_mini_train_dit(
@@ -441,6 +483,12 @@ def main():
         crossattn_emb = crossattn_emb.to(device, dtype=dtype, non_blocking=True)
         B = latents.shape[0]
 
+        # One step-begin marker per training step (not per forward).
+        # ``compile_blocks(mode="default")`` doesn't enable cudagraphs, so this
+        # is semantically a no-op today, but it's the right cadence if/when
+        # the script switches to ``mode="reduce-overhead"``.
+        torch.compiler.cudagraph_mark_step_begin()
+
         # --- Sample generator-t ---
         if t_distribution == "uniform":
             t = torch.rand(B, device=device, dtype=dtype)
@@ -468,7 +516,13 @@ def main():
             v_real_cond_ca = _forward(
                 "teacher", x_renoised_ca, tau_ca, crossattn_emb, no_grad=True
             ).squeeze(2)
-            c_null = torch.zeros_like(crossattn_emb)
+            # zeros_like is cheap, but reusing one buffer also lets dynamo
+            # avoid retracing on a fresh tensor id every step.
+            key = tuple(crossattn_emb.shape)
+            c_null = _c_null_cache.get(key)
+            if c_null is None or c_null.dtype != crossattn_emb.dtype or c_null.device != crossattn_emb.device:
+                c_null = torch.zeros_like(crossattn_emb)
+                _c_null_cache[key] = c_null
             v_real_uncond_ca = _forward(
                 "teacher", x_renoised_ca, tau_ca, c_null, no_grad=True
             ).squeeze(2)
@@ -505,22 +559,34 @@ def main():
         student_sched.step()
 
         # --- 5. FAKE UPDATE ---
-        tau_fake = (
-            torch.rand(B, device=device, dtype=dtype)
-            if t_distribution == "uniform"
-            else torch.sigmoid(sigmoid_scale * torch.randn(B, device=device, dtype=dtype))
-        )
-        eps_fake = torch.randn_like(x_pred)
-        x_t_fake = renoise(x_pred.detach(), tau_fake, eps_fake).requires_grad_()
-        v_fake = _forward("fake", x_t_fake, tau_fake, crossattn_emb, no_grad=False).squeeze(2)
-        target_v_fake = eps_fake - x_pred.detach()  # flow-matching target
-        fake_loss = nn.functional.mse_loss(v_fake.float(), target_v_fake.float())
-        fake_loss.backward()
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(turbo.fake_params(), max_norm=grad_clip)
-        fake_opt.step()
-        fake_opt.zero_grad(set_to_none=True)
-        fake_sched.step()
+        # Run ``fake_steps_per_student_step`` inner updates against the same
+        # x_pred.detach(), resampling (τ_fake, ε_fake) each iteration so each
+        # inner step sees a different rung of the flow-matching forward path.
+        # Standard DMD2 practice: keep the fake's regression target ahead of
+        # the student's moving x_pred distribution.
+        x_pred_d = x_pred.detach()
+        fake_loss_sum = 0.0
+        for _ in range(fake_steps_per_student_step):
+            tau_fake = (
+                torch.rand(B, device=device, dtype=dtype)
+                if t_distribution == "uniform"
+                else torch.sigmoid(sigmoid_scale * torch.randn(B, device=device, dtype=dtype))
+            )
+            eps_fake = torch.randn_like(x_pred_d)
+            x_t_fake = renoise(x_pred_d, tau_fake, eps_fake).requires_grad_()
+            v_fake = _forward(
+                "fake", x_t_fake, tau_fake, crossattn_emb, no_grad=False
+            ).squeeze(2)
+            target_v_fake = eps_fake - x_pred_d  # flow-matching target
+            fake_loss = nn.functional.mse_loss(v_fake.float(), target_v_fake.float())
+            fake_loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(turbo.fake_params(), max_norm=grad_clip)
+            fake_opt.step()
+            fake_opt.zero_grad(set_to_none=True)
+            fake_sched.step()
+            fake_loss_sum += fake_loss.detach().item()
+        fake_loss_mean = fake_loss_sum / fake_steps_per_student_step
 
         # --- logging ---
         # DMD2 health scalars. loss_student is a sign-random gradient vehicle
@@ -532,7 +598,7 @@ def main():
         #   xpred_rms — x_pred dispersion: → 0 means collapse to mean,
         #               drifting upward means student is exploding.
         s_now = loss_student.detach().item()
-        f_now = fake_loss.detach().item()
+        f_now = fake_loss_mean
         with torch.no_grad():
             grad_rms = grad_signal.float().pow(2).mean().sqrt().item()
             dm_rms = delta_dm.float().pow(2).mean().sqrt().item()

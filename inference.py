@@ -487,10 +487,6 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    # FP8 autocast is not supported yet -- force-disable so downstream code paths
-    # see a consistent False on this flag.
-    args.fp8 = False
-
     # Validate arguments
     if args.from_file and args.interactive:
         raise ValueError(
