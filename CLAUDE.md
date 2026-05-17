@@ -267,7 +267,7 @@ Data preparation scripts in `preprocess/`:
 - `resize_images.py` — VAE-compatible image resizing (used by `make preprocess-resize`). Reads `image_dataset/`, writes resized PNGs to `post_image_dataset/resized/`. Drops images below `--min_pixels` (default 0.5MP). `--no_copy_captions` skips the `.txt` copy so captions stay only in `image_dataset/`.
 - `cache_latents.py` — Cache VAE latents (used by `make preprocess-vae`). Reads `post_image_dataset/resized/`, writes `{stem}_{WxH}_anima.npz` into `post_image_dataset/lora/` via `--cache_dir`.
 - `cache_text_embeddings.py` — Cache text encoder outputs (used by `make preprocess-te`). Reads `image_dataset/` (where `.txt` lives) and writes `{stem}_anima_te.safetensors` into `post_image_dataset/lora/` via `--cache_dir`. Mirrors `resize_images.py`'s `--min_pixels` filter so caches don't accumulate for images that would be dropped at resize.
-- `cache_pe_encoder.py` — Cache PE-Core-L14-336 vision encoder features (`{stem}_anima_pe.safetensors`). Wrapped by `make preprocess-pe` (reads `post_image_dataset/resized/`, writes `post_image_dataset/lora/`). Both the LoRA / REPA pipeline and IP-Adapter consume the same sidecars from `post_image_dataset/lora/`.
+- `cache_pe_encoder.py` — Cache PE-Core-L14-336 vision encoder features (`{stem}_anima_pe.safetensors`). Wrapped by `make preprocess-pe` (reads `post_image_dataset/resized/`, writes `post_image_dataset/lora/`). Both the LoRA / REPA pipeline and IP-Adapter consume the same sidecars from `post_image_dataset/lora/`. Pass `--centroid` (after cache pass) or `--centroid_only` (pool existing caches) to emit the dataset-mean PE-feature centroid sidecar consumed by IP-Adapter (`ip_centroid_path`) and DCW v4 (`cos(c_pool, μ_centroid)` channel).
 - `make preprocess-pooled` — Cache pooled text-embedding sidecars (consumed by `make distill-mod`). CPU-only; reads existing `_anima_te.safetensors` and writes pooled companions next to them.
 - `generate_masks.py` — SAM3-based text bubble mask generation
 - `generate_masks_mit.py` — MIT/ComicTextDetector mask generation (manga-specific)
@@ -279,7 +279,6 @@ Utility scripts in `scripts/`:
 - `distill_mod/` — Modulation guidance distillation package: `prep.py` (Phase 1 + 2 staging, `make distill-prep`), `distill.py` (pooled_text_proj trainer, `make distill-mod`), shared `uncond.py` / `synth.py` / `teacher_cache.py` / `validation.py`
 - `comfy_batch.py` — Run ComfyUI batch workflow from `workflows/` directory
 - `merge_to_dit.py` — Bake a LoRA adapter into the base DiT (used by `make merge`)
-- `compute_pe_centroid.py` — Compute PE-feature centroid for DCW v4's `cos(c_pool, μ_centroid)` channel.
 - `export_logs_json.py` — Export TensorBoard run scalars to JSON/JSONL (used by `make export-logs`)
 - `anima_tagger/cli.py` — Train the Anima Tagger checkpoint used by DirectEdit (invoke as `python -m scripts.anima_tagger.cli`). See `docs/experimental/anima_tagger.md`.
 - `edit.py` — Standalone DirectEdit CLI entry (the `make exp-test-directedit` wrapper around it lives in `scripts/experimental_tasks/inference.py`).

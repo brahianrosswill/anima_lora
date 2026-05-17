@@ -210,9 +210,9 @@ artifacts:
 - `IPAdapterNetwork.load_centroid_from_file(path)` — populates the
   buffer from a sidecar at first-time training only. Resume / inference
   ignore the path because the checkpoint already carries the buffer.
-- `scripts/compute_pe_centroid.py` — streams the cached PE files,
-  mean-pools each, averages across the dataset, writes a small `[D]`
-  safetensors. ~1 second over 2407 files. Output:
+- `preprocess/cache_pe_encoder.py --centroid_only` — streams the cached
+  PE files, mean-pools each, averages across the dataset, writes a small
+  `[D]` safetensors. ~1 second over 2407 files. Output:
   `post_image_dataset/ip_adapter/anima_pe_centroid_{encoder}.safetensors`.
   The centroid is a dataset artifact, not a checkpoint artifact, so it
   lives in its own dir alongside (not inside) the shared LoRA cache.
@@ -351,5 +351,5 @@ Lives in `IPAdapterMethodAdapter.validation_baselines()`.
   `library/training/method_adapter.py:156-164`
 - Feature analysis: `bench/ip_adapter/pe_feature_analysis.py` +
   `bench/ip_adapter/analysis.md`
-- Centroid script: `scripts/compute_pe_centroid.py`
+- Centroid script: `preprocess/cache_pe_encoder.py --centroid_only`
 - Centroid sidecar: `post_image_dataset/ip_adapter/anima_pe_centroid_pe.safetensors`
