@@ -1,5 +1,5 @@
-"""Misc utility entry-points: merge, comfy-batch, distill-mod, test-unit, update,
-export-logs, print-config."""
+"""Misc utility entry-points: merge, comfy-batch, distill-prep, distill-mod,
+test-unit, update, export-logs, print-config."""
 
 from __future__ import annotations
 
@@ -29,6 +29,26 @@ def cmd_comfy_batch(extra):
     workflow = extra[0] if extra else "workflows/modhydra.json"
     remaining = extra[1:] if extra else []
     run([PY, "scripts/comfy_batch.py", workflow, *remaining])
+
+
+def cmd_distill_prep(extra):
+    """Pre-stage artifacts for ``make distill-mod``.
+
+    Phase 1: emits ``post_image_dataset/lora/_anima_uncond_te.safetensors``
+    (T5("") cross-attn baseline) — consumed as the student's unconditional
+    text input, replacing the zeroed-crossattn shortcut.
+
+    Phase 2: emits teacher-synthesized clean latents under
+    ``post_image_dataset/distill_mod_synth/`` (same NPZ layout as
+    ``cache_latents.py``). Train with
+    ``make distill-mod ARGS='--synth_data_dir post_image_dataset/distill_mod_synth'``
+    to fit on the teacher's manifold (paper-faithful; removes real-vs-teacher
+    gap that floors val loss).
+
+    Skip flags forwarded via ``extra``: ``--skip_uncond``, ``--skip_synth``,
+    ``--max_samples N``, etc.
+    """
+    run([PY, "scripts/distill_mod_prep.py", *extra])
 
 
 def cmd_distill_mod(extra):

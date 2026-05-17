@@ -155,6 +155,12 @@ COMMANDS = {
         "Bake latest LoRA (ADAPTER_DIR=..., default 'output/ckpt') into base DiT",
     ),
     "comfy-batch": (utilities.cmd_comfy_batch, "Run ComfyUI batch workflow"),
+    "distill-prep": (
+        utilities.cmd_distill_prep,
+        "Pre-stage artifacts for distill-mod: T5(\"\") uncond sidecar + "
+        "teacher-synthetic clean latents pool (--skip_synth / --skip_uncond to "
+        "stage only one).",
+    ),
     "distill-mod": (
         utilities.cmd_distill_mod,
         "Distill pooled_text_proj MLP for modulation guidance",

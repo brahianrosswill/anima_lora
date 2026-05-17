@@ -63,7 +63,7 @@ from tqdm import tqdm
 from library.anima import weights as anima_utils
 from library.anima.models import Anima
 from networks.methods.turbo_dmd import TurboDMDNetwork
-from scripts.distill_modulation import CachedDataset  # reuse the cached-pair loader
+from library.datasets.distill import CachedDataset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(

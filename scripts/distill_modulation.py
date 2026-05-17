@@ -7,9 +7,13 @@ MLP (~8M params) receives gradients.
 
 Distillation setup (Starodubcev et al., ICLR 2026, Section 5):
   - Teacher: normal forward with real crossattn_emb, pooled_text_proj disabled.
-  - Student: forward with zeroed crossattn_emb (unconditional cross-attention),
+  - Student: forward with T5("") crossattn_emb (unconditional T5, matches Anima's
+    own CFG-uncond path at inference time — library/inference/text.py:99-127),
     but pooled_text_proj receives the real pooled text vector.
   - Loss: MSE(student_pred, teacher_pred).
+
+The unconditional sidecar is staged by ``make distill-prep`` (writes
+``<data_dir>/_anima_uncond_te.safetensors``).
 
 This forces pooled_text_proj to encode text information through modulation,
 complementing the cross-attention path.
@@ -29,23 +33,60 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from safetensors.torch import load_file as _load_safetensors
 from safetensors.torch import save_file
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from library.anima import weights as anima_utils
 from library.anima.models import Anima
-from library.io.cache import (
-    discover_cached_pairs,
-    get_latent_resolution,
-    load_cached_latents,
-    load_cached_text_features,
-)
+from library.datasets.distill import CachedDataset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+
+UNCOND_TE_FILENAME = "_anima_uncond_te.safetensors"
+
+
+def _load_uncond_crossattn(path: str, device, dtype) -> torch.Tensor:
+    """Load the ``T5("")`` sidecar staged by ``make distill-prep`` and return a
+    ``(1, seq, 1024)`` tensor on ``device`` in ``dtype``. Used as the student's
+    unconditional cross-attention input; replaces ``torch.zeros_like(...)``,
+    which is neither paper-faithful nor what Anima uses at CFG-uncond inference.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Unconditional TE sidecar not found at {path!r}. "
+            f"Run `make distill-prep` (or `python tasks.py distill-prep`) first."
+        )
+    sd = _load_safetensors(path)
+    uncond = sd.get("crossattn_emb")
+    if uncond is None:
+        raise KeyError(
+            f"Expected key 'crossattn_emb' in {path!r}; got {list(sd.keys())}"
+        )
+    if uncond.dim() != 2:
+        raise ValueError(
+            f"Expected (seq, dim) tensor in {path!r}; got shape {tuple(uncond.shape)}"
+        )
+    return uncond.to(device=device, dtype=dtype).unsqueeze(0).contiguous()
+
+
+def _uncond_for_batch(uncond_1: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Broadcast ``uncond_1`` (1, S_u, D) to ``(B, S_ref, D)`` matching ``ref``.
+    Pads with zeros (attention sinks) if ``S_u < S_ref``; truncates if larger.
+    """
+    B, S_ref, _D = ref.shape
+    S_u = uncond_1.shape[1]
+    if S_u < S_ref:
+        uncond_1 = F.pad(uncond_1, (0, 0, 0, S_ref - S_u))
+    elif S_u > S_ref:
+        uncond_1 = uncond_1[:, :S_ref, :]
+    return uncond_1.expand(B, -1, -1)
 
 
 # ---------------------------------------------------------------------------
@@ -154,89 +195,6 @@ def prefill_teacher_cache(teacher_cache, dataset, model, device, dtype):
     logger.info(f"Prefill complete: {len(teacher_cache)} entries cached")
 
 
-# ---------------------------------------------------------------------------
-# Dataset: load cached latents + crossattn_emb from disk
-# ---------------------------------------------------------------------------
-
-
-class CachedDataset(torch.utils.data.Dataset):
-    """Loads pre-cached latents and text encoder outputs for distillation.
-
-    Samples are grouped by latent resolution so that each batch has uniform
-    spatial dimensions (matching the bucket-based batching used in training).
-    A deterministic per-bucket split (seeded by ``validation_seed``) carves off
-    the last ``validation_split`` fraction for the val set, mirroring the
-    LoRA training convention.
-    """
-
-    def __init__(
-        self,
-        data_dir: str,
-        batch_size: int = 1,
-        *,
-        split: str = "train",
-        validation_split: float = 0.0,
-        validation_seed: int = 42,
-        sample_ratio: float = 1.0,
-    ):
-        assert split in ("train", "val")
-        self.data_dir = data_dir
-        cached = discover_cached_pairs(data_dir)
-
-        # Group samples by latent resolution
-        buckets: dict[str, list[tuple[str, str]]] = {}
-        for img in cached:
-            if img.te_path is None:
-                continue
-            res = get_latent_resolution(img.npz_path)
-            buckets.setdefault(res, []).append((img.npz_path, img.te_path))
-
-        # Per-bucket deterministic shuffle, then carve last `validation_split`
-        # off as val so train/val never overlap and remain bucket-grouped.
-        # Apply sample_ratio per-bucket (mirrors the LoRA pipeline's per-subset
-        # subsampling), keeping at least one sample per non-empty bucket so
-        # debug/half presets don't silently drop entire resolutions.
-        # Drop per-bucket remainders for whichever side we're emitting.
-        rng = random.Random(validation_seed)
-        self.samples: list[tuple[str, str]] = []
-        n_train = n_val = 0
-        for _res, items in buckets.items():
-            items = list(items)
-            rng.shuffle(items)
-            n = len(items)
-            n_v = int(round(n * validation_split)) if validation_split > 0.0 else 0
-            n_t = n - n_v
-            train_items = items[:n_t]
-            val_items = items[n_t:]
-            n_train += n_t
-            n_val += n_v
-            picked = train_items if split == "train" else val_items
-            if sample_ratio < 1.0 and picked:
-                n_keep = max(1, int(round(len(picked) * sample_ratio)))
-                picked = picked[:n_keep]
-            full = (len(picked) // batch_size) * batch_size
-            self.samples.extend(picked[:full])
-
-        sr_note = f", sample_ratio={sample_ratio}" if sample_ratio < 1.0 else ""
-        logger.info(
-            f"[{split}] {len(self.samples)} samples from {data_dir} "
-            f"({len(buckets)} buckets; pre-drop train={n_train}, val={n_val}{sr_note})"
-        )
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        latent_path, te_path = self.samples[idx]
-        latents, _res, _h, _w = load_cached_latents(latent_path)  # (16, H, W)
-        # Fixed variant=0: distill-mod targets a deterministic teacher mapping,
-        # and the teacher cache keys on (sample_idx, sigma_idx) only — drawing
-        # a random variant per visit would let cache hits return a teacher pred
-        # computed under a different caption than the student is conditioned on.
-        crossattn_emb, pooled_text = load_cached_text_features(te_path, variant=0)
-        return idx, latents, crossattn_emb, pooled_text
-
-
 class ValTeacherCache:
     """In-RAM cache of validation-time teacher predictions keyed by
     ``(batch_idx, sigma_idx)``.
@@ -286,6 +244,7 @@ def run_validation(
     sigmas: list[float],
     max_steps: int | None,
     seed: int,
+    uncond_te_1: torch.Tensor,
     teacher_cache: ValTeacherCache | None = None,
 ):
     """Compute teacher↔student MSE on the val set at fixed sigmas.
@@ -315,7 +274,7 @@ def run_validation(
         padding_mask = torch.zeros(
             B, 1, latents.shape[-2], latents.shape[-1], dtype=dtype, device=device
         )
-        uncond = torch.zeros_like(crossattn_emb)
+        uncond = _uncond_for_batch(uncond_te_1, crossattn_emb)
 
         for s_idx, sigma in enumerate(sigmas):
             sig_b = torch.full((B,), float(sigma), device=device, dtype=latents.dtype)
@@ -383,6 +342,29 @@ def main():
         help="Directory with cached latents and text encoder outputs",
     )
     parser.add_argument(
+        "--uncond_te_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to the T5(\"\") sidecar used as the student's unconditional "
+            "cross-attention input. Defaults to "
+            "``<data_dir>/_anima_uncond_te.safetensors`` (staged by "
+            "``make distill-prep``)."
+        ),
+    )
+    parser.add_argument(
+        "--synth_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional dir of teacher-generated synthetic clean latents from "
+            "``make distill-prep`` (Phase 2). When set, training reads latents "
+            "from here (matched by stem + resolution) and TE caches from "
+            "``--data_dir`` — paper-faithful setup that removes the real-vs-"
+            "teacher distribution gap. Default: real-image latents only."
+        ),
+    )
+    parser.add_argument(
         "--dit_path",
         type=str,
         default="models/diffusion_models/anima-base-v1.0.safetensors",
@@ -393,8 +375,8 @@ def main():
         default="output/ckpt/pooled_text_proj.safetensors",
         help="Where to save the trained projection weights",
     )
-    parser.add_argument("--iterations", type=int, default=25000)
-    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--iterations", type=int, default=1000)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(
         "--blocks_to_swap",
@@ -517,7 +499,7 @@ def main():
     parser.add_argument(
         "--validate_every_n_steps",
         type=int,
-        default=2500,
+        default=250,
         help="Run validation every N optimizer steps (only if validation_split>0)",
     )
     parser.add_argument(
@@ -579,6 +561,7 @@ def main():
             args.data_dir,
             batch_size=args.batch_size,
             sample_ratio=args.sample_ratio,
+            synth_data_dir=args.synth_data_dir,
         )
 
         def _collate_dry(batch):
@@ -609,6 +592,16 @@ def main():
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
+
+    # --- Load unconditional T5("") sidecar (staged by `make distill-prep`) ---
+    uncond_te_path = args.uncond_te_path or os.path.join(
+        args.data_dir, UNCOND_TE_FILENAME
+    )
+    uncond_te_1 = _load_uncond_crossattn(uncond_te_path, device, dtype)
+    logger.info(
+        f"Loaded uncond crossattn from {uncond_te_path} "
+        f"(shape={tuple(uncond_te_1.shape)})"
+    )
 
     # --- Load model ---
     logger.info("Loading DiT model...")
@@ -735,6 +728,7 @@ def main():
         validation_split=args.validation_split,
         validation_seed=args.validation_seed,
         sample_ratio=args.sample_ratio,
+        synth_data_dir=args.synth_data_dir,
     )
 
     val_dataset = None
@@ -747,6 +741,7 @@ def main():
             validation_split=args.validation_split,
             validation_seed=args.validation_seed,
             sample_ratio=args.sample_ratio,
+            synth_data_dir=args.synth_data_dir,
         )
 
     # Custom collate to bypass collate_tensor_fn's _new_shared_filename_cpu
@@ -942,12 +937,12 @@ def main():
                                 idx_list[i], sigma_idx_list[i], teacher_pred[i : i + 1]
                             )
 
-            # --- Student forward: zeroed crossattn, real pooled text through proj ---
+            # --- Student forward: T5("") crossattn, real pooled text through proj ---
             # requires_grad_ needed for gradient checkpointing
             noisy_input = noisy_input.requires_grad_()
             if model.blocks_to_swap:
                 model.prepare_block_swap_before_forward()
-            uncond_crossattn = torch.zeros_like(crossattn_emb)
+            uncond_crossattn = _uncond_for_batch(uncond_te_1, crossattn_emb)
             torch.compiler.cudagraph_mark_step_begin()
             with torch.autocast("cuda", dtype=dtype):
                 student_pred = model.forward_mini_train_dit(
@@ -1021,6 +1016,7 @@ def main():
                 sigmas=args.validation_sigmas,
                 max_steps=args.max_validation_steps,
                 seed=args.validation_seed,
+                uncond_te_1=uncond_te_1,
                 teacher_cache=val_teacher_cache,
             )
             sigma_str = ", ".join(

@@ -67,7 +67,11 @@ make lora-gui GUI_PRESETS=fera                                 # FeRA (independe
 make lora-gui GUI_PRESETS=hydralora_fei                        # Hydra with FEI-on-Hydra (shared_A + FEI router)
 
 # Modulation guidance distillation
-make distill-mod           # Train pooled_text_proj MLP (text → AdaLN modulation)
+make distill-prep          # Stage T5("") uncond sidecar (Phase 1) + teacher-synthetic
+                           #   clean latents pool (Phase 2 — post_image_dataset/distill_mod_synth/)
+make distill-mod           # Train pooled_text_proj MLP (text → AdaLN modulation).
+                           # Add --synth_data_dir post_image_dataset/distill_mod_synth to fit on
+                           # the teacher's own manifold (paper-faithful; removes real-vs-teacher gap).
 
 # Inference (test with most recent output)
 make test
