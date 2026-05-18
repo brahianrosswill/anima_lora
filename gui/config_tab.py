@@ -11,7 +11,7 @@ from typing import Any
 import html
 
 import toml
-from PySide6.QtCore import QProcess, Qt, Signal
+from PySide6.QtCore import QProcess, Qt, QTimer, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -46,6 +46,7 @@ from gui import (
     apply_validation_choice,
     confirm_existing_caches,
     confirm_resumable_checkpoint,
+    confirm_train_using_cache,
     is_basic_field,
     list_gui_variants,
     list_methods,
@@ -170,7 +171,9 @@ class ConfigTab(QWidget):
         )
         self.train_btn.setStyleSheet(self._train_idle_style)
         self.train_btn.clicked.connect(self._start_training)
-        self.train_btn.setEnabled(self._preprocessed)
+        # Always enabled — when no cache exists yet, clicking Train silently
+        # chains a Preprocess run first (see _start_training).
+        self.train_btn.setEnabled(True)
         top.addWidget(self.train_btn)
 
         self.test_btn = QPushButton(t("test"))
@@ -698,24 +701,35 @@ class ConfigTab(QWidget):
         self.variant_combo.setEnabled(False)
         self.new_variant_btn.setEnabled(False)
 
+    def _resolve_cache_dir(self, variant: str) -> Path:
+        """Resolve the absolute lora_cache_dir for the given variant. Used by
+        both Preprocess (reassurance popup) and Train (cache-exists branch)."""
+        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        cache_rel = merged.get("lora_cache_dir") or "post_image_dataset/lora"
+        cache_dir = Path(cache_rel)
+        if not cache_dir.is_absolute():
+            cache_dir = ROOT / cache_dir
+        return cache_dir
+
     def _start_preprocess(self):
         # Flush form edits to disk first — the subprocess re-reads the variant
         # file, so unsaved knobs (paths, source dirs, …) would otherwise be lost.
         if self._dirty:
             self._save_preset(silent=True)
 
-        # Resolve the cache dir that tasks.py preprocess will write into and
-        # confirm with the user that any pre-existing caches there will be
-        # reused, not wiped. Mirrors scripts/tasks/preprocess.py's fallback.
         variant = self._current_variant()
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
-        cache_rel = merged.get("lora_cache_dir") or "post_image_dataset/lora"
-        cache_dir = Path(cache_rel)
-        if not cache_dir.is_absolute():
-            cache_dir = ROOT / cache_dir
+        cache_dir = self._resolve_cache_dir(variant)
+        # Reassure the user that any pre-existing caches there will be reused,
+        # not wiped. Mirrors scripts/tasks/preprocess.py's fallback.
         if not confirm_existing_caches(self, cache_dir):
             return
 
+        self._launch_preprocess(variant)
+
+    def _launch_preprocess(self, variant: str) -> None:
+        """Start the preprocess subprocess for ``variant``. Skips the
+        confirm-existing-caches popup — callers (Preprocess button, train
+        auto-chain) own that decision."""
         python = sys.executable
         args = ["tasks.py", "preprocess"]
 
@@ -733,6 +747,8 @@ class ConfigTab(QWidget):
         self.log.clear()
         self._reset_progress()
         self._progress_tracker.mark_starting(t("starting"))
+        if getattr(self, "_chain_train_after_preprocess", False):
+            self._log(t("train_autopreprocess_log"))
         self._log(
             f"> METHOD={variant} METHODS_SUBDIR=gui-methods python {' '.join(args)}\n"
         )
@@ -749,20 +765,37 @@ class ConfigTab(QWidget):
         self.new_variant_btn.setEnabled(False)
 
     def _start_training(self):
-        if not self._preprocessed:
-            QMessageBox.warning(self, t("error"), t("preprocess_required"))
-            return
-
         # Flush form edits to disk first — train.py reads the variant file
         # from disk, so unsaved form values would otherwise be ignored.
         if self._dirty:
             self._save_preset(silent=True)
 
         variant = self._current_variant()
+        cache_dir = self._resolve_cache_dir(variant)
+
+        # Three-way branch on cache state:
+        #   • Cache exists → confirm with the user that we're reusing it.
+        #   • Cache missing → silently auto-chain Preprocess → Train so the
+        #     user doesn't bounce off a "run preprocess first" wall.
+        # The auto-chain decision is recorded on the instance so
+        # _on_finished can pick it up once preprocess succeeds.
+        decision = confirm_train_using_cache(self, cache_dir)
+        if decision is False:
+            return
+        if decision is None:
+            self._chain_train_after_preprocess = True
+            self._launch_preprocess(variant)
+            return
+
+        # Cache exists and user confirmed — go straight to training.
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         if not confirm_resumable_checkpoint(self, merged):
             return
+        self._launch_training(variant)
 
+    def _launch_training(self, variant: str) -> None:
+        """Start the training subprocess. Caller owns all pre-launch
+        confirmations (cache-reuse popup, resume-checkpoint prompt)."""
         # Flip button visuals to busy + repaint BEFORE the slow accelerate
         # import and QProcess.start, otherwise Qt's event loop is blocked
         # long enough for Windows to flag the GUI as "Not Responding".
@@ -807,7 +840,7 @@ class ConfigTab(QWidget):
     def _restore_train_idle(self):
         self.train_btn.setText(t("train"))
         self.train_btn.setStyleSheet(self._train_idle_style)
-        self.train_btn.setEnabled(self._preprocessed)
+        self.train_btn.setEnabled(True)
         self.preprocess_btn.setEnabled(True)
         self.test_btn.setEnabled(self._has_lora_output())
         self.method_combo.setEnabled(True)
@@ -864,7 +897,7 @@ class ConfigTab(QWidget):
         self.preprocess_btn.setEnabled(True)
         self.train_btn.setText(t("train"))
         self.train_btn.setStyleSheet(self._train_idle_style)
-        self.train_btn.setEnabled(self._preprocessed)
+        self.train_btn.setEnabled(True)
         self.test_btn.setText(t("test"))
         self.test_btn.setStyleSheet(self._test_idle_style)
         self.test_btn.setEnabled(self._has_lora_output())
@@ -872,6 +905,24 @@ class ConfigTab(QWidget):
         self.method_combo.setEnabled(True)
         self.variant_combo.setEnabled(True)
         self.new_variant_btn.setEnabled(True)
+
+        # Auto-chain Train after a successful Preprocess when the user
+        # originally clicked Train against an empty cache. On preprocess
+        # failure (or user cancel via Stop), clear the flag and stay idle —
+        # we shouldn't quietly launch training over a broken cache.
+        chain = getattr(self, "_chain_train_after_preprocess", False)
+        self._chain_train_after_preprocess = False
+        if chain and mode == "preprocess" and exit_code == 0:
+            variant = self._current_variant()
+            merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+            # Resume-checkpoint check still fires — the user might have
+            # previously trained this variant; we don't want to silently wipe
+            # or silently resume without asking.
+            if confirm_resumable_checkpoint(self, merged):
+                # Defer the launch so Qt finishes processing this
+                # ``finished`` signal (clears QProcess state) before we
+                # ``start`` again on the same QProcess instance.
+                QTimer.singleShot(0, lambda v=variant: self._launch_training(v))
 
     def _log(self, text: str):
         self.log.moveCursor(QTextCursor.End)

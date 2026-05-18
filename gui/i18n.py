@@ -100,6 +100,19 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "preprocess_cache_count_latents": "{n} VAE latents (.npz)",
         "preprocess_cache_count_te": "{n} text embeddings (_te.safetensors)",
         "preprocess_cache_count_pe": "{n} PE features (_pe.safetensors)",
+        "train_using_cache_title": "Use cached dataset?",
+        "train_using_cache_body": (
+            "A preprocessed dataset cache already exists at:\n  {cache_dir}\n\n"
+            "{items}\n\n"
+            "Training will reuse this cache as-is. If you've added new images "
+            "or edited captions and want them included, cancel and run "
+            "Preprocess first.\n\n"
+            "Proceed with the existing cache?"
+        ),
+        "train_autopreprocess_log": (
+            "No preprocessed cache found — running preprocess first, "
+            "then training automatically.\n"
+        ),
         "no_lora_for_test": "No LoRA in output/ckpt/ to test. Run training first.",
         "test_output_title": "Latest test output",
         "test_output_empty": "output/tests/ is empty.",
@@ -382,6 +395,19 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "preprocess_cache_count_latents": "VAE 잠재변수 {n}개 (.npz)",
         "preprocess_cache_count_te": "텍스트 임베딩 {n}개 (_te.safetensors)",
         "preprocess_cache_count_pe": "PE 피처 {n}개 (_pe.safetensors)",
+        "train_using_cache_title": "기존 캐시 데이터셋으로 학습할까요?",
+        "train_using_cache_body": (
+            "다음 경로에 이미 전처리된 데이터셋 캐시가 있습니다:\n  {cache_dir}\n\n"
+            "{items}\n\n"
+            "학습은 이 캐시를 그대로 재사용합니다. 새 이미지를 추가했거나 "
+            "캡션을 수정해서 다시 반영하고 싶다면, 취소를 누르고 먼저 "
+            "전처리를 실행하세요.\n\n"
+            "기존 캐시로 학습을 진행할까요?"
+        ),
+        "train_autopreprocess_log": (
+            "전처리 캐시가 없어 전처리를 먼저 실행한 뒤 자동으로 "
+            "학습을 시작합니다.\n"
+        ),
         "no_lora_for_test": "테스트할 LoRA가 output/ckpt/에 없습니다. 먼저 학습을 실행하세요.",
         "test_output_title": "최신 테스트 출력",
         "test_output_empty": "output/tests/가 비어 있습니다.",

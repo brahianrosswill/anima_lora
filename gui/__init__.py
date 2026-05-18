@@ -613,6 +613,46 @@ def confirm_existing_caches(
     return box.exec() == QMessageBox.Ok
 
 
+def confirm_train_using_cache(
+    parent: QWidget | None, cache_dir: Path, require_pe: bool = False
+) -> bool | None:
+    """Train-side cache confirmation: returns True to launch training against
+    the existing cache, False if the user cancelled, or None when no cache was
+    found on disk (caller should auto-chain a preprocess run instead).
+
+    Distinct from ``confirm_existing_caches`` (which reassures during
+    Preprocess) — this gates Train and exposes the empty-cache case as a
+    separate ``None`` so the caller can branch into the auto-preprocess flow.
+    """
+    counts = count_preprocess_caches(cache_dir)
+    has_any = (
+        counts["latents"] > 0 or counts["te"] > 0 or (require_pe and counts["pe"] > 0)
+    )
+    if not has_any:
+        return None
+
+    parts: list[str] = []
+    if counts["latents"]:
+        parts.append(t("preprocess_cache_count_latents", n=counts["latents"]))
+    if counts["te"]:
+        parts.append(t("preprocess_cache_count_te", n=counts["te"]))
+    if require_pe and counts["pe"]:
+        parts.append(t("preprocess_cache_count_pe", n=counts["pe"]))
+
+    body = t(
+        "train_using_cache_body",
+        cache_dir=str(cache_dir),
+        items="  • " + "\n  • ".join(parts),
+    )
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Question)
+    box.setWindowTitle(t("train_using_cache_title"))
+    box.setText(body)
+    box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+    box.setDefaultButton(QMessageBox.Yes)
+    return box.exec() == QMessageBox.Yes
+
+
 def find_resumable_checkpoint(merged: dict) -> tuple[Path, int] | None:
     """If the merged config has a writable ``checkpointing_epochs`` and an
     on-disk checkpoint state directory exists with a usable ``train_state.json``,
