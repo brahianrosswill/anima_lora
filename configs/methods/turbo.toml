@@ -27,8 +27,8 @@ use_custom_down_autograd = true
 # are the stability knobs, not alpha.
 student_rank = 48
 student_alpha = 48
-fake_rank = 96
-fake_alpha = 96
+fake_rank = 64
+fake_alpha = 64
 attn_mode = "flash"
 
 # DMD2 schedule (proposal §Schedule, paper Table 1 row 4: Decoupled-Hybrid).
@@ -57,5 +57,5 @@ sigmoid_scale = 1.0
 # Logging / checkpoints.
 [io]
 save_every = 250
-log_interval = 10
+log_interval = 5
 log_dir = "output/logs/turbo"

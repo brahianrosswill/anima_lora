@@ -155,7 +155,8 @@ def main() -> None:
     parser.add_argument(
         "--buckets",
         type=str,
-        default=",".join(_DEFAULT_SYNTH_BUCKETS),
+        default="1248x832",
+        # default=",".join(_DEFAULT_SYNTH_BUCKETS),
         help=(
             "Comma-separated (H_pix x W_pix) resolution allowlist for synthesis. "
             "Default = DCW_ASPECT_NAMES (top-5 by frequency in "
@@ -168,7 +169,7 @@ def main() -> None:
     parser.add_argument(
         "--n_per_bucket",
         type=int,
-        default=500,
+        default=1000,
         help=(
             "Cap synthesized stems per bucket (None = use every stem in the "
             "allowlist's buckets). With --shuffle_seed, picks deterministically "
