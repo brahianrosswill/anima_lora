@@ -35,9 +35,7 @@ def get_latents_npz_path(
     layouts produce nested caches; otherwise the cache lives flat in
     ``cache_dir`` (legacy layout).
     """
-    suffix = (
-        f"_{image_size[0]:04d}x{image_size[1]:04d}{LATENT_CACHE_SUFFIX}"
-    )
+    suffix = f"_{image_size[0]:04d}x{image_size[1]:04d}{LATENT_CACHE_SUFFIX}"
     if cache_dir is None:
         return image_path.with_name(image_path.stem + suffix)
     return Path(
@@ -158,7 +156,9 @@ def main() -> None:
             tensors = []
 
             for p in batch_paths:
-                npz_path = get_latents_npz_path(p, (w, h), cache_dir=cache_dir, image_dir=data_dir)
+                npz_path = get_latents_npz_path(
+                    p, (w, h), cache_dir=cache_dir, image_dir=data_dir
+                )
                 if npz_path.exists():
                     latents_size = (h // 8, w // 8)
                     key = f"latents_{latents_size[0]}x{latents_size[1]}"

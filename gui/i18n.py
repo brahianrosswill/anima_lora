@@ -59,7 +59,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Confidence threshold for the MIT/ComicTextDetector text segmenter. "
             "Default 0.8."
         ),
-        "preprocess_run_mask": "Run mask (SAM + MIT → merged)",
+        "preprocess_run_mask": "Run masking",
+        "preprocess_run_sam_mask": "Run SAM masking",
+        "preprocess_run_sam_mask_tip": (
+            "Run SAM3 bubble segmentation as part of mask generation. "
+            "Uncheck to skip SAM and use only MIT (or whichever other "
+            "backends are enabled)."
+        ),
+        "preprocess_run_mit_mask": "Run MIT masking",
+        "preprocess_run_mit_mask_tip": (
+            "Run MIT/ComicTextDetector text segmentation as part of mask "
+            "generation. Uncheck to skip MIT and use only SAM."
+        ),
+        "preprocess_mask_nothing_enabled": (
+            "At least one of SAM or MIT masking must be enabled."
+        ),
         "preprocess_status_resized": "Resized images: {n}",
         "preprocess_status_caches": "Caches — latents: {lat}, text: {te}, PE: {pe}",
         "preprocess_status_masks": "Masks: {masks}",
@@ -353,7 +367,20 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "preprocess_mit_threshold_tip": (
             "MIT/ComicTextDetector 텍스트 세그멘터의 신뢰도 임계값. 기본값 0.8."
         ),
-        "preprocess_run_mask": "마스크 실행 (SAM + MIT → 병합)",
+        "preprocess_run_mask": "마스킹 실행",
+        "preprocess_run_sam_mask": "SAM 마스킹 실행",
+        "preprocess_run_sam_mask_tip": (
+            "마스크 생성 단계에서 SAM3 말풍선 분할을 실행합니다. "
+            "체크 해제하면 SAM을 건너뛰고 MIT(또는 활성화된 다른 백엔드)만 사용합니다."
+        ),
+        "preprocess_run_mit_mask": "MIT 마스킹 실행",
+        "preprocess_run_mit_mask_tip": (
+            "마스크 생성 단계에서 MIT/ComicTextDetector 텍스트 분할을 "
+            "실행합니다. 체크 해제하면 MIT를 건너뛰고 SAM만 사용합니다."
+        ),
+        "preprocess_mask_nothing_enabled": (
+            "SAM 또는 MIT 마스킹 중 최소 하나는 활성화되어야 합니다."
+        ),
         "preprocess_status_resized": "리사이즈된 이미지: {n}장",
         "preprocess_status_caches": "캐시 — latents: {lat}, text: {te}, PE: {pe}",
         "preprocess_status_masks": "마스크: {masks}장",

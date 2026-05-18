@@ -288,11 +288,16 @@ def main() -> None:
         out_path = (
             Path(args.centroid_out)
             if args.centroid_out
-            else ROOT / "post_image_dataset" / "ip_adapter" / f"anima_pe_centroid_{args.encoder}.safetensors"
+            else ROOT
+            / "post_image_dataset"
+            / "ip_adapter"
+            / f"anima_pe_centroid_{args.encoder}.safetensors"
         )
         _write_centroid_sidecar(
-            centroid_cache_dir, out_path,
-            encoder=args.encoder, limit=args.centroid_limit,
+            centroid_cache_dir,
+            out_path,
+            encoder=args.encoder,
+            limit=args.centroid_limit,
         )
         return
 
@@ -302,7 +307,11 @@ def main() -> None:
         sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    save_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}[args.dtype]
+    save_dtype = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[args.dtype]
 
     print(f"Loading vision encoder '{args.encoder}' on {device} ...")
     bundle = load_pe_encoder(device, name=args.encoder, model_id=args.model_id)
@@ -377,9 +386,7 @@ def main() -> None:
     )
     for (w, h), paths in reso_groups.items():
         out_paths = [
-            cache_path_for(
-                p, bundle.name, cache_dir=cache_dir, image_dir=data_dir
-            )
+            cache_path_for(p, bundle.name, cache_dir=cache_dir, image_dir=data_dir)
             for p in paths
         ]
         ds = _PEImageGroup(paths, out_paths)
@@ -399,10 +406,7 @@ def main() -> None:
                 )
             for src, dst, feats in zip(batch_paths, batch_out_paths, feats_list):
                 save_dict = {
-                    "image_features": feats.detach()
-                    .to(save_dtype)
-                    .cpu()
-                    .contiguous()
+                    "image_features": feats.detach().to(save_dtype).cpu().contiguous()
                 }
                 _save_safetensors(save_dict, dst, metadata=metadata)
                 cached += 1
@@ -421,11 +425,16 @@ def main() -> None:
         out_path = (
             Path(args.centroid_out)
             if args.centroid_out
-            else ROOT / "post_image_dataset" / "ip_adapter" / f"anima_pe_centroid_{bundle.name}.safetensors"
+            else ROOT
+            / "post_image_dataset"
+            / "ip_adapter"
+            / f"anima_pe_centroid_{bundle.name}.safetensors"
         )
         _write_centroid_sidecar(
-            cache_dir, out_path,
-            encoder=bundle.name, limit=args.centroid_limit,
+            cache_dir,
+            out_path,
+            encoder=bundle.name,
+            limit=args.centroid_limit,
         )
 
 

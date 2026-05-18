@@ -281,7 +281,6 @@ _BASIC = {
     "caption_dropout_rate",
     "gradient_checkpointing",
     "blocks_to_swap",
-    "mixed_precision",
     "source_image_dir",
     "lora_cache_dir",
     "output_dir",

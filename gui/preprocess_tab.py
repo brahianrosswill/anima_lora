@@ -31,6 +31,7 @@ from pathlib import Path
 import yaml
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -67,6 +68,8 @@ DEFAULT_SAM_THRESHOLD = 0.5
 DEFAULT_SAM_DILATE = 5
 DEFAULT_MIT_TEXT_THRESHOLD = 0.8
 DEFAULT_MIT_DILATE = 5
+DEFAULT_RUN_SAM_MASK = True
+DEFAULT_RUN_MIT_MASK = True
 
 RESIZED_DIR = ROOT / "post_image_dataset" / "resized"
 LORA_CACHE_DIR = ROOT / "post_image_dataset" / "lora"
@@ -270,6 +273,16 @@ class PreprocessingTab(QWidget):
         # SAM masking group
         sam_box = QGroupBox(t("preprocess_masking_sam"))
         sam_form = QFormLayout()
+        self.run_sam_mask_chk = QCheckBox(t("preprocess_run_sam_mask"))
+        self.run_sam_mask_chk.setToolTip(t("preprocess_run_sam_mask_tip"))
+        self.run_sam_mask_chk.setChecked(
+            bool(settings.get("run_sam_mask", DEFAULT_RUN_SAM_MASK))
+        )
+        sam_form.addRow(
+            self._field_label("run_sam_mask", t("preprocess_run_sam_mask")),
+            self.run_sam_mask_chk,
+        )
+
         self.sam_prompts_edit = QPlainTextEdit("\n".join(sam_prompts))
         self.sam_prompts_edit.setMaximumHeight(80)
         self.sam_prompts_edit.setStyleSheet("font-family:monospace;")
@@ -298,6 +311,16 @@ class PreprocessingTab(QWidget):
         # MIT masking group
         mit_box = QGroupBox(t("preprocess_masking_mit"))
         mit_form = QFormLayout()
+        self.run_mit_mask_chk = QCheckBox(t("preprocess_run_mit_mask"))
+        self.run_mit_mask_chk.setToolTip(t("preprocess_run_mit_mask_tip"))
+        self.run_mit_mask_chk.setChecked(
+            bool(settings.get("run_mit_mask", DEFAULT_RUN_MIT_MASK))
+        )
+        mit_form.addRow(
+            self._field_label("run_mit_mask", t("preprocess_run_mit_mask")),
+            self.run_mit_mask_chk,
+        )
+
         self.mit_threshold_edit = QLineEdit(
             f"{float(settings.get('mit_text_threshold', DEFAULT_MIT_TEXT_THRESHOLD)):g}"
         )
@@ -451,6 +474,8 @@ class PreprocessingTab(QWidget):
                 "caption_tag_dropout_rate": dropout,
                 "mit_text_threshold": mit_threshold,
                 "mit_dilate": int(self.mit_dilate_spin.value()),
+                "run_sam_mask": self.run_sam_mask_chk.isChecked(),
+                "run_mit_mask": self.run_mit_mask_chk.isChecked(),
             }
         )
         return True
@@ -480,16 +505,26 @@ class PreprocessingTab(QWidget):
         self._launch(["tasks.py", "preprocess"], env=env)
 
     def _run_mask(self) -> None:
-        # Single-shot pipeline. ``tasks.py mask`` runs SAM + MIT into a
-        # tempdir, merges them, and writes only the merged result to
-        # ``post_image_dataset/masks/<rel>/``. SAM reads
+        # Single-shot pipeline. ``tasks.py mask`` runs SAM and/or MIT into
+        # a tempdir, merges the produced sources, and writes only the
+        # merged result to ``post_image_dataset/masks/<rel>/``. SAM reads
         # ``configs/sam_mask.yaml`` directly; MIT picks up the
         # ``MIT_TEXT_THRESHOLD`` / ``MIT_DILATE`` env vars set below.
+        # ``RUN_SAM_MASK`` / ``RUN_MIT_MASK`` gate each backend.
         if not self._save_all():
+            return
+        run_sam = self.run_sam_mask_chk.isChecked()
+        run_mit = self.run_mit_mask_chk.isChecked()
+        if not (run_sam or run_mit):
+            QMessageBox.warning(
+                self, t("error"), t("preprocess_mask_nothing_enabled")
+            )
             return
         env = make_subprocess_env(
             MIT_TEXT_THRESHOLD=self.mit_threshold_edit.text().strip(),
             MIT_DILATE=str(int(self.mit_dilate_spin.value())),
+            RUN_SAM_MASK="1" if run_sam else "0",
+            RUN_MIT_MASK="1" if run_mit else "0",
         )
         self._launch(["tasks.py", "mask"], env=env)
 

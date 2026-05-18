@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import torch
-import torch.nn.functional as F
 from safetensors.torch import load_file
 
 logger = logging.getLogger(__name__)

@@ -392,6 +392,36 @@ PREPROCESS_FIELD_HELP: dict[str, dict[str, str]] = {
             "학습 신호가 희석될 수 있습니다."
         ),
     },
+    "run_sam_mask": {
+        "en": (
+            "Whether to run SAM3 bubble segmentation during 'Run masking'. "
+            "Uncheck to skip SAM entirely — useful when SAM produces false "
+            "positives on your dataset or when you only want MIT's text "
+            "detection. If both SAM and MIT are unchecked, the Run button "
+            "is blocked."
+        ),
+        "ko": (
+            "'마스킹 실행' 시 SAM3 말풍선 분할을 실행할지 여부. 체크 해제 "
+            "하면 SAM을 완전히 건너뜁니다 — 데이터셋에서 SAM이 오탐을 "
+            "많이 내거나 MIT의 텍스트 검출만 원할 때 유용합니다. SAM과 "
+            "MIT 둘 다 해제하면 실행 버튼이 차단됩니다."
+        ),
+    },
+    "run_mit_mask": {
+        "en": (
+            "Whether to run MIT/ComicTextDetector text segmentation during "
+            "'Run masking'. Uncheck to skip MIT — useful for non-manga "
+            "datasets where its prior doesn't help, or to iterate faster on "
+            "SAM-only configurations. If both SAM and MIT are unchecked, "
+            "the Run button is blocked."
+        ),
+        "ko": (
+            "'마스킹 실행' 시 MIT/ComicTextDetector 텍스트 분할을 "
+            "실행할지 여부. 체크 해제하면 MIT를 건너뜁니다 — 만화가 아닌 "
+            "데이터셋이나 SAM 전용 구성을 빠르게 시험할 때 유용합니다. "
+            "SAM과 MIT 둘 다 해제하면 실행 버튼이 차단됩니다."
+        ),
+    },
     "sam_prompts": {
         "en": (
             "Text prompts SAM3 will look for in each image. One prompt per "
