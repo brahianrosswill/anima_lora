@@ -1,18 +1,26 @@
 """Mask generation: SAM3 + MIT/ComicTextDetector → merged.
 
-Outputs to masks/{sam,mit,merged}/. ``cmd_mask`` runs SAM and MIT only if
-their per-tool dirs are missing, then always runs the merge.
+``make mask`` is a one-shot orchestrator: it runs SAM and MIT into a
+``tempfile.TemporaryDirectory()`` (cross-platform — honors ``TMPDIR`` /
+``TEMP``) and writes only the merged result to
+``post_image_dataset/masks/<rel>/{stem}_mask.png``. Per-tool intermediates
+are never persisted under the project root.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import tempfile
+from pathlib import Path
 
 from ._common import PY, ROOT, run
 
+MASK_OUTPUT_DIR = ROOT / "post_image_dataset" / "masks"
+RESIZED_IMAGE_DIR = ROOT / "post_image_dataset" / "resized"
 
-def cmd_mask_sam(extra):
+
+def _run_sam(image_dir: Path, out_dir: Path, extra: list[str]) -> None:
     run(
         [
             PY,
@@ -20,19 +28,20 @@ def cmd_mask_sam(extra):
             "--config",
             "configs/sam_mask.yaml",
             "--image-dir",
-            "post_image_dataset/resized",
+            str(image_dir),
             "--mask-dir",
-            "masks/sam",
+            str(out_dir),
             "--checkpoint",
             "models/sam3/sam3.pt",
             "--batch-size",
             "2",
+            "--recursive",
             *extra,
         ]
     )
 
 
-def cmd_mask_mit(extra):
+def _run_mit(image_dir: Path, out_dir: Path, extra: list[str]) -> None:
     # MIT_TEXT_THRESHOLD / MIT_DILATE let the GUI's Preprocessing tab tune
     # the MIT masker without editing this file. Defaults match the script's
     # own argparse defaults so direct CLI use is unchanged.
@@ -40,11 +49,12 @@ def cmd_mask_mit(extra):
         PY,
         "preprocess/generate_masks_mit.py",
         "--image-dir",
-        "post_image_dataset/resized",
+        str(image_dir),
         "--mask-dir",
-        "masks/mit",
+        str(out_dir),
         "--model-path",
         "models/mit/model.pth",
+        "--recursive",
     ]
     text_threshold = os.environ.get("MIT_TEXT_THRESHOLD")
     if text_threshold:
@@ -57,25 +67,27 @@ def cmd_mask_mit(extra):
 
 
 def cmd_mask(extra):
-    if not (ROOT / "masks" / "sam").is_dir():
-        cmd_mask_sam([])
-    if not (ROOT / "masks" / "mit").is_dir():
-        cmd_mask_mit([])
-    run(
-        [
-            PY,
-            "preprocess/merge_masks.py",
-            "masks/sam",
-            "masks/mit",
-            "--output-dir",
-            "masks/merged",
-            *extra,
-        ]
-    )
+    """Run SAM + MIT into a tempdir, merge, write to post_image_dataset/masks/."""
+    with tempfile.TemporaryDirectory(prefix="anima-masks-") as tmp_root:
+        tmp_sam = Path(tmp_root) / "sam"
+        tmp_mit = Path(tmp_root) / "mit"
+        _run_sam(RESIZED_IMAGE_DIR, tmp_sam, [])
+        _run_mit(RESIZED_IMAGE_DIR, tmp_mit, [])
+        MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                PY,
+                "preprocess/merge_masks.py",
+                str(tmp_sam),
+                str(tmp_mit),
+                "--output-dir",
+                str(MASK_OUTPUT_DIR),
+                *extra,
+            ]
+        )
 
 
 def cmd_mask_clean(_extra):
-    p = ROOT / "masks"
-    if p.exists():
-        shutil.rmtree(p)
-        print("  Removed masks/")
+    if MASK_OUTPUT_DIR.exists():
+        shutil.rmtree(MASK_OUTPUT_DIR)
+        print(f"  Removed {MASK_OUTPUT_DIR.relative_to(ROOT)}/")

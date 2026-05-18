@@ -12,12 +12,23 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_default_mask_dir() -> Optional[str]:
-    """Prefer masks/merged/ when it exists; fall back to masks/sam/ or masks/mit/.
+    """Resolve the default mask directory.
+
+    Prefers the new ``post_image_dataset/masks/`` layout produced by
+    ``make mask``; falls back to the legacy ``masks/{merged,sam,mit}/``
+    triple so users who haven't re-run masking after the consolidation
+    keep training without manual intervention.
 
     Returned path is relative, matching how other paths are resolved from the
     training CWD (anima_lora/).
     """
-    for candidate in ("masks/merged", "masks/sam", "masks/mit"):
+    candidates = (
+        "post_image_dataset/masks",
+        "masks/merged",
+        "masks/sam",
+        "masks/mit",
+    )
+    for candidate in candidates:
         if os.path.isdir(candidate):
             return candidate
     return None

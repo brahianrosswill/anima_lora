@@ -298,10 +298,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 # if caption is multiline, use the first line
                 caption = caption.split("\n")[0]
 
-            if (
-                subset.token_warmup_step > 0
-                or subset.caption_tag_dropout_rate > 0
-            ):
+            if subset.token_warmup_step > 0 or subset.caption_tag_dropout_rate > 0:
                 fixed_tokens = []
                 flex_tokens = []
                 fixed_suffix_tokens = []
@@ -584,9 +581,7 @@ class BaseDataset(torch.utils.data.Dataset):
             if (mask.width, mask.height) != (target_w, target_h):
                 mask = mask.resize((target_w, target_h), Image.LANCZOS)
                 n_resized += 1
-            info.preloaded_alpha_mask = torch.from_numpy(
-                np.array(mask, dtype=np.uint8)
-            )
+            info.preloaded_alpha_mask = torch.from_numpy(np.array(mask, dtype=np.uint8))
         if n_missing:
             logger.warning(f"  {n_missing} mask files missing on disk")
         if n_resized:
@@ -1154,9 +1149,7 @@ class BaseDataset(torch.utils.data.Dataset):
             flat = os.path.join(str(cache_dir), stem + suffix)
             if flat != nested:
                 candidates.append(flat)
-        candidates.append(
-            os.path.join(os.path.dirname(image_abs_path), stem + suffix)
-        )
+        candidates.append(os.path.join(os.path.dirname(image_abs_path), stem + suffix))
         cache_path = next((c for c in candidates if os.path.exists(c)), None)
         if cache_path is None:
             raise FileNotFoundError(
@@ -2047,9 +2040,25 @@ class DreamBoothDataset(BaseDataset):
                 )
                 if getattr(subset, "mask_dir", None):
                     stem = os.path.splitext(os.path.basename(img_path))[0]
-                    mask_path = os.path.join(subset.mask_dir, f"{stem}_mask.png")
-                    if os.path.exists(mask_path):
-                        info.mask_path = mask_path
+                    # Prefer the nested path that mirrors subset.image_dir →
+                    # mask_dir; fall back to the flat layout so legacy
+                    # masks/merged/ etc. caches keep working.
+                    candidates: list[str] = []
+                    image_dir = getattr(subset, "image_dir", None)
+                    if image_dir:
+                        try:
+                            rel = os.path.relpath(os.path.dirname(img_path), image_dir)
+                        except ValueError:
+                            rel = ""
+                        if rel and rel != "." and not rel.startswith(".."):
+                            candidates.append(
+                                os.path.join(subset.mask_dir, rel, f"{stem}_mask.png")
+                            )
+                    candidates.append(os.path.join(subset.mask_dir, f"{stem}_mask.png"))
+                    for mask_path in candidates:
+                        if os.path.exists(mask_path):
+                            info.mask_path = mask_path
+                            break
                 if size is not None:
                     info.image_size = size
                 if subset.is_reg:

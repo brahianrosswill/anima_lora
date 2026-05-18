@@ -124,15 +124,14 @@ is on by default in `base.toml`; turn it off in the method TOML if a run
 shouldn't use masks even when the mask dir exists.
 
 ```bash
-make mask        # SAM3 + MIT, then merge → masks/{sam,mit,merged}/
-make mask-sam    # masks/sam/
-make mask-mit    # masks/mit/
-make mask-clean  # remove masks/
+make mask        # SAM3 + MIT (via tempdir) → post_image_dataset/masks/
+make mask-clean  # rm -rf post_image_dataset/masks/
 ```
 
 These read `post_image_dataset/resized/` (the resized output of
-`make preprocess`). Subsets auto-pick `masks/merged/` if present, falling
-back to `masks/sam/` then `masks/mit/`.
+`make preprocess`). Subsets auto-pick `post_image_dataset/masks/` if
+present, falling back to legacy `masks/{merged,sam,mit}/` so users who
+haven't re-run `make mask` after the consolidation keep training.
 
 ## Dataset configuration
 

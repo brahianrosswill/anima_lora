@@ -170,7 +170,7 @@ FIELD_HELP: dict[str, dict[str, str]] = {
     },
     "caption_dropout_rate": {
         "en": "Probability per sample of dropping the caption (replaced with empty text embedding). Pushes the LoRA toward an unconditional bias — useful for style training where you want the look to apply regardless of prompt. Typical: 0.0–0.05 for character/concept LoRAs, 0.1–0.25 for style LoRAs (그림체 학습). Too high can blur prompt-driven diversity (pose/composition).",
-        "ko": "샘플별로 캡션을 비울(빈 텍스트 임베딩으로 대체) 확률. LoRA를 무조건부(unconditional) 방향으로 학습시켜, 프롬프트와 무관하게 항상 적용되는 \"스타일\"을 학습할 때 유리. 일반적: 캐릭터/컨셉 LoRA는 0.0–0.05, 그림체 학습은 0.1–0.25. 너무 높이면 캡션이 담당하던 다양성(포즈/구도)까지 함께 약해짐.",
+        "ko": '샘플별로 캡션을 비울(빈 텍스트 임베딩으로 대체) 확률. LoRA를 무조건부(unconditional) 방향으로 학습시켜, 프롬프트와 무관하게 항상 적용되는 "스타일"을 학습할 때 유리. 일반적: 캐릭터/컨셉 LoRA는 0.0–0.05, 그림체 학습은 0.1–0.25. 너무 높이면 캡션이 담당하던 다양성(포즈/구도)까지 함께 약해짐.',
     },
     "optimizer_type": {
         "en": "Optimizer algorithm. AdamW8bit: memory-efficient 8-bit Adam. Others: AdamW, Lion, Prodigy, etc.",
@@ -222,8 +222,8 @@ FIELD_HELP: dict[str, dict[str, str]] = {
         "ko": "LLM 어댑터 레이어 출력을 디스크에 캐싱. 매 에폭 텍스트 인코더 투영 재계산 회피.",
     },
     "masked_loss": {
-        "en": "Apply loss only to non-masked regions (e.g., exclude text bubbles). Requires mask files in masks/ directory.",
-        "ko": "마스크되지 않은 영역에만 손실 적용 (예: 말풍선 제외). masks/ 디렉토리에 마스크 파일 필요.",
+        "en": "Apply loss only to non-masked regions (e.g., exclude text bubbles). Requires mask files in post_image_dataset/masks/ (or legacy masks/merged/) — run `make mask` to generate them.",
+        "ko": "마스크되지 않은 영역에만 손실 적용 (예: 말풍선 제외). post_image_dataset/masks/ (또는 레거시 masks/merged/) 에 마스크 파일 필요 — `make mask` 로 생성.",
     },
     "mixed_precision": {
         "en": "Mixed precision mode. bf16: recommended for modern GPUs. fp16: for older GPUs without bf16 support.",

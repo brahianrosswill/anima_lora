@@ -142,21 +142,39 @@ IMAGE_EXTENSIONS = [
 
 
 def load_mask_from_dir(
-    mask_dir: str, image_path: str, size: Tuple[int, int]
+    mask_dir: str,
+    image_path: str,
+    size: Tuple[int, int],
+    image_dir: Optional[str] = None,
 ) -> Optional[torch.Tensor]:
     """Load a mask from a separate file in mask_dir matching the image stem.
 
     Args:
-        mask_dir: Directory containing {stem}_mask.png files.
+        mask_dir: Directory containing ``{stem}_mask.png`` files.
         image_path: Path to the source image (used for stem matching).
         size: (width, height) to resize the mask to if needed.
+        image_dir: Optional source root. When set, the relative subpath from
+            ``image_dir`` to ``image_path`` is mirrored under ``mask_dir``,
+            matching the nested-output layout produced by the mask writers.
+            Falls back to the legacy flat lookup if no nested file exists so
+            old caches keep working mid-migration.
 
     Returns:
         Float tensor [H, W] in [0, 1] range, or None if no mask file found.
     """
     stem = os.path.splitext(os.path.basename(image_path))[0]
-    mask_path = os.path.join(mask_dir, f"{stem}_mask.png")
-    if not os.path.exists(mask_path):
+    candidates: list[str] = []
+    if image_dir is not None:
+        try:
+            rel = os.path.relpath(os.path.dirname(image_path), image_dir)
+        except ValueError:
+            rel = ""
+        if rel and rel != "." and not rel.startswith(".."):
+            candidates.append(os.path.join(mask_dir, rel, f"{stem}_mask.png"))
+    candidates.append(os.path.join(mask_dir, f"{stem}_mask.png"))
+
+    mask_path = next((p for p in candidates if os.path.exists(p)), None)
+    if mask_path is None:
         return None
     mask = Image.open(mask_path).convert("L")
     if (mask.width, mask.height) != size:

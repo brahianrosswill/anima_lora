@@ -112,12 +112,12 @@ python tasks.py gui        # Windows
 make gui-shortcut          # Create "Anima LoRA GUI.lnk" on the Windows desktop (no console window)
 
 # Masking (for masked loss training)
-# Outputs under masks/{sam,mit,merged}/. Subsets auto-pick masks/merged/ when
-# it exists, falling back to masks/sam/ then masks/mit/.
-make mask                  # Generate SAM3 + MIT masks under masks/{sam,mit}/, then merge → masks/merged/
-make mask-sam              # SAM3 only → masks/sam/
-make mask-mit              # MIT/ComicTextDetector only → masks/mit/
-make mask-clean            # Remove masks/
+# Merged masks land in post_image_dataset/masks/<rel>/{stem}_mask.png. SAM +
+# MIT intermediates run through a tempdir and are not persisted. Subsets
+# auto-pick post_image_dataset/masks/, falling back to legacy
+# masks/{merged,sam,mit}/ when the new tree is missing.
+make mask                  # Run SAM3 + MIT (via tempdir), merge → post_image_dataset/masks/
+make mask-clean            # rm -rf post_image_dataset/masks/
 
 # Merge LoRA into DiT (standalone ComfyUI-compatible checkpoint)
 make merge ADAPTER_DIR=output/ckpt                    # bake latest bakeable LoRA in dir

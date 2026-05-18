@@ -59,12 +59,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "Confidence threshold for the MIT/ComicTextDetector text segmenter. "
             "Default 0.8."
         ),
-        "preprocess_run_sam": "Run SAM masking",
-        "preprocess_run_mit": "Run MIT masking",
-        "preprocess_run_merge": "Merge SAM + MIT → masks/merged",
+        "preprocess_run_mask": "Run mask (SAM + MIT → merged)",
         "preprocess_status_resized": "Resized images: {n}",
         "preprocess_status_caches": "Caches — latents: {lat}, text: {te}, PE: {pe}",
-        "preprocess_status_masks": "Masks — SAM: {sam}, MIT: {mit}, merged: {merged}",
+        "preprocess_status_masks": "Masks: {masks}",
         "preprocess_status_no_resized": "No resized images yet — run Preprocess in the Training Config tab first.",
         "preprocess_log_placeholder": "Preprocessing output will appear here...",
         "preprocess_save_settings": "Save",
@@ -355,12 +353,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "preprocess_mit_threshold_tip": (
             "MIT/ComicTextDetector 텍스트 세그멘터의 신뢰도 임계값. 기본값 0.8."
         ),
-        "preprocess_run_sam": "SAM 마스킹 실행",
-        "preprocess_run_mit": "MIT 마스킹 실행",
-        "preprocess_run_merge": "SAM + MIT 병합 → masks/merged",
+        "preprocess_run_mask": "마스크 실행 (SAM + MIT → 병합)",
         "preprocess_status_resized": "리사이즈된 이미지: {n}장",
         "preprocess_status_caches": "캐시 — latents: {lat}, text: {te}, PE: {pe}",
-        "preprocess_status_masks": "마스크 — SAM: {sam}, MIT: {mit}, merged: {merged}",
+        "preprocess_status_masks": "마스크: {masks}장",
         "preprocess_status_no_resized": "리사이즈된 이미지가 없습니다 — 학습 설정 탭에서 Preprocess를 먼저 실행하세요.",
         "preprocess_log_placeholder": "전처리 출력이 여기에 표시됩니다...",
         "preprocess_save_settings": "저장",
@@ -407,8 +403,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "기존 캐시로 학습을 진행할까요?"
         ),
         "train_autopreprocess_log": (
-            "전처리 캐시가 없어 전처리를 먼저 실행한 뒤 자동으로 "
-            "학습을 시작합니다.\n"
+            "전처리 캐시가 없어 전처리를 먼저 실행한 뒤 자동으로 학습을 시작합니다.\n"
         ),
         "train_preprocessing": "전처리 중…",
         "no_lora_for_test": "테스트할 LoRA가 output/ckpt/에 없습니다. 먼저 학습을 실행하세요.",

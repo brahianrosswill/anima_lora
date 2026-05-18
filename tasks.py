@@ -146,10 +146,14 @@ COMMANDS = {
         "Download PE-Spatial-B16-512 (Anima Tagger aux encoder)",
     ),
     # ── Masking ───────────────────────────────────────────────────────
-    "mask": (masking.cmd_mask, "Generate SAM3 + MIT masks, then merge"),
-    "mask-sam": (masking.cmd_mask_sam, "Generate SAM3 masks only"),
-    "mask-mit": (masking.cmd_mask_mit, "Generate MIT masks only"),
-    "mask-clean": (masking.cmd_mask_clean, "Remove all generated masks"),
+    "mask": (
+        masking.cmd_mask,
+        "Run SAM + MIT (via tempdir) and write merged masks under post_image_dataset/masks/",
+    ),
+    "mask-clean": (
+        masking.cmd_mask_clean,
+        "Remove post_image_dataset/masks/",
+    ),
     # ── GUI ───────────────────────────────────────────────────────────
     "gui": (gui.cmd_gui, "Launch PySide6 GUI"),
     "gui-shortcut": (
@@ -164,7 +168,7 @@ COMMANDS = {
     "comfy-batch": (utilities.cmd_comfy_batch, "Run ComfyUI batch workflow"),
     "distill-prep": (
         utilities.cmd_distill_prep,
-        "Pre-stage artifacts for distill-mod: T5(\"\") uncond sidecar + "
+        'Pre-stage artifacts for distill-mod: T5("") uncond sidecar + '
         "teacher-synthetic clean latents pool (--skip_synth / --skip_uncond to "
         "stage only one).",
     ),

@@ -70,11 +70,9 @@ DEFAULT_MIT_DILATE = 5
 
 RESIZED_DIR = ROOT / "post_image_dataset" / "resized"
 LORA_CACHE_DIR = ROOT / "post_image_dataset" / "lora"
-MASK_DIRS = {
-    "sam": ROOT / "masks" / "sam",
-    "mit": ROOT / "masks" / "mit",
-    "merged": ROOT / "masks" / "merged",
-}
+# Merged masks now live under the cache root alongside the resized tree
+# (the SAM/MIT intermediates run through a tempdir during `make mask`).
+MASK_DIR = ROOT / "post_image_dataset" / "masks"
 
 
 def _load_settings() -> dict:
@@ -134,14 +132,20 @@ def _save_sam_yaml(prompts: list[str], threshold: float, dilate: int) -> None:
 def _count_masks(mask_dir: Path) -> int:
     if not mask_dir.is_dir():
         return 0
-    return sum(1 for p in mask_dir.iterdir() if p.is_file() and p.suffix.lower() == ".png")
+    # rglob picks up the nested `<rel>/` subtrees produced by `make mask`
+    # under the consolidated layout; legacy flat trees still count correctly.
+    return sum(1 for _ in mask_dir.rglob("*_mask.png"))
 
 
 def _count_resized() -> int:
     if not RESIZED_DIR.is_dir():
         return 0
+    # rglob picks up the nested `<rel>/` subtrees produced by recursive
+    # resize_images.py; flat trees still count correctly.
     return sum(
-        1 for p in RESIZED_DIR.iterdir() if p.suffix.lower() in IMAGE_EXTS
+        1
+        for p in RESIZED_DIR.rglob("*")
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
 
 
@@ -168,13 +172,9 @@ class PreprocessingTab(QWidget):
         # Color semantics (matches ConfigTab):
         #   Save           → neutral (default styling, no background tint)
         #   Cache / mask   → blue   (#2980b9) — run a specific preprocess step
-        #   Merge          → green  (#27ae60) — combine prior results
         #   Stop           → red    (#c0392b) — abort the running subprocess
         run_step_style = (
             "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
-        )
-        merge_style = (
-            "background:#27ae60;color:white;font-weight:bold;padding:4px 16px;"
         )
 
         self.save_btn = QPushButton(t("preprocess_save_settings"))
@@ -190,23 +190,11 @@ class PreprocessingTab(QWidget):
         self._run_buttons.append(self.run_te_btn)
         top.addWidget(self.run_te_btn)
 
-        self.run_sam_btn = QPushButton(t("preprocess_run_sam"))
-        self.run_sam_btn.setStyleSheet(run_step_style)
-        self.run_sam_btn.clicked.connect(self._run_sam)
-        self._run_buttons.append(self.run_sam_btn)
-        top.addWidget(self.run_sam_btn)
-
-        self.run_mit_btn = QPushButton(t("preprocess_run_mit"))
-        self.run_mit_btn.setStyleSheet(run_step_style)
-        self.run_mit_btn.clicked.connect(self._run_mit)
-        self._run_buttons.append(self.run_mit_btn)
-        top.addWidget(self.run_mit_btn)
-
-        self.run_merge_btn = QPushButton(t("preprocess_run_merge"))
-        self.run_merge_btn.setStyleSheet(merge_style)
-        self.run_merge_btn.clicked.connect(self._run_merge)
-        self._run_buttons.append(self.run_merge_btn)
-        top.addWidget(self.run_merge_btn)
+        self.run_mask_btn = QPushButton(t("preprocess_run_mask"))
+        self.run_mask_btn.setStyleSheet(run_step_style)
+        self.run_mask_btn.clicked.connect(self._run_mask)
+        self._run_buttons.append(self.run_mask_btn)
+        top.addWidget(self.run_mask_btn)
 
         top.addStretch()
         self.stop_btn = QPushButton(t("stop"))
@@ -369,9 +357,7 @@ class PreprocessingTab(QWidget):
         lbl.setStyleSheet("color:#f0f0f0; text-decoration: underline dotted;")
         help_text = preprocess_field_help(key)
         lbl.clicked.connect(
-            lambda _k=key, _h=help_text, _t=text_str: self._show_field_help(
-                _t, _h
-            )
+            lambda _k=key, _h=help_text, _t=text_str: self._show_field_help(_t, _h)
         )
         return lbl
 
@@ -400,9 +386,7 @@ class PreprocessingTab(QWidget):
     def _refresh_status(self) -> None:
         n_resized = _count_resized()
         caches = count_preprocess_caches(LORA_CACHE_DIR)
-        sam_n = _count_masks(MASK_DIRS["sam"])
-        mit_n = _count_masks(MASK_DIRS["mit"])
-        merged_n = _count_masks(MASK_DIRS["merged"])
+        mask_n = _count_masks(MASK_DIR)
         if n_resized == 0:
             self.status_lbl.setText(t("preprocess_status_no_resized"))
             return
@@ -414,12 +398,7 @@ class PreprocessingTab(QWidget):
                 te=caches["te"],
                 pe=caches["pe"],
             ),
-            t(
-                "preprocess_status_masks",
-                sam=sam_n,
-                mit=mit_n,
-                merged=merged_n,
-            ),
+            t("preprocess_status_masks", masks=mask_n),
         ]
         self.status_lbl.setText("  |  ".join(lines))
 
@@ -478,9 +457,7 @@ class PreprocessingTab(QWidget):
 
     def _save_all_clicked(self) -> None:
         if self._save_all():
-            QMessageBox.information(
-                self, t("saved"), t("preprocess_settings_saved")
-            )
+            QMessageBox.information(self, t("saved"), t("preprocess_settings_saved"))
 
     # ── Subprocess actions ─────────────────────────────────────────
 
@@ -502,25 +479,19 @@ class PreprocessingTab(QWidget):
         )
         self._launch(["tasks.py", "preprocess"], env=env)
 
-    def _run_sam(self) -> None:
-        # SAM reads configs/sam_mask.yaml directly — no env vars needed,
-        # just persist the form values to the YAML before launching.
-        if not self._save_all():
-            return
-        self._launch(["tasks.py", "mask-sam"])
-
-    def _run_mit(self) -> None:
+    def _run_mask(self) -> None:
+        # Single-shot pipeline. ``tasks.py mask`` runs SAM + MIT into a
+        # tempdir, merges them, and writes only the merged result to
+        # ``post_image_dataset/masks/<rel>/``. SAM reads
+        # ``configs/sam_mask.yaml`` directly; MIT picks up the
+        # ``MIT_TEXT_THRESHOLD`` / ``MIT_DILATE`` env vars set below.
         if not self._save_all():
             return
         env = make_subprocess_env(
             MIT_TEXT_THRESHOLD=self.mit_threshold_edit.text().strip(),
             MIT_DILATE=str(int(self.mit_dilate_spin.value())),
         )
-        self._launch(["tasks.py", "mask-mit"], env=env)
-
-    def _run_merge(self) -> None:
-        # Merge has no tunable knobs — just chain the output dirs.
-        self._launch(["tasks.py", "mask"])  # merges if SAM+MIT already exist
+        self._launch(["tasks.py", "mask"], env=env)
 
     def _launch(self, argv: list[str], env=None) -> None:
         if self._is_running():
