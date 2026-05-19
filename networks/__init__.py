@@ -92,9 +92,9 @@ SHARED_KWARG_FLAGS: Tuple[str, ...] = (
     "use_timestep_mask",
     "min_rank",
     "alpha_rank_scale",
-    # Per-channel input pre-scaling (SmoothQuant-style)
-    "per_channel_scaling",
-    "channel_stats_path",
+    # Per-channel input pre-scaling (SmoothQuant-style). Gated by alpha:
+    # 0.0 disables; 0.5 = sqrt balance; 1.0 fully flattens. Calibration is
+    # vendored at `networks/calibration/channel_stats.safetensors`.
     "channel_scaling_alpha",
     # Memory-saving down-projection autograd (classic LoRA only; bitwise-equal grads)
     "use_custom_down_autograd",

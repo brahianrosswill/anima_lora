@@ -889,16 +889,17 @@ class LoRANetwork(torch.nn.Module):
 
         if cfg.channel_scales_dict is not None:
             logger.info(
-                f"per_channel_scaling: {self._channel_scale_hits} DiT modules "
+                f"channel_scaling: {self._channel_scale_hits} DiT modules "
                 f"received calibration-based input scaling"
             )
             if self._channel_scale_misses:
                 logger.warning(
-                    f"per_channel_scaling: {len(self._channel_scale_misses)} DiT modules "
+                    f"channel_scaling: {len(self._channel_scale_misses)} DiT modules "
                     f"have no calibration stats (first: {self._channel_scale_misses[:3]}). "
-                    f"These will train without input rebalancing — regenerate the stats "
-                    f"file with `python archive/bench/analyze_lora_input_channels.py "
-                    f"--dump_channel_stats <path>` if this is unexpected."
+                    f"These will train without input rebalancing — regenerate the vendored "
+                    f"calibration with `python bench/channel_stats/analyze_lora_input_channels.py "
+                    f"--per_artist --dump_channel_stats networks/calibration/channel_stats.safetensors` "
+                    f"if this is unexpected."
                 )
 
         # Create ReFT modules on the DiT residual stream (block outputs), following

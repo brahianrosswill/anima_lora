@@ -8,12 +8,13 @@ Missing keys fall back to English via ``t()``.
 
 from __future__ import annotations
 
-from gui.i18n import cn, en, ko
+from gui.i18n import cn, en, ja, ko
 
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": en.STRINGS,
     "ko": ko.STRINGS,
     "cn": cn.STRINGS,
+    "ja": ja.STRINGS,
 }
 
 _current_lang = "en"

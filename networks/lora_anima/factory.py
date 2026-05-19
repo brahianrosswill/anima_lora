@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
@@ -57,47 +58,48 @@ def _maybe_attach_repa_head(network: "LoRANetwork", kwargs: Dict[str, object]) -
     )
 
 
+# Vendored SmoothQuant-style calibration — ships in-tree (~3.5 MB) so deploys
+# (including custom_nodes/*/_vendor/ trees) work without a separate download.
+# Regenerate via `bench/channel_stats/analyze_lora_input_channels.py`.
+_CHANNEL_STATS_PATH = (
+    Path(__file__).resolve().parent.parent / "calibration" / "channel_stats.safetensors"
+)
+
+
 def _load_channel_scales(
     kwargs: Dict[str, object],
 ) -> Optional[Dict[str, torch.Tensor]]:
-    """Load per-channel input pre-scaling stats from disk, if requested.
+    """Load per-channel input pre-scaling stats, gated on ``channel_scaling_alpha``.
 
-    SmoothQuant-style. Requires a calibration file produced by
-    ``archive/bench/analyze_lora_input_channels.py --dump_channel_stats <path>``.
-    See ``archive/bench/channel_dominance_analysis.md`` for motivation.
+    SmoothQuant-style. ``channel_scaling_alpha`` is the sole user knob:
+    0.0 (default) disables; 0.5 = sqrt balance; 1.0 fully flattens. The
+    calibration file is vendored at ``networks/calibration/channel_stats.safetensors``;
+    regenerate it with ``bench/channel_stats/analyze_lora_input_channels.py``.
+    See ``bench/channel_stats/channel_dominance_analysis.md`` for motivation.
     """
-    per_channel_scaling = kwargs.get("per_channel_scaling", "false")
-    if per_channel_scaling is not None:
-        per_channel_scaling = str(per_channel_scaling).lower() == "true"
-    if not per_channel_scaling:
+    raw_alpha = kwargs.get("channel_scaling_alpha", 0.0)
+    channel_scaling_alpha = float(raw_alpha) if raw_alpha is not None else 0.0
+    if channel_scaling_alpha == 0.0:
         return None
 
-    channel_stats_path = kwargs.get("channel_stats_path", None)
-    channel_scaling_alpha = kwargs.get("channel_scaling_alpha", None)
-    channel_scaling_alpha = (
-        float(channel_scaling_alpha) if channel_scaling_alpha is not None else 0.5
-    )
-
-    if not channel_stats_path:
-        raise ValueError(
-            "per_channel_scaling=true requires channel_stats_path. Generate one with:\n"
-            "  python archive/bench/analyze_lora_input_channels.py --dump_channel_stats <path.safetensors>"
-        )
-    if not os.path.isfile(channel_stats_path):
+    if not _CHANNEL_STATS_PATH.is_file():
         raise FileNotFoundError(
-            f"channel_stats_path does not exist: {channel_stats_path}"
+            f"vendored channel stats missing at {_CHANNEL_STATS_PATH}. "
+            f"Regenerate with:\n"
+            f"  python bench/channel_stats/analyze_lora_input_channels.py "
+            f"--per_artist --dump_channel_stats {_CHANNEL_STATS_PATH}"
         )
     from safetensors.torch import load_file as _load_channel_stats_file
 
-    raw_stats = _load_channel_stats_file(channel_stats_path)
+    raw_stats = _load_channel_stats_file(str(_CHANNEL_STATS_PATH))
     out: Dict[str, torch.Tensor] = {}
     for _lora_name, _mean_abs in raw_stats.items():
         _s = _mean_abs.float().clamp_min(1e-6).pow(channel_scaling_alpha)
         _s = _s / _s.mean().clamp_min(1e-12)
         out[_lora_name] = _s
     logger.info(
-        f"Per-channel input pre-scaling: alpha={channel_scaling_alpha}, "
-        f"stats={channel_stats_path} ({len(out)} calibrated modules)"
+        f"channel_scaling: alpha={channel_scaling_alpha}, "
+        f"stats={_CHANNEL_STATS_PATH.name} ({len(out)} calibrated modules)"
     )
     return out
 
