@@ -127,4 +127,21 @@ class TqdmProgressTracker:
         if steps <= 0:
             return ""
         spi = (now - anchor_time) / steps
-        return f" — {spi:.2f}s/step"
+        remaining = tot - cur
+        if remaining <= 0:
+            return f" — {spi:.2f}s/step"
+        return f" — {spi:.2f}s/step — ETA {_format_duration(remaining * spi)}"
+
+
+def _format_duration(seconds: float) -> str:
+    """Render a duration as ``M:SS`` (under an hour) or ``H:MM:SS``.
+
+    Matches tqdm's own remaining-time style so the ETA reads naturally next
+    to the s/step rate.
+    """
+    s = max(0, int(round(seconds)))
+    if s < 3600:
+        return f"{s // 60}:{s % 60:02d}"
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}"
