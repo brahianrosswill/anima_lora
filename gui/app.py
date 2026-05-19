@@ -49,8 +49,9 @@ _GUIDEBOOK_BY_LANG: dict[str, Path] = {
     "en": _GUIDELINES / "guidebook.md",
     "ko": _GUIDELINES / "가이드북.md",
     "cn": _GUIDELINES / "指南书.md",
+    "ja": _GUIDELINES / "ガイドブック.md",
 }
-_GUIDEBOOK_FALLBACK = _GUIDEBOOK_BY_LANG["ko"]
+_GUIDEBOOK_FALLBACK = _GUIDEBOOK_BY_LANG["en"]
 ICON_PATH = Path(__file__).resolve().parent / "icon.ico"
 
 
@@ -58,7 +59,7 @@ def _guidebook_path() -> Path:
     return _GUIDEBOOK_BY_LANG.get(current_language(), _GUIDEBOOK_FALLBACK)
 
 
-LANG_NAMES = {"en": "English", "ko": "한국어", "cn": "简体中文"}
+LANG_NAMES = {"en": "English", "ko": "한국어", "cn": "简体中文", "ja": "日本語"}
 
 
 def _dark(app: QApplication):

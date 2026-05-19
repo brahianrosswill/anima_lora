@@ -1,0 +1,3 @@
+<h2 style='margin:0 0 10px 0; font-size:17px;'>Postfix (cond + ortho)</h2>
+<p><b>postfix_ortho_cond</b> &mdash; 構造的直交性を持つキャプション条件付き postfix。小さな <code>cond_mlp</code> がプールされたキャプション埋め込みを読み込み、直接 <code>K·D</code> postfix テンソルの代わりにキャプションごとに <code>(S(c), λ(c))</code> を出力します — キャプションごとに <code>K(K-1)/2 + 1</code> スカラー。各キャプションの postfix は <code>Cayley(S(c) − S(c)ᵀ) @ basis · λ(c)</code> であり、<code>postfix(c) @ postfix(c).T = λ(c)² · I_K</code> が構造的に保証されます: キャプション内では per-slot の均一な大きさ、大きさはキャプター間で変化します。</p>
+<p>基底はキャッシュされた <code>_anima_te.safetensors</code> の上位 K 個の右特異ベクトルで、<code>ortho_basis_seed</code> で決定論的に行シャッフルされます。学習可能なパラメーター数は K=32 / hidden=256 / D=1024 で約 390k (K=64 のレガシー非拘束 cond postfix の ~8.65M に対して)。詳細は <code>docs/proposal/orthogonal_postfix.md §C</code> を参照。</p>
