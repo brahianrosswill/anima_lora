@@ -106,11 +106,9 @@ output_name = "anima_chimera"
 #    failure mode as FeRA's GlobalRouter — see networks/CLAUDE.md).
 #  • LR-sensitive. Start with the same scale FreqRouter uses (10×).
 #
-# content_router_source = "crossattn"
-# content_router_init_std = 0.1      # non-zero (uniform would be a fixed point)
-# content_router_layer_norm = true   # parameterless LN on the pooled input
-# network_content_router_lr_scale = 10  # stacks on router_lr_scale
-
+content_router_source = "crossattn"
+content_router_init_std = 0.1      # non-zero (uniform would be a fixed point)
+content_router_layer_norm = true   # parameterless LN on the pooled input
 
 # -------------
 # REPA / VR-loss compositions are not gated. Both modify what shared A

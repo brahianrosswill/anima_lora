@@ -82,6 +82,26 @@ Detection / dispatch: `load_adapter` writes `bundle["chimera_dual_a"]` (a top-le
 - T-LoRA's content-branch rank mask is training-only and intentionally not applied at inference — same rationale as plain T-LoRA (`[[project_tlora_inference_full_rank]]`).
 - Old `sigma_mlp.*` checkpoints are not supported (see README §2.1.0).
 
+### Global ContentRouter (`content_router_source="crossattn"`)
+
+When chimera was trained with `content_router_source="crossattn"`, the per-Linear `router.weight/bias` keys (shape `(K_c, rank)`) are **absent** — `ChimeraHydraInferenceModule.__init__` sets `self.router = None` under that mode. Instead, a network-level `ContentRouter` MLP (`Linear → SiLU → Linear → softmax/τ`, weights `content_router.net.{0,2}.weight/bias`) consumes the **pooled post-LLM-adapter `crossattn_emb`** and emits `π_c ∈ (B, K_c)`, broadcast to every chimera Linear via the same slot-assign contract as `π_f`.
+
+Detection: `ss_chimera_content_router_source == "crossattn"` in safetensors metadata. `load_adapter` then parses `content_router.net.*` into `chimera_data["content_router"]` and stamps `chimera_data["content_router_source"] = "crossattn"`. `ss_chimera_content_router_layer_norm` controls whether a parameterless LN is applied to the pooled vector before the MLP (matches training).
+
+Application path differs from the freq pool — the input is text features, which are only materialized **inside** `diffusion_model.forward` (when `self.llm_adapter(...)` runs). A pre-hook on `diffusion_model._forward_pre_hooks` fires too early. So:
+
+- `_make_content_router_llm_adapter_hook` is installed via `add_object_patch("diffusion_model.llm_adapter._forward_hooks", ...)` — a `forward_hook` on the LLM adapter itself. It captures the adapter output `(B, L_text, D)`, zero-pads to `_T5_PAD_LEN = 512` (matches `Anima.preprocess_text_embeds`), RMS-pools over the sequence dim, optionally LayerNorms over D, runs the MLP, and writes `router_state["pi_c"]`.
+- Per-Linear chimera hooks (`_make_chimera_hook` / `_make_chimera_dual_a_hook`) are flagged with `global_content_router=True` in their `params` dict, which makes them skip the per-Linear pooled-softmax and broadcast `router_state["pi_c"]` instead (with uniform `1/K_c` fallback if the llm_adapter hook hasn't fired yet).
+- The `router_w`/`router_b` requirement in both apply paths (`_apply_hydra_live_to_model` chimera branch + `_apply_chimera_dual_a_to_model`) is dropped under the global router — those keys are absent by design.
+
+CFG composes naturally: ComfyUI batches cond + uncond through one `diffusion_model.forward`, the LLM adapter runs once over `(2B, L, D)`, the hook pools per-sample, and `π_c` already varies per row.
+
+Hard error if the file claims `crossattn` but is missing `content_router.net.*` (malformed checkpoint), or if the loaded DiT has no `llm_adapter` attribute (non-Anima model — the router has no input). Caveats:
+
+- The hook runs `torch._dynamo.disable`d (same as the chimera pre-hook) — softmax/τ at small τ underflows in bf16, so it stays fp32.
+- `_T5_PAD_LEN` is hardcoded to 512 because T5 tokenization and `Anima.preprocess_text_embeds` both pin it. If T5 max_length ever varies, plumb a metadata stamp.
+- Postfix composes fine — postfix splices its vectors into `context` AFTER `preprocess_text_embeds`, so the llm_adapter hook always sees the unmodified post-T5 features.
+
 ## Author-faithful FeRA (`fera.py`)
 
 `AnimaFeraLoader` is for `networks.methods.fera` checkpoints — a different network family from the FEI-on-Hydra path above. Three architectural differences that drive the split:

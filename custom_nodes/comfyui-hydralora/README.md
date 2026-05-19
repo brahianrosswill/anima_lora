@@ -41,6 +41,8 @@ FeRA-style FEI routing (`make exp-fera` checkpoints): when the checkpoint's safe
 
 **ChimeraHydra dual-pool routing** (`make chimera` checkpoints, files named `*_chimera.safetensors`): the per-Linear router is narrowed to `K_c` outputs and reads pooled rank-R `lx` only (no σ/FEI columns). A network-level FreqRouter MLP (`Linear → SiLU → Linear → softmax/τ`, weights under `freq_router.net.*`) runs once per denoising step on `concat(FEI(z_t), sinusoidal(σ))` and broadcasts `π_f ∈ (B, K_f)` to every chimera Linear via shared state. Each per-Linear hook concatenates `[π_c, π_f]` over the full `E = K_c + K_f` experts and dispatches the standard Hydra einsum/bmm. Detected from `ss_use_chimera_hydra=true` plus the chimera-specific `ss_num_experts_content` / `ss_num_experts_freq` / `ss_chimera_*` metadata.
 
+When chimera was trained with `content_router_source = "crossattn"` (`ss_chimera_content_router_source="crossattn"` in metadata), the per-Linear content router is replaced by a single network-level `ContentRouter` MLP fed pooled post-LLM-adapter `crossattn_emb`. A second `forward_hook` is installed on `diffusion_model.llm_adapter._forward_hooks` that pools its output to `(B, D)`, runs the MLP, and writes `π_c` into the same shared state as `π_f`. Per-Linear chimera hooks then broadcast that `π_c` instead of running their own pooled-`lx` softmax. The per-Linear `router.weight`/`router.bias` keys are absent from the file in this mode. See changelog 3.5.0.
+
 **ReFT** → per-block `forward_hook` installed via `ModelPatcher.add_object_patch` on `diffusion_model.blocks.<idx>._forward_hooks`. The hook adds `R^T · (ΔW · h + b) · scale · strength` to the block output.
 
 **Prefix / postfix / cond** → `ModelPatcher.add_object_patch` on `diffusion_model.forward`, splicing learned vectors into the T5-compatible crossattn embedding *after* the LLM adapter + pad-to-512 step. Positive-batch rows only via `cond_or_uncond` from `transformer_options` (CFG-safe).
@@ -63,6 +65,18 @@ For both HydraLoRA and ReFT we install a `forward_hook` rather than overriding `
 The pure-compute router math (FEI 2-band / FEI n-band high-to-low, σ sinusoidal features, σ-band partition mask) lives in `library/inference/router_compute.py` in the main repo. `adapter.py` resolves it live when the node is inside anima_lora, falls back to `_vendor/library/inference/router_compute.py` when standalone. Trained router weights are bit-sensitive to these kernels, so the vendored copy must stay in lockstep with the live tree — re-run `make vendor-sync` (or `python scripts/sync_vendor.py`) before publishing a new node version.
 
 ## Changelog
+
+### 3.5.0 — 2026-05-19 — ChimeraHydra global ContentRouter (`content_router_source="crossattn"`)
+
+`AnimaAdapterLoader` now supports chimera checkpoints trained with the network-level ContentRouter — one MLP per network, fed pooled post-LLM-adapter `crossattn_emb`, broadcasting `π_c` to every chimera Linear. The per-Linear pooled-`lx_c` softmax is replaced by a global "caption regime" axis (analogous to the freq pool's FreqRouter). Mutually exclusive with the default per-Linear path; selected at training time via `content_router_source = "crossattn"` in `configs/methods/chimera.toml`.
+
+- Detection key: `ss_chimera_content_router_source == "crossattn"` in safetensors metadata. The loader parses top-level `content_router.net.{0,2}.weight/bias` into `chimera_data["content_router"]` and honors `ss_chimera_content_router_layer_norm` for the parameterless LN flag.
+- The per-Linear `router.weight`/`router.bias` keys (shape `(K_c, rank)`) are **absent** under this mode — the loader no longer requires them on chimera prefixes when `content_router_source == "crossattn"`. Other modes (per-Linear router, default) are unchanged.
+- New application hook: `_make_content_router_llm_adapter_hook` is installed as a `forward_hook` on `diffusion_model.llm_adapter._forward_hooks`. It captures the post-T5 features `(B, L_text, D)`, zero-pads to 512 (matches `Anima.preprocess_text_embeds`), RMS-pools over the sequence dim, optionally LayerNorms over D, runs `Linear → SiLU → Linear → softmax/τ`, and writes `π_c` into the same shared state the FreqRouter already uses. Per-Linear chimera hooks broadcast `π_c` from that state (uniform `1/K_c` fallback on the very first compile-cache miss).
+- CFG batching composes naturally — cond and uncond rows go through one `diffusion_model.forward` and the hook produces per-row gates because their text differs.
+- Composes with `AnimaPostfixLoader` (postfix splices into `context` AFTER `preprocess_text_embeds`, so the llm_adapter hook always sees the unmodified post-T5 features).
+- Hard error if the file claims crossattn but is missing `content_router.net.*`, or if the loaded DiT has no `llm_adapter` (non-Anima base).
+- Single-A (3.3.0) and dual-A (3.4.0) chimera formats both pick this up; the parser is one helper (`_parse_chimera_content_router`) shared across both branches.
 
 ### 3.4.0 — 2026-05-15 — ChimeraHydra dual-A on-disk format
 
