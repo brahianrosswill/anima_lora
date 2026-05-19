@@ -44,8 +44,18 @@ from gui.system_dialog import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-GUIDEBOOK_PATH = _REPO_ROOT / "docs" / "guidelines" / "가이드북.md"
+_GUIDELINES = _REPO_ROOT / "docs" / "guidelines"
+_GUIDEBOOK_BY_LANG: dict[str, Path] = {
+    "en": _GUIDELINES / "guidebook.md",
+    "ko": _GUIDELINES / "가이드북.md",
+    "cn": _GUIDELINES / "指南书.md",
+}
+_GUIDEBOOK_FALLBACK = _GUIDEBOOK_BY_LANG["ko"]
 ICON_PATH = Path(__file__).resolve().parent / "icon.ico"
+
+
+def _guidebook_path() -> Path:
+    return _GUIDEBOOK_BY_LANG.get(current_language(), _GUIDEBOOK_FALLBACK)
 
 
 LANG_NAMES = {"en": "English", "ko": "한국어", "cn": "简体中文"}
@@ -322,12 +332,13 @@ class MainWindow(QMainWindow):
         )
 
     def _open_guidebook(self):
-        if not GUIDEBOOK_PATH.exists():
+        path = _guidebook_path()
+        if not path.exists():
             QMessageBox.warning(
-                self, t("guidebook"), t("guidebook_missing", path=str(GUIDEBOOK_PATH))
+                self, t("guidebook"), t("guidebook_missing", path=str(path))
             )
             return
-        dlg = GuidebookDialog(GUIDEBOOK_PATH, self)
+        dlg = GuidebookDialog(path, self)
         dlg.show()
 
     def _change_lang(self, idx: int):

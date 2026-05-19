@@ -234,8 +234,8 @@ STRINGS: dict[str, str] = {
     # Language
     "language": "Language:",
     # Guidebook
-    "guidebook": "📖 Guide",
-    "guidebook_tooltip": "Open the Korean end-to-end guide (docs/guidelines/가이드북.md)",
+    "guidebook": "📖 Guidebook",
+    "guidebook_tooltip": "Open the end-to-end guide (docs/guidelines/guidebook.md)",
     "guidebook_missing": "Guide not found at {path}",
     "guidebook_open_external": "Open in system viewer",
     "guidebook_close": "Close",
