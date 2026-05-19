@@ -161,7 +161,7 @@ This command automatically downloads the following three items and organizes the
 | Qwen3 0.6B text encoder | `models/text_encoders/qwen_3_06b_base.safetensors` |
 | QwenImage VAE | `models/vae/qwen_image_vae.safetensors` |
 
-If you plan to use the masking feature, SAM3 and MIT models are also included in the above command.
+The same command also pulls **SAM3** and **MIT**, which are only used by the optional masked-loss step (see §8.2). Masking itself is opt-in, and even within it either segmenter can be toggled off — feel free to ignore these checkpoints if you're not training with masked loss.
 
 > **If the download is interrupted**: you can re-download individual components with targets like `make download-anima`, `make download-sam3`, or `make download-mit`.
 
