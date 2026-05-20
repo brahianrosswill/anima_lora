@@ -88,7 +88,8 @@ from library.training import (
     verify_training_args,
 )
 from library.training.loop import build_loop_state, run_training_loop
-from library.training.progress import ProgressSink
+from library.training.log_dispatch import dispatch_logs
+from library.training.progress import ProgressSink, run_scope
 from library.training.router_conditioning import apply_router_conditioning
 from library.training.text_conds import prepare_text_conds
 from library.training.forward_kwargs import build_forward_kwargs
@@ -226,12 +227,26 @@ class AnimaTrainer:
     def step_logging(
         self, accelerator: Accelerator, logs: dict, global_step: int, epoch: int
     ):
-        self.accelerator_logging(accelerator, logs, global_step, global_step, epoch)
+        dispatch_logs(
+            accelerator,
+            logs,
+            global_step,
+            global_step,
+            epoch,
+            progress_sink=getattr(self, "progress_sink", None),
+        )
 
     def epoch_logging(
         self, accelerator: Accelerator, logs: dict, global_step: int, epoch: int
     ):
-        self.accelerator_logging(accelerator, logs, epoch, global_step, epoch)
+        dispatch_logs(
+            accelerator,
+            logs,
+            epoch,
+            global_step,
+            epoch,
+            progress_sink=getattr(self, "progress_sink", None),
+        )
 
     def val_logging(
         self,
@@ -241,51 +256,15 @@ class AnimaTrainer:
         epoch: int,
         val_step: int,
     ):
-        self.accelerator_logging(
-            accelerator, logs, global_step + val_step, global_step, epoch, val_step
+        dispatch_logs(
+            accelerator,
+            logs,
+            global_step + val_step,
+            global_step,
+            epoch,
+            val_step,
+            progress_sink=getattr(self, "progress_sink", None),
         )
-
-    def accelerator_logging(
-        self,
-        accelerator: Accelerator,
-        logs: dict,
-        step_value: int,
-        global_step: int,
-        epoch: int,
-        val_step: Optional[int] = None,
-    ):
-        """
-        step_value is for tensorboard, other values are for wandb
-        """
-        tensorboard_tracker = None
-        wandb_tracker = None
-        other_trackers = []
-        for tracker in accelerator.trackers:
-            if tracker.name == "tensorboard":
-                tensorboard_tracker = accelerator.get_tracker("tensorboard")
-            elif tracker.name == "wandb":
-                wandb_tracker = accelerator.get_tracker("wandb")
-            else:
-                other_trackers.append(accelerator.get_tracker(tracker.name))
-
-        if tensorboard_tracker is not None:
-            tensorboard_tracker.log(logs, step=step_value)
-
-        if wandb_tracker is not None:
-            logs["global_step"] = global_step
-            logs["epoch"] = epoch
-            if val_step is not None:
-                logs["val_step"] = val_step
-            wandb_tracker.log(logs)
-
-        for tracker in other_trackers:
-            tracker.log(logs, step=step_value)
-
-        progress_sink = getattr(self, "progress_sink", None)
-        if progress_sink is not None and accelerator.is_main_process:
-            progress_sink.log(
-                logs, global_step=global_step, epoch=epoch, val_step=val_step
-            )
 
     # endregion
 
@@ -2274,7 +2253,9 @@ class AnimaTrainer:
             metadata=metadata,
         )
 
-        try:
+        # run_scope emits the matching run_end (ok / stopped / error) on exit;
+        # run_start already fired when the sink was constructed above.
+        with run_scope(self.progress_sink, final_step=lambda: loop_state.global_step):
             run_training_loop(self, loop_state)
 
             accelerator.end_training()
@@ -2285,25 +2266,6 @@ class AnimaTrainer:
 
             saver.cleanup_resumable()
             saver.save_final(network, loop_state.global_step, num_train_epochs)
-        except KeyboardInterrupt:
-            if self.progress_sink is not None:
-                self.progress_sink.run_end(
-                    status="stopped", final_step=loop_state.global_step
-                )
-            raise
-        except BaseException as exc:
-            if self.progress_sink is not None:
-                self.progress_sink.run_end(
-                    status="error",
-                    final_step=loop_state.global_step,
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-            raise
-        else:
-            if self.progress_sink is not None:
-                self.progress_sink.run_end(
-                    status="ok", final_step=loop_state.global_step
-                )
 
     # endregion
 

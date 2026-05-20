@@ -60,21 +60,31 @@ Two load-bearing design calls:
 The keystone. Everything downstream reads this. Independently useful: the GUI
 can drop its brittle tqdm regex *today*, before any daemon exists.
 
-**Implemented:** `library/training/progress.py` (`ProgressSink`), wired into
-`train.py` (`run_start`/`run_end` around the loop, `step`/`val` via
-`accelerator_logging`, `ckpt` via `CheckpointSaver.save`). Gated by
-`--progress_jsonl` (default on → `<output_dir>/<output_name>.progress.jsonl`;
+**Implemented:** `library/training/progress.py` (`ProgressSink` +
+`run_scope` lifecycle context manager), wired into `train.py` (`run_start` at
+sink construction, `run_scope` emits the matching `run_end` ok/stopped/error on
+loop exit, `step`/`val` via `dispatch_logs`, `ckpt` via `CheckpointSaver.save`).
+Gated by `--progress_jsonl` (default on → `<output_dir>/<output_name>.progress.jsonl`;
 empty/`none`/`off` disables). GUI cutover via `gui/progress.py`
 `JsonlProgressReader` + a 400 ms `QTimer` poll in `config_tab.py`, with the tqdm
 regex retained as fallback until the file appears. Tests:
 `tests/test_progress_sink.py`, `tests/test_gui_jsonl_progress.py`.
 
+The metrics fan-out was extracted off the trainer in the same pass: the body of
+the former `AnimaTrainer.accelerator_logging` now lives as the free function
+`dispatch_logs` in `library/training/log_dispatch.py` (distinct from
+`library/log.py`, which is stdlib console logging). `AnimaTrainer` keeps thin
+`step_logging`/`epoch_logging`/`val_logging` wrappers that call it with the
+trainer's `progress_sink`, so loop.py / validation call sites are unchanged.
+
 ### Hook point
 
-`AnimaTrainer.accelerator_logging` (`train.py:247`) is the single chokepoint —
-it already receives `logs` (loss, lr, `vr/*`, CMMD, …), `global_step`, `epoch`,
-`val_step`, and fans out to tensorboard/wandb trackers. The progress sink is
-**one more tracker registered alongside them**, or a few lines appended here.
+`dispatch_logs` (`library/training/log_dispatch.py`) is the single chokepoint —
+it receives `logs` (loss, lr, `vr/*`, CMMD, …), `global_step`, `epoch`,
+`val_step`, fans out to tensorboard/wandb trackers, and forwards the same dict
+to the progress sink on the main process. The sink is **one more sink appended
+here**, not an accelerate `GeneralTracker` (it needs lifecycle events the
+tracker protocol doesn't model).
 
 ### Event schema (JSONL, one event per line)
 

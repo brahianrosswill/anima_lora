@@ -23,7 +23,8 @@ import json
 import logging
 import os
 import time
-from typing import Any, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -202,3 +203,33 @@ class ProgressSink:
                 pass
         self._fh = None
         self._closed = True
+
+
+@contextmanager
+def run_scope(sink: Optional[ProgressSink], *, final_step: Callable[[], int]):
+    """Emit the matching ``run_end`` when the wrapped training block exits.
+
+    ``run_start`` must already have fired (the sink is constructed earlier so it
+    can be handed to the checkpoint saver). On block exit this maps the outcome
+    to a status: normal return → ``ok``; ``KeyboardInterrupt`` → ``stopped``;
+    any other exception → ``error`` (re-raised either way). ``final_step`` is
+    read lazily at exit so the event records where training actually stopped.
+    A ``None`` sink makes this a transparent pass-through.
+    """
+    if sink is None:
+        yield
+        return
+    try:
+        yield
+    except KeyboardInterrupt:
+        sink.run_end(status="stopped", final_step=final_step())
+        raise
+    except BaseException as exc:
+        sink.run_end(
+            status="error",
+            final_step=final_step(),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    else:
+        sink.run_end(status="ok", final_step=final_step())
