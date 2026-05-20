@@ -72,9 +72,9 @@ class DaemonClient:
 
     # ----- typed endpoints -----
 
-    def health(self) -> Optional[dict]:
+    def health(self, *, timeout: float = 3.0) -> Optional[dict]:
         try:
-            return self._request("GET", "/health", timeout=3.0)
+            return self._request("GET", "/health", timeout=timeout)
         except (urllib.error.URLError, OSError, ValueError):
             return None
 
@@ -96,6 +96,24 @@ class DaemonClient:
                 "methods_subdir": methods_subdir,
                 "overrides": overrides or {},
                 "extra": extra or [],
+            },
+        )
+
+    def submit_command(
+        self,
+        *,
+        label: str,
+        argv: list[str],
+        extra_env: Optional[dict] = None,
+    ) -> dict:
+        return self._request(
+            "POST",
+            "/jobs",
+            {
+                "kind": "command",
+                "label": label,
+                "argv": list(argv),
+                "extra_env": extra_env or {},
             },
         )
 
@@ -145,20 +163,28 @@ def ensure_daemon(*, timeout: float = 60.0, port: Optional[int] = None) -> Daemo
     Idempotent: if ``/health`` answers we just return a client. Otherwise spawn
     ``python -m scripts.daemon`` detached (stdout → ``daemon.log``) and poll
     ``/health`` until it answers or ``timeout`` elapses.
+
+    The daemon may bind a *different* port than requested if the preferred one
+    is taken by a stranger (see ``server.serve_with_fallback``); it records the
+    actual port in the pidfile, so we re-resolve from there each tick and follow
+    it rather than polling a port nothing is listening on.
     """
-    port = port or _resolve_port()
-    client = DaemonClient(port)
+    requested = port or _resolve_port()
+    client = DaemonClient(requested)
     if client.health() is not None:
         return client
 
     config.ensure_state_dirs()
     proc.spawn_detached(
-        [venv_python(), "-m", "scripts.daemon", str(port)],
+        [venv_python(), "-m", "scripts.daemon", str(requested)],
         cwd=config.ROOT,
         stdout_path=config.DAEMON_LOG,
     )
     deadline = time.time() + timeout
     while time.time() < deadline:
+        resolved = _resolve_port()  # follow a fallback-to-ephemeral daemon
+        if resolved != client.port:
+            client = DaemonClient(resolved)
         if client.health() is not None:
             return client
         time.sleep(0.5)

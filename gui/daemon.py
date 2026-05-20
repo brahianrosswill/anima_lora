@@ -65,6 +65,23 @@ def submit_training(
     )
 
 
+def submit_command(
+    *,
+    label: str,
+    argv: list[str],
+    extra_env: Optional[dict] = None,
+) -> dict:
+    """Auto-start the daemon if needed and enqueue a plain task job.
+
+    Mirrors what ``python tasks.py <target>`` would have launched inline (e.g.
+    preprocess / mask), but runs it through the daemon's serial queue so it
+    survives the GUI closing and can't fight a training run for the GPU.
+    Returns the daemon's ``{job_id, state}`` response.
+    """
+    cl = ensure_daemon()
+    return cl.submit_command(label=label, argv=list(argv), extra_env=extra_env or {})
+
+
 def stop_job(job_id: str) -> dict:
     """Abort a running/queued job (daemon stays up, advances the queue)."""
     return _client.DaemonClient().stop(job_id)
@@ -103,6 +120,23 @@ def read_job_state(job_id: str) -> Optional[str]:
     except (OSError, ValueError):
         return None
     return data.get("state")
+
+
+def read_job_kind(job_id: str) -> str:
+    """Job kind ('train' | 'command') from ``job.json``.
+
+    Lets the two daemon-observing tabs (ConfigTab, PreprocessingTab) share the
+    daemon's single active job without each other's job: each only re-attaches
+    to jobs of its own kind. Defaults to 'train' for a missing/legacy record so
+    pre-existing checkpoints still re-attach to the training tab.
+    """
+    try:
+        data = json.loads(
+            (_cfg.job_dir(job_id) / "job.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return "train"
+    return data.get("kind") or "train"
 
 
 def is_terminal(state: Optional[str]) -> bool:

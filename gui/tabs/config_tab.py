@@ -860,6 +860,10 @@ class ConfigTab(QWidget):
             return
         if not job_id:
             return
+        # The daemon's active job may be a preprocess/mask command job submitted
+        # from the PreprocessingTab — that one belongs to that tab, not here.
+        if gui_daemon.read_job_kind(job_id) != "train":
+            return
         self.log.clear()
         self._reset_progress()
         self._progress_tracker.mark_starting(t("starting"))

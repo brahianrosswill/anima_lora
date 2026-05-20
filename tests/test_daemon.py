@@ -275,6 +275,128 @@ def test_reconcile_orphan_requeue_adopt(tmp_path, monkeypatch):
     assert "live" in mgr._adopt  # re-attached for monitoring
 
 
+def test_command_job_build_cmd():
+    """A `kind="command"` job builds a plain `python <argv>` call (no
+    accelerate launch) and merges its extra_env over the inherited env."""
+    job = jobs.Job(
+        id="c1",
+        method="preprocess",
+        preset="",
+        kind="command",
+        argv=["tasks.py", "preprocess"],
+        extra_env={"CAPTION_SHUFFLE_VARIANTS": "7"},
+    )
+    mgr = JobManager.__new__(JobManager)  # no worker thread
+    cmd, env = mgr._build_cmd(job)
+    assert cmd == [sys.executable, "tasks.py", "preprocess"]
+    assert "train.py" not in cmd
+    assert env["CAPTION_SHUFFLE_VARIANTS"] == "7"
+    assert env["PYTHONUNBUFFERED"] == "1"
+
+
+def test_command_job_loads_with_train_default():
+    """A legacy job.json (written before `kind` existed) loads as a train job."""
+    job = jobs.Job.from_dict({"id": "old", "method": "lora", "preset": "default"})
+    assert job.kind == "train"
+    assert job.argv == [] and job.extra_env == {}
+
+
+@pytest.fixture
+def real_cmd_daemon(tmp_path, monkeypatch):
+    """Daemon with the *real* `_build_cmd` (no fake-trainer patch) so command
+    jobs actually exec their argv. GPU guard stubbed so the queue never blocks
+    on the host's VRAM."""
+    from scripts.daemon import client
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(config, "PIDFILE", tmp_path / "daemon.json")
+    monkeypatch.setattr(config, "DAEMON_LOG", tmp_path / "daemon.log")
+    monkeypatch.setattr(gpu, "gpu_pids", lambda: set())
+
+    mgr = JobManager()
+    mgr.start()
+    srv = serve(mgr, port=0)
+    t = threading.Thread(
+        target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
+    )
+    t.start()
+    cl = client.DaemonClient(srv.server_address[1])
+    assert _wait_until(lambda: cl.health() is not None, timeout=5)
+    try:
+        yield cl, mgr
+    finally:
+        srv.request_shutdown(True)
+        srv.server_close()
+
+
+def test_command_job_end_to_end(real_cmd_daemon):
+    """submit_command → detached exec → exit-code finalize (no progress.jsonl),
+    with extra_env applied and stdout captured."""
+    cl, _ = real_cmd_daemon
+    resp = cl.submit_command(
+        label="preprocess",
+        argv=["-c", "import os;print('shuf=' + os.environ['CAPTION_SHUFFLE_VARIANTS'])"],
+        extra_env={"CAPTION_SHUFFLE_VARIANTS": "7"},
+    )
+    jid = resp["job_id"]
+    assert resp["state"] == "queued"
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+    job = cl.get(jid)
+    assert job["kind"] == "command"
+    assert job["argv"][0] == "-c"
+    log = (config.job_dir(jid) / "stdout.log").read_text()
+    assert "shuf=7" in log
+
+
+def test_command_job_missing_argv_rejected(real_cmd_daemon):
+    """A command submission without argv is a 400 (urllib raises HTTPError)."""
+    import urllib.error
+
+    cl, _ = real_cmd_daemon
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        cl._request("POST", "/jobs", {"kind": "command", "label": "x"})
+    assert ei.value.code == 400
+
+
+def test_serve_falls_back_when_port_held_by_stranger():
+    """A non-anima process on the preferred port → bind an ephemeral one
+    instead of failing (``serve_with_fallback``)."""
+    import socket
+
+    from scripts.daemon.server import serve_with_fallback
+
+    # A plain listener that never speaks HTTP — stands in for a stranger.
+    stranger = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    stranger.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    stranger.bind((config.HOST, 0))
+    stranger.listen(1)
+    held = stranger.getsockname()[1]
+
+    mgr = JobManager.__new__(JobManager)  # serve() doesn't need a started worker
+    server = None
+    try:
+        server = serve_with_fallback(mgr, port=held)
+        bound = server.server_address[1]
+        assert bound != held  # moved off the contested port
+        assert bound != 0
+    finally:
+        if server is not None:
+            server.server_close()
+        stranger.close()
+
+
+def test_serve_defers_to_a_live_sibling_daemon(daemon):
+    """If an anima daemon already answers on the port, ``serve_with_fallback``
+    re-raises so the second process stands down (no duplicate daemon)."""
+    from scripts.daemon.server import serve_with_fallback
+
+    cl, mgr = daemon  # a real in-process daemon is already serving here
+    port = cl.port
+    with pytest.raises(OSError):
+        serve_with_fallback(JobManager.__new__(JobManager), port=port)
+
+
 def test_tail_while_write(tmp_path):
     """progress.jsonl tail-while-write: last_event sees the freshest line even
     as it grows (Windows-strict-locking smoke check)."""

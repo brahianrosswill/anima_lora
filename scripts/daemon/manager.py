@@ -92,6 +92,33 @@ class JobManager:
             overrides=dict(overrides or {}),
             extra=list(extra or []),
         )
+        return self._register_and_queue(job)
+
+    def submit_command(
+        self,
+        *,
+        label: str,
+        argv: list[str],
+        extra_env: Optional[dict] = None,
+    ) -> Job:
+        """Enqueue a plain ``python <argv>`` task (preprocess / mask).
+
+        Goes through the same serial queue as training so a cache-build and a
+        training run can't fight over the single local GPU. ``label`` is the
+        display name; ``argv`` is passed straight to the venv interpreter (e.g.
+        ``["tasks.py", "preprocess"]``); ``extra_env`` carries the GUI's knobs
+        (``CAPTION_SHUFFLE_VARIANTS``, ``RUN_SAM_MASK``, …)."""
+        job = Job(
+            id=new_job_id(),
+            method=label,
+            preset="",
+            kind="command",
+            argv=list(argv or []),
+            extra_env=dict(extra_env or {}),
+        )
+        return self._register_and_queue(job)
+
+    def _register_and_queue(self, job: Job) -> Job:
         d = config.job_dir(job.id)
         job.progress_path = str(d / "progress.jsonl")
         job.stdout_path = str(d / "stdout.log")
@@ -309,6 +336,19 @@ class JobManager:
     # ----- command building -----
 
     def _build_cmd(self, job: Job) -> tuple[list[str], dict]:
+        import sys
+
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+
+        # Command jobs (preprocess / mask) are a plain task invocation. The
+        # daemon runs under anima's venv, so sys.executable is the right
+        # interpreter. No --progress_jsonl injection — these emit tqdm to stdout
+        # and the monitor finalizes them on exit code (no run_end event).
+        if job.kind == "command":
+            env.update(job.extra_env or {})
+            return [sys.executable, *job.argv], env
+
         # Imported lazily so loading the daemon package never drags in the task
         # runner's transitive imports until a job actually launches.
         from scripts.tasks._common import build_launch_cmd, build_method_args
@@ -342,8 +382,6 @@ class JobManager:
             extra=extra,
         )
         cmd = build_launch_cmd(*args)
-        env = os.environ.copy()
-        env.setdefault("PYTHONUNBUFFERED", "1")
         return cmd, env
 
     # ----- reconciliation (boot) -----

@@ -41,6 +41,17 @@ class Job:
     overrides: dict = field(default_factory=dict)
     extra: list[str] = field(default_factory=list)
 
+    # Job kind: "train" (the default — an ``accelerate launch … train.py`` run
+    # built from method/preset/overrides/extra) or "command" (a plain
+    # ``python <argv>`` task such as preprocess / mask). Command jobs carry
+    # their own argv + env and skip the train-specific command building and
+    # progress.jsonl wiring; they finalize on exit code. ``method`` doubles as
+    # the display label for command jobs. Defaulting to "train" keeps legacy
+    # job.json records (written before this field existed) loading correctly.
+    kind: str = "train"
+    argv: list[str] = field(default_factory=list)
+    extra_env: dict = field(default_factory=dict)
+
     state: str = STATE_QUEUED
     submitted_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None

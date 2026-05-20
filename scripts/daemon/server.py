@@ -8,6 +8,7 @@ blocked thread.
 
 Endpoints
     POST /jobs              {method, preset, methods_subdir, overrides, extra} → {job_id}
+                            or {kind:"command", label, argv, extra_env}        → {job_id}
     GET  /jobs              → [job, …]
     GET  /jobs/{id}         → job (+ latest progress event, stale_for)
     POST /jobs/{id}/stop    → {job}
@@ -132,6 +133,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _handle_submit(self) -> None:
         body = self._read_json()
+        if (body.get("kind") or "train") == "command":
+            argv = body.get("argv")
+            if not isinstance(argv, list) or not argv:
+                self._send_json({"error": "missing 'argv' for command job"}, 400)
+                return
+            job = self.manager.submit_command(
+                label=body.get("label") or "command",
+                argv=[str(a) for a in argv],
+                extra_env=body.get("extra_env") or {},
+            )
+            self._send_json({"job_id": job.id, "state": job.state}, 201)
+            return
         method = body.get("method")
         if not method:
             self._send_json({"error": "missing 'method'"}, 400)
@@ -238,3 +251,32 @@ class _Server(ThreadingHTTPServer):
 def serve(manager: JobManager, *, port: int) -> _Server:
     """Bind 127.0.0.1:port and return the server (call ``serve_forever``)."""
     return _Server((config.HOST, port), manager)
+
+
+def serve_with_fallback(manager: JobManager, *, port: int) -> _Server:
+    """Bind ``port``; if it's already taken, fall back to an OS-chosen free one.
+
+    The catch: don't blindly grab a new port on every collision, or a startup
+    race (GUI auto-start + ``make daemon`` firing together) would spin up a
+    *second* daemon that overwrites the pidfile — breaking the single-daemon
+    invariant. So on ``EADDRINUSE`` we first probe the port: if an anima daemon
+    already answers ``/health`` there (a sibling that won the race), we re-raise
+    so the caller exits and defers to it. Only when a *stranger* holds the port
+    do we move to an ephemeral one (the actual port is recorded in the pidfile,
+    and ``ensure_daemon`` re-resolves it from there)."""
+    try:
+        return _Server((config.HOST, port), manager)
+    except OSError:
+        from .client import DaemonClient
+
+        # A sibling may have bound the socket microseconds ago but not yet
+        # reached serve_forever; probe a few times (short timeout) to be sure.
+        for _ in range(3):
+            if DaemonClient(port).health(timeout=0.5) is not None:
+                raise  # an anima daemon owns it → let the caller stand down
+            time.sleep(0.3)
+        logger.warning(
+            "127.0.0.1:%s held by a non-anima process; using an ephemeral port",
+            port,
+        )
+        return _Server((config.HOST, 0), manager)

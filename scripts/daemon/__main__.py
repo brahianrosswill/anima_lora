@@ -1,9 +1,11 @@
 """Daemon process entry point: ``python -m scripts.daemon``.
 
 This is the long-lived, console-detached process that ``make daemon`` spawns.
-It takes the single-daemon lock (pidfile ``(pid, create_time)`` + the bound
-port — ``EADDRINUSE`` is a second, free signal), reconciles ``jobs/`` from any
-previous run, then serves until ``POST /shutdown``.
+It takes the single-daemon lock (pidfile ``(pid, create_time)``; a live sibling
+that already answers ``/health`` on the port also makes us stand down), binds
+the preferred port — falling back to an ephemeral one if a *stranger* holds it
+— reconciles ``jobs/`` from any previous run, then serves until
+``POST /shutdown``.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import sys
 
 from . import config, proc
 from .manager import JobManager
-from .server import serve
+from .server import serve_with_fallback
 
 
 def _setup_logging() -> None:
@@ -51,10 +53,14 @@ def main() -> int:
     manager.start()
 
     try:
-        server = serve(manager, port=port)
+        # Falls back to an ephemeral port if a stranger holds the preferred one,
+        # but re-raises (→ exit 3) if a sibling anima daemon already owns it, so
+        # a startup race can't produce two daemons. The bound port is written to
+        # the pidfile below; clients re-resolve it from there.
+        server = serve_with_fallback(manager, port=port)
     except OSError as exc:
-        # EADDRINUSE: another daemon owns the port even if the pidfile is stale.
-        log.error("could not bind 127.0.0.1:%s (%s); another daemon?", port, exc)
+        log.error("could not bind 127.0.0.1:%s (%s); another anima daemon?", port, exc)
+        manager.shutdown(kill_jobs=False)
         return 3
 
     proc.write_pidfile(config.PIDFILE, pid=os.getpid(), port=server.server_address[1])
