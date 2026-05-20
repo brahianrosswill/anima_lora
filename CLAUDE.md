@@ -120,8 +120,11 @@ make daemon-terminate      # Stop the daemon entirely (active job killed, GPU fr
 make lora --queue                          # enqueue a default-preset LoRA run
 make lora-gui GUI_PRESETS=tlora --queue    # enqueue a gui-methods variant
 # The GUI Train button submits to the daemon too, so training survives closing
-# the GUI; reopening re-attaches to the running job. (Test/Preprocess stay
-# in-process — they aren't daemon jobs.)
+# the GUI; reopening re-attaches to the running job. Preprocessing (the
+# Preprocessing tab's caching/mask Runs + the Train button's auto-chain cache
+# build) also submits to the daemon — as a "command" job (a plain
+# `python tasks.py <target>` with its knobs in extra_env) that queues serially
+# behind training on the single GPU. Only the Test button stays in-process.
 
 # GUI (PySide6 — config editing, IP-Adapter / EasyControl preprocess+train, dataset browsing)
 make gui
