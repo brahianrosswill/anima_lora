@@ -52,6 +52,15 @@ class Job:
     argv: list[str] = field(default_factory=list)
     extra_env: dict = field(default_factory=dict)
 
+    # Daemon-managed auto-chain: when a command job (preprocess) carries a
+    # ``chain_train`` spec (``{method, preset, methods_subdir}``), the manager
+    # enqueues that training job the moment this one finishes successfully —
+    # so a GUI-initiated "preprocess → train" survives the GUI closing (the
+    # chain lives in the daemon, not the UI). ``chained_job_id`` records the
+    # follow-on it spawned, so a client can hop straight to observing it.
+    chain_train: Optional[dict] = None
+    chained_job_id: Optional[str] = None
+
     state: str = STATE_QUEUED
     submitted_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None

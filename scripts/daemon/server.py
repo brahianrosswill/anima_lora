@@ -8,7 +8,8 @@ blocked thread.
 
 Endpoints
     POST /jobs              {method, preset, methods_subdir, overrides, extra} → {job_id}
-                            or {kind:"command", label, argv, extra_env}        → {job_id}
+                            or {kind:"command", label, argv, extra_env,
+                                 chain_train?}                                 → {job_id}
     GET  /jobs              → [job, …]
     GET  /jobs/{id}         → job (+ latest progress event, stale_for)
     POST /jobs/{id}/stop    → {job}
@@ -142,6 +143,7 @@ class _Handler(BaseHTTPRequestHandler):
                 label=body.get("label") or "command",
                 argv=[str(a) for a in argv],
                 extra_env=body.get("extra_env") or {},
+                chain_train=body.get("chain_train") or None,
             )
             self._send_json({"job_id": job.id, "state": job.state}, 201)
             return

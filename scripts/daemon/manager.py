@@ -100,6 +100,7 @@ class JobManager:
         label: str,
         argv: list[str],
         extra_env: Optional[dict] = None,
+        chain_train: Optional[dict] = None,
     ) -> Job:
         """Enqueue a plain ``python <argv>`` task (preprocess / mask).
 
@@ -107,7 +108,12 @@ class JobManager:
         training run can't fight over the single local GPU. ``label`` is the
         display name; ``argv`` is passed straight to the venv interpreter (e.g.
         ``["tasks.py", "preprocess"]``); ``extra_env`` carries the GUI's knobs
-        (``CAPTION_SHUFFLE_VARIANTS``, ``RUN_SAM_MASK``, …)."""
+        (``CAPTION_SHUFFLE_VARIANTS``, ``RUN_SAM_MASK``, …).
+
+        ``chain_train`` (``{method, preset, methods_subdir}``) makes this an
+        auto-chain step: on successful completion the daemon enqueues that
+        training job itself (see ``_finalize``), so the chain runs to the end
+        even if the GUI that started it has since closed."""
         job = Job(
             id=new_job_id(),
             method=label,
@@ -115,6 +121,7 @@ class JobManager:
             kind="command",
             argv=list(argv or []),
             extra_env=dict(extra_env or {}),
+            chain_train=dict(chain_train) if chain_train else None,
         )
         return self._register_and_queue(job)
 
@@ -286,6 +293,31 @@ class JobManager:
             if detail:
                 job.status_detail = detail
             job.ckpt_path = tail.last_ckpt_path(job.progress_path)
+            # Daemon-managed auto-chain: a successfully finished command job that
+            # carries a chain_train spec enqueues its follow-on training job
+            # right here, so the chain survives the GUI closing. Recorded on this
+            # job (chained_job_id) and persisted in the same write that flips us
+            # to `done`, so a client observing this job sees both atomically.
+            if (
+                state == STATE_DONE
+                and job.kind == "command"
+                and job.chain_train
+                and not job.chained_job_id
+            ):
+                ct = job.chain_train
+                follow = self.submit(
+                    method=ct.get("method"),
+                    preset=ct.get("preset") or "default",
+                    methods_subdir=ct.get("methods_subdir"),
+                    overrides=ct.get("overrides") or {},
+                    extra=ct.get("extra") or [],
+                )
+                job.chained_job_id = follow.id
+                logger.info(
+                    "auto-chain: job %s done → enqueued training %s",
+                    job.id,
+                    follow.id,
+                )
             job.persist()
         self._broadcast({"ev": "ended", "job_id": job.id, "state": state})
 

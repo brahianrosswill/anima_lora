@@ -70,16 +70,26 @@ def submit_command(
     label: str,
     argv: list[str],
     extra_env: Optional[dict] = None,
+    chain_train: Optional[dict] = None,
 ) -> dict:
     """Auto-start the daemon if needed and enqueue a plain task job.
 
     Mirrors what ``python tasks.py <target>`` would have launched inline (e.g.
     preprocess / mask), but runs it through the daemon's serial queue so it
     survives the GUI closing and can't fight a training run for the GPU.
-    Returns the daemon's ``{job_id, state}`` response.
+
+    ``chain_train`` (``{method, preset, methods_subdir}``) makes the daemon
+    enqueue that training job itself once this one finishes successfully — the
+    "preprocess → train" auto-chain then completes even if the GUI closes
+    mid-way. Returns the daemon's ``{job_id, state}`` response.
     """
     cl = ensure_daemon()
-    return cl.submit_command(label=label, argv=list(argv), extra_env=extra_env or {})
+    return cl.submit_command(
+        label=label,
+        argv=list(argv),
+        extra_env=extra_env or {},
+        chain_train=chain_train or None,
+    )
 
 
 def stop_job(job_id: str) -> dict:
@@ -139,24 +149,45 @@ def read_job_kind(job_id: str) -> str:
     return data.get("kind") or "train"
 
 
-def read_job_chain_variant(job_id: str) -> Optional[str]:
-    """The training variant a command job is the auto-chain preprocess for.
-
-    The ConfigTab's Train button submits its auto-chain preprocess as a
-    ``command`` job tagged with ``ANIMA_CHAIN_TRAIN=<variant>`` in ``extra_env``
-    (persisted in ``job.json``). That marker is how the ConfigTab re-attaches to
-    *its own* preprocess on GUI reopen — distinguishing it from a standalone
-    preprocess/mask the PreprocessingTab owns — so it can keep the bar live,
-    keep Train blocked, and chain into training when the cache build finishes.
-    Returns ``None`` for a job without the marker.
-    """
+def _read_job_record(job_id: str) -> Optional[dict]:
     try:
-        data = json.loads(
+        return json.loads(
             (_cfg.job_dir(job_id) / "job.json").read_text(encoding="utf-8")
         )
     except (OSError, ValueError):
         return None
-    return (data.get("extra_env") or {}).get("ANIMA_CHAIN_TRAIN")
+
+
+def read_job_chain_variant(job_id: str) -> Optional[str]:
+    """The training variant a command job is the auto-chain preprocess for.
+
+    The ConfigTab's Train button submits its auto-chain preprocess as a
+    ``command`` job carrying a ``chain_train`` spec (the daemon uses it to
+    enqueue the follow-on training; persisted in ``job.json``). The variant is
+    ``chain_train.method``. This marker is how the ConfigTab re-claims *its own*
+    preprocess on GUI reopen — distinguishing it from a standalone
+    preprocess/mask the PreprocessingTab owns — to keep the bar live and Train
+    blocked. Returns ``None`` for a job that isn't an auto-chain step.
+    """
+    data = _read_job_record(job_id)
+    if not data:
+        return None
+    return (data.get("chain_train") or {}).get("method")
+
+
+def read_job_chained_id(job_id: str) -> Optional[str]:
+    """The follow-on training job id the daemon spawned for ``job_id``, if any.
+
+    Set by the daemon when an auto-chain preprocess finishes successfully (see
+    ``manager._finalize``). Lets the ConfigTab hop straight from observing the
+    preprocess to observing the training the daemon just enqueued — instead of
+    launching training itself (which would double-submit). ``None`` until/unless
+    the chain fired.
+    """
+    data = _read_job_record(job_id)
+    if not data:
+        return None
+    return data.get("chained_job_id")
 
 
 def is_terminal(state: Optional[str]) -> bool:

@@ -161,7 +161,9 @@ class JsonlProgressReader:
         self._pos = 0
         self._total_steps = 0
         self._active = False
-        # (monotonic_anchor_time, anchor_step) seeded from the first step event
+        # (anchor_ts, anchor_step) seeded from the first step event. Uses the
+        # event's embedded ``ts`` (seconds since run start), not wall-clock —
+        # see ``_rate`` for why that matters on GUI re-attach.
         self._anchor: tuple[float, int] | None = None
 
     @property
@@ -216,16 +218,16 @@ class JsonlProgressReader:
             self._bar.setVisible(True)
         elif kind == "step":
             self._active = True
-            self._update_bar(int(ev.get("global_step") or 0))
+            self._update_bar(int(ev.get("global_step") or 0), ev.get("ts"))
         elif kind == "val":
             # CMMD val pass — keep the bar where it is, annotate if we have it.
             cmmd = ev.get("cmmd")
             if cmmd is not None and self._bar.isVisible():
                 self._bar.setFormat(self._bar.format() + f" — CMMD {cmmd:.4f}")
 
-    def _update_bar(self, cur: int) -> None:
+    def _update_bar(self, cur: int, ts: float | None = None) -> None:
         tot = self._total_steps
-        rate = self._rate(cur)
+        rate = self._rate(cur, ts)
         if tot > 0:
             self._bar.setRange(0, tot)
             self._bar.setValue(cur)
@@ -236,16 +238,26 @@ class JsonlProgressReader:
         if not self._bar.isVisible():
             self._bar.setVisible(True)
 
-    def _rate(self, cur: int) -> str:
-        now = time.monotonic()
+    def _rate(self, cur: int, ts: float | None) -> str:
+        """Compute s/step, anchoring on the event's embedded ``ts``.
+
+        ``ts`` is seconds-since-run-start written by the trainer. Using it
+        (rather than ``time.monotonic()``) makes the rate re-attach-safe: when
+        the GUI reopens mid-run it re-reads the whole progress.jsonl in one
+        burst, so wall-clock deltas between consecutive events collapse to ~0
+        and s/step would read near zero (the "all steps done instantly" bug).
+        The embedded ``ts`` carries the real step spacing no matter when we
+        read the file. Falls back to wall-clock only if ``ts`` is absent.
+        """
+        clock = ts if ts is not None else time.monotonic()
         if self._anchor is None or cur < self._anchor[1]:
-            self._anchor = (now, cur)
+            self._anchor = (clock, cur)
             return ""
         anchor_time, anchor_step = self._anchor
         steps = cur - anchor_step
         if steps <= 0:
             return ""
-        spi = (now - anchor_time) / steps
+        spi = (clock - anchor_time) / steps
         remaining = self._total_steps - cur
         if self._total_steps <= 0 or remaining <= 0:
             return f" — {spi:.2f}s/step"

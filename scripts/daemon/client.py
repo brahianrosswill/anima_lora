@@ -119,6 +119,7 @@ class DaemonClient:
         label: str,
         argv: list[str],
         extra_env: Optional[dict] = None,
+        chain_train: Optional[dict] = None,
     ) -> dict:
         return self._request(
             "POST",
@@ -128,6 +129,7 @@ class DaemonClient:
                 "label": label,
                 "argv": list(argv),
                 "extra_env": extra_env or {},
+                "chain_train": chain_train or None,
             },
         )
 

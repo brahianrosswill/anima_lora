@@ -763,9 +763,19 @@ class ConfigTab(QWidget):
         self._log(t("daemon_submitting") + "\n")
         QApplication.processEvents()
 
-        # Remember the variant to train so the auto-chain (and a re-attach after
-        # a GUI reopen) launches the right one even if the combo is touched.
+        # Remember the variant to train so a re-attach after a GUI reopen can
+        # show the right one even if the combo is touched.
         self._chain_variant = variant
+        # When the user clicked Train (auto-chain), hand the daemon a chain_train
+        # spec so IT enqueues the follow-on training the moment preprocess
+        # succeeds — the chain then completes even if the GUI closes mid-cache.
+        # The spec also tags this command job as *this tab's* preprocess, so
+        # ConfigTab re-claims it on reopen and the PreprocessingTab leaves it be.
+        chain_train = (
+            {"method": variant, "preset": self._IMPLICIT_PRESET, "methods_subdir": "gui-methods"}
+            if getattr(self, "_chain_train_after_preprocess", False)
+            else None
+        )
         try:
             resp = gui_daemon.submit_command(
                 label="preprocess",
@@ -774,12 +784,8 @@ class ConfigTab(QWidget):
                     "METHOD": variant,
                     "METHODS_SUBDIR": "gui-methods",
                     "PRESET": self._IMPLICIT_PRESET,
-                    # Marks this command job as *this tab's* auto-chain preprocess
-                    # so ConfigTab._try_reattach re-claims it on reopen (bar live,
-                    # Train blocked, chains into training) and the PreprocessingTab
-                    # leaves it alone. Value = the variant to train next.
-                    "ANIMA_CHAIN_TRAIN": variant,
                 },
+                chain_train=chain_train,
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
@@ -817,15 +823,26 @@ class ConfigTab(QWidget):
         decision = confirm_train_using_cache(self, cache_dir)
         if decision is False:
             return
+
+        # Resume prompt up-front (before any submit) for BOTH paths. The daemon
+        # now owns the preprocess→train chain, so it can't pause to ask once
+        # preprocess finishes (the GUI may be closed by then) — the user's
+        # resume/fresh choice has to be captured here and baked in. The helper
+        # does its wipe-for-fresh synchronously, so it's settled before training
+        # ever runs. Returns True with no prompt when there's nothing to resume.
+        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        if not confirm_resumable_checkpoint(self, merged):
+            return
+
         if decision is None:
+            # Cache missing → auto-chain Preprocess → Train. The daemon enqueues
+            # the training itself when preprocess succeeds (see _launch_preprocess
+            # chain_train); _on_job_finished just hops the UI onto it.
             self._chain_train_after_preprocess = True
             self._launch_preprocess(variant)
             return
 
         # Cache exists and user confirmed — go straight to training.
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
-        if not confirm_resumable_checkpoint(self, merged):
-            return
         self._launch_training(variant)
 
     def _launch_training(self, variant: str) -> None:
@@ -991,28 +1008,39 @@ class ConfigTab(QWidget):
         )
 
         # Auto-chain Train after a successful preprocess command job when the
-        # user originally clicked Train against an empty cache. On failure (or a
-        # Stop), clear the flag and stay idle — we don't quietly train over a
-        # broken/missing cache.
+        # user originally clicked Train against an empty cache. The DAEMON owns
+        # the chain now: on a successful tagged preprocess it has already
+        # enqueued the training job and recorded its id (chained_job_id), so we
+        # just hop the UI onto that job. On failure/Stop there's no chained job,
+        # so we clear the flag and stay idle — never training over a broken cache.
         if kind == "preprocess":
             chain = getattr(self, "_chain_train_after_preprocess", False)
             self._chain_train_after_preprocess = False
+            self._chain_variant = None
             if state == "done":
                 self._preprocessed = True
             if chain and state == "done":
-                # Prefer the variant captured at submit time (survives a combo
-                # change after a GUI reopen); fall back to the live selection.
-                variant = getattr(self, "_chain_variant", None) or self._current_variant()
-                self._chain_variant = None
-                merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
-                # Resume-checkpoint check still fires — the user might have
-                # previously trained this variant; don't silently wipe/resume.
-                if confirm_resumable_checkpoint(self, merged):
+                chained = gui_daemon.read_job_chained_id(job_id)
+                if chained:
                     # Defer so this poll callback finishes (job state fully torn
-                    # down) before we attach the follow-on training job.
-                    QTimer.singleShot(0, lambda v=variant: self._launch_training(v))
+                    # down) before we attach the daemon-enqueued training job.
+                    QTimer.singleShot(
+                        0,
+                        lambda jid=chained: self._reattach_chained_training(jid),
+                    )
                     return  # stay busy — training is starting
         self._restore_idle_ui()
+
+    def _reattach_chained_training(self, job_id: str) -> None:
+        """Bind the UI to a training job the daemon auto-chained off a preprocess.
+
+        The daemon already enqueued it (so the chain survives a GUI close); this
+        only re-points the bar + log at it. ``replay_log=False`` because we were
+        watching live and the training stdout is fresh."""
+        self.log.clear()
+        self._reset_progress()
+        self._progress_tracker.mark_starting(t("starting"))
+        self._attach_to_job(job_id, replay_log=False, kind="train")
 
     def _restore_idle_ui(self):
         """Return every control to its idle state (shared by the daemon-job and
