@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -52,6 +51,7 @@ from gui import (
     merged_gui_variant_preset,
     variant_path,
 )
+from gui import daemon as gui_daemon
 from gui.explanations import field_help, method_guide
 from gui.i18n import t
 from gui.process import kill_process_tree, make_subprocess_env, setup_kill_safe
@@ -280,8 +280,22 @@ class ConfigTab(QWidget):
         self._stdout_buf = ""
         self._stderr_buf = ""
 
+        # Daemon-backed training (Phase 2). Training is submitted to the local
+        # daemon — not run as a child of this QProcess — so it survives the GUI
+        # closing. The tab observes the job by polling the per-job files the
+        # daemon writes (job.json / progress.jsonl / stdout.log) off a single
+        # timer; no SSE thread (daemon is localhost-only, files are right here).
+        self._job_id: str | None = None
+        self._stdout_tailer = gui_daemon.FileTailer()
+        self._job_timer = QTimer(self)
+        self._job_timer.setInterval(400)
+        self._job_timer.timeout.connect(self._poll_job)
+
         self._origin: dict[str, str] = {}
         self._reload()
+        # Re-bind to a job still running from a previous GUI session (or one the
+        # CLI / ComfyUI node submitted) so closing+reopening re-attaches.
+        self._try_reattach()
 
     # Preset selection is no longer surfaced in the GUI — variants encode the
     # hardware/perf knobs that used to live in presets. The merge still uses
@@ -786,11 +800,15 @@ class ConfigTab(QWidget):
         self._launch_training(variant)
 
     def _launch_training(self, variant: str) -> None:
-        """Start the training subprocess. Caller owns all pre-launch
-        confirmations (cache-reuse popup, resume-checkpoint prompt)."""
-        # Flip button visuals to busy + repaint BEFORE the slow accelerate
-        # import and QProcess.start, otherwise Qt's event loop is blocked
-        # long enough for Windows to flag the GUI as "Not Responding".
+        """Submit a training job to the local daemon (Phase 2).
+
+        Training no longer runs as a child of this tab's QProcess — it's
+        enqueued on the daemon, which spawns ``accelerate launch … train.py``
+        detached. That's what lets training survive the GUI closing. The caller
+        owns all pre-launch confirmations (cache-reuse popup, resume prompt).
+        """
+        # Flip to busy + repaint before the submit so the UI feels responsive
+        # (the daemon auto-start + /health wait can take a moment on cold start).
         self.train_btn.setText(t("train") + " ...")
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
@@ -800,63 +818,150 @@ class ConfigTab(QWidget):
         self.new_variant_btn.setEnabled(False)
         self.log.clear()
         self._reset_progress()
-        # Indeterminate "busy" bar bridges the gap until the child's first
-        # tqdm line — without it, Windows reads the gray button + still GUI
-        # as "Not Responding" during the multi-second torch import.
         self._progress_tracker.mark_starting(t("starting"))
+        self._log(t("daemon_submitting") + "\n")
         QApplication.processEvents()
 
-        # find_spec, not import: actually importing accelerate transitively
-        # imports torch, which blocks the GUI thread for several seconds on
-        # Windows and freezes the marquee. find_spec just resolves the module
-        # location without executing it.
-        if importlib.util.find_spec("accelerate.commands.accelerate_cli") is None:
-            QMessageBox.warning(self, t("error"), t("accelerate_not_found"))
-            self._restore_train_idle()
+        try:
+            resp = gui_daemon.submit_training(
+                method=variant,
+                preset=self._IMPLICIT_PRESET,
+                methods_subdir="gui-methods",
+            )
+        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
+            QMessageBox.warning(
+                self, t("error"), t("daemon_submit_failed", err=str(e))
+            )
+            self._restore_idle_ui()
             return
 
-        # Route through tasks.py rather than spawning accelerate directly:
-        # tasks.py uses python.exe + CREATE_NO_WINDOW for its subprocess calls,
-        # which keeps tqdm output flowing back to the GUI. If we spawned
-        # accelerate from this process (sys.executable = pythonw.exe under the
-        # desktop shortcut), accelerate's workers would inherit pythonw and
-        # their stdio would silently drop.
-        args = ["tasks.py", "lora-gui", variant]
+        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        if not job_id:
+            QMessageBox.warning(
+                self, t("error"), t("daemon_submit_failed", err=str(resp))
+            )
+            self._restore_idle_ui()
+            return
 
-        # Point the JSONL tailer at this run's progress stream (mirrors
-        # ProgressSink.resolve_path on the trainer side). Best-effort: if the
-        # merged config can't be resolved, tqdm-stdout parsing still drives the bar.
+        self._log(t("daemon_queued", job_id=job_id))
+        self._attach_to_job(job_id, replay_log=False)
+
+    # ── Daemon job observation ──
+
+    def _try_reattach(self) -> None:
+        """Bind to a daemon job still running when this tab is constructed.
+
+        Makes "close GUI mid-train → reopen → re-attach" work, and surfaces a
+        job the CLI / ComfyUI node submitted. Best-effort: a down/idle daemon
+        leaves the tab in its normal idle state."""
         try:
-            merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
-            output_dir = merged.get("output_dir")
-            output_name = merged.get("output_name") or "run"
-            if output_dir:
-                self._jsonl_reader.watch(
-                    str(Path(output_dir) / f"{output_name}.progress.jsonl")
-                )
-                self._jsonl_timer.start()
-        except Exception:
-            pass
+            job_id = gui_daemon.active_job_id()
+        except Exception:  # noqa: BLE001 — daemon unreachable → nothing to attach
+            return
+        if not job_id:
+            return
+        self.log.clear()
+        self._reset_progress()
+        self._progress_tracker.mark_starting(t("starting"))
+        self._log(t("daemon_reattached", job_id=job_id))
+        self._attach_to_job(job_id, replay_log=True)
 
-        self._log(f"> python {' '.join(args)}\n")
+    def _attach_to_job(self, job_id: str, *, replay_log: bool) -> None:
+        """Point the bar + log at a daemon job's on-disk files and start polling.
+
+        ``replay_log`` reads ``stdout.log`` from the top (re-attach after a GUI
+        restart); otherwise pre-existing output is skipped so a fresh launch
+        shows only new lines."""
+        self._job_id = job_id
         self._running_mode = "train"
-        self._proc.start(sys.executable, args)
+        self._stdout_buf = ""
+        self._jsonl_reader.watch(gui_daemon.progress_path(job_id))
+        self._stdout_tailer.watch(gui_daemon.stdout_path(job_id))
+        if not replay_log:
+            self._stdout_tailer.read_new()  # discard backlog
+        self.train_btn.setText(t("train_running_daemon"))
+        self.train_btn.setStyleSheet(self._train_busy_style)
+        self.train_btn.setEnabled(False)
+        self.test_btn.setEnabled(False)
+        self.method_combo.setEnabled(False)
+        self.variant_combo.setEnabled(False)
+        self.new_variant_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self._job_timer.start()
 
-    def _restore_train_idle(self):
+    def _drain_job_stdout(self) -> None:
+        """Append new stdout.log lines to the log widget (carriage-return aware,
+        tqdm-suppressed once the structured stream drives the bar)."""
+        chunk = self._stdout_tailer.read_new()
+        if not chunk:
+            return
+        parts = re.split(r"[\r\n]", self._stdout_buf + chunk)
+        self._stdout_buf = parts[-1]  # incomplete trailing fragment
+        for line in parts[:-1]:
+            if self._jsonl_reader.active and TQDM_RE.search(line):
+                continue
+            if line:
+                self._log(line + "\n")
+
+    def _poll_job(self) -> None:
+        if not self._job_id:
+            return
+        self._jsonl_reader.poll()
+        self._drain_job_stdout()
+        state = gui_daemon.read_job_state(self._job_id)
+        if gui_daemon.is_terminal(state):
+            self._on_job_finished(state)
+
+    def _on_job_finished(self, state: str | None) -> None:
+        self._job_timer.stop()
+        # Drain the last progress event + any trailing stdout before tearing down.
+        self._jsonl_reader.poll()
+        self._drain_job_stdout()
+        if self._stdout_buf:
+            self._log(self._stdout_buf + "\n")
+        self._stdout_buf = ""
+        job_id = self._job_id
+        self._job_id = None
+        self._jsonl_timer.stop()
+        self._jsonl_reader.reset()
+        self._stdout_tailer.reset()
+        self.progress.setVisible(False)
+        self._log(
+            "\n" + t("daemon_job_finished", job_id=job_id, state=state or "ended") + "\n"
+        )
+        self._restore_idle_ui()
+
+    def _restore_idle_ui(self):
+        """Return every control to its idle state (shared by the daemon-job and
+        QProcess-error paths)."""
         self.train_btn.setText(t("train"))
         self.train_btn.setStyleSheet(self._train_idle_style)
         self.train_btn.setEnabled(True)
+        self.test_btn.setText(t("test"))
+        self.test_btn.setStyleSheet(self._test_idle_style)
         self.test_btn.setEnabled(self._has_lora_output())
+        self.stop_btn.setEnabled(False)
         self.method_combo.setEnabled(True)
         self.variant_combo.setEnabled(True)
         self.new_variant_btn.setEnabled(True)
 
     def _stop_training(self):
+        # A daemon training job is aborted via the daemon (the job timer then
+        # observes the 'stopped' state and restores the UI). A QProcess-backed
+        # test/preprocess run is killed directly.
+        if self._job_id:
+            try:
+                gui_daemon.stop_job(self._job_id)
+            except Exception as e:  # noqa: BLE001
+                self._log(f"stop failed: {e}\n")
+            return
         kill_process_tree(self._proc)
 
     def cleanup_subprocess(self):
-        """Hook for app shutdown — kill any running launcher + descendants."""
+        """App-shutdown hook. Kills a running test/preprocess subprocess, but
+        deliberately leaves a daemon training job alive — it runs detached so
+        training survives the GUI closing (re-attached on next launch)."""
+        self._job_timer.stop()
         kill_process_tree(self._proc)
 
     def _read_stdout(self):

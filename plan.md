@@ -1,6 +1,6 @@
 # Plan — Local Training Daemon + Structured Progress + MCP
 
-Status: Phase 0 + Phase 1 implemented (2026-05-20); Phases 2–3 not started. Owner: @sorryhyun. Drafted 2026-05-20.
+Status: Phase 0 + Phase 1 + Phase 2 implemented (2026-05-20); Phase 3 (MCP) not started. Owner: @sorryhyun. Drafted 2026-05-20.
 
 Phase 1 lives in `scripts/daemon/` (`config`, `proc`, `gpu`, `jobs`, `tail`,
 `manager`, `server`, `client`, `__main__`), CLI verbs in `scripts/tasks/daemon.py`
@@ -332,7 +332,34 @@ the codebase already solved most of it.
 
 ---
 
-## Phase 2 — GUI + CLI as clients *(optional polish)*
+## Phase 2 — GUI + CLI as clients *(DONE — 2026-05-20)*
+
+**Implemented.**
+
+- **CLI `--queue`** (`scripts/tasks/_common.py`): `train()` detects `--queue`
+  anywhere in `extra`, strips it, and routes to `_queue_submit` instead of
+  `accelerate_launch`. `_queue_submit` auto-starts the daemon
+  (`client.ensure_daemon`), folds `ARTIST` / `PROFILE_STEPS` into `extra` as
+  explicit flags (the daemon's own `build_method_args` doesn't read env vars),
+  POSTs the job, and prints the job id + `make daemon-*` follow/cancel hints.
+  Works for both `make lora --queue` and `make lora-gui <variant> --queue`
+  (both go through `train()`). This is the overnight sweep: submit ×N, drains
+  serially.
+- **GUI as daemon client** (`gui/daemon.py` + `gui/tabs/config_tab.py`):
+  `_launch_training` submits to the daemon instead of owning a `QProcess`, so
+  training survives the GUI closing. The tab *observes* the job by polling the
+  per-job files the daemon already writes locally — `job.json` (state),
+  `progress.jsonl` (bar, via the existing `JsonlProgressReader`), `stdout.log`
+  (log, via a new `FileTailer`) — off a single 400 ms `QTimer`. No SSE
+  consumer thread: the daemon is localhost-only so the files are right there
+  (chosen over the plan's literal "subscribe to `/jobs/{id}/logs`"; functionally
+  equivalent, thread-free). `_try_reattach` (on tab construction) re-binds to a
+  job still running from a previous session or one the CLI / ComfyUI node
+  submitted. Stop aborts via the daemon (job-scoped); window-close
+  (`cleanup_subprocess`) deliberately leaves the job alive. **Test and
+  preprocess stay on the QProcess path** — they aren't daemon jobs.
+
+Tests: `tests/test_daemon.py::test_cli_queue_*`.
 
 - GUI: submit to daemon instead of owning a `QProcess`; training survives GUI
   close. Subscribe to `/jobs/{id}/logs`.

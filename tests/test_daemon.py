@@ -173,6 +173,52 @@ def test_serial_queue(daemon):
     assert g1["latest"]["ev"] == "run_end"
 
 
+def test_cli_queue_submits_instead_of_launching(daemon, monkeypatch):
+    """`train(..., extra=["--queue"])` enqueues on the daemon and returns,
+    rather than calling accelerate_launch inline."""
+    from scripts.tasks import _common
+
+    cl, _ = daemon
+    # Point the CLI's daemon client at the in-process test daemon (train() does
+    # a local `from scripts.daemon import client` then calls ensure_daemon).
+    import scripts.daemon.client as daemon_client
+
+    monkeypatch.setattr(daemon_client, "ensure_daemon", lambda **kw: cl)
+    launched = []
+    monkeypatch.setattr(
+        _common, "accelerate_launch", lambda *a: launched.append(a)
+    )
+
+    _common.train("tlora", ["--queue"], methods_subdir="gui-methods")
+
+    assert launched == []  # inline path skipped
+    jobs_list = cl.list_jobs()
+    assert len(jobs_list) == 1
+    job = jobs_list[0]
+    assert job["method"] == "tlora"
+    assert job["methods_subdir"] == "gui-methods"
+    assert "--queue" not in job["extra"]
+
+
+def test_cli_queue_folds_artist_into_extra(daemon, monkeypatch):
+    """ARTIST env is folded into the queued job's extra (the daemon's own
+    build_method_args doesn't read env vars)."""
+    from scripts.tasks import _common
+
+    cl, _ = daemon
+    import scripts.daemon.client as daemon_client
+
+    monkeypatch.setattr(daemon_client, "ensure_daemon", lambda **kw: cl)
+    monkeypatch.setattr(_common, "accelerate_launch", lambda *a: None)
+    monkeypatch.setenv("ARTIST", "alice")
+
+    _common.train("lora", ["--queue"])
+
+    job = cl.list_jobs()[-1]
+    assert "--artist_filter" in job["extra"]
+    assert "alice" in job["extra"]
+
+
 def test_stop_running_job(daemon):
     cl, mgr = daemon
     jid = cl.submit(method="lora", overrides={"duration": 60.0})["job_id"]
