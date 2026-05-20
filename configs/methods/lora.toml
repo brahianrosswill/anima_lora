@@ -58,11 +58,12 @@ alpha_rank_scale = 1.0
 
 
 # -------------
-# "independent_A" and route_per_layer=true -> hydralora
+# "shared_A" and route_per_layer=false -> hydralora
 
 # use_moe_style = "shared_A"
 # route_per_layer = true
 # router_source = "sigma"
+# router_source = "crossattn_emb"
 
 # sigma_feature_dim = 16
 # per_bucket_balance_weight = 0.3   # × balance_loss_weight, per-bucket term
@@ -72,7 +73,7 @@ alpha_rank_scale = 1.0
 # router_targets = ".*(mlp\\.layer[12])$" 
 
 # -------------
-# "shared_A" and route_per_layer=false -> fera
+# "independent_A" and route_per_layer=true -> fera
 
 # use_moe_style = "independent_A"
 # route_per_layer = false 
