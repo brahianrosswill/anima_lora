@@ -27,6 +27,22 @@ ensure_daemon = _client.ensure_daemon
 is_running = _client.is_running
 
 
+def ensure_daemon_quietly(*, timeout: float = 20.0) -> bool:
+    """Bring the daemon up at GUI launch — idempotent, never blocks startup.
+
+    ``ensure_daemon`` is a no-op when ``/health`` already answers, so this is
+    safe to call unconditionally (a daemon left running by the CLI / a previous
+    GUI session is reused, not duplicated). Any startup failure is swallowed and
+    reported via the return value: the GUI must always open, and the Train
+    button's own ``ensure_daemon`` will surface a real error if it's still down.
+    """
+    try:
+        ensure_daemon(timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001 — launch must never fail on a daemon hiccup
+        return False
+
+
 def submit_training(
     *,
     method: str,

@@ -296,6 +296,17 @@ How to use it in the GUI:
 
 Detailed behavior is covered in [§8.6 Auto-Resume](#86-auto-resume-checkpointing_epochs), including the difference from `save_every_n_epochs`.
 
+### 7.3 Stopping Training and Closing the GUI
+
+Training does not run *inside* the GUI window — when you click `Train`, the job is handed to a small background **training daemon** that runs `train.py` as a detached process. This has two practical consequences:
+
+- **The `Stop` button aborts the current training job.** The daemon keeps running and advances to the next queued job (if any), so stopping one run never tears down the queue. This is the same as `make daemon-kill` on the CLI. (`Stop` also cancels an in-progress `Test` or `Preprocess`, which *do* run inside the GUI.)
+- **Closing the GUI does NOT stop training.** Because the job runs in the detached daemon, training keeps going after you close the window — handy for long runs you want to leave overnight. When you reopen the GUI (`make gui`), it automatically reconnects to the still-running job and you'll see `Re-attached to running job …` in the log, with the progress bar and output picking up live again. (This also surfaces jobs started from the CLI or the ComfyUI trainer node.)
+
+> To fully shut training down — kill the active job *and* stop the daemon to free the GPU — use `make daemon-terminate` on the CLI. `Stop` alone leaves the daemon up.
+>
+> `Test` and `Preprocess` are the exception: they run as in-window subprocesses, so closing the GUI cancels them.
+
 ---
 
 ## 8. Running Training
