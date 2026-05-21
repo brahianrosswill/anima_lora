@@ -437,13 +437,12 @@ class AnimaTrainer:
         # Load DiT
         attn_softmax_scale = getattr(args, "attn_softmax_scale", None)
         logger.info(
-            f"Loading Anima DiT model with split_attn: {args.split_attn}, attn_softmax_scale: {attn_softmax_scale}..."
+            f"Loading Anima DiT model with attn_softmax_scale: {attn_softmax_scale}..."
         )
         model = anima_utils.load_anima_model(
             accelerator.device,
             args.pretrained_model_name_or_path,
             attn_mode,
-            args.split_attn,
             loading_device,
             loading_dtype,
             lora_weights_list=lora_weights_list,

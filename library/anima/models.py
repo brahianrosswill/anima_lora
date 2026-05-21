@@ -1189,7 +1189,6 @@ class Anima(nn.Module):
         rope_enable_fps_modulation: bool = False,
         use_llm_adapter: bool = True,
         attn_mode: str = "torch",
-        split_attn: bool = False,
         attn_softmax_scale: Optional[float] = None,
     ) -> None:
         super().__init__()
@@ -1214,7 +1213,6 @@ class Anima(nn.Module):
         self.use_llm_adapter = use_llm_adapter
 
         self.attn_mode = attn_mode
-        self.split_attn = split_attn
         self.attn_softmax_scale = attn_softmax_scale
 
         # Block swap support
@@ -1732,7 +1730,7 @@ class Anima(nn.Module):
         }
 
         attn_params = attention_dispatch.AttentionParams.create_attention_params(
-            self.attn_mode, self.split_attn, self.attn_softmax_scale
+            self.attn_mode, self.attn_softmax_scale
         )
 
         # Pre-compute cross-attention BlockMask once for all blocks (flex mode only)

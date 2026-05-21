@@ -664,7 +664,7 @@ INFERENCE_BASE = [
     "--guidance_scale",
     "4.0",
     "--seed",
-    "40",
+    "41",
     "--save_path",
     "output/tests",
 ]

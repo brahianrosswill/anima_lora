@@ -55,7 +55,7 @@ sigma_jitter = 0.0
 # Fraction of steps that use the on-policy tail; the rest stay the analytic
 # backbone that anchors the prefix. 0 = analytic-only (today's behavior). MIX —
 # one LoRA can't be frozen by module, so 1.0 lets the prefix drift.
-ratio = 0.0
+ratio = 1.0
 # Site of supervision: 'entry' = the handoff σ̃ only (attacks the seam, cheapest);
 # 'full' = DAgger across the tail band (roll the tail no_grad to a random σ in
 # [sigma_floor, σ̃] and supervise there — needed to claim the high-res stage can
