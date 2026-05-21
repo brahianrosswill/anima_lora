@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # from a downstream inference package without inverting.
 _SPECTRUM_RUNNER = None
 
+# SPD (Spectral Progressive Diffusion) runner registry — same pattern as
+# Spectrum. networks/spd.py self-registers on import; --spd dispatches to it.
+_SPD_RUNNER = None
+
 
 def _setup_soft_tokens(args, anima, device):
     """Build + apply the soft_tokens network from ``--soft_tokens_weight``.
@@ -89,6 +93,39 @@ def register_spectrum_runner(fn):
     """
     global _SPECTRUM_RUNNER
     _SPECTRUM_RUNNER = fn
+
+
+def register_spd_runner(fn):
+    """Plug in an spd_denoise implementation (Spectral Progressive Diffusion).
+
+    The runner must accept the same kwargs as networks.spd.spd_denoise. Called
+    by networks/spd.py at import time, mirroring register_spectrum_runner.
+    """
+    global _SPD_RUNNER
+    _SPD_RUNNER = fn
+
+
+def _resolve_spd_schedule(args) -> Tuple[List[float], List[float]]:
+    """Resolve (stages, transition_sigmas) for --spd from CLI args.
+
+    Default is the bench-recommended single-late knee: one handoff
+    ``0.5 → 1.0`` at σ≈0.7 (conservative; gentler trajectory than σ0.5). A
+    final ``1.0`` stage is appended automatically. ``--spd_transition_sigmas``
+    must have ``len(stages) - 1`` entries.
+    """
+    stages = list(getattr(args, "spd_stages", None) or [0.5])
+    if not stages or stages[-1] != 1.0:
+        stages.append(1.0)
+    transition_sigmas = list(getattr(args, "spd_transition_sigmas", None) or [])
+    if not transition_sigmas:
+        # one default σ per handoff; single-late knee for the common 2-stage case
+        transition_sigmas = [0.7] * (len(stages) - 1)
+    if len(transition_sigmas) != len(stages) - 1:
+        raise ValueError(
+            f"--spd_transition_sigmas needs {len(stages) - 1} value(s) for "
+            f"stages {stages}, got {transition_sigmas}"
+        )
+    return stages, transition_sigmas
 
 
 class GenerationSettings:
@@ -583,7 +620,49 @@ def generate_body(
     pgraft_network = getattr(anima, "_pgraft_network", None)
     lora_cutoff_step = getattr(args, "lora_cutoff_step", None)
 
-    if getattr(args, "spectrum", False):
+    if getattr(args, "spd", False):
+        if getattr(args, "spectrum", False):
+            raise ValueError(
+                "--spd and --spectrum are mutually exclusive (both replace the "
+                "denoise loop). Compose them via a future SPD∘Spectrum runner, "
+                "not by passing both."
+            )
+        if _SPD_RUNNER is None:
+            raise RuntimeError(
+                "--spd was passed but no SPD runner is registered. "
+                "Import networks.spd before calling generate()."
+            )
+
+        stages, transition_sigmas = _resolve_spd_schedule(args)
+        latents = _SPD_RUNNER(
+            anima,
+            latents,
+            timesteps,
+            sigmas,
+            embed,
+            negative_embed,
+            padding_mask,
+            args.guidance_scale,
+            er_sde,
+            device,
+            stages=stages,
+            transition_sigmas=transition_sigmas,
+            seed=seed if isinstance(seed, int) else seed[0],
+            pgraft_network=pgraft_network,
+            lora_cutoff_step=lora_cutoff_step,
+            pooled_text_pos=_pooled_text_pos,
+            pooled_text_neg=_pooled_text_neg,
+            dcw=getattr(args, "dcw", False),
+            dcw_lambda=getattr(args, "dcw_lambda", -0.015),
+            dcw_schedule=getattr(args, "dcw_schedule", "one_minus_sigma"),
+            dcw_band_mask=getattr(args, "dcw_band_mask", "LL"),
+            dcw_calibrator=dcw_calibrator,
+            smc_cfg=smc_cfg,
+            soft_tokens_net=soft_tokens_net,
+            soft_tokens_embed_seqlens=soft_tokens_embed_seqlens,
+            soft_tokens_neg_seqlens=soft_tokens_neg_seqlens,
+        )
+    elif getattr(args, "spectrum", False):
         if _SPECTRUM_RUNNER is None:
             raise RuntimeError(
                 "--spectrum was passed but no spectrum runner is registered. "

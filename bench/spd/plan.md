@@ -160,6 +160,17 @@ resolution-generalization risk that could have killed it does not materialize.
 
 ## Phase 3 — Training-free SPD integration  [conditional on Phase 2 PASS]
 
+**Status (2026-05-21): runner + CLI shipped (v0).** `networks/spd.py` exists —
+the probe's `dct_lowpass_init` / `spectral_expand` / multi-resolution Euler loop
+promoted verbatim, wrapped as a sampler-level runner that self-registers with
+`library.inference.generation` (mirrors `networks/spectrum.py`). Dispatched on
+`--spd` (`--spd_stages` / `--spd_transition_sigmas`; default single-late knee
+`0.5→1.0 @ σ0.7`). `SPD=1` composes into every `test-*` target like `SPECTRUM=1`.
+v0 limitations: **Euler-only** (ER-SDE/LCM precompute coefficients incompatible
+with mid-loop σ re-spacing), **mutually exclusive with `--spectrum`**, and **does
+not compose with DCW / SMC-CFG** (warn + ignore). Still TODO below: the
+speed/quality bench and the SPD∘Spectrum composition study.
+
 Tier-2 method (see `CONTRIBUTING.md`). Engineering notes:
 - **Static-shape / compile conflict.** Each resolution stage = a distinct token
   count = a `torch.compile` graph. S=2–3 → 2–3 cached shapes (survivable, but

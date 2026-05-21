@@ -37,6 +37,9 @@ from library.inference.text import MAX_CROSSATTN_TOKENS
 # so --spectrum dispatches without library.inference holding a hard edge into networks/.
 import networks.spectrum  # noqa: F401, E402
 
+# Same pattern for SPD (Spectral Progressive Diffusion) — registers spd_denoise.
+import networks.spd  # noqa: F401, E402
+
 from library.log import setup_logging  # noqa: E402
 
 setup_logging()
@@ -405,6 +408,33 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Spectrum residual calibration strength (0.0=disabled, default 0.0). "
         "Adds residual bias correction from last actual forward to cached predictions.",
+    )
+
+    # SPD: Spectral Progressive Diffusion (arXiv:2605.18736) — training-free
+    # multi-resolution inference. Early steps run at low resolution; HF detail is
+    # injected via spectral noise expansion at the σ handoff. Forces Euler;
+    # mutually exclusive with --spectrum. See networks/spd.py + bench/spd/.
+    parser.add_argument(
+        "--spd",
+        action="store_true",
+        help="Enable Spectral Progressive Diffusion: run early steps at low "
+        "resolution, spectral-expand to full res at the σ handoff. Training-free.",
+    )
+    parser.add_argument(
+        "--spd_stages",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Ascending resolution scales, e.g. '0.5 1.0' or '0.5 0.75 1.0'. A "
+        "trailing 1.0 is appended if missing. Default: 0.5 1.0 (single handoff).",
+    )
+    parser.add_argument(
+        "--spd_transition_sigmas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="σ thresholds (in [0,1]) at which to expand to each next stage; "
+        "len = len(stages)-1. Default: 0.7 per handoff (single-late knee).",
     )
 
     # DCW: SNR-t bias correction (arXiv:2604.16044). Opposite-sign on Anima -- see
