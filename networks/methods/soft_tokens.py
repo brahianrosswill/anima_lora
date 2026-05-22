@@ -34,7 +34,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
 
 from library.log import setup_logging
 from library.training.method_adapter import (
@@ -717,93 +716,36 @@ class SoftTokensMethodAdapter(MethodAdapter):
         anchor_seqlens = net._step_seqlens
 
         dit = ctx.accelerator.unwrap_model(primary.anima_call)
-        if bool(getattr(dit, "blocks_to_swap", 0) or 0):
-            return self._extra_forwards_blockswap(
-                ctx, primary, net, dit, neg, k, ce_dtype,
-                v_pos, v_target, timesteps, base_kw, neg_penalty,
-                anchor_tokens, anchor_seqlens,
-            )
 
-        # ── Default path (no block swap): gradient caching via activation
-        # checkpointing. The InfoNCE coupling is a tiny head over (B,C,H,W)
-        # velocities, but each negative's velocity comes from a full frozen-DiT
-        # forward. Holding all k+1 activation graphs at once is (k+1)× peak and
-        # OOMs a 16GB card even at k=1. So we never build the negative graphs
-        # eagerly: each negative forward is wrapped in activation checkpointing,
-        # so its graph is *recomputed one at a time during backward* — peak stays
-        # at a single DiT forward regardless of k.
+        # ── Gradient caching, split so the negative DiT forward NEVER overlaps
+        # the anchor backward. The naive approach (wrap each negative in
+        # ``checkpoint`` and let the single fused backward recompute it) OOMs:
+        # the recompute fires *during* ``accelerator.backward`` while the anchor's
+        # un-checkpointed activation graph is still live, so two full forwards'
+        # activations are resident at once. And under block swap it also crashes —
+        # the recompute re-enters ``_run_blocks`` against the offloader's
+        # end-of-forward layout (block 0 parked on CPU → cuda/cpu mm mismatch).
         #
-        # The splice is mutable network state (`_step_layer_tokens`, set by
-        # `append_postfix`, read by the per-block hooks), so the re-prime MUST run
-        # *inside* the checkpointed callable: otherwise the backward recompute
-        # would read whatever negative/anchor state is live at backward time and
-        # splice the wrong tokens. Re-priming inside also keeps the param→token
-        # graph (`self.tokens` → `_step_layer_tokens`) intact through recompute,
-        # so gradient still reaches the soft tokens.
-        def _neg_velocity(neg_j: torch.Tensor) -> torch.Tensor:
-            def run(nmi, ts, neg_emb, pm):
-                return self._neg_forward(
-                    net, primary.anima_call, nmi, pm, base_kw, ts, ce_dtype, neg_emb
-                )
+        # Instead we split ∂L_con/∂θ into two partials that each run as their own
+        # clean forward/backward:
+        #   • ∂L/∂v_pos — rides the anchor's FM backward. The returned loss is
+        #     built from ``logit_pos`` (live anchor graph) + *detached* negative
+        #     logits, so ``accelerator.backward`` pushes it into the soft tokens.
+        #   • ∂L/∂v_neg — deferred to ``after_backward`` (post-anchor-backward,
+        #     when the anchor activations are freed and, under swap, the offloader
+        #     is head-resident). We forward the negatives once here under no_grad
+        #     just for their velocity *values* + the cached ``g_neg``, then replay
+        #     each as an isolated forward+backward in ``after_backward``.
+        #
+        # ``prepare_block_swap_before_forward`` is a no-op at ``blocks_to_swap=0``,
+        # so this single path serves both the swap and no-swap cases; the no-swap
+        # case still wins on peak memory (one forward graph, never two).
 
-            return checkpoint(
-                run,
-                primary.noisy_model_input,
-                timesteps,
-                neg_j,
-                primary.padding_mask,
-                use_reentrant=False,
-            )
-
-        v_neg = torch.stack(
-            [_neg_velocity(neg[:, j]) for j in range(k)], dim=1
-        )  # (B, k, C, H, W)
-
-        # Restore anchor splice state (the value passes mutated the per-step
-        # buffers; the recompute re-primes each negative inside its checkpoint).
-        net._step_layer_tokens = anchor_tokens
-        net._step_seqlens = anchor_seqlens
-
-        loss, diag = net.contrastive_loss(
-            v_pos, v_neg, v_target, neg_penalty=neg_penalty
-        )
-        self._record_metrics(net, loss, diag)
-        return {"soft_tokens_contrastive": loss}
-
-    def _extra_forwards_blockswap(
-        self, ctx, primary, net, dit, neg, k, ce_dtype,
-        v_pos, v_target, timesteps, base_kw, neg_penalty,
-        anchor_tokens, anchor_seqlens,
-    ) -> Optional[dict]:
-        """Gradient-caching contrastive path for active block swapping.
-
-        Activation checkpointing (the default path) can't be used here: the
-        ``ModelOffloader`` device layout is a sliding window tied to *one*
-        forward→*one* backward per step. The anchor forward leaves the tail
-        blocks GPU-resident for the FM backward; checkpointed negatives would
-        re-enter ``_run_blocks`` (forward-style swap) during that backward and
-        desync the rotation. Worse, each negative *value* pass starting at a
-        CPU-parked block 0 crashes outright (cuda/cpu mm mismatch).
-
-        So we true-gradient-cache instead, splitting ∂L_con/∂θ into two partials
-        the offloader can each serve with a clean cycle:
-
-          • ∂L/∂v_pos — rides the FM backward. We build the returned loss from
-            ``logit_pos`` (live anchor graph) and *detached* negative logits, so
-            ``accelerator.backward`` pushes it into the soft tokens through the
-            anchor's own (single) backward.
-          • ∂L/∂v_neg — deferred to ``after_backward``. We forward the negatives
-            once under ``no_grad`` (each bracketed by a block-swap reset) just to
-            get their velocity *values*; that leaves the offloader tail-resident,
-            exactly as the anchor forward did, so the FM backward is unaffected.
-            We cache ``g_neg = ∂L/∂v_neg`` and replay each negative as its own
-            isolated forward+backward post-FM-backward (see ``after_backward``).
-        """
-        # Pass A — negative velocity *values* under no_grad. A fresh block-swap
-        # reset before each forward gives block 0 onward back on GPU; the forward
-        # then slides the resident window and ends tail-resident. After the last
-        # one the offloader is in the same end-of-forward state the anchor left,
-        # so the queued FM backward sees the layout it expects.
+        # Negative velocity *values* under no_grad — no activation graph retained,
+        # so this adds only a transient working set on top of the live anchor
+        # activations. Each forward is bracketed by a block-swap reset (no-op when
+        # not swapping); under swap this leaves the offloader in the same
+        # end-of-forward state the anchor left, so the FM backward is unaffected.
         v_neg_vals = []
         with torch.no_grad():
             for j in range(k):
@@ -859,15 +801,15 @@ class SoftTokensMethodAdapter(MethodAdapter):
     def after_backward(self, ctx: StepCtx) -> None:
         """Replay the cached contrastive negatives after the FM backward.
 
-        Runs only on the block-swap path (``_extra_forwards_blockswap`` queued a
-        replay). The FM backward has finished, leaving the offloader head-resident
-        and nothing else depending on its state, so each negative re-forward +
-        immediate backward is a clean isolated swap cycle. The cached
-        ``weight·g_neg`` gradient is pushed back through ``self.tokens``, adding
-        to the FM backward's grads on the same params (no ``zero_grad`` runs
-        between here and the optimizer step). Single-process (the project's 16GB
-        target) — a manual backward inside ``accelerator.accumulate`` would need
-        DDP no-sync handling under multi-GPU.
+        The anchor's FM backward has finished, so its activation graph is freed
+        and (under block swap) the offloader is head-resident — each negative
+        re-forward + immediate backward is then a clean, isolated forward/backward
+        whose peak is a single forward graph, never stacked on the anchor's. The
+        cached ``weight·g_neg`` gradient is pushed back through ``self.tokens``,
+        accumulating onto the FM backward's grads on the same params (no
+        ``zero_grad`` runs between here and the optimizer step). Single-process
+        (the project's 16GB target) — a manual backward inside
+        ``accelerator.accumulate`` would need DDP no-sync handling under multi-GPU.
         """
         pend = self._pending_gradcache
         if pend is None:
