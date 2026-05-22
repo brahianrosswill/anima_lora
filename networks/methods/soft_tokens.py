@@ -580,6 +580,30 @@ class SoftTokensNetwork(AdapterNetworkBase):
         accuracy (pos beats every negative) and the mean pos−neg logit gap for
         TensorBoard.
         """
+        logit_pos, logits_neg = self._velocities_to_logits(
+            v_pos, v_neg, v_target, neg_penalty
+        )
+        loss = self._infonce_from_logits(logit_pos, logits_neg)
+        return loss, self._contrastive_diagnostics(logit_pos, logits_neg)
+
+    def _velocities_to_logits(
+        self,
+        v_pos: torch.Tensor,
+        v_neg: torch.Tensor,
+        v_target: torch.Tensor,
+        neg_penalty: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-sample FM-error logits for the InfoNCE softmax.
+
+        Shared by the monolithic ``contrastive_loss`` and the grad-cached
+        block-swap path (``SoftTokensMethodAdapter``). Differentiable in every
+        velocity argument, so the caller can ``.detach()`` whichever branch it
+        wants to drop from the returned logits' graph — this is what lets the
+        grad-cache path compute ``∂L/∂v_pos`` and ``∂L/∂v_neg`` as separate
+        partials without duplicating the τ / penalty math.
+
+        Returns ``(logit_pos (B,), logits_neg (B, k))``.
+        """
         tau = float(self._contrastive_tau)
         vp = v_pos.float()
         vt = v_target.float()
@@ -596,19 +620,27 @@ class SoftTokensNetwork(AdapterNetworkBase):
         if neg_penalty is not None:
             # jaccard mode: down-weight tag-overlapping negatives.
             logits_neg = logits_neg - neg_penalty.to(logits_neg.dtype)
+        return logit_pos, logits_neg
 
+    @staticmethod
+    def _infonce_from_logits(
+        logit_pos: torch.Tensor, logits_neg: torch.Tensor
+    ) -> torch.Tensor:
         # InfoNCE: -log softmax of the positive over {pos, neg_1..k}.
         all_logits = torch.cat([logit_pos.unsqueeze(1), logits_neg], dim=1)  # (B, 1+k)
-        loss = (-logit_pos + torch.logsumexp(all_logits, dim=1)).mean()
+        return (-logit_pos + torch.logsumexp(all_logits, dim=1)).mean()
 
+    @staticmethod
+    def _contrastive_diagnostics(
+        logit_pos: torch.Tensor, logits_neg: torch.Tensor
+    ) -> dict[str, float]:
         with torch.no_grad():
             acc = (logit_pos.unsqueeze(1) > logits_neg).all(dim=1).float().mean()
             gap = (logit_pos - logits_neg.mean(dim=1)).mean()
-        diagnostics = {
+        return {
             "contrastive_acc": float(acc.item()),
             "contrastive_logit_gap": float(gap.item()),
         }
-        return loss, diagnostics
 
 
 class SoftTokensMethodAdapter(MethodAdapter):
@@ -637,6 +669,10 @@ class SoftTokensMethodAdapter(MethodAdapter):
         self._neg_crossattn: Optional[torch.Tensor] = None
         self._neg_jaccard: Optional[torch.Tensor] = None
         self._last_metrics: dict[str, float] = {}
+        # Block-swap grad-cache state: when block swapping is active the
+        # negative backward can't share the anchor's forward/backward cycle, so
+        # it's deferred to ``after_backward``. ``None`` when no replay is queued.
+        self._pending_gradcache: Optional[dict] = None
 
     def prime_for_forward(
         self, ctx: StepCtx, batch, latents: torch.Tensor, *, is_train: bool
@@ -670,24 +706,32 @@ class SoftTokensMethodAdapter(MethodAdapter):
         v_target = primary.noise - primary.latents  # (B, C, H, W)
         timesteps = primary.timesteps
         base_kw = dict(primary.forward_kwargs)
+        neg_penalty = self._neg_penalty(net, device)
 
-        # Snapshot the anchor's per-step splice state. The eager (value) pass of
-        # each checkpointed negative below mutates the per-step buffers, so we
-        # restore the anchor's afterwards. (The anchor's own autograd graph holds
-        # tensor *references*, so it is unaffected by these attribute writes —
-        # this restore just keeps the live network state coherent.)
+        # Snapshot the anchor's per-step splice state. The negative value passes
+        # below mutate the per-step buffers, so we restore the anchor's
+        # afterwards. (The anchor's own autograd graph holds tensor *references*,
+        # so it is unaffected by these attribute writes — this restore just keeps
+        # the live network state coherent.)
         anchor_tokens = net._step_layer_tokens
         anchor_seqlens = net._step_seqlens
 
-        # ── Gradient caching (your "grad-accum across the contrastive forwards")
-        # The InfoNCE coupling is a tiny head over (B,C,H,W) velocities, but each
-        # negative's velocity comes from a full frozen-DiT forward. Holding all
-        # k+1 activation graphs at once is (k+1)× peak and OOMs a 16GB card even
-        # at k=1. So we never build the negative graphs eagerly: each negative
-        # forward is wrapped in activation checkpointing, so its graph is
-        # *recomputed one at a time during backward* — peak stays at a single DiT
-        # forward regardless of k. (Plain LoRA at any rank fits one forward, which
-        # is why rank never OOMs — rank touches params, not activations.)
+        dit = ctx.accelerator.unwrap_model(primary.anima_call)
+        if bool(getattr(dit, "blocks_to_swap", 0) or 0):
+            return self._extra_forwards_blockswap(
+                ctx, primary, net, dit, neg, k, ce_dtype,
+                v_pos, v_target, timesteps, base_kw, neg_penalty,
+                anchor_tokens, anchor_seqlens,
+            )
+
+        # ── Default path (no block swap): gradient caching via activation
+        # checkpointing. The InfoNCE coupling is a tiny head over (B,C,H,W)
+        # velocities, but each negative's velocity comes from a full frozen-DiT
+        # forward. Holding all k+1 activation graphs at once is (k+1)× peak and
+        # OOMs a 16GB card even at k=1. So we never build the negative graphs
+        # eagerly: each negative forward is wrapped in activation checkpointing,
+        # so its graph is *recomputed one at a time during backward* — peak stays
+        # at a single DiT forward regardless of k.
         #
         # The splice is mutable network state (`_step_layer_tokens`, set by
         # `append_postfix`, read by the per-block hooks), so the re-prime MUST run
@@ -698,19 +742,9 @@ class SoftTokensMethodAdapter(MethodAdapter):
         # so gradient still reaches the soft tokens.
         def _neg_velocity(neg_j: torch.Tensor) -> torch.Tensor:
             def run(nmi, ts, neg_emb, pm):
-                # Cached crossattn_emb is zero-padded past the real text length
-                # (the LLM adapter zeroes padding positions), so non-zero rows
-                # give the per-sample seqlen the front_of_padding splice needs.
-                seqlens = (neg_emb.abs().sum(dim=-1) > 0).sum(dim=-1).to(torch.int32)
-                # Returns crossattn_emb unchanged — the per-block hooks splice
-                # during the forward off the buffer this call primes.
-                ce = net.append_postfix(neg_emb, seqlens, timesteps=ts)
-                kw_j = dict(base_kw)
-                if "pooled_text_override" in kw_j:
-                    kw_j["pooled_text_override"] = neg_emb.max(dim=1).values
-                return primary.anima_call(
-                    nmi, ts, ce, padding_mask=pm, **kw_j
-                ).squeeze(2)
+                return self._neg_forward(
+                    net, primary.anima_call, nmi, pm, base_kw, ts, ce_dtype, neg_emb
+                )
 
             return checkpoint(
                 run,
@@ -722,28 +756,188 @@ class SoftTokensMethodAdapter(MethodAdapter):
             )
 
         v_neg = torch.stack(
-            [_neg_velocity(neg[:, j].to(dtype=ce_dtype)) for j in range(k)], dim=1
+            [_neg_velocity(neg[:, j]) for j in range(k)], dim=1
         )  # (B, k, C, H, W)
 
-        # Restore anchor splice state (checkpoint ran each negative forward
-        # eagerly to produce its value, mutating the per-step buffers).
+        # Restore anchor splice state (the value passes mutated the per-step
+        # buffers; the recompute re-primes each negative inside its checkpoint).
         net._step_layer_tokens = anchor_tokens
         net._step_seqlens = anchor_seqlens
 
-        # jaccard mode: subtract α·s from each negative logit (s = caption
-        # tag-overlap surfaced by the dataset). No-op for shuffled / hard.
-        neg_penalty = None
+        loss, diag = net.contrastive_loss(
+            v_pos, v_neg, v_target, neg_penalty=neg_penalty
+        )
+        self._record_metrics(net, loss, diag)
+        return {"soft_tokens_contrastive": loss}
+
+    def _extra_forwards_blockswap(
+        self, ctx, primary, net, dit, neg, k, ce_dtype,
+        v_pos, v_target, timesteps, base_kw, neg_penalty,
+        anchor_tokens, anchor_seqlens,
+    ) -> Optional[dict]:
+        """Gradient-caching contrastive path for active block swapping.
+
+        Activation checkpointing (the default path) can't be used here: the
+        ``ModelOffloader`` device layout is a sliding window tied to *one*
+        forward→*one* backward per step. The anchor forward leaves the tail
+        blocks GPU-resident for the FM backward; checkpointed negatives would
+        re-enter ``_run_blocks`` (forward-style swap) during that backward and
+        desync the rotation. Worse, each negative *value* pass starting at a
+        CPU-parked block 0 crashes outright (cuda/cpu mm mismatch).
+
+        So we true-gradient-cache instead, splitting ∂L_con/∂θ into two partials
+        the offloader can each serve with a clean cycle:
+
+          • ∂L/∂v_pos — rides the FM backward. We build the returned loss from
+            ``logit_pos`` (live anchor graph) and *detached* negative logits, so
+            ``accelerator.backward`` pushes it into the soft tokens through the
+            anchor's own (single) backward.
+          • ∂L/∂v_neg — deferred to ``after_backward``. We forward the negatives
+            once under ``no_grad`` (each bracketed by a block-swap reset) just to
+            get their velocity *values*; that leaves the offloader tail-resident,
+            exactly as the anchor forward did, so the FM backward is unaffected.
+            We cache ``g_neg = ∂L/∂v_neg`` and replay each negative as its own
+            isolated forward+backward post-FM-backward (see ``after_backward``).
+        """
+        # Pass A — negative velocity *values* under no_grad. A fresh block-swap
+        # reset before each forward gives block 0 onward back on GPU; the forward
+        # then slides the resident window and ends tail-resident. After the last
+        # one the offloader is in the same end-of-forward state the anchor left,
+        # so the queued FM backward sees the layout it expects.
+        v_neg_vals = []
+        with torch.no_grad():
+            for j in range(k):
+                dit.prepare_block_swap_before_forward(free_cache=False)
+                v_neg_vals.append(
+                    self._neg_forward(
+                        net, primary.anima_call,
+                        primary.noisy_model_input, primary.padding_mask,
+                        base_kw, timesteps, ce_dtype, neg[:, j],
+                    )
+                )
+        net._step_layer_tokens = anchor_tokens
+        net._step_seqlens = anchor_seqlens
+        v_neg = torch.stack(v_neg_vals, dim=1)  # (B, k, C, H, W), detached values
+
+        # Composer-side loss: grad only via v_pos (negatives are constants).
+        logit_pos, logits_neg = net._velocities_to_logits(
+            v_pos, v_neg, v_target, neg_penalty
+        )
+        loss = net._infonce_from_logits(logit_pos, logits_neg)
+        diag = net._contrastive_diagnostics(logit_pos.detach(), logits_neg.detach())
+        self._record_metrics(net, loss, diag)
+
+        live = float(getattr(net, "_contrastive_weight", 0.0) or 0.0)
+        if live > 0.0:
+            # Cache ∂L/∂v_neg with v_pos held constant (the matching partial to
+            # the v_pos branch above). Tiny head — no DiT forward here.
+            v_neg_leaf = v_neg.detach().requires_grad_(True)
+            lp_d, ln_leaf = net._velocities_to_logits(
+                v_pos.detach(), v_neg_leaf, v_target, neg_penalty
+            )
+            g_loss = net._infonce_from_logits(lp_d, ln_leaf)
+            (g_neg,) = torch.autograd.grad(g_loss, v_neg_leaf)
+            self._pending_gradcache = {
+                "net": net,
+                "dit": dit,
+                "anima_call": primary.anima_call,
+                "noisy_model_input": primary.noisy_model_input,
+                "padding_mask": primary.padding_mask,
+                "timesteps": timesteps,
+                "base_kw": base_kw,
+                "neg": neg,
+                "ce_dtype": ce_dtype,
+                "g_neg": g_neg.detach(),
+                "weight": live,
+                "anchor_tokens": anchor_tokens,
+                "anchor_seqlens": anchor_seqlens,
+            }
+        else:
+            self._pending_gradcache = None
+        return {"soft_tokens_contrastive": loss}
+
+    def after_backward(self, ctx: StepCtx) -> None:
+        """Replay the cached contrastive negatives after the FM backward.
+
+        Runs only on the block-swap path (``_extra_forwards_blockswap`` queued a
+        replay). The FM backward has finished, leaving the offloader head-resident
+        and nothing else depending on its state, so each negative re-forward +
+        immediate backward is a clean isolated swap cycle. The cached
+        ``weight·g_neg`` gradient is pushed back through ``self.tokens``, adding
+        to the FM backward's grads on the same params (no ``zero_grad`` runs
+        between here and the optimizer step). Single-process (the project's 16GB
+        target) — a manual backward inside ``accelerator.accumulate`` would need
+        DDP no-sync handling under multi-GPU.
+        """
+        pend = self._pending_gradcache
+        if pend is None:
+            return
+        self._pending_gradcache = None
+
+        net = pend["net"]
+        dit = pend["dit"]
+        accel = ctx.accelerator
+        # Match accelerate's 1/N loss scaling so contrastive grads land on the
+        # same scale as the FM grads it accumulates alongside.
+        accum = max(1, int(getattr(accel, "gradient_accumulation_steps", 1) or 1))
+        scale = pend["weight"] / accum
+        neg = pend["neg"]
+        k = neg.shape[1]
+        ts = pend["timesteps"]
+        ce_dtype = pend["ce_dtype"]
+        g_neg = pend["g_neg"]
+
+        with accel.autocast(), torch.enable_grad():
+            for j in range(k):
+                dit.prepare_block_swap_before_forward(free_cache=False)
+                v_neg_j = self._neg_forward(
+                    net, pend["anima_call"],
+                    pend["noisy_model_input"], pend["padding_mask"],
+                    pend["base_kw"], ts, ce_dtype, neg[:, j],
+                )
+                grad_j = (scale * g_neg[:, j]).to(v_neg_j.dtype)
+                torch.autograd.backward(v_neg_j, grad_tensors=grad_j)
+        net._step_layer_tokens = pend["anchor_tokens"]
+        net._step_seqlens = pend["anchor_seqlens"]
+
+    @staticmethod
+    def _neg_forward(
+        net, anima_call, noisy_model_input, padding_mask,
+        base_kw, timesteps, ce_dtype, neg_emb,
+    ) -> torch.Tensor:
+        """One negative DiT forward → velocity (B, C, H, W).
+
+        Re-primes the per-block soft-token splice for this negative's text and
+        runs the frozen DiT with the anchor's (x_t, ε, t). Returns the squeezed
+        4D velocity.
+        """
+        neg_emb = neg_emb.to(dtype=ce_dtype)
+        # Cached crossattn_emb is zero-padded past the real text length (the LLM
+        # adapter zeroes padding positions), so non-zero rows give the per-sample
+        # seqlen the front_of_padding splice needs.
+        seqlens = (neg_emb.abs().sum(dim=-1) > 0).sum(dim=-1).to(torch.int32)
+        # Returns crossattn_emb unchanged — the per-block hooks splice during the
+        # forward off the buffer this call primes.
+        ce = net.append_postfix(neg_emb, seqlens, timesteps=timesteps)
+        kw_j = dict(base_kw)
+        if "pooled_text_override" in kw_j:
+            kw_j["pooled_text_override"] = neg_emb.max(dim=1).values
+        return anima_call(
+            noisy_model_input, timesteps, ce, padding_mask=padding_mask, **kw_j
+        ).squeeze(2)
+
+    def _neg_penalty(self, net, device) -> Optional[torch.Tensor]:
+        """jaccard mode: α·s subtracted from each negative logit (s = caption
+        tag-overlap surfaced by the dataset). ``None`` for shuffled / hard."""
         if (
             getattr(net, "contrastive_negative_mode", "shuffled") == "jaccard"
             and self._neg_jaccard is not None
         ):
             alpha = float(getattr(net, "contrastive_jaccard_alpha", 1.0) or 0.0)
-            neg_penalty = alpha * self._neg_jaccard.to(device).float()
+            return alpha * self._neg_jaccard.to(device).float()
+        return None
 
-        loss, diag = net.contrastive_loss(
-            v_pos, v_neg, v_target, neg_penalty=neg_penalty
-        )
-
+    def _record_metrics(self, net, loss, diag) -> None:
         live = float(getattr(net, "_contrastive_weight", 0.0) or 0.0)
         loss_val = float(loss.detach().item())
         self._last_metrics = {
@@ -753,7 +947,6 @@ class SoftTokensMethodAdapter(MethodAdapter):
             "soft_tokens/contrastive_acc": diag["contrastive_acc"],
             "soft_tokens/contrastive_logit_gap": diag["contrastive_logit_gap"],
         }
-        return {"soft_tokens_contrastive": loss}
 
     def metrics(self, ctx) -> dict:
         del ctx

@@ -59,7 +59,7 @@ network_args = [
     "contrastive_negative_mode=hard",
     "contrastive_jaccard_alpha=1.0",
     "contrastive_tau=0.5",
-    "contrastive_warmup_ratio=0.1",
+    "contrastive_warmup_ratio=0.0",
 ]
 output_name = "anima_soft_tokens"
 weight_decay=1e-4
@@ -76,7 +76,7 @@ checkpointing_epochs = 4
 # compile_inductor_mode = "reduce-overhead"
 
 # gradient_accumulation_steps = 2
-blocks_to_swap = 0
+blocks_to_swap = 24
 
 logging_dir = "output/logs"
 log_with = "tensorboard"
