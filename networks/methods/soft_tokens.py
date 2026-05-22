@@ -81,6 +81,7 @@ def create_network(
     contrastive_tau = float(kwargs.get("contrastive_tau", 0.5))
     contrastive_warmup_ratio = float(kwargs.get("contrastive_warmup_ratio", 0.1))
     contrastive_jaccard_alpha = float(kwargs.get("contrastive_jaccard_alpha", 1.0))
+    contrastive_every_n = int(kwargs.get("contrastive_every_n", 1))
     network = SoftTokensNetwork(
         num_tokens=num_tokens,
         embed_dim=embed_dim,
@@ -94,6 +95,7 @@ def create_network(
         contrastive_tau=contrastive_tau,
         contrastive_warmup_ratio=contrastive_warmup_ratio,
         contrastive_jaccard_alpha=contrastive_jaccard_alpha,
+        contrastive_every_n=contrastive_every_n,
         multiplier=multiplier,
     )
     return network
@@ -184,6 +186,7 @@ class SoftTokensNetwork(AdapterNetworkBase):
         contrastive_tau: float = 0.5,
         contrastive_warmup_ratio: float = 0.1,
         contrastive_jaccard_alpha: float = 1.0,
+        contrastive_every_n: int = 1,
         multiplier: float = 1.0,
     ):
         super().__init__()
@@ -238,6 +241,15 @@ class SoftTokensNetwork(AdapterNetworkBase):
             if self._contrastive_warmup_ratio > 0.0
             else self._contrastive_target_weight
         )
+        # Cadence: run the (expensive) contrastive negative forwards only every
+        # Nth optimizer step. NOT auto-scaled — a manual frequency knob, so the
+        # effective regularization strength is (weight × 1/N); co-tune
+        # ``contrastive_weight`` if you want to hold it roughly constant. 1 =
+        # every step (default). ``_contrastive_fire_this_step`` is recomputed
+        # each step by ``step_contrastive_warmup`` from the optimizer-step index
+        # and read by ``SoftTokensMethodAdapter.extra_forwards``.
+        self._contrastive_every_n = max(1, int(contrastive_every_n))
+        self._contrastive_fire_this_step = True
 
         self.tokens = nn.Parameter(
             torch.randn(n_layers, num_tokens, embed_dim) * init_std
@@ -302,8 +314,9 @@ class SoftTokensNetwork(AdapterNetworkBase):
         """
         if timesteps is None:
             raise ValueError(
-                "soft_tokens requires timesteps (per-step) — train.py passes "
-                "this automatically; inference path is not yet wired up"
+                "soft_tokens requires timesteps (per-step) — train.py and the "
+                "inference loop (library/inference/generation.py, "
+                "networks/spectrum.py) both pass this per CFG branch each step"
             )
         B = crossattn_emb.shape[0]
         bucket_idx = self._bucketize(timesteps)  # (B,)
@@ -451,6 +464,7 @@ class SoftTokensNetwork(AdapterNetworkBase):
             "ss_contrastive_negative_mode": self.contrastive_negative_mode,
             "ss_contrastive_tau": str(self._contrastive_tau),
             "ss_contrastive_warmup_ratio": str(self._contrastive_warmup_ratio),
+            "ss_contrastive_every_n": str(self._contrastive_every_n),
         }
 
     def load_weights(self, file):
@@ -488,24 +502,30 @@ class SoftTokensNetwork(AdapterNetworkBase):
         out: dict[str, float] = {}
 
         # Bank-state diagnostics always logged when there are ≥ 2 tokens per
-        # layer to take pairs from — cheap collapse/divergence signal.
+        # layer to take pairs from — cheap collapse/divergence signal. Batched
+        # over the layer axis so the whole bank costs 3 host syncs, not the
+        # ~2·n_layers the per-layer Python loop used to.
         if self.num_tokens >= 2 and self.n_layers > 0:
-            tokens = self.tokens.detach()
-            # Pairwise cos / d² per layer, averaged across layers.
-            cos_sum = 0.0
-            d_min = float("inf")
-            for k in range(self.n_layers):
-                z = tokens[k]
-                zn = torch.nn.functional.normalize(z, dim=-1, eps=1e-8)
-                gram = zn @ zn.t()
-                n = gram.shape[0]
-                iu = torch.triu_indices(n, n, offset=1, device=gram.device)
-                cos_sum += float(gram[iu[0], iu[1]].mean().item())
-                d_sq = torch.pdist(z, p=2).pow(2)
-                if d_sq.numel():
-                    d_min = min(d_min, float(d_sq.min().item()))
-            out["soft_tokens/tokens_mean_cos"] = cos_sum / self.n_layers
-            out["soft_tokens/tokens_min_d_sq"] = d_min if d_min != float("inf") else 0.0
+            tokens = self.tokens.detach()  # (L, K, D)
+            K = tokens.shape[1]
+            iu = torch.triu_indices(K, K, offset=1, device=tokens.device)
+            # Mean pairwise cos per layer → mean over layers. Equal pair count
+            # per layer, so the global pair mean equals the mean of per-layer
+            # means (matches the old cos_sum / n_layers).
+            zn = torch.nn.functional.normalize(tokens, dim=-1, eps=1e-8)
+            gram = zn @ zn.transpose(1, 2)  # (L, K, K)
+            out["soft_tokens/tokens_mean_cos"] = float(
+                gram[:, iu[0], iu[1]].mean().item()
+            )
+            # Squared pairwise distances via ‖a‖²+‖b‖²−2a·b; clamp the tiny
+            # negative round-off the subtraction can produce.
+            sq = tokens.pow(2).sum(-1)  # (L, K)
+            d_sq = (
+                sq.unsqueeze(2) + sq.unsqueeze(1) - 2.0 * (tokens @ tokens.transpose(1, 2))
+            ).clamp_min(0.0)  # (L, K, K)
+            out["soft_tokens/tokens_min_d_sq"] = float(
+                d_sq[:, iu[0], iu[1]].min().item()
+            )
             out["soft_tokens/tokens_mean_norm"] = float(
                 tokens.flatten(1).norm(dim=-1).mean().item()
             )
@@ -520,9 +540,13 @@ class SoftTokensNetwork(AdapterNetworkBase):
         )
         return out
 
-    def step_contrastive_warmup(self, global_step: int, max_train_steps: int) -> None:
+    def step_contrastive_warmup(
+        self, global_step: int, max_train_steps: int, accum: int = 1
+    ) -> None:
         """Activate the contrastive objective once training crosses its warmup
-        window. Step function: ``_contrastive_weight`` holds at 0 for the first
+        window, and decide whether the contrastive negatives fire this step.
+
+        Warmup: ``_contrastive_weight`` holds at 0 for the first
         ``_contrastive_warmup_ratio`` of steps, then flips to
         ``_contrastive_target_weight``. No-op when target is 0.
 
@@ -530,7 +554,22 @@ class SoftTokensNetwork(AdapterNetworkBase):
         contrastive term starts pulling the soft tokens toward text
         discrimination, so the contrast sharpens an existing signal rather than
         fighting a near-random init.
+
+        Cadence: ``global_step`` is the trainer's micro-batch counter
+        (``_hydra_warmup_step``, incremented once per ``process_batch``). The
+        firing decision is taken on the *optimizer*-step index
+        (``global_step // accum``) so every micro-batch inside one accumulation
+        window agrees — otherwise a cadence stride over micro-batches would
+        fire partial, accum-coupled contrastive grads. ``_contrastive_every_n``
+        is a manual frequency knob (no auto-scaling).
         """
+        every_n = int(self._contrastive_every_n)
+        accum = max(1, int(accum))
+        optimizer_step = int(global_step) // accum
+        self._contrastive_fire_this_step = (
+            every_n <= 1 or optimizer_step % every_n == 0
+        )
+
         target = float(self._contrastive_target_weight)
         ratio = float(self._contrastive_warmup_ratio)
         if target <= 0.0:
@@ -694,6 +733,12 @@ class SoftTokensMethodAdapter(MethodAdapter):
         net = ctx.accelerator.unwrap_model(ctx.network)
         if float(getattr(net, "_contrastive_target_weight", 0.0) or 0.0) <= 0.0:
             return None
+        # Cadence gate: skip the whole contrastive block (no_grad value pass +
+        # after_backward replay) on non-firing steps. The flag is set per step
+        # by ``step_contrastive_warmup`` on the optimizer-step clock.
+        if not getattr(net, "_contrastive_fire_this_step", True):
+            self._pending_gradcache = None
+            return None
 
         device = primary.noisy_model_input.device
         ce_dtype = primary.crossattn_emb.dtype
@@ -856,8 +901,14 @@ class SoftTokensMethodAdapter(MethodAdapter):
         neg_emb = neg_emb.to(dtype=ce_dtype)
         # Cached crossattn_emb is zero-padded past the real text length (the LLM
         # adapter zeroes padding positions), so non-zero rows give the per-sample
-        # seqlen the front_of_padding splice needs.
-        seqlens = (neg_emb.abs().sum(dim=-1) > 0).sum(dim=-1).to(torch.int32)
+        # seqlen the front_of_padding splice needs. end_of_sequence ignores
+        # _step_seqlens entirely, so skip the O(B·S·D) abs-sum reduction there —
+        # it would otherwise run 2k times per step (value pass + replay) to fill
+        # a buffer the hook discards.
+        if net.splice_position == "front_of_padding":
+            seqlens = (neg_emb.abs().sum(dim=-1) > 0).sum(dim=-1).to(torch.int32)
+        else:
+            seqlens = None
         # Returns crossattn_emb unchanged — the per-block hooks splice during the
         # forward off the buffer this call primes.
         ce = net.append_postfix(neg_emb, seqlens, timesteps=timesteps)

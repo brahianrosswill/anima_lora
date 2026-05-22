@@ -35,6 +35,13 @@ network_dim = 4
 # contrastive_weight            — λ_con. 0.0 disables (and the dataset stops
 #                                 producing negatives, so no extra forwards).
 # contrastive_k                 — negatives per step → (k+1)× step time. Keep 1–2.
+# contrastive_every_n           — run the negative forwards only every Nth
+#                                 optimizer step (1 = every step). Manual
+#                                 frequency knob, NOT auto-scaled: effective
+#                                 strength ≈ weight × 1/N, so bump
+#                                 contrastive_weight if you want to hold the
+#                                 average pull constant. Costs no extra memory
+#                                 (firing-step peak unchanged, off-steps cheaper).
 # contrastive_negative_mode     — negative sourcing. "shuffled" (unrelated
 #                                 cached negative), "jaccard" (shuffled + logit
 #                                 down-weight by caption tag-overlap), or "hard"
@@ -46,15 +53,13 @@ network_dim = 4
 #                                 (−FM-error / τ).
 # contrastive_warmup_ratio      — hold λ_con at 0 for the first fraction of
 #                                 steps (lets plain FM shape the bank first).
-# The negative grouping is read from the shared caption index produced by
-# `make caption-index` (post_image_dataset/captions/caption_index.json) — not a
-# user knob.
+
 network_args = [
     "n_layers=6",
     "n_t_buckets=14",
     "init_std=0.02",
     "splice_position=front_of_padding",
-    "contrastive_weight=1.0",
+    "contrastive_weight=0.05",
     "contrastive_k=1",
     "contrastive_negative_mode=hard",
     "contrastive_jaccard_alpha=1.0",
@@ -73,10 +78,10 @@ learning_rate = 1e-3
 max_train_epochs = 4
 save_every_n_epochs = 4
 checkpointing_epochs = 4
-# compile_inductor_mode = "reduce-overhead"
+compile_inductor_mode = "reduce-overhead"
 
 # gradient_accumulation_steps = 2
-blocks_to_swap = 24
+blocks_to_swap = 0
 
 logging_dir = "output/logs"
 log_with = "tensorboard"

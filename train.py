@@ -757,6 +757,9 @@ class AnimaTrainer:
             is_train=is_train,
             warmup_step=int(getattr(self, "_hydra_warmup_step", 0)),
             max_train_steps=int(getattr(args, "max_train_steps", 0) or 0),
+            gradient_accumulation_steps=int(
+                getattr(args, "gradient_accumulation_steps", 1) or 1
+            ),
         )
 
         # Gradient checkpointing support

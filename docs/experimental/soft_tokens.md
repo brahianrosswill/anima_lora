@@ -11,7 +11,7 @@ make exp-soft-tokens                    # default preset
 python tasks.py exp-soft-tokens         # cross-platform
 ```
 
-v1 is **training-only**. `inference.py` cannot load these checkpoints — `create_network_from_weights(for_inference=True)` raises `NotImplementedError`. Wire up the per-step block hook inside the denoising loop if early training looks promising.
+**Inference is supported.** `create_network_from_weights` loads the checkpoint and the denoising loop fires the per-step splice for you: `library/inference/generation.py` and `networks/spectrum.py` call `soft_tokens_net.append_postfix(embed, seqlens, timesteps=t)` once per CFG branch before each forward (cond + uncond, including the tiled path), mirroring the training-side trainer hook. On Spectrum *cached* steps the blocks don't fire, so soft tokens silently no-op for those steps — it composes freely with `--spectrum`.
 
 ## What it is
 
@@ -121,7 +121,9 @@ L_contrastive = -log( exp(ℓ_pos) / Σ_{pos, neg_1..k} exp(ℓ_*) )
 L_total       = L_FM + λ_con · L_contrastive                         (post-warmup)
 ```
 
-Only `crossattn_emb` differs across the forwards, so the gradient isolates text-conditioning. Each negative is one extra full DiT forward — `k=4` ≈ 5× step time — so keep `k ∈ {1, 2}`.
+Only `crossattn_emb` differs across the forwards, so the gradient isolates text-conditioning. Each negative is one extra full DiT forward — `k=4` ≈ 5× step time — so keep `k ∈ {1, 2}`. To further amortize the cost, `contrastive_every_n` runs the negatives only every Nth *optimizer* step (the term is a small-weight auxiliary regularizer; the warmup window already proves the bank trains fine with it fully off for a stretch). It's a **manual frequency knob, not auto-scaled**: effective strength ≈ `weight × 1/N`, so bump `contrastive_weight` if you want to hold the average pull constant. Firing-step peak memory is unchanged and off-steps are cheaper, so it's a free throughput lever with no OOM risk.
+
+> **Why not a fused single-backward instead?** A tempting alternative is to run the `k` negatives *with* grad and do one combined backward (cutting `2k`→`k` DiT forwards). At the shipped default preset (no gradient checkpointing, `blocks_to_swap=0`) that holds a full second forward's activation graph co-resident — ~+6 GB on a ~13 GB run, OOM-risking a 16 GB card — which is exactly why `extra_forwards` keeps the `no_grad` value pass + `after_backward` grad-cache replay split ([[project_blockswap_extra_forwards_gradcache]]). `contrastive_every_n` gets the throughput win without the memory hit.
 
 **Negative modes** (`contrastive_negative_mode`):
 
@@ -141,6 +143,7 @@ Negative grouping comes from the shared caption index (`make caption-index` → 
 |---|---|---|
 | `contrastive_weight` | `0.0` | λ_con; `0` = bit-identical to plain FM (dataset stops producing negatives → no extra forwards). |
 | `contrastive_k` | `1` | negatives per step → `(k+1)×` forward cost. |
+| `contrastive_every_n` | `1` | run the negatives only every Nth optimizer step (gated on `global_step // accum` so an accumulation window fires uniformly). Manual knob, not auto-scaled → effective strength ≈ `weight × 1/N`. No extra memory. |
 | `contrastive_negative_mode` | `shuffled` | `shuffled` \| `jaccard` \| `hard`. |
 | `contrastive_jaccard_alpha` | `1.0` | logit penalty for `jaccard` (sweep 0.5–2.0). |
 | `contrastive_tau` | `0.5` | InfoNCE temperature. |
@@ -153,8 +156,8 @@ TensorBoard signals: `reg/soft_tokens_contrastive` (raw InfoNCE), `_weighted`, `
 | Component | Compat | Notes |
 |---|---|---|
 | Training loop | ✅ | `train.py` already passes `timesteps=...` into `append_postfix` (legacy `cond-timestep` postfix mode); soft tokens piggyback on the same hook. |
-| Standard inference | ❌ v1 | `for_inference=True` raises `NotImplementedError`. Per-step block hook would need to fire inside `library/inference/generation.py::generate_body`. |
-| Spectrum inference | ❌ v1 | Same blocker as standard inference — Spectrum's actual-step forwards would need the per-step hook too. |
+| Standard inference | ✅ | `create_network_from_weights` loads the bank (contrastive forced off — it leaves no params); `library/inference/generation.py` fires `append_postfix(..., timesteps=t)` per CFG branch each step, including the tiled path. |
+| Spectrum inference | ✅ | `networks/spectrum.py` fires the same per-step splice on *actual* steps; cached steps skip all blocks so soft tokens no-op there (composes with `--spectrum`). |
 | `torch.compile` (`_run_blocks`) | ✅ | `end_of_sequence` keeps `crossattn_emb` shape static; the cached `_step_layer_tokens` is read as a runtime tensor with static shape. `front_of_padding` uses `scatter` with dynamic per-sample indices but static buffer shape — also compile-clean. |
 | `blocks_to_swap` | ❌ method-forced 0 | The hook captures each `Block` by reference at `apply_to()` time; a swapped block is a different object instance, so the hook would fire on the wrong tensor. |
 | `gradient_checkpointing` | ✅ | The hook is the outermost wrapper; the original `forward` (which itself runs `checkpoint(_forward, ...)`) is called underneath, and the spliced `crossattn_emb` is part of the saved input graph. |

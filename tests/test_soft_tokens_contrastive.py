@@ -100,6 +100,44 @@ def test_contrastive_warmup_noop_when_disabled():
     assert net._contrastive_weight == 0.0
 
 
+def test_contrastive_every_n_default_fires_every_step():
+    net = _net(contrastive_weight=0.3, contrastive_warmup_ratio=0.0)
+    assert net._contrastive_every_n == 1
+    for s in range(5):
+        net.step_contrastive_warmup(global_step=s, max_train_steps=100)
+        assert net._contrastive_fire_this_step is True
+
+
+def test_contrastive_every_n_cadence_on_optimizer_step():
+    """every_n strides over optimizer steps (global_step // accum), so an
+    accumulation window fires uniformly across its micro-batches."""
+    net = _net(contrastive_weight=0.3, contrastive_warmup_ratio=0.0, contrastive_every_n=3)
+    # accum=1: fire on micro-batches 0, 3, 6 (== optimizer steps 0, 3, 6).
+    fired = []
+    for s in range(9):
+        net.step_contrastive_warmup(global_step=s, max_train_steps=100, accum=1)
+        fired.append(net._contrastive_fire_this_step)
+    assert fired == [True, False, False, True, False, False, True, False, False]
+
+
+def test_contrastive_every_n_uniform_within_accum_window():
+    net = _net(contrastive_weight=0.3, contrastive_warmup_ratio=0.0, contrastive_every_n=2)
+    # accum=2 → optimizer steps {0,0,1,1,2,2,3,3}; fire when opt_step even.
+    fired = []
+    for micro in range(8):
+        net.step_contrastive_warmup(global_step=micro, max_train_steps=100, accum=2)
+        fired.append(net._contrastive_fire_this_step)
+    # Both micro-batches of each optimizer window agree.
+    assert fired == [True, True, False, False, True, True, False, False]
+
+
+def test_contrastive_every_n_clamped_and_stamped():
+    net = _net(contrastive_weight=0.3, contrastive_every_n=0)
+    assert net._contrastive_every_n == 1  # clamped to >= 1
+    net2 = _net(contrastive_weight=0.3, contrastive_every_n=4)
+    assert net2.metadata_fields()["ss_contrastive_every_n"] == "4"
+
+
 @pytest.mark.parametrize("mode", ["shuffled", "jaccard", "hard"])
 def test_all_modes_construct(mode):
     net = _net(contrastive_weight=0.1, contrastive_negative_mode=mode)
