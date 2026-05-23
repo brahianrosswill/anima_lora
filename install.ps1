@@ -54,7 +54,19 @@ try {
   $Zipball = "https://github.com/$Repo/archive/refs/tags/$Version.zip"
   Say "downloading $Zipball"
   $zip = Join-Path $Tmp 'release.zip'
-  irm $Zipball -OutFile $zip
+  # Stream to disk with curl.exe (ships with Windows 10 1803+): it follows the
+  # codeload redirect and retries mid-stream resets, which `irm -OutFile` does
+  # not -- a dropped packet there aborts the whole install. Fall back to
+  # Invoke-WebRequest on older boxes that lack curl.exe.
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($curl) {
+    & $curl.Source -L --fail --retry 5 --retry-all-errors --retry-delay 2 -o $zip $Zipball
+    if ($LASTEXITCODE -ne 0) { Die "download failed (curl exit $LASTEXITCODE): $Zipball" }
+  } else {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $ProgressPreference = 'SilentlyContinue'  # progress bar throttles IWR badly
+    Invoke-WebRequest -Uri $Zipball -OutFile $zip -UseBasicParsing
+  }
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $Tmp, [System.Text.Encoding]::UTF8)
   $top = Get-ChildItem -Directory $Tmp | Select-Object -First 1
