@@ -200,7 +200,15 @@ def cmd_preprocess_config(extra):
     one explicit flag: ``--src <dir>``. The ComfyUI trainer node uses this to
     cache a single-image temp dir before its chained training job runs.
 
-    Usage: ``preprocess-config --dataset_config <path> --src <dir> [extra…]``
+    The VAE / text-encoder / DiT used for caching default to the config-resolved
+    ``models/`` paths (base → preset → method merge), but can be overridden with
+    ``--vae`` / ``--qwen3`` / ``--dit`` so a caller can point the cache at models
+    living elsewhere — e.g. the ComfyUI trainer node passes the paths ComfyUI's
+    own ``folder_paths`` registers, so it never assumes a copy under
+    ``anima_lora/models/``.
+
+    Usage: ``preprocess-config --dataset_config <path> --src <dir>
+    [--vae <path>] [--qwen3 <path>] [--dit <path>] [extra…]``
     (any remaining args are forwarded to the resize step).
     """
     import toml
@@ -208,6 +216,12 @@ def cmd_preprocess_config(extra):
     args = list(extra)
     cfg_path: str | None = None
     src_dir: str | None = None
+    vae_path = _path("vae", "models/vae/qwen_image_vae.safetensors")
+    qwen3_path = _path("qwen3", "models/text_encoders/qwen_3_06b_base.safetensors")
+    dit_path = _path(
+        "pretrained_model_name_or_path",
+        "models/diffusion_models/anima-base-v1.0.safetensors",
+    )
     rest: list[str] = []
     i = 0
     while i < len(args):
@@ -216,6 +230,15 @@ def cmd_preprocess_config(extra):
             i += 2
         elif args[i] == "--src" and i + 1 < len(args):
             src_dir = args[i + 1]
+            i += 2
+        elif args[i] == "--vae" and i + 1 < len(args):
+            vae_path = args[i + 1]
+            i += 2
+        elif args[i] == "--qwen3" and i + 1 < len(args):
+            qwen3_path = args[i + 1]
+            i += 2
+        elif args[i] == "--dit" and i + 1 < len(args):
+            dit_path = args[i + 1]
             i += 2
         else:
             rest.append(args[i])
@@ -269,7 +292,7 @@ def cmd_preprocess_config(extra):
                 "--cache_dir",
                 cache_dir,
                 "--vae",
-                "models/vae/qwen_image_vae.safetensors",
+                vae_path,
                 "--batch_size",
                 "4",
                 "--chunk_size",
@@ -287,9 +310,9 @@ def cmd_preprocess_config(extra):
                 "--cache_dir",
                 cache_dir,
                 "--qwen3",
-                "models/text_encoders/qwen_3_06b_base.safetensors",
+                qwen3_path,
                 "--dit",
-                "models/diffusion_models/anima-base-v1.0.safetensors",
+                dit_path,
                 "--recursive",
             ]
         )

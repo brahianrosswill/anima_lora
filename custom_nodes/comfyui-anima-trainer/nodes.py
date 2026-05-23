@@ -92,11 +92,46 @@ def _input_subdirs_optional() -> list[str]:
 
 
 def _comfy_loras_dir() -> str:
-    """Return the first directory registered under ComfyUI's 'loras' folder."""
-    entry = folder_paths.folder_names_and_paths.get("loras")
-    if not entry or not entry[0]:
+    """Return the directory to save trained LoRAs into, under ComfyUI's loras.
+
+    Prefers ComfyUI's *native* ``models/loras`` over any path an
+    ``extra_model_paths.yaml`` entry registers (which, with ``is_default: true``,
+    would otherwise sort first — e.g. anima_lora's ``output/``). Falls back to
+    the first registered loras path when the native dir isn't registered.
+    """
+    paths = folder_paths.get_folder_paths("loras") or []
+    if not paths:
         raise RuntimeError("ComfyUI has no 'loras' folder registered.")
-    return entry[0][0]
+    models_dir = getattr(folder_paths, "models_dir", None)
+    if models_dir:
+        native = os.path.abspath(os.path.join(models_dir, "loras"))
+        for p in paths:
+            if os.path.abspath(p) == native:
+                return p
+    return paths[0]
+
+
+def _comfy_model_path(folder: str, preferred: str) -> str | None:
+    """Resolve a model file through ComfyUI's ``folder_paths``, or ``None``.
+
+    Lets the trainer source the VAE / text-encoder used for caching from
+    whatever ComfyUI registers (its ``models/`` dirs, or any ``base_path`` from
+    ``extra_model_paths.yaml``) — the same way the base DiT is already resolved —
+    instead of assuming a copy under ``anima_lora/models/``. Returns ``None``
+    when nothing usable is found, so the caller falls back to the
+    preprocess-config defaults rather than passing a bad path.
+
+    Tries the canonical Anima filename first; if absent, accepts a sole file in
+    the folder (the common case — one VAE, one TE); otherwise gives up rather
+    than guess among several.
+    """
+    path = folder_paths.get_full_path(folder, preferred)
+    if path:
+        return path
+    files = folder_paths.get_filename_list(folder) or []
+    if len(files) == 1:
+        return folder_paths.get_full_path(folder, files[0])
+    return None
 
 
 def _resolve_daemon_client():
@@ -249,16 +284,31 @@ def _train_and_save(
     # succeeds (and persists the link as `chained_job_id`), so the chain
     # completes even if ComfyUI stops polling. Both run on the daemon's single
     # serial GPU queue, so they can't fight over VRAM.
+    # Cache against the models ComfyUI registers (the DiT the user selected, plus
+    # the VAE + text-encoder resolved through folder_paths) so preprocess never
+    # assumes a copy under anima_lora/models/. Unresolved ones are simply omitted
+    # → preprocess-config falls back to its config-default models/ paths.
+    pp_argv = [
+        "tasks.py",
+        "preprocess-config",
+        "--dataset_config",
+        dataset_cfg,
+        "--src",
+        src_dir,
+    ]
+    dit_path = overrides.get("pretrained_model_name_or_path")
+    if dit_path:
+        pp_argv += ["--dit", dit_path]
+    vae_path = _comfy_model_path("vae", "qwen_image_vae.safetensors")
+    if vae_path:
+        pp_argv += ["--vae", vae_path]
+    qwen3_path = _comfy_model_path("text_encoders", "qwen_3_06b_base.safetensors")
+    if qwen3_path:
+        pp_argv += ["--qwen3", qwen3_path]
+
     pp_job_id = client.submit_command(
         label="preprocess",
-        argv=[
-            "tasks.py",
-            "preprocess-config",
-            "--dataset_config",
-            dataset_cfg,
-            "--src",
-            src_dir,
-        ],
+        argv=pp_argv,
         chain_train={
             "method": method,
             "preset": preset,
