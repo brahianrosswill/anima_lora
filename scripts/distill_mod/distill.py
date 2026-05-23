@@ -175,6 +175,15 @@ def main():
         help="Warmup steps: int >= 1 for absolute steps, float < 1 for ratio of iterations",
     )
     parser.add_argument(
+        "--no_shuffle",
+        dest="shuffle",
+        action="store_false",
+        default=True,
+        help="Disable per-epoch shuffling of the (bucket-grouped) batch order. "
+        "Default shuffles batch order each epoch while keeping every batch "
+        "single-resolution and pinning the largest-token bucket to step 0.",
+    )
+    parser.add_argument(
         "--dry_run",
         action="store_true",
         help="Iterate entire DataLoader without training to test collation",
@@ -472,13 +481,14 @@ def main():
             torch.stack([b[3] for b in batch]),
         )
 
+    # Bucket-grouped batch sampler: every batch is one resolution (so the
+    # stacking _collate works at batch_size>1) and, when shuffling, batch order
+    # is reshuffled per epoch with the largest-token bucket pinned first.
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=args.batch_size,
-        shuffle=False,  # dataset is pre-bucketed; shuffling would mix resolutions
+        batch_sampler=dataset.make_batch_sampler(shuffle=args.shuffle, seed=args.seed),
         num_workers=2,
         pin_memory=True,
-        drop_last=True,
         collate_fn=_collate,
     )
 

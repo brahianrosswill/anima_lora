@@ -21,10 +21,10 @@ import numpy as np
 # densely covers aspect space at the cost of one extra graph. Landscape mirrors
 # (swap W, H) are included explicitly. Token count = (W//16)*(H//16).
 #
-# NOTE: this diverges from DCW_ASPECT_BUCKETS below — the 832x1248 / 1248x832
-# HD pair (4056 tokens) is no longer a training bucket, so a future `make dcw`
-# recalibration will produce zero rows for those two aspect_ids. See the DCW
-# table's note; do not reorder it (shipped fusion-head checkpoints key off it).
+# NOTE: DCW_ASPECT_BUCKETS below now draws its top-5 from this table (every
+# entry is a real training bucket), so `make dcw` recalibration produces rows
+# for every aspect_id. Do not reorder the DCW table (shipped fusion-head
+# checkpoints key off it).
 CONSTANT_TOKEN_BUCKETS = [
     # ---- 4032-token family (63*64) ----
     (1008, 1024),  # 63 x 64, ar 0.98 (nearest to square)
@@ -56,7 +56,8 @@ CONSTANT_TOKEN_BUCKETS = [
 
 # DCW v4 calibration aspect-bucket set.
 #
-# Top 5 (H, W) resolutions by frequency in post_image_dataset/lora/. List
+# Top 5 (H, W) resolutions by frequency in post_image_dataset/lora/ (recounted
+# 2026-05-23; every entry is a CONSTANT_TOKEN_BUCKETS training bucket). List
 # order *is* the canonical aspect_id index — DCW v4's per-aspect statistics
 # (fusion_head.safetensors per-bucket μ_g, σ²_prior, λ_scalar) key off this
 # order, so a reorder invalidates every shipped fusion-head checkpoint.
@@ -67,11 +68,11 @@ CONSTANT_TOKEN_BUCKETS = [
 # lookup that decides which run rows feed the trainer). Inference itself
 # is bucket-agnostic post-cleanup — see project_dcw_bucket_prior_cosmetic.
 DCW_ASPECT_BUCKETS: Tuple[Tuple[int, int], ...] = (
-    (832, 1248),  # 0 — HD portrait (most common)
-    (896, 1152),  # 1 — 3:4 portrait
-    (768, 1344),  # 2 — tall portrait
-    (1152, 896),  # 3 — 3:4 landscape
-    (1248, 832),  # 4 — HD landscape
+    (1200, 896),  # 0 — 896x1200 portrait (most common, 4200-tok)
+    (1344, 800),  # 1 — 800x1344 tall portrait (4200-tok)
+    (896, 1200),  # 2 — 1200x896 landscape (4200-tok)
+    (1344, 768),  # 3 — 768x1344 tall portrait (4032-tok)
+    (1152, 896),  # 4 — 896x1152 portrait (4032-tok)
 )
 DCW_ASPECT_NAMES: Tuple[str, ...] = tuple(f"{h}x{w}" for h, w in DCW_ASPECT_BUCKETS)
 DCW_ASPECT_TABLE: dict = {hw: i for i, hw in enumerate(DCW_ASPECT_BUCKETS)}

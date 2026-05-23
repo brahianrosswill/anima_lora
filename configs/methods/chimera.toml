@@ -52,7 +52,7 @@ channel_scaling_alpha = 0.5
 # path.
 
 use_chimera_hydra = true
-num_experts_content = 3
+num_experts_content = 6
 num_experts_freq = 2
 
 # Outer balance multiplier is 1.0 so the per-pool weights below are the

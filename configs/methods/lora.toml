@@ -21,8 +21,8 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 
-network_alpha = 32
-network_dim = 32
+network_alpha = 64
+network_dim = 64
 
 learning_rate = 5e-5
 max_train_epochs = 1
@@ -37,7 +37,7 @@ logging_dir = "output/logs"
 log_with = "tensorboard"
 
 output_name = "anima_all"
-path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
+# path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 # vr_loss_weight = 1.0
 # vr_fei_sigma_low_div = 4.0

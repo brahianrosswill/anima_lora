@@ -614,6 +614,34 @@ class BaseDataset(torch.utils.data.Dataset):
 
         random.shuffle(self.buckets_indices)
         self.bucket_manager.shuffle()
+        self._largest_bucket_first()
+
+    def _largest_bucket_first(self):
+        """Pin one batch of the highest-token-count bucket to the front of the
+        epoch order.
+
+        With native-shape buckets (``static_pad = false``) each distinct token
+        count traces its own ``torch.compile`` block graph, and the largest
+        bucket also carries the biggest activations. Front-loading it forces
+        that worst-case graph compile + peak allocation onto step 0, so a
+        too-tight VRAM budget fails fast at start instead of OOMing mid-epoch
+        when the big bucket happens to come up in the shuffle. Only the first
+        batch is reordered; the rest of the epoch stays randomly shuffled.
+        """
+        if not self.buckets_indices:
+            return
+        # resos are (W, H); pixel area is the token-count proxy.
+        if getattr(self, "_largest_bucket_index", None) is None:
+            resos = self.bucket_manager.resos
+            present = {bbi.bucket_index for bbi in self.buckets_indices}
+            self._largest_bucket_index = max(
+                present, key=lambda bi: resos[bi][0] * resos[bi][1]
+            )
+        for i, bbi in enumerate(self.buckets_indices):
+            if bbi.bucket_index == self._largest_bucket_index:
+                if i:
+                    self.buckets_indices.insert(0, self.buckets_indices.pop(i))
+                return
 
     def verify_bucket_reso_steps(self, min_steps: int):
         assert (
