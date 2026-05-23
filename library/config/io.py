@@ -21,6 +21,7 @@ from typing import Any, Optional
 import toml
 
 from library.config import schema as _config_schema
+from library.runtime.proc import no_window_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +404,7 @@ def _git_sha() -> Optional[str]:
             ["git", "rev-parse", "HEAD"],
             stderr=subprocess.DEVNULL,
             text=True,
+            **no_window_kwargs(),
         ).strip()
         return sha or None
     except (subprocess.SubprocessError, FileNotFoundError, OSError):

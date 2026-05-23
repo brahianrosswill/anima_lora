@@ -16,6 +16,8 @@ import shutil
 import subprocess
 from typing import Optional
 
+from library.runtime.proc import no_window_kwargs
+
 
 def gpu_pids() -> Optional[set[int]]:
     """PIDs with a **compute** context on any visible GPU.
@@ -87,6 +89,7 @@ def _gpu_mem_smi() -> Optional[tuple[int, int]]:
             text=True,
             timeout=10,
             check=False,
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -147,6 +150,7 @@ def _gpu_pids_smi() -> Optional[set[int]]:
             text=True,
             timeout=10,
             check=False,
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
