@@ -66,8 +66,9 @@ Defaults: 10 · 4 · 1024 + 100 · 10 · 1024 ≈ 41k + 1.05M ≈ **1.05M params
 | `apply_to(text_encoders, unet)` | Walks `unet.blocks[:n_layers]`, replaces each `block.forward` with a wrapper that splices `s^(k, t)` into `crossattn_emb` before calling the original (ReFT-pattern monkey-patch). |
 | `append_postfix(crossattn_emb, seqlens, timesteps)` | Receives `timesteps` from `train.py`'s existing per-step hook; computes `(n_layers, B, K, D)` step-scoped tokens and caches them on the network. **Returns `crossattn_emb` unchanged** — splicing happens inside the block hooks. |
 | `_make_block_hook(layer_idx, org_forward)` | Closure that reads the cached step tokens at `layer_idx`, splices into `crossattn_emb`, calls the original block forward. |
-| `SoftTokensMethodAdapter` (same file) | Contrastive extra-forward driver: stashes `neg_crossattn_emb` in `prime_for_forward`, runs the `k` negative forwards + InfoNCE in `extra_forwards`, surfaces metrics. Auto-resolved by `resolve_adapters` when `_contrastive_target_weight > 0`. |
+| `SoftTokensMethodAdapter` (same file) | Contrastive extra-forward driver: stashes `neg_crossattn_emb` in `prime_for_forward`, runs the negative forwards + the active objective in `extra_forwards`, replays the deferred ∂L/∂v_neg + refreshes the AGSM bank-EMA in `after_backward`, surfaces metrics. Auto-resolved by `resolve_adapters` when `_contrastive_target_weight > 0`. |
 | `contrastive_loss(...)` / `step_contrastive_warmup(...)` | InfoNCE over the negatives (with optional jaccard penalty) + the warmup gate. |
+| `agsm_delta(...)` / `agsm_losses(...)` / `update_bank_ema()` | AGSM target-shift objective: Δ off the bank-EMA shadow + the bounded ±γ·Δ losses + the EMA refresh (`contrastive_objective=agsm`). See `docs/proposal/soft_tokens_agsm.md`. |
 | `library/datasets/base.py` | `setup_contrastive_negatives` / `_load_te_for_stem` — negative TE sourcing + `neg_crossattn_emb` / `neg_jaccard` on the example. |
 | `library/datasets/identity_pairs.py` | `IdentityPairSampler.hard_negative` / `shuffled` / `tag_jaccard` — negative policy. |
 | `library/training/losses.py::_soft_tokens_contrastive_loss` | Applies the warmup-gated `λ_con` to the adapter's InfoNCE scalar. |
@@ -150,6 +151,62 @@ Negative grouping comes from the shared caption index (`make caption-index` → 
 | `contrastive_warmup_ratio` | `0.1` | hold λ_con at 0 for the first 10% of steps. |
 
 TensorBoard signals: `reg/soft_tokens_contrastive` (raw InfoNCE), `_weighted`, `_lambda_live` (warmup gate), `soft_tokens/contrastive_acc` (positive beats every negative) and `soft_tokens/contrastive_logit_gap`.
+
+### AGSM objective (bounded target-shift, optional)
+
+A second objective on the **same** extra-forward plumbing (negatives, warmup,
+`contrastive_every_n`, compose seam, `after_backward` grad-cache), selected with
+`contrastive_objective=agsm`. Full design + phasing: `docs/proposal/soft_tokens_agsm.md`.
+It diagnoses SoftREPA's contrastive instability (val reward degrades while loss
+drops) as **unbounded negative divergence** — maximizing negative error has no
+fixed point — and replaces the InfoNCE softmax with regression toward fixed,
+shifted targets:
+
+```
+positives → v_target + γ·Δ          L⁺ = ‖ v_θ^ψ⁺ − (v_target + γ·Δ) ‖²
+negatives → v_target − γ·Δ          L⁻ = mean_j ‖ v_θ^ψ⁻ − (v_target − γ·Δ) ‖²
+Δ = v̂⁺_ema − mean_j v̂⁻_ema_j        (detached; matched − mismatched velocity)
+```
+
+`Δ` is the alignment direction read off an **EMA shadow of the bank's own
+predictions** — reward-free self-distillation, no external scorer. Because Anima
+is velocity flow-matching (`v = ε − x₀`, fixed `x₀`), shifting the ε-target by `δ`
+is exactly shifting the v-target by `δ`, so the paper's ε-prediction math maps
+across with no reparameterization. Both targets are constants each step
+(`v_target` and `Δ` detached), so each term has a bounded fixed point — the fix.
+
+This is **Phase 2**: single bank (ψ⁺ = ψ⁻ = the one bank, only `crossattn_emb`
+differs across forwards) and a constant time-weight `Ã(t)=1`. Dual banks ψ⁺/ψ⁻ +
+`Ã(t)` shaping + Plackett–Luce reward-weighting of Δ are Phase 3, not yet built.
+
+Gradient flow mirrors InfoNCE exactly — `L⁺` rides the anchor's FM backward (grad
+via the live `v_pos`), `L⁻`'s gradient is deferred to `after_backward` (the
+block-swap-safe grad-cache split, [[project_blockswap_extra_forwards_gradcache]]).
+The EMA shadow is refreshed once per optimizer step in `after_backward` (gated on
+`sync_gradients`); it is a plain tensor attribute, so it never enters the saved
+checkpoint — a trained `.safetensors` is bit-identical to plain-FM and inference
+ignores AGSM entirely, same as InfoNCE.
+
+**Cost.** AGSM adds the EMA value passes (matched + each mismatched caption through
+the shadow bank) on top of the live negative passes: ~`(2k+1)` extra forwards per
+firing step vs InfoNCE's `k`, all `no_grad` except the deferred replay. Keep
+`contrastive_k ∈ {1, 2}` and lean on `contrastive_every_n` to amortize.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `contrastive_objective` | `infonce` | `infonce` \| `agsm`. |
+| `agsm_gamma` | `0.5` | γ, target-shift magnitude (both signs in Phase 2). Sweep ~0.25–1.0. |
+| `agsm_ema_decay` | `0.99` | EMA decay for the bank shadow Δ is read off; must be in `(0,1)`. |
+
+TensorBoard signals (AGSM): `reg/soft_tokens_contrastive` (= L⁺ + L⁻), `_weighted`,
+`_lambda_live`, `soft_tokens/agsm_l_pos`, `soft_tokens/agsm_l_neg` (both should sit
+at a bounded steady state, not `l_neg` diverging), `soft_tokens/agsm_delta_norm`
+(near 0 ⇒ matched/mismatched preds collapsed → no alignment signal).
+
+> **Gating.** AGSM is only justified if the plain-InfoNCE A/B exhibits the
+> SoftREPA degrade-while-loss-drops pattern on Anima, and after the Phase 0
+> reward-premise probe passes (matched caption out-ranks `shuffled` negatives).
+> See the proposal's phasing.
 
 ## Compatibility
 

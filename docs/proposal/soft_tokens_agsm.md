@@ -151,12 +151,22 @@ checked before any training:
 - **Phase 1 — (deferred to the contrastive proposal).** Its plain-InfoNCE A/B is
   the instability detector. AGSM is only justified if that A/B exhibits the
   SoftREPA degrade-while-loss-drops pattern.
-- **Phase 2 — AGSM target-shift, single bank first.** Implement the bounded
-  target (`v_target ± γ·Ã(t)·Δ` with `Ã=1`, Δ from EMA) in `extra_forwards`,
-  reusing the compose seam. A/B vs (a) plain FM and (b) Phase-1 InfoNCE, on the
+- **Phase 2 — AGSM target-shift, single bank first. ✅ IMPLEMENTED (2026-05-22,
+  not yet benched).** The bounded target (`v_target ± γ·Ã(t)·Δ` with `Ã=1`, Δ from
+  the bank-EMA shadow) lives in `SoftTokensMethodAdapter.extra_forwards`, selected
+  by the network arg `contrastive_objective=agsm` and reusing the InfoNCE compose
+  seam + `after_backward` grad-cache verbatim (only the loss math differs). Single
+  bank (ψ⁺ = ψ⁻), constant `Ã(t)=1`. Knobs: `agsm_gamma` (γ, default 0.5),
+  `agsm_ema_decay` (default 0.99). The EMA shadow is a plain tensor attribute
+  (never saved; refreshed once per optimizer step in `after_backward` on
+  `sync_gradients`). **Cost note:** the EMA value passes make this ~`(2k+1)` extra
+  forwards/firing-step, above the proposal's headline `(k+1)×` — Δ is read off the
+  shadow bank's *own* predictions (the load-bearing self-distillation decoupling),
+  which costs the extra matched + mismatched EMA forwards; a cheaper live-Δ
+  approximation was rejected because it reintroduces the moving-target dynamic AGSM
+  exists to remove. Still to do: A/B vs (a) plain FM and (b) Phase-1 InfoNCE on the
   prompt-following / CMMD axis (FM-MSE val deltas are uninformative —
-  `project_fm_val_loss_uninformative`). Keep `k ∈ {1,2}` (each negative = one
-  extra forward — soft tokens' whole appeal is a single frozen-DiT forward).
+  `project_fm_val_loss_uninformative`). Keep `k ∈ {1,2}`.
 - **Phase 3 — dual bank ψ⁺/ψ⁻ + ablation.** Add ψ⁻, reproduce the paper's
   dual > positive-only > shared ablation at equal token budget. Add Ã(t) shaping
   only if a t-bucket sweep shows the constant weight leaves signal on the table.

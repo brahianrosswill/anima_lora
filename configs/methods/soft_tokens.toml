@@ -50,9 +50,26 @@ network_dim = 4
 # contrastive_jaccard_alpha     — logit penalty for "jaccard" mode (ℓ_neg −= α·s,
 #                                 sweep 0.5–2.0). Unused by other modes.
 # contrastive_tau               — InfoNCE temperature on the logit
-#                                 (−FM-error / τ).
+#                                 (−FM-error / τ). Unused by the agsm objective.
 # contrastive_warmup_ratio      — hold λ_con at 0 for the first fraction of
 #                                 steps (lets plain FM shape the bank first).
+#
+# ── AGSM objective (bounded target-shift) — docs/proposal/soft_tokens_agsm.md ──
+# Alternative to InfoNCE on the SAME extra-forward plumbing (negatives, warmup,
+# every_n, compose seam). Diagnoses SoftREPA's instability as unbounded negative
+# divergence and fixes it by regressing toward fixed shifted targets instead of
+# maximizing negative error:
+#   positives → v_target + γ·Δ,   negatives → v_target − γ·Δ
+# Δ = v̂⁺_ema − mean_j v̂⁻_ema_j is the matched-minus-mismatched velocity read off
+# an EMA shadow of the bank's own predictions (reward-free self-distillation; no
+# external scorer). Phase 2 = single bank, constant Ã(t)=1. Costs ~(2k+1) extra
+# forwards/firing-step vs InfoNCE's k (the EMA value passes), all no_grad except
+# the deferred negative replay — keep contrastive_k ∈ {1,2}.
+# contrastive_objective         — "infonce" (default) | "agsm".
+# agsm_gamma                    — γ, target-shift magnitude (used for both signs
+#                                 in Phase 2). Sweep ~0.25–1.0.
+# agsm_ema_decay                — EMA decay for the bank shadow that Δ is read
+#                                 off (must be in (0,1); slower = steadier Δ).
 
 network_args = [
     "n_layers=6",
@@ -60,11 +77,17 @@ network_args = [
     "init_std=0.02",
     "splice_position=front_of_padding",
     "contrastive_weight=0.05",
+    "contrastive_every_n=3",
     "contrastive_k=1",
     "contrastive_negative_mode=hard",
+
+    "contrastive_objective=agsm",
+    "agsm_gamma=0.5",
+    "agsm_ema_decay=0.99",
+
     "contrastive_jaccard_alpha=1.0",
     "contrastive_tau=0.5",
-    "contrastive_warmup_ratio=0.0",
+    "contrastive_warmup_ratio=0.1",
 ]
 output_name = "anima_soft_tokens"
 weight_decay=1e-4
