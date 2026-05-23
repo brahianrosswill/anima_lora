@@ -119,6 +119,11 @@ COMMANDS = {
         preprocess.cmd_preprocess,
         "Full preprocessing (resize + VAE + text embeddings)",
     ),
+    "preprocess-config": (
+        preprocess.cmd_preprocess_config,
+        "Preprocess the dirs named in a --dataset_config TOML (resize --src "
+        "→ image_dir, then VAE + TE caches → cache_dir). Used by the trainer node.",
+    ),
     "preprocess-resize": (
         preprocess.cmd_preprocess_resize,
         "Resize images to bucket resolutions",

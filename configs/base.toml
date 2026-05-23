@@ -44,8 +44,8 @@ timestep_sampling = "sigmoid"
 discrete_flow_shift = 1.0
 mixed_precision = "bf16"
 
-# gradient_checkpointing = true
-# unsloth_offload_checkpointing = true
+gradient_checkpointing = false
+unsloth_offload_checkpointing = false
 cache_latents = true
 cache_latents_to_disk = true
 cache_text_encoder_outputs = true

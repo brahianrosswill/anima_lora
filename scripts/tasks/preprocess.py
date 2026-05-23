@@ -179,3 +179,117 @@ def cmd_preprocess(extra):
     cmd_preprocess_resize(extra)
     cmd_preprocess_vae(extra)
     cmd_preprocess_te(extra)
+
+
+def cmd_preprocess_config(extra):
+    """Preprocess the exact directories named in a ``--dataset_config`` TOML.
+
+    Unlike ``cmd_preprocess`` (which resolves the repo's standard
+    ``image_dataset/`` → ``post_image_dataset/`` layout from the merged
+    config), this drives off the same dataset config the *training* job will
+    consume, so one file fully describes an ad-hoc job — no reliance on the
+    default layout. For each ``[[datasets.subsets]]`` it:
+
+      1. bucket-resizes ``--src`` (the originals, with caption sidecars) into
+         that subset's ``image_dir`` — the source dir is never modified;
+      2. caches VAE latents from ``image_dir`` into the subset's ``cache_dir``;
+      3. caches text embeddings (captions read from ``--src``) into ``cache_dir``.
+
+    A config can't encode where the *un-resized* originals live (its
+    ``image_dir`` is the post-resize dir training reads), so the source is the
+    one explicit flag: ``--src <dir>``. The ComfyUI trainer node uses this to
+    cache a single-image temp dir before its chained training job runs.
+
+    Usage: ``preprocess-config --dataset_config <path> --src <dir> [extra…]``
+    (any remaining args are forwarded to the resize step).
+    """
+    import toml
+
+    args = list(extra)
+    cfg_path: str | None = None
+    src_dir: str | None = None
+    rest: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--dataset_config" and i + 1 < len(args):
+            cfg_path = args[i + 1]
+            i += 2
+        elif args[i] == "--src" and i + 1 < len(args):
+            src_dir = args[i + 1]
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    if not cfg_path or not src_dir:
+        raise SystemExit(
+            "preprocess-config requires --dataset_config <path> and --src <dir>"
+        )
+
+    cfg = toml.load(cfg_path)
+    subsets = [
+        sub
+        for ds in (cfg.get("datasets") or [])
+        for sub in (ds.get("subsets") or [])
+        if sub.get("image_dir")
+    ]
+    if not subsets:
+        raise SystemExit(f"no [[datasets.subsets]] with image_dir in {cfg_path}")
+
+    for sub in subsets:
+        image_dir = sub["image_dir"]
+        cache_dir = sub.get("cache_dir") or image_dir
+        # 1) bucket-resize originals → image_dir. cache_latents.py keys caches
+        #    by the on-disk (native) size, so the resized size must already be
+        #    the constant-token bucket the trainer will select. Captions stay
+        #    in --src (TE caching reads them there).
+        run(
+            [
+                PY,
+                "preprocess/resize_images.py",
+                "--src",
+                src_dir,
+                "--dst",
+                image_dir,
+                "--no_copy_captions",
+                "--min_pixels",
+                "0",
+                "--bucket_reso_steps",
+                "64",
+                "--recursive",
+                *rest,
+            ]
+        )
+        # 2) VAE latents → cache_dir
+        run(
+            [
+                PY,
+                "preprocess/cache_latents.py",
+                "--dir",
+                image_dir,
+                "--cache_dir",
+                cache_dir,
+                "--vae",
+                "models/vae/qwen_image_vae.safetensors",
+                "--batch_size",
+                "4",
+                "--chunk_size",
+                "64",
+                "--recursive",
+            ]
+        )
+        # 3) text embeddings (captions read from --src) → cache_dir
+        run(
+            [
+                PY,
+                "preprocess/cache_text_embeddings.py",
+                "--dir",
+                src_dir,
+                "--cache_dir",
+                cache_dir,
+                "--qwen3",
+                "models/text_encoders/qwen_3_06b_base.safetensors",
+                "--dit",
+                "models/diffusion_models/anima-base-v1.0.safetensors",
+                "--recursive",
+            ]
+        )
