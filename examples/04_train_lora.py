@@ -55,11 +55,11 @@ def build_training_args(extra_argv: list[str]):
 
     args = parser.parse_args(argv)
     verify_command_line_training_args(args)
-    # Applies the base→preset→method merge. Note: it re-reads sys.argv to layer
-    # CLI overrides on top of the merged config (that's how `--network_dim 32`
-    # wins over the method file), so the override flags must be in sys.argv —
-    # which they are here, since main() passes sys.argv[1:] as extra_argv.
-    args = read_config_from_file(args, parser)
+    # Applies the base→preset→method merge, then layers CLI overrides on top
+    # (that's how `--network_dim 32` wins over the method file). We pass `argv`
+    # explicitly so the override layer is driven by *our* list — not the process
+    # sys.argv. (Default argv=None preserves the CLI behaviour for train.py.)
+    args = read_config_from_file(args, parser, argv=argv)
 
     if args.attn_mode == "sdpa":
         args.attn_mode = "torch"  # backward compatibility

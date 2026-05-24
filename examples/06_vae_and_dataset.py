@@ -36,9 +36,9 @@ VAE = os.environ.get("ANIMA_VAE", "models/vae/qwen_image_vae.safetensors")
 
 
 def _load_vae(device):
-    vae = qwen_vae.load_vae(VAE, device=device, disable_mmap=True)
-    vae.to(torch.bfloat16).eval()
-    return vae
+    return qwen_vae.load_vae(
+        VAE, device=device, disable_mmap=True, dtype=torch.bfloat16, eval=True
+    )
 
 
 def vae_roundtrip(image_path: str, out_path: str, device) -> None:
@@ -82,16 +82,15 @@ def iterate_cache(data_dir: str, device) -> None:
     )
 
     # Decode the cached latent back to an image to confirm it's the real thing.
-    vae = _load_vae(device)
-    with torch.no_grad():
-        recon = vae.decode_to_pixels(
-            latent.unsqueeze(0).to(device, dtype=torch.bfloat16)
-        )
-    recon01 = (recon.squeeze(0).float().clamp(-1, 1) + 1) / 2
-    from torchvision import transforms
+    # decode_to_pil is the in-memory latent→PIL exit (VAE decode + the
+    # [-1,1]→[0,255] + channel handling), so no temp PNG / hand-rolled
+    # denormalization — just an Image you can .save(), composite, or score.
+    from library.inference.output import decode_to_pil
 
+    vae = _load_vae(device)
     out = "output/tests/example_06_cached_sample0.png"
-    transforms.ToPILImage()(recon01.cpu()).save(out)
+    with torch.no_grad():
+        decode_to_pil(vae, latent.unsqueeze(0), device).save(out)
     print(f"  decoded cached latent → {out}")
 
 

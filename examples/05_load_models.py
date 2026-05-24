@@ -67,8 +67,9 @@ def main() -> None:
     )
 
     # --- VAE ----------------------------------------------------------------
-    vae = qwen_vae.load_vae(VAE, device=device, disable_mmap=True)
-    vae.to(torch.bfloat16).eval()
+    vae = qwen_vae.load_vae(
+        VAE, device=device, disable_mmap=True, dtype=torch.bfloat16, eval=True
+    )
     print(f"VAE   : {type(vae).__name__}  z_dim={vae.z_dim}")
 
     # --- Text encoder + encode a prompt -------------------------------------

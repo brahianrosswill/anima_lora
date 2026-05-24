@@ -16,6 +16,8 @@ _ATTR_TO_MODULE = {
     # output
     "check_inputs": "output",
     "decode_latent": "output",
+    "decode_to_pil": "output",
+    "pixels_to_pil": "output",
     "get_time_flag": "output",
     "save_latent": "output",
     "save_images": "output",

@@ -78,7 +78,14 @@ def load_dit_model(
     device: torch.device,
     dit_weight_dtype: Optional[torch.dtype] = None,
 ) -> anima_models.Anima:
-    """Load DiT model with optional LoRA merge, P-GRAFT hooks, and torch.compile."""
+    """Load DiT model with optional LoRA merge, P-GRAFT hooks, and torch.compile.
+
+    Namespace-driven adapter over the explicit-argument primitive
+    ``library.anima.weights.load_anima_model``: it pulls ``dit``/``attn_mode``/
+    ``lora_weight``/etc. off ``args`` and adds the adapter-attach + compile
+    wiring. Reach for ``load_anima_model`` directly when you want just the
+    weights and no Namespace.
+    """
 
     loading_device = device
 

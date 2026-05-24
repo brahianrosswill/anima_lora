@@ -102,9 +102,9 @@ def generate_image(args: argparse.Namespace) -> None:
         disable_mmap=True,
         spatial_chunk_size=args.vae_chunk_size,
         disable_cache=args.vae_disable_cache,
+        dtype=torch.bfloat16,  # load_vae handles the bf16 cast + eval() for you
+        eval=True,
     )
-    vae.to(torch.bfloat16)
-    vae.eval()
     save_output(args, vae, latent, device)
     print(f"saved → {args.save_path}")
 
