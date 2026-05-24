@@ -105,7 +105,7 @@ Cross-attention is not the only way the caption reaches the DiT. A max-pooled su
 
 Anima uses the **Qwen VAE** (from the Qwen-Image family), 8× spatial compression, 16 latent channels. An input image of `H × W` pixels becomes a latent of shape `(16, H/8, W/8)`.
 
-Latent caching (`preprocess/cache_latents.py`) is the second half of the offline pipeline: run the VAE over every training image once, write the latents to disk, free the VAE from VRAM. During training, only cached latents are loaded — the VAE does not need to be resident.
+Latent caching (`scripts/preprocess/cache_latents.py`) is the second half of the offline pipeline: run the VAE over every training image once, write the latents to disk, free the VAE from VRAM. During training, only cached latents are loaded — the VAE does not need to be resident.
 
 PatchEmbed inside the DiT then divides the latent spatially by 2 and maps channels `16 → 2048`, giving roughly `(H/16) × (W/16)` DiT tokens per frame.
 

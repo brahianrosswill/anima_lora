@@ -84,7 +84,7 @@ def _resolve_mask_path(image_path: Path, current_dir: Path | None) -> Path | Non
 def _compose_mask_overlay(source: QPixmap, mask_path: Path) -> QPixmap:
     """Return ``source`` with a red translucent tint over the masked-out region.
 
-    Convention from ``preprocess/merge_masks.py``: **white = "train here",
+    Convention from ``scripts/preprocess/merge_masks.py``: **white = "train here",
     black = ignored (text bubble / artifact)**. We invert so the tint lands
     on the *ignored* region — that's the half users want to see at a glance
     ("did the detector catch every bubble?").

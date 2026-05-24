@@ -82,7 +82,7 @@ def cmd_preprocess_resize(extra):
     run(
         [
             PY,
-            "preprocess/resize_images.py",
+            "scripts/preprocess/resize_images.py",
             "--src",
             _path("source_image_dir", "image_dataset"),
             "--dst",
@@ -99,7 +99,7 @@ def cmd_preprocess_vae(extra):
     run(
         [
             PY,
-            "preprocess/cache_latents.py",
+            "scripts/preprocess/cache_latents.py",
             "--dir",
             _path("resized_image_dir", "post_image_dataset/resized"),
             "--cache_dir",
@@ -127,7 +127,7 @@ def cmd_preprocess_te(extra):
     run(
         [
             PY,
-            "preprocess/cache_text_embeddings.py",
+            "scripts/preprocess/cache_text_embeddings.py",
             "--dir",
             _path("source_image_dir", "image_dataset"),
             "--cache_dir",
@@ -158,7 +158,7 @@ def cmd_preprocess_pooled(extra):
     run(
         [
             PY,
-            "preprocess/cache_pooled_text.py",
+            "scripts/preprocess/cache_pooled_text.py",
             "--dir",
             _path("lora_cache_dir", "post_image_dataset/lora"),
             *extra,
@@ -180,7 +180,7 @@ def cmd_preprocess_pe(extra):
     run(
         [
             PY,
-            "preprocess/cache_pe_encoder.py",
+            "scripts/preprocess/cache_pe_encoder.py",
             "--dir",
             _path("resized_image_dir", "post_image_dataset/resized"),
             "--cache_dir",
@@ -206,7 +206,7 @@ def cmd_caption_index(extra):
     run(
         [
             PY,
-            "preprocess/build_caption_index.py",
+            "scripts/preprocess/build_caption_index.py",
             "--src",
             _path("source_image_dir", "image_dataset"),
             *extra,
@@ -335,7 +335,7 @@ def cmd_preprocess_config(extra):
         run(
             [
                 PY,
-                "preprocess/resize_images.py",
+                "scripts/preprocess/resize_images.py",
                 "--src",
                 src_dir,
                 "--dst",
@@ -353,7 +353,7 @@ def cmd_preprocess_config(extra):
         run(
             [
                 PY,
-                "preprocess/cache_latents.py",
+                "scripts/preprocess/cache_latents.py",
                 "--dir",
                 image_dir,
                 "--cache_dir",
@@ -371,7 +371,7 @@ def cmd_preprocess_config(extra):
         run(
             [
                 PY,
-                "preprocess/cache_text_embeddings.py",
+                "scripts/preprocess/cache_text_embeddings.py",
                 "--dir",
                 src_dir,
                 "--cache_dir",

@@ -198,7 +198,7 @@ def load_cached_text_features(
 
     The pooled tensor is sourced from a ``{stem}_anima_pooled.safetensors``
     sidecar next to ``te_path`` when present (written by
-    ``preprocess/cache_pooled_text.py``). When the sidecar is missing — old
+    ``scripts/preprocess/cache_pooled_text.py``). When the sidecar is missing — old
     caches that predate the pooled-sidecar pass — pooled is computed at
     load time via ``crossattn_emb.amax(dim=0)`` (cheaper than
     ``.max(dim=0).values``, which also computes argmax). The same variant

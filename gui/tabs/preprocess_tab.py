@@ -12,7 +12,7 @@ list / threshold / dilate, MIT text-threshold / dilate.
 
 Settings persist to:
 - ``configs/sam_mask.yaml`` — SAM prompts / threshold / dilate (existing
-  canonical location, read directly by ``preprocess/generate_masks.py``).
+  canonical location, read directly by ``scripts/preprocess/generate_masks.py``).
 - ``gui/gui_settings.json`` — TE-cache and MIT knobs, picked up by this
   tab on launch and forwarded to subprocesses via env vars
   (``CAPTION_SHUFFLE_VARIANTS``, ``CAPTION_TAG_DROPOUT_RATE``,
@@ -60,7 +60,7 @@ SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
 SETTINGS_FILE = Path(__file__).resolve().parent.parent / "gui_settings.json"
 
 # Defaults match the historical hardcoded values in scripts/tasks/preprocess.py
-# and preprocess/generate_masks_mit.py so a freshly installed GUI runs the
+# and scripts/preprocess/generate_masks_mit.py so a freshly installed GUI runs the
 # same pipeline as the bare CLI.
 DEFAULT_TE_SHUFFLE_VARIANTS = 4
 DEFAULT_TE_TAG_DROPOUT = 0.1

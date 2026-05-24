@@ -573,7 +573,7 @@ def confirm_resumable_checkpoint(parent: QWidget | None, merged: dict) -> bool:
 
 
 # Cache-file suffixes written by the preprocess scripts. Kept in sync with
-# preprocess/cache_latents.py, cache_text_embeddings.py, cache_pe_encoder.py.
+# scripts/preprocess/cache_latents.py, cache_text_embeddings.py, cache_pe_encoder.py.
 _LATENT_SUFFIX = "_anima.npz"
 _TE_SUFFIX = "_anima_te.safetensors"
 _PE_SUFFIX = "_anima_pe.safetensors"

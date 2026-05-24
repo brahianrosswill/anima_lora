@@ -16,8 +16,6 @@ import yaml
 from PIL import Image
 from tqdm import tqdm
 
-# Allow running from preprocess/ subdirectory
-
 from library.preprocess import walk_images
 
 

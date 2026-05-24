@@ -1212,7 +1212,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def _try_load_ip_features(self, image_abs_path: str) -> Optional[torch.Tensor]:
         """Load ``{stem}_anima_{encoder}.safetensors`` produced by
-        ``preprocess/cache_pe_encoder.py``.
+        ``scripts/preprocess/cache_pe_encoder.py``.
 
         Looks first in the subset's ``cache_dir`` (when set) and falls back to
         the legacy sidecar location next to the source image, so existing
@@ -1263,7 +1263,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 f"keys={list(sd.keys())}. Re-run `make preprocess-pe`."
             )
         # Hand back the on-disk dtype unchanged (bf16 by default; see
-        # preprocess/cache_pe_encoder.py --dtype). The IP-Adapter resampler
+        # scripts/preprocess/cache_pe_encoder.py --dtype). The IP-Adapter resampler
         # runs in bf16, so upcasting to fp32 here only doubles CPU memory and
         # H2D bandwidth before being cast right back down.
         return feats

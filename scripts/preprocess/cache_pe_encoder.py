@@ -46,7 +46,7 @@ from library.preprocess import (
 from library.runtime.cli import add_device_args, add_io_args
 from library.vision.encoder import load_pe_encoder
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _default_centroid_out(encoder: str) -> Path:

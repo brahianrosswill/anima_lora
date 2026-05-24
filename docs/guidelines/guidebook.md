@@ -289,7 +289,7 @@ make preprocess-pe           # (Optional) PE-Core vision encoder feature caching
 - Runs the VAE once on all resized images and saves the results to disk
 - The VAE is not loaded onto the GPU during training, saving significant VRAM
 - Cache location: `post_image_dataset/lora/{stem}_{WxH}_anima.npz`
-- Script: `preprocess/cache_latents.py`
+- Script: `scripts/preprocess/cache_latents.py`
 
 ### 6.3 Text Embedding Caching
 
@@ -297,7 +297,7 @@ make preprocess-pe           # (Optional) PE-Core vision encoder feature caching
 - If `use_shuffled_caption_variants = true`, also caches comma-shuffled caption variants (randomly selected during training)
 - Cache location: `post_image_dataset/lora/{stem}_anima_te.safetensors`
 - Captions are always read from the original `.txt` files in `image_dataset/` (not copied to the resized folder)
-- Script: `preprocess/cache_text_embeddings.py`
+- Script: `scripts/preprocess/cache_text_embeddings.py`
 
 ### 6.4 PE Vision Feature Caching (Optional)
 

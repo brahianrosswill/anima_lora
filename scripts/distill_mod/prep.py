@@ -23,7 +23,7 @@ Phase 2 — teacher-driven synthetic clean latents:
     CFG denoising (positive = cached crossattn_emb v0, negative = T5("") from
     the Phase 1 sidecar), saves the resulting clean latent under
     ``--synth_dir`` using the same NPZ layout as
-    ``preprocess/cache_latents.py``. The trainer can then point at
+    ``scripts/preprocess/cache_latents.py``. The trainer can then point at
     ``--synth_dir`` instead of (or alongside) the real-image cache to fit on
     the teacher's own manifold, removing the real-vs-teacher distribution gap
     that inflates the irreducible MSE floor.

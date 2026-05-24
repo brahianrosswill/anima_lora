@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Sentinel users can drop into captions that lack a real artist tag, so the
 # shuffle/drop boundary keeps working. Stripped from caption variants before
 # they reach the tokenizer (see _generate_caption_variants in
-# preprocess/cache_text_embeddings.py). Callers of anima_smart_shuffle_caption
+# scripts/preprocess/cache_text_embeddings.py). Callers of anima_smart_shuffle_caption
 # that feed the result to a tokenizer must strip it themselves — kept inside
 # the shuffle so the boundary index stays consistent with the input.
 NO_ARTIST_SENTINEL = "@no-artist"
