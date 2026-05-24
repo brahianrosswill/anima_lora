@@ -32,9 +32,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-import inference
-from library.inference import generate, get_generation_settings, save_output
-from library.models import qwen_vae
+# The curated entry points live on the top-level `anima_lora` package — the
+# programmatic front door (a thin lazy re-export of the `library.*` homes).
+from anima_lora import (
+    GenerationRequest,
+    generate,
+    get_generation_settings,
+    load_vae,
+    save_output,
+)
 from library.runtime.device import clean_memory_on_device
 
 DIT = os.environ.get("ANIMA_DIT", "models/diffusion_models/anima-base-v1.0.safetensors")
@@ -44,34 +50,22 @@ TEXT_ENCODER = os.environ.get(
 )
 
 
-def build_inference_args(opts: argparse.Namespace) -> argparse.Namespace:
-    argv = [
-        "--dit",
-        DIT,
-        "--vae",
-        VAE,
-        "--text_encoder",
-        TEXT_ENCODER,
-        "--prompt",
-        opts.prompt,
-        "--save_path",
-        opts.save_path,
-        "--infer_steps",
-        str(opts.steps),
-        "--guidance_scale",
-        str(opts.cfg),
-        "--image_size",
-        str(opts.size[0]),
-        str(opts.size[1]),
-        "--seed",
-        str(opts.seed),
-        # --lora_weight / --lora_multiplier take nargs="*"; forward each path.
-        "--lora_weight",
-        *opts.lora_weight,
-        "--lora_multiplier",
-        *[str(m) for m in opts.multiplier],
-    ]
-    return inference.parse_args(argv)
+def build_request(opts: argparse.Namespace) -> GenerationRequest:
+    # lora_weight / lora_multiplier accept sequences — the request forwards each
+    # path/multiplier as the CLI's nargs="*" tokens under the hood.
+    return GenerationRequest(
+        dit=DIT,
+        vae=VAE,
+        text_encoder=TEXT_ENCODER,
+        prompt=opts.prompt,
+        save_path=opts.save_path,
+        infer_steps=opts.steps,
+        guidance_scale=opts.cfg,
+        image_size=tuple(opts.size),  # (H, W)
+        seed=opts.seed,
+        lora_weight=opts.lora_weight,
+        lora_multiplier=opts.multiplier,
+    )
 
 
 def main() -> None:
@@ -99,7 +93,7 @@ def main() -> None:
     if len(opts.multiplier) == 1 and len(opts.lora_weight) > 1:
         opts.multiplier = opts.multiplier * len(opts.lora_weight)
 
-    args = build_inference_args(opts)
+    args = build_request(opts).to_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.device = device
 
@@ -107,7 +101,7 @@ def main() -> None:
     latent = generate(args, gen_settings)  # adapter attached during DiT load
     clean_memory_on_device(device)
 
-    vae = qwen_vae.load_vae(
+    vae = load_vae(
         args.vae,
         device="cpu",
         disable_mmap=True,

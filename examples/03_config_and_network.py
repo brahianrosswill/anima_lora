@@ -30,7 +30,8 @@ from pathlib import Path
 # configs/ and models/ paths are resolved relative to the CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from library.config.io import load_method_preset
+# `load_method_preset` is re-exported from the `anima_lora` front door.
+from anima_lora import load_method_preset
 
 # Keys that make up the LoRA routing/shape surface — the values an adapter
 # author cares about. (Full merged dict has ~150 keys spanning optimizer,

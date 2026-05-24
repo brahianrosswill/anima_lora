@@ -136,8 +136,12 @@ reportIncompatibleVariableOverride = "none"
 reportInvalidStringEscapeSequence = "none"
 reportUnsupportedDunderAll = "none"
 
-[tool.setuptools]
-packages = []
+# Expose the importable package trees so `pip install` / `uv sync` makes
+# `import anima_lora` (the programmatic front door) + `import library` /
+# `networks` resolve without the repo root on sys.path. The other top-level
+# dirs (gui, scripts, preprocess, …) stay CLI-only and are excluded.
+[tool.setuptools.packages.find]
+include = ["anima_lora*", "library*", "networks*"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

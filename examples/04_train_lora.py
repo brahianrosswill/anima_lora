@@ -40,7 +40,10 @@ from train import (
     verify_command_line_training_args,
 )
 from library.config import schema as config_schema
-from library.config.io import read_config_from_file
+
+# `read_config_from_file` is re-exported from the `anima_lora` front door
+# (AnimaTrainer / setup_parser stay on `train` — they're not part of the façade).
+from anima_lora import read_config_from_file
 
 
 def build_training_args(extra_argv: list[str]):

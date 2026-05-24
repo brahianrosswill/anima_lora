@@ -29,6 +29,9 @@ _ATTR_TO_MODULE = {
     # text
     "process_escape": "text",
     "prepare_text_inputs": "text",
+    "ensure_text_strategies": "text",
+    # request object (typed front door for generate())
+    "GenerationRequest": "request",
     # mod_guidance
     "build_mod_schedule": "corrections.mod_guidance",
     "setup_mod_guidance": "corrections.mod_guidance",

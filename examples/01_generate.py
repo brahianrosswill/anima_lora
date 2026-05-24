@@ -28,12 +28,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-# `inference` is the repo-root module; we reuse its arg parser so every default
-# the generation code reads via getattr() is guaranteed to be set (building a
-# bare Namespace by hand silently drops dozens of optional knobs).
-import inference
-from library.inference import generate, get_generation_settings, save_output
-from library.models import qwen_vae
+# The curated entry points live on the top-level `anima_lora` package — the
+# programmatic front door (a thin lazy re-export of the `library.*` homes).
+# `GenerationRequest` is the typed constructor for a single generation; its
+# `.to_args()` feeds the request through `inference.parse_args` under the hood,
+# so every optional knob the generation code reads via getattr() still gets a
+# default (building a bare Namespace by hand silently drops dozens of them).
+from anima_lora import (
+    GenerationRequest,
+    generate,
+    get_generation_settings,
+    load_vae,
+    save_output,
+)
 from library.runtime.device import clean_memory_on_device
 
 # Default checkpoint locations (from configs/base.toml). Override via env if
@@ -45,7 +52,7 @@ TEXT_ENCODER = os.environ.get(
 )
 
 
-def build_inference_args(
+def build_request(
     prompt: str,
     save_path: str,
     *,
@@ -53,30 +60,19 @@ def build_inference_args(
     cfg: float,
     size: tuple[int, int],
     seed: int,
-) -> argparse.Namespace:
-    """Construct the inference args namespace via the shared CLI parser."""
-    argv = [
-        "--dit",
-        DIT,
-        "--vae",
-        VAE,
-        "--text_encoder",
-        TEXT_ENCODER,
-        "--prompt",
-        prompt,
-        "--save_path",
-        save_path,
-        "--infer_steps",
-        str(steps),
-        "--guidance_scale",
-        str(cfg),
-        "--image_size",
-        str(size[0]),
-        str(size[1]),  # H W
-        "--seed",
-        str(seed),
-    ]
-    return inference.parse_args(argv)
+) -> GenerationRequest:
+    """Describe the generation as a typed request (the CLI is one consumer)."""
+    return GenerationRequest(
+        dit=DIT,
+        vae=VAE,
+        text_encoder=TEXT_ENCODER,
+        prompt=prompt,
+        save_path=save_path,
+        infer_steps=steps,
+        guidance_scale=cfg,
+        image_size=size,  # (H, W)
+        seed=seed,
+    )
 
 
 def generate_image(args: argparse.Namespace) -> None:
@@ -96,7 +92,7 @@ def generate_image(args: argparse.Namespace) -> None:
     clean_memory_on_device(device)
 
     # 4. Decode latent → PNG (+ generation metadata) via save_output.
-    vae = qwen_vae.load_vae(
+    vae = load_vae(
         args.vae,
         device="cpu",
         disable_mmap=True,
@@ -123,7 +119,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     opts = p.parse_args()
 
-    args = build_inference_args(
+    req = build_request(
         opts.prompt,
         opts.save_path,
         steps=opts.steps,
@@ -131,7 +127,9 @@ def main() -> None:
         size=tuple(opts.size),
         seed=opts.seed,
     )
-    generate_image(args)
+    # .to_args() runs the request through the CLI parser, so the returned
+    # Namespace has every optional knob populated for generate().
+    generate_image(req.to_args())
 
 
 if __name__ == "__main__":

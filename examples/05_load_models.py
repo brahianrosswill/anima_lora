@@ -29,11 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 import inference
-from library.anima import strategy as strategy_anima
-from library.anima import text_strategies
 from library.anima import weights as anima_weights
 from library.inference.models import load_text_encoder
-from library.inference.text import MAX_CROSSATTN_TOKENS, prepare_text_inputs
+from library.inference.text import (
+    MAX_CROSSATTN_TOKENS,
+    ensure_text_strategies,
+    prepare_text_inputs,
+)
 from library.models import qwen_vae
 
 DIT = os.environ.get("ANIMA_DIT", "models/diffusion_models/anima-base-v1.0.safetensors")
@@ -73,18 +75,13 @@ def main() -> None:
     print(f"VAE   : {type(vae).__name__}  z_dim={vae.z_dim}")
 
     # --- Text encoder + encode a prompt -------------------------------------
-    # The tokenize/encode strategies are global singletons (the strategy pattern
-    # in library/anima/strategy.py). Set them once before any encode call.
-    tok = strategy_anima.AnimaTokenizeStrategy(
-        qwen3_path=TEXT_ENCODER,
-        t5_tokenizer_path=None,
-        qwen3_max_length=MAX_CROSSATTN_TOKENS,
-        t5_max_length=MAX_CROSSATTN_TOKENS,
-    )
-    text_strategies.TokenizeStrategy.set_strategy(tok)
-    text_strategies.TextEncodingStrategy.set_strategy(
-        strategy_anima.AnimaTextEncodingStrategy()
-    )
+    # Prompt encoding goes through two process-global strategy singletons (the
+    # strategy pattern in library/anima/strategy.py). ensure_text_strategies()
+    # installs them from the text-encoder path — a no-op if already set, and the
+    # same call prepare_text_inputs() now makes internally, so this line is
+    # really just here to show the seam. (Forget it and you'd get a cryptic
+    # `'NoneType' object has no attribute 'tokenize'`.)
+    ensure_text_strategies(TEXT_ENCODER, max_length=MAX_CROSSATTN_TOKENS)
 
     text_encoder = load_text_encoder(
         # prepare_text_inputs/load_text_encoder read these off an args namespace.
