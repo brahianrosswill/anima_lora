@@ -27,19 +27,16 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.preprocess import cache_text_embeddings, tqdm_progress
+from library.runtime.cli import add_io_args
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dir", type=str, required=True, help="Dataset directory")
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help=(
-            "Optional directory to write text-encoder caches into (created if "
-            "needed). Defaults to writing alongside each source image."
-        ),
+    add_io_args(
+        parser,
+        cache_noun="text-encoder caches",
+        include_batch_size=True,
+        batch_size_default=16,
     )
     parser.add_argument(
         "--qwen3", type=str, required=True, help="Path to Qwen3 text encoder"
@@ -55,12 +52,6 @@ def main() -> None:
         type=str,
         default=None,
         help="Path to T5 tokenizer (default: library/anima/configs/t5_old/)",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=16,
-        help="Text encoder batch size (default: 16)",
     )
     parser.add_argument(
         "--caption_shuffle_variants",
@@ -91,15 +82,6 @@ def main() -> None:
             "= 0.5MP). Mirrors the same filter in preprocess/resize_images.py "
             "so TE caches don't accumulate for images that get dropped at "
             "resize time. Set to 0 to disable."
-        ),
-    )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help=(
-            "Walk subfolders under --dir. Caches mirror the source subdir "
-            "structure under --cache_dir; stems must be unique within each "
-            "subfolder but the same stem can repeat across folders."
         ),
     )
     args = parser.parse_args()

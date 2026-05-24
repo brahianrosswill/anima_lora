@@ -19,24 +19,18 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from library.preprocess import cache_latents, tqdm_progress
+from library.runtime.cli import add_io_args
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dir", type=str, required=True, help="Dataset directory")
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help=(
-            "Optional directory to write latent caches into (created if needed). "
-            "Defaults to writing alongside each source image."
-        ),
+    add_io_args(
+        parser,
+        cache_noun="latent caches",
+        include_batch_size=True,
+        batch_size_default=4,
     )
     parser.add_argument("--vae", type=str, required=True, help="Path to VAE weights")
-    parser.add_argument(
-        "--batch_size", type=int, default=4, help="VAE encoding batch size (default: 4)"
-    )
     parser.add_argument(
         "--chunk_size",
         type=int,
@@ -48,15 +42,6 @@ def main() -> None:
         action="store_true",
         default=True,
         help="Disable VAE internal cache (default: True)",
-    )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help=(
-            "Walk subfolders under --dir. Caches mirror the source subdir "
-            "structure under --cache_dir; stems must be unique within each "
-            "subfolder but the same stem can repeat across folders."
-        ),
     )
     args = parser.parse_args()
 

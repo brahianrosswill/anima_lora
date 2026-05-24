@@ -45,6 +45,7 @@ from library.preprocess import (
     tqdm_progress,
     write_pe_centroid,
 )
+from library.runtime.cli import add_device_args, add_io_args
 from library.vision.encoder import load_pe_encoder
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,20 +73,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
-        "--dir",
-        type=str,
-        default=None,
-        help="Dataset directory. Required unless --centroid_only is set.",
+    add_io_args(
+        parser,
+        dir_required=False,
+        dir_help="Dataset directory. Required unless --centroid_only is set.",
+        cache_noun="PE caches",
+        include_batch_size=True,
+        batch_size_default=8,
+        include_num_workers=True,
+        num_workers_default=4,
     )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help=(
-            "Optional directory to write PE caches into (created if needed). "
-            "Defaults to writing alongside each source image."
-        ),
+    add_device_args(
+        parser,
+        include_device=False,
+        dtype_default="bfloat16",
+        dtype_choices=("bfloat16", "float16", "float32"),
     )
     parser.add_argument(
         "--encoder",
@@ -98,38 +100,6 @@ def main() -> None:
         type=str,
         default=None,
         help="Override the encoder's default model id / checkpoint path.",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=8,
-        help="Forward batch size within each (H, W) group (default: 8).",
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=4,
-        help=(
-            "DataLoader workers for parallel PIL decode + transform. "
-            "0 = single-threaded (decode on the main thread, GPU sits idle "
-            "during decode + safetensors write). Default 4."
-        ),
-    )
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        default="bfloat16",
-        choices=["bfloat16", "float16", "float32"],
-        help="Storage dtype for cached features (default: bfloat16, matches train-time).",
-    )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help=(
-            "Walk subfolders under --dir. Caches mirror the source subdir "
-            "structure under --cache_dir; stems must be unique within each "
-            "subfolder but the same stem can repeat across folders."
-        ),
     )
     parser.add_argument(
         "--centroid",
