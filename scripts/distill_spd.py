@@ -128,6 +128,15 @@ def main():
     parser.add_argument("--seed", type=int, default=-1)
     parser.add_argument("--rank", type=int, default=-1)
     parser.add_argument("--alpha", type=float, default=-1.0)
+    parser.add_argument(
+        "--channel_scaling_alpha",
+        type=float,
+        default=-1.0,
+        help="SmoothQuant-style per-channel input pre-scaling exponent for the LoRA "
+        "down projection (0.0 = off / paper-faithful, 0.5 = sqrt balance, 1.0 = full "
+        "flatten). Overrides network.channel_scaling_alpha. inv_scale is baked into the "
+        "saved weights, so inference needs no extra plumbing.",
+    )
     parser.add_argument("--attn_mode", type=str, default=None)
     parser.add_argument(
         "--stages",
@@ -223,6 +232,9 @@ def main():
         _flatten(cfg, "network.alpha", rank) if args.alpha == -1.0 else args.alpha
     )
     attn_mode = pick(args.attn_mode, "network.attn_mode", "flash")
+    channel_scaling_alpha = float(
+        pick(args.channel_scaling_alpha, "network.channel_scaling_alpha", 0.0)
+    )
     if (
         args.torch_compile
         and args.compile_inductor_mode == "reduce-overhead"
@@ -356,10 +368,18 @@ def main():
 
     # --- Plain LoRA adapter (paper-faithful: no MoE / ortho / T-LoRA / ReFT) ---
     # use_custom_down_autograd: save the bf16 lora_down input and recompute the
-    # fp32 cast in backward instead of stashing the fp32 copy (bitwise-identical
-    # for the no-channel-scale path SPD uses). Trims LoRA-branch activation memory
-    # and avoids a per-Linear bf16 intermediate getting pinned in the CUDA-Graph
-    # pool under --compile_inductor_mode reduce-overhead. See custom_autograd.py.
+    # fp32 cast in backward instead of stashing the fp32 copy. Bitwise-identical
+    # on the no-channel-scale path (the default); when channel_scaling_alpha>0 the
+    # per-Linear inv_scale is folded into the recomputed down-project (lora.py:97),
+    # so it stays correct, just no longer bit-identical to the alpha=0 baseline.
+    # Trims LoRA-branch activation memory and avoids a per-Linear bf16 intermediate
+    # getting pinned in the CUDA-Graph pool under reduce-overhead. See
+    # custom_autograd.py and project-custom-down-autograd-distill-lever.
+    if channel_scaling_alpha:
+        logger.info(
+            "channel_scaling enabled (alpha=%.3g); inv_scale baked at save",
+            channel_scaling_alpha,
+        )
     network = create_network(
         multiplier=1.0,
         network_dim=rank,
@@ -368,6 +388,7 @@ def main():
         text_encoders=[],
         unet=model,
         use_custom_down_autograd=True,
+        channel_scaling_alpha=channel_scaling_alpha,
     )
     network.apply_to(
         text_encoders=[], unet=model, apply_text_encoder=False, apply_unet=True
@@ -477,6 +498,7 @@ def main():
                     "transition_sigmas": transition_sigmas,
                     "rank": rank,
                     "alpha": alpha,
+                    "channel_scaling_alpha": channel_scaling_alpha,
                     "lr": lr,
                     "iterations": iterations,
                     "sigma_jitter": sigma_jitter,
@@ -488,7 +510,14 @@ def main():
     def _save(step: int):
         save_path = str(Path(output_dir) / f"{output_name}.safetensors")
         sd = network.state_dict()
-        sd = {k: v for k, v in sd.items() if ".lora_" in k or ".alpha" in k}
+        # Keep .inv_scale buffers (per_channel_scaling): the standard write path's
+        # bake_inv_scale folds them into lora_down, so dropping them here would
+        # silently emit a wrong delta whenever channel_scaling_alpha>0.
+        sd = {
+            k: v
+            for k, v in sd.items()
+            if ".lora_" in k or k.endswith(".alpha") or k.endswith(".inv_scale")
+        }
         save_network_weights(
             sd,
             file=save_path,
@@ -500,6 +529,7 @@ def main():
                 "ss_spd_transition_sigmas": json.dumps(transition_sigmas),
                 "ss_spd_schedule_label": str(schedule_label),
                 "ss_spd_rank": str(rank),
+                "ss_channel_scaling_alpha": str(channel_scaling_alpha),
                 "ss_spd_step": str(step),
             },
             save_variant="standard",
