@@ -69,13 +69,7 @@ class DreamBoothDataset(BaseDataset):
         subsets: Sequence[DreamBoothSubset],
         is_training_dataset: bool,
         batch_size: int,
-        resolution,
         network_multiplier: float,
-        enable_bucket: bool,
-        min_bucket_reso: int,
-        max_bucket_reso: int,
-        bucket_reso_steps: int,
-        bucket_no_upscale: bool,
         prior_loss_weight: float,
         debug_dataset: bool,
         validation_split: float,
@@ -83,35 +77,15 @@ class DreamBoothDataset(BaseDataset):
         resize_interpolation: Optional[str],
         validation_split_num: int = 0,
     ) -> None:
-        super().__init__(
-            resolution, network_multiplier, debug_dataset, resize_interpolation
-        )
-
-        assert resolution is not None, "resolution is required"
+        super().__init__(network_multiplier, debug_dataset, resize_interpolation)
 
         self.batch_size = batch_size
-        self.size = min(self.width, self.height)
         self.prior_loss_weight = prior_loss_weight
         self.latents_cache = None
         self.is_training_dataset = is_training_dataset
         self.validation_seed = validation_seed
         self.validation_split = validation_split
         self.validation_split_num = int(validation_split_num or 0)
-
-        self.enable_bucket = enable_bucket
-        if self.enable_bucket:
-            min_bucket_reso, max_bucket_reso = self.adjust_min_max_bucket_reso_by_steps(
-                resolution, min_bucket_reso, max_bucket_reso, bucket_reso_steps
-            )
-            self.min_bucket_reso = min_bucket_reso
-            self.max_bucket_reso = max_bucket_reso
-            self.bucket_reso_steps = bucket_reso_steps
-            self.bucket_no_upscale = bucket_no_upscale
-        else:
-            self.min_bucket_reso = None
-            self.max_bucket_reso = None
-            self.bucket_reso_steps = None
-            self.bucket_no_upscale = False
 
         def load_dreambooth_dir(subset: DreamBoothSubset):
             if not os.path.isdir(subset.image_dir):

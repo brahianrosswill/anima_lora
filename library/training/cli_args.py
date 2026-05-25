@@ -1070,12 +1070,6 @@ def add_dataset_arguments(
         help="show images for debugging (do not train)",
     )
     parser.add_argument(
-        "--resolution",
-        type=str,
-        default=None,
-        help="resolution in training ('size' or 'width,height')",
-    )
-    parser.add_argument(
         "--use_vae_cache",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1091,34 +1085,6 @@ def add_dataset_arguments(
         "--skip_cache_check",
         action="store_true",
         help="skip the content validation of cache",
-    )
-    parser.add_argument(
-        "--enable_bucket",
-        action="store_true",
-        help="enable buckets for multi aspect ratio training",
-    )
-    parser.add_argument(
-        "--min_bucket_reso",
-        type=int,
-        default=256,
-        help="minimum resolution for buckets",
-    )
-    parser.add_argument(
-        "--max_bucket_reso",
-        type=int,
-        default=1024,
-        help="maximum resolution for buckets",
-    )
-    parser.add_argument(
-        "--bucket_reso_steps",
-        type=int,
-        default=64,
-        help="steps of resolution for buckets",
-    )
-    parser.add_argument(
-        "--bucket_no_upscale",
-        action="store_true",
-        help="make bucket for each image without upscaling",
     )
     parser.add_argument(
         "--resize_interpolation",

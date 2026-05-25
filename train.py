@@ -433,12 +433,6 @@ class AnimaTrainer:
                     f"mode={con_mode} index={con_index}"
                 )
 
-        train_dataset_group.verify_bucket_reso_steps(
-            16
-        )  # WanVAE spatial downscale = 8 and patch size = 2
-        if val_dataset_group is not None:
-            val_dataset_group.verify_bucket_reso_steps(16)
-
     def load_target_model(
         self, args, weight_dtype, accelerator, load_qwen3=True, load_vae=True
     ):

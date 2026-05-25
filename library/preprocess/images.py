@@ -37,7 +37,6 @@ def process_image(
     """
     max_reso, min_size, max_size, reso_steps, use_constant = bucket_args
     bucket_mgr = BucketManager(
-        no_upscale=False,
         max_reso=max_reso,
         min_size=min_size,
         max_size=max_size,
