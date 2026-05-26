@@ -98,22 +98,25 @@ def get_noisy_model_input_and_timesteps(
     bsz, h, w = latents.shape[0], latents.shape[-2], latents.shape[-1]
     assert bsz > 0, "Batch size not large enough"
     num_timesteps = noise_scheduler.config.num_train_timesteps
+    # Logit-space mean shift shared by every sigmoid-based branch; >0 skews σ
+    # toward the high-noise (structure) regime, 0.0 (default) = unbiased.
+    sigmoid_bias = getattr(args, "sigmoid_bias", 0.0)
     if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
         if args.timestep_sampling == "sigmoid":
             sigmas = torch.sigmoid(
-                args.sigmoid_scale * torch.randn((bsz,), device=device)
+                args.sigmoid_scale * torch.randn((bsz,), device=device) + sigmoid_bias
             )
         else:
             sigmas = torch.rand((bsz,), device=device)
     elif args.timestep_sampling == "shift":
         shift = args.discrete_flow_shift
         sigmas = torch.randn(bsz, device=device)
-        sigmas = sigmas * args.sigmoid_scale
+        sigmas = sigmas * args.sigmoid_scale + sigmoid_bias
         sigmas = sigmas.sigmoid()
         sigmas = (sigmas * shift) / (1 + (shift - 1) * sigmas)
     elif args.timestep_sampling == "flux_shift":
         sigmas = torch.randn(bsz, device=device)
-        sigmas = sigmas * args.sigmoid_scale
+        sigmas = sigmas * args.sigmoid_scale + sigmoid_bias
         sigmas = sigmas.sigmoid()
         mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
         sigmas = time_shift(mu, 1.0, sigmas)

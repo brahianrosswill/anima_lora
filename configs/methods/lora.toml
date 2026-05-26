@@ -36,7 +36,8 @@ caption_dropout_rate = 0.1
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-output_name = "anima_quarter"
+output_name = "anima_biased"
+sigmoid_bias = 0.5
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 # vr_loss_weight = 1.0

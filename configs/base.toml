@@ -45,6 +45,7 @@ lr_scheduler = "cosine"
 lr_warmup_steps = 0.05   # ratio (<1) → 5% of total steps; warms AdamW before full LR
 
 timestep_sampling = "sigmoid"
+sigmoid_bias = 0.0
 discrete_flow_shift = 1.0
 mixed_precision = "bf16"
 
