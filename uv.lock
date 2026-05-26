@@ -729,7 +729,7 @@ dependencies = [
     { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://github.com/sorryhyun/flash-attention-sm120-fix/releases/download/fa2cuda132.partial/flash_attn-2.8.4-cp313-cp313-win_amd64.whl", hash = "sha256:412ce04b713b22c4b4e40a9c48be145f4d62b7abc85f2352494d17a9b2c5a1f5" },
+    { url = "https://github.com/sorryhyun/flash-attention-sm120-fix/releases/download/fa2cuda132.partial/flash_attn-2.8.4-cp313-cp313-win_amd64.whl", hash = "sha256:dcbb46df8fc992ac5f6523f9a66f2a5c7b10b099c5eb1cebf2581d7984fd953c" },
 ]
 
 [package.metadata]
