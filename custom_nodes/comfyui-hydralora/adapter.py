@@ -86,6 +86,7 @@ compute_fei_nband_high_to_low = _rc.compute_fei_nband_high_to_low
 fei_sigma_low = _rc.fei_sigma_low
 sigma_sinusoidal_features = _rc.sigma_sinusoidal_features
 apply_sigma_band_mask = _rc.apply_sigma_band_mask
+fei_temperature = _rc.fei_temperature
 
 
 def _resolve_module(model, dotted_path: str):
@@ -441,11 +442,14 @@ def load_adapter(file_path: str) -> dict:
                 if chimera.get("content_router") is not None
                 else ""
             )
+            freq_tag = (
+                f"freq=hardwired-FEI(τ={chimera.get('freq_router_fei_tau', 1.0):g})"
+                if str(chimera.get("freq_router_mode", "learned")) == "fei"
+                else f"FreqRouter in={chimera['fei_feature_dim']}+{chimera['sigma_feature_dim']}"
+            )
             routing.append(
                 f"chimera K_c={chimera['num_experts_content']}+"
-                f"K_f={chimera['num_experts_freq']}, "
-                f"FreqRouter in={chimera['fei_feature_dim']}+"
-                f"{chimera['sigma_feature_dim']}{cr_tag}"
+                f"K_f={chimera['num_experts_freq']}, {freq_tag}{cr_tag}"
             )
         elif bundle["hydra"].get("use_fei_router"):
             routing.append(f"FEI={bundle['hydra']['fei_feature_dim']}d")
@@ -750,6 +754,8 @@ def _apply_hydra_live_to_model(model, hydra_data: dict, strength: float) -> int:
             fei_sigma_low_div=float(chimera_data["fei_sigma_low_div"]),
             router_tau=float(chimera_data["router_tau"]),
             K_f=int(chimera_data["num_experts_freq"]),
+            freq_router_mode=str(chimera_data.get("freq_router_mode", "learned")),
+            freq_router_fei_tau=float(chimera_data.get("freq_router_fei_tau", 1.0)),
         )
     else:
         router_pre_hook = _make_router_pre_hook(sigma_state, fei_on, fei_sigma_low_div)
@@ -902,14 +908,21 @@ def _apply_hydra_live_to_model(model, hydra_data: dict, strength: float) -> int:
             if global_cr_on
             else ""
         )
+        if str(chimera_data.get("freq_router_mode", "learned")) == "fei":
+            freq_desc = (
+                f"freq=hardwired-FEI(τ={chimera_data.get('freq_router_fei_tau', 1.0):g})"
+            )
+        else:
+            freq_desc = (
+                f"FreqRouter input=FEI({chimera_data['fei_feature_dim']}) + "
+                f"σ({chimera_data['sigma_feature_dim']}), "
+                f"τ={chimera_data['router_tau']:g}"
+            )
         logger.info(
             f"ChimeraHydra live-routing installed {patched} hooks "
             f"(strength={strength}, K_c={chimera_data['num_experts_content']} + "
-            f"K_f={chimera_data['num_experts_freq']}, FreqRouter input="
-            f"FEI({chimera_data['fei_feature_dim']}) + "
-            f"σ({chimera_data['sigma_feature_dim']}), "
-            f"σ_low_div={chimera_data['fei_sigma_low_div']:g}, "
-            f"τ={chimera_data['router_tau']:g}{cr_tag})"
+            f"K_f={chimera_data['num_experts_freq']}, {freq_desc}, "
+            f"σ_low_div={chimera_data['fei_sigma_low_div']:g}{cr_tag})"
         )
         return patched
     # Decide what's actually being routed on by checking the router-input

@@ -335,6 +335,28 @@ class LoRANetworkCfg:
     # so the state_dict format is unchanged; the on/off semantics live in
     # the ``ss_chimera_freq_router_layer_norm`` metadata stamp.
     freq_router_layer_norm: bool = True
+    # Freq-pool routing MODE.
+    #   "learned" (default) — build the FreqRouter MLP over
+    #       ``concat(FEI, sinusoidal-σ-features)`` and route the freq pool by
+    #       its softmax output (paper-faithful).
+    #   "fei" — hardwire ``π_f = normalize(FEI ** (1/τ))`` directly, with no
+    #       learned params, no σ-feature input, and no freq balance loss.
+    #       Requires ``num_experts_freq == fei_feature_dim`` (the FEI band
+    #       count IS the expert count). Motivation: the archived FEI trace
+    #       (``_archive/bench/fera/.../fei_traces.png``) shows FEI is already a
+    #       normalized simplex carrying the load-bearing per-prompt routing
+    #       signal at low σ — the learned MLP only adds a reshape over inputs
+    #       (FEI + σ) no richer than FEI itself, and σ is the non-discriminating
+    #       half (identical across prompts at a given step). Hardwiring keeps
+    #       100% of the routing signal and makes ``expert_0 ≡ low band,
+    #       expert_1 ≡ high band`` true by construction. Stamped to
+    #       ``ss_chimera_freq_router_mode`` so the loader rebuilds the right path.
+    freq_router_mode: str = "learned"
+    # Temperature on the hardwired FEI gate (``freq_router_mode="fei"`` only).
+    # ``π_f = normalize(FEI ** (1/τ))``. τ=1.0 is the raw-FEI passthrough
+    # (``softmax(log p) = p`` identity); τ<1 sharpens the low/high crossover,
+    # τ>1 flattens it. Inert under ``freq_router_mode="learned"``.
+    freq_router_tau: float = 1.0
     # Per-pool router LR multipliers (chimera-only). Stack on top of the
     # global ``router_lr_scale``: effective LR = ``unet_lr × router_lr_scale
     # × <pool>_router_lr_scale``. Default 1.0 = preserves the previous
@@ -531,6 +553,14 @@ class LoRANetworkCfg:
         )
         freq_router_init_std = float(kwargs.get("freq_router_init_std", 0.1))
         freq_router_layer_norm = _as_bool(kwargs.get("freq_router_layer_norm", True))
+        freq_router_mode = str(
+            kwargs.get("freq_router_mode", "learned")
+        ).strip().lower() or "learned"
+        if freq_router_mode not in ("learned", "fei"):
+            raise ValueError(
+                f"freq_router_mode={freq_router_mode!r}: expected 'learned' or 'fei'."
+            )
+        freq_router_tau = float(kwargs.get("freq_router_tau", 1.0))
         content_router_lr_scale = float(
             kwargs.get("network_content_router_lr_scale", 1.0)
         )
@@ -575,6 +605,15 @@ class LoRANetworkCfg:
                     "use_chimera_hydra=True requires num_experts_content > 0 "
                     f"and num_experts_freq > 0 (got K_c={num_experts_content}, "
                     f"K_f={num_experts_freq})."
+                )
+            if freq_router_mode == "fei" and num_experts_freq != fei_feature_dim:
+                raise ValueError(
+                    "freq_router_mode='fei' hardwires the freq gate to the FEI "
+                    "band-simplex, so num_experts_freq must equal fei_feature_dim "
+                    f"(got K_f={num_experts_freq}, fei_feature_dim={fei_feature_dim}). "
+                    "Either set num_experts_freq=fei_feature_dim, or use "
+                    "freq_router_mode='learned' for an MLP that maps any input "
+                    "width to K_f experts."
                 )
         if content_router_source == "crossattn_emb" and not use_chimera_hydra:
             raise ValueError(
@@ -734,6 +773,8 @@ class LoRANetworkCfg:
             balance_w_freq=balance_w_freq,
             freq_router_init_std=freq_router_init_std,
             freq_router_layer_norm=freq_router_layer_norm,
+            freq_router_mode=freq_router_mode,
+            freq_router_tau=freq_router_tau,
             content_router_lr_scale=content_router_lr_scale,
             freq_router_lr_scale=freq_router_lr_scale,
             content_router_source=content_router_source,
@@ -782,6 +823,8 @@ class LoRANetworkCfg:
         num_experts_content: Optional[int] = None,
         num_experts_freq: Optional[int] = None,
         freq_router_layer_norm: bool = False,
+        freq_router_mode: str = "learned",
+        freq_router_tau: float = 1.0,
         content_router_source: str = "input",
         content_router_layer_norm: bool = True,
         chimera_centered_gate: bool = False,
@@ -889,6 +932,12 @@ class LoRANetworkCfg:
                 int(num_experts_freq) if num_experts_freq is not None else 3
             ),
             freq_router_layer_norm=bool(freq_router_layer_norm),
+            freq_router_mode=(
+                str(freq_router_mode).strip().lower()
+                if freq_router_mode
+                else "learned"
+            ),
+            freq_router_tau=float(freq_router_tau),
             content_router_source=(
                 # ``"crossattn"`` is the pre-rename stamp; normalize the
                 # deprecated alias so old chimera checkpoints still load.

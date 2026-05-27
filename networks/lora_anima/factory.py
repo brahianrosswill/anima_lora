@@ -749,6 +749,19 @@ def create_network_from_weights(
         and str(file_metadata.get("ss_chimera_freq_router_layer_norm", "")).strip().lower()
         == "true"
     )
+    # Freq routing mode. Absent stamp ⇒ "learned" (pre-2026-05-27 checkpoints,
+    # which carry FreqRouter weights). "fei" rebuilds the hardwired-FEI path:
+    # no FreqRouter module, the simplex is re-broadcast each inference step.
+    chimera_freq_router_mode: str = (
+        str(file_metadata.get("ss_chimera_freq_router_mode", "learned")).strip().lower()
+        if is_chimera_hydra
+        else "learned"
+    ) or "learned"
+    chimera_freq_router_tau: float = (
+        float(file_metadata.get("ss_chimera_freq_router_tau", 1.0))
+        if is_chimera_hydra
+        else 1.0
+    )
     # ContentRouter stamps. Absent / "input" preserves the per-Linear router
     # (today's chimera). "crossattn" rebuilds a network-level ContentRouter
     # fed by pooled crossattn_emb; per-Linear ``self.router`` is then absent
@@ -842,6 +855,8 @@ def create_network_from_weights(
         num_experts_content=chimera_num_experts_content,
         num_experts_freq=chimera_num_experts_freq,
         freq_router_layer_norm=chimera_freq_router_layer_norm,
+        freq_router_mode=chimera_freq_router_mode,
+        freq_router_tau=chimera_freq_router_tau,
         content_router_source=chimera_content_router_source,
         content_router_layer_norm=chimera_content_router_layer_norm,
         chimera_centered_gate=chimera_centered_gate,

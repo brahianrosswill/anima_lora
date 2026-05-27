@@ -150,6 +150,115 @@ def test_content_router_source_crossattn_emb_requires_chimera():
         )
 
 
+def test_freq_router_mode_defaults_to_learned():
+    """Absent ``freq_router_mode`` ⇒ "learned" (the paper-faithful MLP path)."""
+    cfg = LoRANetworkCfg.from_kwargs(
+        {
+            "use_chimera_hydra": "true",
+            "num_experts_content": "3",
+            "num_experts_freq": "3",
+        },
+        network_dim=8,
+        network_alpha=4.0,
+        neuron_dropout=None,
+        module_class=HydraLoRAModule,
+    )
+    assert cfg.freq_router_mode == "learned"
+    assert cfg.freq_router_tau == 1.0
+
+
+def test_freq_router_mode_fei_parses():
+    """``freq_router_mode="fei"`` parses (case-insensitive) with K_f == fei bands."""
+    cfg = LoRANetworkCfg.from_kwargs(
+        {
+            "use_chimera_hydra": "true",
+            "num_experts_content": "4",
+            "num_experts_freq": "2",
+            "fei_feature_dim": "2",
+            "freq_router_mode": "FEI",
+            "freq_router_tau": "0.5",
+        },
+        network_dim=8,
+        network_alpha=4.0,
+        neuron_dropout=None,
+        module_class=HydraLoRAModule,
+    )
+    assert cfg.freq_router_mode == "fei"
+    assert cfg.freq_router_tau == 0.5
+
+
+def test_freq_router_mode_fei_requires_kf_eq_fei_dim():
+    """Hardwired FEI gate maps each band to one expert, so K_f must equal
+    ``fei_feature_dim`` — a mismatch is a config error, not a silent reshape."""
+    with pytest.raises(ValueError, match="num_experts_freq must equal fei_feature_dim"):
+        LoRANetworkCfg.from_kwargs(
+            {
+                "use_chimera_hydra": "true",
+                "num_experts_content": "3",
+                "num_experts_freq": "3",  # != fei_feature_dim=2
+                "fei_feature_dim": "2",
+                "freq_router_mode": "fei",
+            },
+            network_dim=8,
+            network_alpha=4.0,
+            neuron_dropout=None,
+            module_class=HydraLoRAModule,
+        )
+
+
+def test_freq_router_mode_invalid_raises():
+    with pytest.raises(ValueError, match="expected 'learned' or 'fei'"):
+        LoRANetworkCfg.from_kwargs(
+            {
+                "use_chimera_hydra": "true",
+                "num_experts_content": "3",
+                "num_experts_freq": "2",
+                "fei_feature_dim": "2",
+                "freq_router_mode": "hardwired",
+            },
+            network_dim=8,
+            network_alpha=4.0,
+            neuron_dropout=None,
+            module_class=HydraLoRAModule,
+        )
+
+
+def test_from_weights_freq_router_mode_round_trip():
+    """The ``ss_chimera_freq_router_mode`` / ``_tau`` stamps survive the
+    metadata → ``from_weights`` rebuild; absent stamp ⇒ "learned"."""
+    common = dict(
+        modules_dim={"m": 4},
+        modules_alpha={"m": 4.0},
+        module_class=HydraLoRAModule,
+        train_llm_adapter=False,
+        has_reft=False,
+        reft_dim=None,
+        reft_block_indices=[],
+        is_hydra_or_ortho_hydra=False,
+        hydra_num_experts=6,
+        sigma_feature_dim_detected=None,
+        sigma_router_names=None,
+        hydra_router_names=None,
+        channel_scales_dict=None,
+        new_use_moe_style="shared_A",
+        new_route_per_layer=True,
+        new_router_source="fei",
+        is_chimera_hydra=True,
+        num_experts_content=4,
+        num_experts_freq=2,
+        fei_feature_dim=2,
+    )
+    cfg_fei = LoRANetworkCfg.from_weights(
+        **common, freq_router_mode="fei", freq_router_tau=0.5
+    )
+    assert cfg_fei.freq_router_mode == "fei"
+    assert cfg_fei.freq_router_tau == 0.5
+
+    cfg_default = LoRANetworkCfg.from_weights(**common)
+    assert cfg_default.freq_router_mode == "learned"
+    assert cfg_default.freq_router_tau == 1.0
+
+
 def test_legacy_router_kwargs_raise():
     """plan2 task #6 retired ``use_hydra`` / ``use_sigma_router`` /
     ``use_fei_router``. Surfacing them must raise so a stale TOML can't

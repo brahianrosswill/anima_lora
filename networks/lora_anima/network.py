@@ -32,6 +32,7 @@ from networks.lora_modules import (
     StackedExpertsLoRAModule,
     _sigma_sinusoidal_features,
 )
+from networks.lora_modules.router_state import _fei_temperature
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -1053,45 +1054,73 @@ class LoRANetwork(torch.nn.Module):
         # router_targets regex can narrow the chimera class to a subset of
         # layers (others fall back to OrthoLoRA).
         self.freq_router: Optional[FreqRouter] = None
+        # Freq-pool routing mode. "learned" builds the FreqRouter MLP below;
+        # "fei" leaves freq_router=None and broadcasts the FEI simplex directly
+        # in set_fei (no params, no σ-features, no freq balance loss).
+        self.freq_router_mode: str = str(
+            getattr(cfg, "freq_router_mode", "learned")
+        ).lower()
+        self.freq_router_tau: float = float(getattr(cfg, "freq_router_tau", 1.0))
         if cfg.use_chimera_hydra and self._chimera_aware_loras:
-            freq_input_dim = int(cfg.fei_feature_dim) + int(cfg.sigma_feature_dim)
-            if freq_input_dim <= 0:
-                raise ValueError(
-                    "use_chimera_hydra=True requires fei_feature_dim + "
-                    f"sigma_feature_dim > 0 for the FreqRouter input (got "
-                    f"FEI={cfg.fei_feature_dim}, σ={cfg.sigma_feature_dim})."
+            if self.freq_router_mode == "fei":
+                # Hardwired-FEI gate: π_f = normalize(FEI ** (1/τ)). The FEI
+                # band-simplex IS the routing distribution, so K_f must equal
+                # the band count (validated in from_kwargs; re-assert here for
+                # the warm-start / from_weights path that bypasses from_kwargs).
+                if int(cfg.num_experts_freq) != int(cfg.fei_feature_dim):
+                    raise ValueError(
+                        "freq_router_mode='fei' requires num_experts_freq == "
+                        f"fei_feature_dim (got K_f={cfg.num_experts_freq}, "
+                        f"fei_feature_dim={cfg.fei_feature_dim})."
+                    )
+                # Still fire set_fei every step — that's where the FEI simplex
+                # is broadcast to each chimera module's _freq_routing_weights.
+                self.use_fei_router = True
+                logger.info(
+                    "ChimeraHydra freq pool: HARDWIRED FEI gate "
+                    f"(K_f={cfg.num_experts_freq} = fei bands, τ={self.freq_router_tau:.2f}, "
+                    "no learned router / no σ-features / no freq balance loss), "
+                    f"chimera modules={len(self._chimera_aware_loras)}"
                 )
-            # Under centered_gate the freq pool's cold-start is broken by the
-            # disjoint P_bases_f·λ_f residual (not router noise), so zero-init
-            # the router for an exactly-uniform π_f at step 0 → ΔW_f=0. The
-            # "zero-init is a fixed point" warning in FreqRouter's docstring
-            # only applies to the non-centered additive composition.
-            freq_init_std = 0.0 if cfg.chimera_centered_gate else float(
-                cfg.freq_router_init_std
-            )
-            self.freq_router = FreqRouter(
-                input_dim=freq_input_dim,
-                num_freq_experts=int(cfg.num_experts_freq),
-                hidden_dim=int(cfg.router_hidden_dim),
-                tau=float(cfg.router_tau),
-                init_std=freq_init_std,
-                fei_dim=int(cfg.fei_feature_dim),
-                sigma_dim=int(cfg.sigma_feature_dim),
-                apply_layer_norm=bool(cfg.freq_router_layer_norm),
-            )
-            # Force the per-step conditioning hook to fire set_fei every
-            # step (router_conditioning.py reads this flag). Chimera ties
-            # σ + FEI together for the freq router input, so the set_fei
-            # path is where we re-fire FreqRouter.
-            self.use_fei_router = True
-            logger.info(
-                f"ChimeraHydra FreqRouter: input_dim={freq_input_dim} "
-                f"(FEI={cfg.fei_feature_dim} + σ={cfg.sigma_feature_dim}), "
-                f"K_f={cfg.num_experts_freq}, hidden={cfg.router_hidden_dim}, "
-                f"τ={cfg.router_tau:.2f}, init_std={cfg.freq_router_init_std}, "
-                f"LN={self.freq_router.apply_layer_norm}, "
-                f"chimera modules={len(self._chimera_aware_loras)}"
-            )
+            else:
+                freq_input_dim = int(cfg.fei_feature_dim) + int(cfg.sigma_feature_dim)
+                if freq_input_dim <= 0:
+                    raise ValueError(
+                        "use_chimera_hydra=True requires fei_feature_dim + "
+                        f"sigma_feature_dim > 0 for the FreqRouter input (got "
+                        f"FEI={cfg.fei_feature_dim}, σ={cfg.sigma_feature_dim})."
+                    )
+                # Under centered_gate the freq pool's cold-start is broken by the
+                # disjoint P_bases_f·λ_f residual (not router noise), so zero-init
+                # the router for an exactly-uniform π_f at step 0 → ΔW_f=0. The
+                # "zero-init is a fixed point" warning in FreqRouter's docstring
+                # only applies to the non-centered additive composition.
+                freq_init_std = 0.0 if cfg.chimera_centered_gate else float(
+                    cfg.freq_router_init_std
+                )
+                self.freq_router = FreqRouter(
+                    input_dim=freq_input_dim,
+                    num_freq_experts=int(cfg.num_experts_freq),
+                    hidden_dim=int(cfg.router_hidden_dim),
+                    tau=float(cfg.router_tau),
+                    init_std=freq_init_std,
+                    fei_dim=int(cfg.fei_feature_dim),
+                    sigma_dim=int(cfg.sigma_feature_dim),
+                    apply_layer_norm=bool(cfg.freq_router_layer_norm),
+                )
+                # Force the per-step conditioning hook to fire set_fei every
+                # step (router_conditioning.py reads this flag). Chimera ties
+                # σ + FEI together for the freq router input, so the set_fei
+                # path is where we re-fire FreqRouter.
+                self.use_fei_router = True
+                logger.info(
+                    f"ChimeraHydra FreqRouter: input_dim={freq_input_dim} "
+                    f"(FEI={cfg.fei_feature_dim} + σ={cfg.sigma_feature_dim}), "
+                    f"K_f={cfg.num_experts_freq}, hidden={cfg.router_hidden_dim}, "
+                    f"τ={cfg.router_tau:.2f}, init_std={cfg.freq_router_init_std}, "
+                    f"LN={self.freq_router.apply_layer_norm}, "
+                    f"chimera modules={len(self._chimera_aware_loras)}"
+                )
 
         # ChimeraHydra ContentRouter: network-level twin of FreqRouter for
         # the content pool. Built only when ``content_router_source ==
@@ -1573,16 +1602,25 @@ class LoRANetwork(torch.nn.Module):
             )
             else None
         )
+        # Hardwired-FEI freq pool: no router module, broadcast the simplex
+        # directly. freq_router is None in this mode, so it needs its own flag.
+        chimera_fei_active = bool(
+            self.cfg.use_chimera_hydra
+            and getattr(self, "_chimera_aware_loras", None)
+            and getattr(self, "freq_router_mode", "learned") == "fei"
+        )
         if not (
             has_per_layer_fei
             or global_fei_router is not None
             or chimera_freq_router is not None
+            or chimera_fei_active
         ):
             return
         if not (
             self.use_fei_router
             or global_fei_router is not None
             or chimera_freq_router is not None
+            or chimera_fei_active
         ):
             return
 
@@ -1648,6 +1686,19 @@ class LoRANetwork(torch.nn.Module):
             router_in = torch.cat([fei_cast, sigma_feat], dim=-1)
             freq_gates = chimera_freq_router(router_in)
             self.set_freq_routing_weights(freq_gates)
+
+        # ChimeraHydra hardwired-FEI freq pool: π_f = normalize(FEI ** (1/τ)).
+        # No learned router, no σ-feature input — the FEI band-simplex IS the
+        # gate (K_f == fei bands, enforced at construction). π_f is detached
+        # (FEI is detached above) and carries no grad_fn: there are no router
+        # params to receive gradient, and the freq experts learn through their
+        # own weights — a fixed gate analogous to T-LoRA's timestep mask.
+        elif chimera_fei_active:
+            fei_cast = fei.float()
+            if fei_cast.dim() == 1:
+                fei_cast = fei_cast.unsqueeze(0)
+            pi_f = _fei_temperature(fei_cast, float(self.freq_router_tau))
+            self.set_freq_routing_weights(pi_f)
 
     def clear_fei(self) -> None:
         """Reset cached FEI to zeros without rebinding pointers.
@@ -3181,6 +3232,17 @@ class LoRANetwork(torch.nn.Module):
             # when absent preserves pre-LN checkpoint inference.
             metadata["ss_chimera_freq_router_layer_norm"] = (
                 "true" if self.cfg.freq_router_layer_norm else "false"
+            )
+            # Freq routing mode + FEI-gate temperature. "fei" means the freq
+            # pool was routed by the hardwired FEI simplex (no FreqRouter
+            # weights in the state_dict) — the loader must NOT try to rebuild a
+            # FreqRouter and must re-broadcast the simplex at inference. Absent
+            # stamp ⇒ "learned" (every pre-2026-05-27 chimera checkpoint).
+            metadata["ss_chimera_freq_router_mode"] = str(
+                getattr(self, "freq_router_mode", "learned")
+            )
+            metadata["ss_chimera_freq_router_tau"] = str(
+                float(getattr(self, "freq_router_tau", 1.0))
             )
             # ContentRouter source. Default ``"input"`` matches pre-router
             # checkpoints (per-Linear softmax over pooled lx_c lives on
