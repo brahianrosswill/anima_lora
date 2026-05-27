@@ -43,6 +43,27 @@ STRINGS: dict[str, str] = {
         "Text prompts SAM3 looks for. One per line. Defaults to 'speech bubble' "
         "and 'text bubble'."
     ),
+    "preprocess_sam_focus_prompts": "SAM focus prompts (one per line):",
+    "preprocess_sam_focus_prompts_tip": (
+        "Reversed polarity: subjects to KEEP. When set, the mask trains ONLY on "
+        "these subjects and ignores everything else (e.g. 'girl' masks all "
+        "background). Composes with the prompts above — final trainable region "
+        "is the focus subject minus those ignore regions. Leave empty for the "
+        "default ignore-only behaviour."
+    ),
+    "preprocess_sam_rule": "Mask rule",
+    "preprocess_sam_add_rule": "+ Add rule",
+    "preprocess_sam_add_rule_tip": (
+        "Add another mask rule. Each rule targets a subset of images by path "
+        "pattern; rules whose pattern matches an image compose together."
+    ),
+    "preprocess_sam_remove_rule": "Remove rule",
+    "preprocess_sam_rule_path_pattern": "Path pattern (this rule):",
+    "preprocess_sam_rule_path_pattern_tip": (
+        "Which images this rule applies to — an fnmatch glob ('|'-OR-combined) "
+        "on each image's path relative to the dataset root, e.g. 'character_a/*'. "
+        "Empty or '*' matches every image (a catch-all default rule)."
+    ),
     "preprocess_sam_threshold": "SAM threshold (0.0–1.0):",
     "preprocess_sam_threshold_tip": (
         "Minimum confidence for a SAM3 detection to be kept. Lower = more masks "

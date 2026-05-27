@@ -42,6 +42,27 @@ STRINGS: dict[str, str] = {
         "SAM3이 찾을 텍스트 프롬프트. 한 줄에 하나씩. "
         "기본값: 'speech bubble', 'text bubble'."
     ),
+    "preprocess_sam_focus_prompts": "SAM 포커스 프롬프트 (한 줄에 하나):",
+    "preprocess_sam_focus_prompts_tip": (
+        "반전 극성: 유지할 피사체를 지정합니다. 설정하면 마스크는 해당 피사체에만 "
+        "학습이 적용되고 나머지는 모두 무시됩니다 (예: 'girl'을 지정하면 배경 전체가 "
+        "무시 영역이 됩니다). 위의 프롬프트와 합성되어, 최종 학습 영역은 포커스 "
+        "피사체에서 무시 영역을 뺀 부분이 됩니다. 비워두면 기본 무시 전용 동작이 "
+        "적용됩니다."
+    ),
+    "preprocess_sam_rule": "마스크 규칙",
+    "preprocess_sam_add_rule": "+ 규칙 추가",
+    "preprocess_sam_add_rule_tip": (
+        "마스크 규칙을 하나 더 추가합니다. 각 규칙은 경로 패턴으로 이미지 "
+        "서브셋을 대상으로 하며, 패턴이 일치하는 규칙들은 서로 합성됩니다."
+    ),
+    "preprocess_sam_remove_rule": "규칙 삭제",
+    "preprocess_sam_rule_path_pattern": "경로 패턴 (이 규칙):",
+    "preprocess_sam_rule_path_pattern_tip": (
+        "이 규칙이 적용될 이미지를 지정합니다 — 데이터셋 루트 기준 각 이미지 "
+        "경로에 대한 fnmatch 글로브 ('|'로 OR 조합). 예: 'character_a/*'. "
+        "빈 값 또는 '*'는 모든 이미지에 매칭되는 기본 규칙입니다."
+    ),
     "preprocess_sam_threshold": "SAM 임계값 (0.0–1.0):",
     "preprocess_sam_threshold_tip": (
         "SAM3 탐지를 유지할 최소 신뢰도. 낮을수록 더 많은 마스크 "

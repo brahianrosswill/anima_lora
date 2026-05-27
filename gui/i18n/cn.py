@@ -46,6 +46,26 @@ STRINGS: dict[str, str] = {
         "SAM3 要查找的文本提示词,每行一个。"
         "默认值: 'speech bubble' 和 'text bubble'。"
     ),
+    "preprocess_sam_focus_prompts": "SAM 焦点提示词 (每行一个):",
+    "preprocess_sam_focus_prompts_tip": (
+        "反转极性: 指定要保留的主体。设置后,蒙版将仅对该主体进行训练,"
+        "其余全部忽略 (例如 'girl' 会使背景全部被忽略)。"
+        "与上方提示词合成 —— 最终可训练区域为焦点主体去除忽略区域后的部分。"
+        "留空则使用默认的仅忽略模式。"
+    ),
+    "preprocess_sam_rule": "蒙版规则",
+    "preprocess_sam_add_rule": "+ 添加规则",
+    "preprocess_sam_add_rule_tip": (
+        "再添加一条蒙版规则。每条规则通过路径模式定位图像子集,"
+        "模式匹配同一图像的多条规则将相互合成。"
+    ),
+    "preprocess_sam_remove_rule": "删除规则",
+    "preprocess_sam_rule_path_pattern": "路径模式 (此规则):",
+    "preprocess_sam_rule_path_pattern_tip": (
+        "指定此规则适用的图像 —— 以数据集根目录为基准对各图像路径进行"
+        "fnmatch 匹配 ('|' 作 OR 组合)。例: 'character_a/*'。"
+        "留空或 '*' 可匹配所有图像 (通配默认规则)。"
+    ),
     "preprocess_sam_threshold": "SAM 阈值 (0.0–1.0):",
     "preprocess_sam_threshold_tip": (
         "保留 SAM3 检测结果的最低置信度。越低 = 蒙版越多 "

@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -119,17 +119,48 @@ class _IndentedListDumper(yaml.SafeDumper):
         return super().increase_indent(flow, False)
 
 
+def _load_rules(sam_yaml: dict) -> list[dict]:
+    """Normalize either schema into a list of per-card rule dicts.
+
+    A ``rules:`` array is returned card-for-card (per-rule threshold/dilate
+    fall back to the top-level values). A flat config (no ``rules:`` key)
+    collapses to one catch-all card carrying the top-level prompts.
+    """
+    default_threshold = float(sam_yaml.get("threshold", DEFAULT_SAM_THRESHOLD))
+    default_dilate = int(sam_yaml.get("dilate", DEFAULT_SAM_DILATE))
+    raw = sam_yaml.get("rules")
+    if raw is None:
+        return [
+            {
+                "path_pattern": "",
+                "prompts": sam_yaml.get("prompts") or list(DEFAULT_SAM_PROMPTS),
+                "focus_prompts": sam_yaml.get("focus_prompts") or [],
+                "threshold": default_threshold,
+                "dilate": default_dilate,
+            }
+        ]
+    return [
+        {
+            "path_pattern": r.get("path_pattern") or "",
+            "prompts": r.get("prompts") or [],
+            "focus_prompts": r.get("focus_prompts") or [],
+            "threshold": float(r.get("threshold", default_threshold)),
+            "dilate": int(r.get("dilate", default_dilate)),
+        }
+        for r in raw
+    ]
+
+
 def _save_sam_yaml(
-    prompts: list[str],
-    threshold: float,
-    dilate: int,
+    rules: list[dict],
     path_pattern: str = DEFAULT_MASK_PATH_PATTERN,
 ) -> None:
     SAM_YAML.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "prompts": prompts,
-        "threshold": threshold,
-        "dilate": dilate,
+        # Each rule routes a subset of images (by path_pattern) to its prompt
+        # set; `prompts` mask OUT, `focus_prompts` keep ONLY. Matching rules
+        # compose. See scripts/preprocess/generate_masks.py for the full rule.
+        "rules": rules,
         # Read by scripts/tasks/masking.py and forwarded to BOTH the SAM and
         # MIT backends; "*" (the default) masks every resized image.
         "path_pattern": path_pattern or DEFAULT_MASK_PATH_PATTERN,
@@ -140,9 +171,9 @@ def _save_sam_yaml(
         default_flow_style=False,
         sort_keys=False,
     )
-    # Match the canonical layout's blank line between the prompts list and
-    # the scalar settings.
-    text = text.replace("\nthreshold:", "\n\nthreshold:", 1)
+    # Blank line before the trailing global path_pattern, matching the
+    # canonical layout's separation between the list and the scalar settings.
+    text = text.replace("\npath_pattern:", "\n\npath_pattern:", 1)
     SAM_YAML.write_text(text, encoding="utf-8")
 
 
@@ -164,6 +195,107 @@ def _count_resized() -> int:
         for p in RESIZED_DIR.rglob("*")
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     )
+
+
+class _RuleCard(QGroupBox):
+    """One SAM mask rule editor: path_pattern + prompts/focus + threshold/dilate.
+
+    ``prompts`` mask OUT (ignored in the loss); ``focus_prompts`` keep ONLY
+    that subject (reversed polarity). An empty / ``*`` path_pattern is a
+    catch-all. Emits ``removed(self)`` when its Remove button is clicked.
+    """
+
+    removed = Signal(object)
+
+    def __init__(self, rule: dict, help_cb):
+        super().__init__(t("preprocess_sam_rule"))
+        self._help_cb = help_cb
+        form = QFormLayout(self)
+
+        self.path_pattern_edit = QLineEdit(rule.get("path_pattern", ""))
+        self.path_pattern_edit.setPlaceholderText("*")
+        self.path_pattern_edit.setToolTip(t("preprocess_sam_rule_path_pattern_tip"))
+        form.addRow(
+            self._label(
+                "sam_rule_path_pattern", t("preprocess_sam_rule_path_pattern")
+            ),
+            self.path_pattern_edit,
+        )
+
+        self.prompts_edit = QPlainTextEdit("\n".join(rule.get("prompts") or []))
+        self.prompts_edit.setMaximumHeight(70)
+        self.prompts_edit.setStyleSheet("font-family:monospace;")
+        self.prompts_edit.setToolTip(t("preprocess_sam_prompts_tip"))
+        form.addRow(
+            self._label("sam_prompts", t("preprocess_sam_prompts")), self.prompts_edit
+        )
+
+        self.focus_prompts_edit = QPlainTextEdit(
+            "\n".join(rule.get("focus_prompts") or [])
+        )
+        self.focus_prompts_edit.setMaximumHeight(70)
+        self.focus_prompts_edit.setStyleSheet("font-family:monospace;")
+        self.focus_prompts_edit.setToolTip(t("preprocess_sam_focus_prompts_tip"))
+        form.addRow(
+            self._label("sam_focus_prompts", t("preprocess_sam_focus_prompts")),
+            self.focus_prompts_edit,
+        )
+
+        self.threshold_edit = QLineEdit(
+            f"{float(rule.get('threshold', DEFAULT_SAM_THRESHOLD)):g}"
+        )
+        self.threshold_edit.setToolTip(t("preprocess_sam_threshold_tip"))
+        form.addRow(
+            self._label("sam_threshold", t("preprocess_sam_threshold")),
+            self.threshold_edit,
+        )
+
+        self.dilate_spin = QSpinBox()
+        self.dilate_spin.setRange(0, 64)
+        self.dilate_spin.setValue(int(rule.get("dilate", DEFAULT_SAM_DILATE)))
+        self.dilate_spin.wheelEvent = lambda e: e.ignore()
+        form.addRow(self._label("sam_dilate", t("preprocess_dilate")), self.dilate_spin)
+
+        self.remove_btn = QPushButton(t("preprocess_sam_remove_rule"))
+        self.remove_btn.clicked.connect(lambda: self.removed.emit(self))
+        form.addRow("", self.remove_btn)
+
+    def _label(self, key: str, text: str) -> ClickableLabel:
+        """Clickable field label that routes this field's help to the panel."""
+        lbl = ClickableLabel(text)
+        lbl.setStyleSheet("color:#f0f0f0; text-decoration: underline dotted;")
+        help_text = preprocess_field_help(key)
+        lbl.clicked.connect(lambda _t=text, _h=help_text: self._help_cb(_t, _h))
+        return lbl
+
+    def to_dict(self) -> dict:
+        """Serialize to a rule dict. Raises ValueError on an unparseable threshold."""
+        text = self.threshold_edit.text().strip()
+        try:
+            threshold = float(text)
+        except ValueError as exc:
+            raise ValueError(text) from exc
+        rule: dict = {}
+        pattern = self.path_pattern_edit.text().strip()
+        if pattern and pattern != "*":
+            rule["path_pattern"] = pattern
+        prompts = [
+            line.strip()
+            for line in self.prompts_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        if prompts:
+            rule["prompts"] = prompts
+        focus = [
+            line.strip()
+            for line in self.focus_prompts_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        if focus:
+            rule["focus_prompts"] = focus
+        rule["threshold"] = threshold
+        rule["dilate"] = int(self.dilate_spin.value())
+        return rule
 
 
 class PreprocessingTab(LazyTabMixin, QWidget):
@@ -255,9 +387,10 @@ class PreprocessingTab(LazyTabMixin, QWidget):
 
         settings = _load_settings()
         sam_yaml = _load_sam_yaml()
-        sam_prompts = sam_yaml.get("prompts") or list(DEFAULT_SAM_PROMPTS)
-        sam_threshold = float(sam_yaml.get("threshold", DEFAULT_SAM_THRESHOLD))
-        sam_dilate = int(sam_yaml.get("dilate", DEFAULT_SAM_DILATE))
+        # Normalize either schema (flat or rules array) into a list of rule
+        # dicts, one per editor card below. Flat configs collapse to a single
+        # catch-all card; saving always re-emits the rules form.
+        sam_rules = _load_rules(sam_yaml)
         mask_path_pattern = sam_yaml.get("path_pattern") or DEFAULT_MASK_PATH_PATTERN
 
         # Text caching group
@@ -293,6 +426,9 @@ class PreprocessingTab(LazyTabMixin, QWidget):
 
         # SAM masking group
         sam_box = QGroupBox(t("preprocess_masking_sam"))
+        sam_outer = QVBoxLayout()
+
+        # Top form: run toggle + global scope (forwarded to BOTH backends).
         sam_form = QFormLayout()
         self.run_sam_mask_chk = QCheckBox(t("preprocess_run_sam_mask"))
         self.run_sam_mask_chk.setToolTip(t("preprocess_run_sam_mask_tip"))
@@ -303,30 +439,6 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             self._field_label("run_sam_mask", t("preprocess_run_sam_mask")),
             self.run_sam_mask_chk,
         )
-
-        self.sam_prompts_edit = QPlainTextEdit("\n".join(sam_prompts))
-        self.sam_prompts_edit.setMaximumHeight(80)
-        self.sam_prompts_edit.setStyleSheet("font-family:monospace;")
-        sam_form.addRow(
-            self._field_label("sam_prompts", t("preprocess_sam_prompts")),
-            self.sam_prompts_edit,
-        )
-
-        self.sam_threshold_edit = QLineEdit(f"{sam_threshold:g}")
-        sam_form.addRow(
-            self._field_label("sam_threshold", t("preprocess_sam_threshold")),
-            self.sam_threshold_edit,
-        )
-
-        self.sam_dilate_spin = QSpinBox()
-        self.sam_dilate_spin.setRange(0, 64)
-        self.sam_dilate_spin.setValue(sam_dilate)
-        self.sam_dilate_spin.wheelEvent = lambda e: e.ignore()
-        sam_form.addRow(
-            self._field_label("sam_dilate", t("preprocess_dilate")),
-            self.sam_dilate_spin,
-        )
-
         # Stored in sam_mask.yaml but scopes BOTH backends — masking.py reads
         # it and forwards --path-pattern to SAM and MIT alike.
         self.mask_path_pattern_edit = QLineEdit(mask_path_pattern)
@@ -336,7 +448,23 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             self._field_label("mask_path_pattern", t("preprocess_mask_path_pattern")),
             self.mask_path_pattern_edit,
         )
-        sam_box.setLayout(sam_form)
+        sam_outer.addLayout(sam_form)
+
+        # One card per rule: each routes a subset of images (by path_pattern)
+        # to its own prompt set. Rules whose pattern matches an image compose.
+        self._rule_cards: list[_RuleCard] = []
+        self._rules_layout = QVBoxLayout()
+        self._rules_layout.setContentsMargins(0, 0, 0, 0)
+        sam_outer.addLayout(self._rules_layout)
+        for rule in sam_rules:
+            self._add_rule_card(rule)
+
+        self.add_rule_btn = QPushButton(t("preprocess_sam_add_rule"))
+        self.add_rule_btn.setToolTip(t("preprocess_sam_add_rule_tip"))
+        self.add_rule_btn.clicked.connect(lambda: self._add_rule_card())
+        sam_outer.addWidget(self.add_rule_btn)
+
+        sam_box.setLayout(sam_outer)
         form_layout.addWidget(sam_box)
 
         # MIT masking group
@@ -461,6 +589,48 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         ]
         self.status_lbl.setText("  |  ".join(lines))
 
+    # ── SAM rule cards ─────────────────────────────────────────────
+
+    def _add_rule_card(self, rule: dict | None = None) -> None:
+        card = _RuleCard(rule or {}, self._show_field_help)
+        card.removed.connect(self._remove_rule_card)
+        self._rule_cards.append(card)
+        self._rules_layout.addWidget(card)
+        self._update_remove_buttons()
+
+    def _remove_rule_card(self, card: _RuleCard) -> None:
+        if len(self._rule_cards) <= 1:
+            return  # keep at least one rule
+        self._rule_cards.remove(card)
+        self._rules_layout.removeWidget(card)
+        card.deleteLater()
+        self._update_remove_buttons()
+
+    def _update_remove_buttons(self) -> None:
+        # A lone rule can't be removed (would leave an empty config).
+        sole = len(self._rule_cards) <= 1
+        for card in self._rule_cards:
+            card.remove_btn.setEnabled(not sole)
+
+    def _collect_rules(self) -> list[dict] | None:
+        """Serialize every rule card, or None if one fails validation."""
+        rules: list[dict] = []
+        for card in self._rule_cards:
+            try:
+                rules.append(card.to_dict())
+            except ValueError as bad_threshold:
+                QMessageBox.warning(
+                    self,
+                    t("error"),
+                    t(
+                        "preprocess_invalid_float",
+                        field=t("preprocess_sam_threshold"),
+                        value=str(bad_threshold),
+                    ),
+                )
+                return None
+        return rules
+
     # ── Settings persistence ───────────────────────────────────────
 
     def _parse_float(self, text: str, field_label: str) -> float | None:
@@ -482,12 +652,6 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         )
         if dropout is None:
             return False
-        sam_threshold = self._parse_float(
-            self.sam_threshold_edit.text().strip(),
-            t("preprocess_sam_threshold"),
-        )
-        if sam_threshold is None:
-            return False
         mit_threshold = self._parse_float(
             self.mit_threshold_edit.text().strip(),
             t("preprocess_mit_threshold"),
@@ -495,23 +659,14 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         if mit_threshold is None:
             return False
 
-        prompts = [
-            line.strip()
-            for line in self.sam_prompts_edit.toPlainText().splitlines()
-            if line.strip()
-        ]
-        if not prompts:
-            prompts = list(DEFAULT_SAM_PROMPTS)
+        rules = self._collect_rules()
+        if rules is None:
+            return False
 
         mask_path_pattern = (
             self.mask_path_pattern_edit.text().strip() or DEFAULT_MASK_PATH_PATTERN
         )
-        _save_sam_yaml(
-            prompts,
-            sam_threshold,
-            int(self.sam_dilate_spin.value()),
-            mask_path_pattern,
-        )
+        _save_sam_yaml(rules, mask_path_pattern)
         _save_settings(
             {
                 "caption_shuffle_variants": int(self.shuffle_spin.value()),

@@ -44,6 +44,27 @@ STRINGS: dict[str, str] = {
         "SAM3 が検索するテキストプロンプト。1行1件。"
         "デフォルトは 'speech bubble' と 'text bubble'。"
     ),
+    "preprocess_sam_focus_prompts": "SAM フォーカスプロンプト (1行1件):",
+    "preprocess_sam_focus_prompts_tip": (
+        "逆極性: 残したい被写体を指定します。設定すると、マスクはその被写体のみを"
+        "学習対象とし、それ以外はすべて無視されます (例: 'girl' を指定すると背景全体が"
+        "無視されます)。上のプロンプトと合成され、最終的な学習領域はフォーカスした"
+        "被写体から無視領域を除いた部分になります。空欄にするとデフォルトの"
+        "無視専用の動作になります。"
+    ),
+    "preprocess_sam_rule": "マスクルール",
+    "preprocess_sam_add_rule": "+ ルール追加",
+    "preprocess_sam_add_rule_tip": (
+        "マスクルールをもう一つ追加します。各ルールはパスパターンで画像の"
+        "サブセットを対象とし、パターンが一致するルールは互いに合成されます。"
+    ),
+    "preprocess_sam_remove_rule": "ルール削除",
+    "preprocess_sam_rule_path_pattern": "パスパターン (このルール):",
+    "preprocess_sam_rule_path_pattern_tip": (
+        "このルールを適用する画像を指定します — データセットルート基準の各画像"
+        "パスに対する fnmatch グロブ ('|' で OR 結合)。例: 'character_a/*'。"
+        "空欄または '*' はすべての画像にマッチするキャッチオール規則です。"
+    ),
     "preprocess_sam_threshold": "SAM しきい値 (0.0–1.0):",
     "preprocess_sam_threshold_tip": (
         "SAM3 の検出結果を採用するための最小信頼度。"
