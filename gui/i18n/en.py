@@ -9,6 +9,7 @@ STRINGS: dict[str, str] = {
     "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
+    "tab_turbo": "Turbo",
     "tab_methods": "Methods",
     "tab_images": "Dataset",
     "tab_merge": "Merge",

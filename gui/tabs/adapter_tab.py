@@ -369,3 +369,23 @@ class SPDTrainTab(_AdapterTab):
     TRAIN_METHOD = "spd"
     REQUIRE_PE = False
     METHOD_LABEL = "SPD"
+
+
+class TurboTrainTab(_AdapterTab):
+    # Turbo Anima: a 4-step LoRA student distilled from the 28-step CFG=4
+    # teacher via Decoupled-Hybrid DMD2. Like SPD it trains on the SAME data +
+    # cache as ordinary LoRA training (image_dataset/ → post_image_dataset/lora/,
+    # VAE + TE only — no PE), through the bespoke loop `make exp-turbo`
+    # (scripts/distill_turbo.py, NOT train.py), so it has no dataset of its own:
+    # "Preprocess" just runs `make preprocess`. Output anima_turbo.safetensors is
+    # a normal LoRA — infer at 4 steps cfg=1.0 (`make exp-test-turbo`). The
+    # turbo.toml schema is bespoke/sectioned but its flat output_name/output_dir
+    # top-level keys are enough for the resume prompt. See
+    # docs/proposal/turbo_anima_dmd_lora.md.
+    SOURCE_DIR = "image_dataset"
+    CACHE_DIR = "post_image_dataset/lora"
+    PREPROCESS_TASK = "preprocess"
+    TRAIN_TASK = "exp-turbo"
+    TRAIN_METHOD = "turbo"
+    REQUIRE_PE = False
+    METHOD_LABEL = "Turbo"

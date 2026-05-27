@@ -32,7 +32,12 @@ from gui.i18n import (
     save_language,
     t,
 )
-from gui.tabs.adapter_tab import EasyControlTab, IPAdapterTab, SPDTrainTab
+from gui.tabs.adapter_tab import (
+    EasyControlTab,
+    IPAdapterTab,
+    SPDTrainTab,
+    TurboTrainTab,
+)
 from gui.tabs.config_tab import ConfigTab
 from gui.tabs.image_tab import ImageViewerTab
 from gui.tabs.merge_tab import MergeTab
@@ -297,6 +302,7 @@ class MainWindow(QMainWindow):
         self.experimental_tabs.addTab(IPAdapterTab(), t("tab_ip_adapter"))
         self.experimental_tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
         self.experimental_tabs.addTab(SPDTrainTab(), t("tab_spd"))
+        self.experimental_tabs.addTab(TurboTrainTab(), t("tab_turbo"))
 
         self.tab_stack = QStackedWidget()
         self.tab_stack.addWidget(self.tabs)
