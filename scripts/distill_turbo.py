@@ -15,6 +15,12 @@ One frozen DiT serves three roles via per-network ``set_enabled`` toggling:
     student view  — student on, fake off (v_student for x_pred)
     fake view     — student off, fake on (s_fake_cond_dm)
 
+Before the main loop, an optional fake (critic) head-start runs
+``fake_warmup_steps`` fake-only updates (step 5 alone) against the student's
+init ≈ teacher x_pred distribution, so the critic is calibrated before the
+student LR warmup ramps to full strength — this removes the early
+grad_signal_rms spike (~step 50). The student is untouched during it.
+
 Per training step (single-call DMD2 — no inference sampler unroll at train
 time, gradient is one ODE step from the sampled generator-t):
 
@@ -211,6 +217,19 @@ def main():
         "(optim.fake_steps_per_student_step, default 1).",
     )
     parser.add_argument(
+        "--fake_warmup_steps",
+        type=int,
+        default=-1,
+        help="Fake-only (critic head-start) updates run BEFORE the main loop. "
+        "The student LR warmup finishes at ~0.02·iterations, so the student "
+        "starts full-strength steps while the zero-init fake/critic LoRA is "
+        "still ≈ the teacher → a large, misaligned delta_dm and an early "
+        "grad_signal_rms spike (~step 50). Pre-training the fake net against the "
+        "student's (init ≈ teacher) x_pred distribution calibrates it first. "
+        "Run at full fake_lr; the fake scheduler is untouched. Default: TOML "
+        "(optim.fake_warmup_steps, default 0 = off).",
+    )
+    parser.add_argument(
         "--alpha",
         type=float,
         default=-1.0,
@@ -330,6 +349,9 @@ def main():
     alpha_warmup_steps = int(
         pick(args.alpha_warmup_steps, "optim.alpha_warmup_steps", 1000)
     )
+    fake_warmup_steps = int(
+        pick(args.fake_warmup_steps, "optim.fake_warmup_steps", 0)
+    )
     weight_decay = float(_flatten(cfg, "optim.weight_decay", 0.0))
     grad_clip = float(_flatten(cfg, "optim.grad_clip", 1.0))
 
@@ -441,10 +463,16 @@ def main():
         )
 
     student_sched = _make_scheduler(student_opt, iterations, student_lr)
-    # Fake gets ``fake_steps_per_student_step`` updates per outer iteration.
-    # Cosine should anneal across the actual update count, not the student's.
+    # Fake gets ``fake_steps_per_student_step`` updates per outer iteration, plus
+    # ``fake_warmup_steps`` head-start iterations BEFORE the main loop. The fake
+    # scheduler is stepped through both phases, so its total update count — and
+    # hence the ``0.02·total`` LR warmup span — is computed over
+    # ``iterations + fake_warmup_steps``. The fake LR warmup therefore overlaps
+    # the head-start (the fake enters the main loop already calibrated AND at
+    # full LR), and the cosine still lands at the end of the main loop. The
+    # student schedule is independent: ``0.02·iterations``, no head-start offset.
     fake_sched = _make_scheduler(
-        fake_opt, iterations * fake_steps_per_student_step, fake_lr
+        fake_opt, (iterations + fake_warmup_steps) * fake_steps_per_student_step, fake_lr
     )
 
     # ---------------- Dataset ----------------
@@ -511,6 +539,7 @@ def main():
                     "student_steps": student_steps,
                     "teacher_cfg": teacher_cfg,
                     "alpha_warmup_steps": alpha_warmup_steps,
+                    "fake_warmup_steps": fake_warmup_steps,
                     "student_lr": student_lr,
                     "fake_lr": fake_lr,
                     "fake_steps_per_student_step": fake_steps_per_student_step,
@@ -625,6 +654,82 @@ def main():
     acc_dm_to_ca = _z()
     acc_ca_steps = _z()
     running_alpha = 0.0  # pure-Python; no GPU work
+
+    # ---------------- Fake (critic) head-start ----------------
+    # DMD2 generator-outruns-critic transient: the student LR warmup completes
+    # at ~0.02·iterations, so the student takes its first full-strength steps
+    # while the zero-init fake LoRA is still ≈ the teacher (delta_dm large +
+    # misaligned) → the early grad_signal_rms / v_student_rms spike (~step 50).
+    # Pre-train the fake net for `fake_warmup_steps` fake-only updates against
+    # the student's (init ≈ teacher) x_pred distribution so the critic is
+    # calibrated before the student moves. The student is left untouched
+    # (no-grad forward, no student optimizer step). The fake scheduler IS
+    # stepped through this phase (it was sized over ``iterations +
+    # fake_warmup_steps``), so the fake's 0.02 LR warmup overlaps the head-start
+    # and the fake enters the main loop at full LR with a calibrated critic.
+    if fake_warmup_steps > 0:
+        logger.info(f"fake (critic) head-start: {fake_warmup_steps} fake-only updates")
+        for cw in tqdm(range(fake_warmup_steps), desc="fake-warmup"):
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(dataloader)
+                batch = next(data_iter)
+            latents, crossattn_emb = batch[1], batch[2]
+            latents = latents.to(device, dtype=dtype, non_blocking=True)
+            crossattn_emb = crossattn_emb.to(device, dtype=dtype, non_blocking=True)
+            B = latents.shape[0]
+            torch.compiler.cudagraph_mark_step_begin()
+
+            if t_distribution == "uniform":
+                t = torch.rand(B, device=device, dtype=dtype)
+            else:
+                t = torch.sigmoid(
+                    sigmoid_scale * torch.randn(B, device=device, dtype=dtype)
+                )
+            eps = torch.randn_like(latents)
+            t_e = t.view(B, 1, 1, 1)
+            x_t = (1.0 - t_e) * latents + t_e * eps
+            # Student (init) x_pred — no grad: the student is not trained here.
+            with torch.no_grad():
+                v_student = _forward(
+                    "student", x_t, t, crossattn_emb, no_grad=True
+                ).squeeze(2)
+                x_pred_d = (x_t.squeeze(2) - t_e * v_student).detach()
+
+            cw_loss = torch.zeros((), device=device)
+            for _ in range(fake_steps_per_student_step):
+                tau_fake = (
+                    torch.rand(B, device=device, dtype=dtype)
+                    if t_distribution == "uniform"
+                    else torch.sigmoid(
+                        sigmoid_scale * torch.randn(B, device=device, dtype=dtype)
+                    )
+                )
+                eps_fake = torch.randn_like(x_pred_d)
+                x_t_fake = renoise(x_pred_d, tau_fake, eps_fake).requires_grad_()
+                v_fake = _forward(
+                    "fake", x_t_fake, tau_fake, crossattn_emb, no_grad=False
+                ).squeeze(2)
+                target_v_fake = eps_fake - x_pred_d
+                fake_loss = nn.functional.mse_loss(
+                    v_fake.float(), target_v_fake.float()
+                )
+                fake_loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        turbo.fake_params(), max_norm=grad_clip
+                    )
+                fake_opt.step()
+                fake_opt.zero_grad(set_to_none=True)
+                fake_sched.step()
+                cw_loss = cw_loss + fake_loss.detach()
+            if writer is not None and (cw + 1) % log_interval == 0:
+                writer.add_scalar(
+                    "warmup/fake_loss",
+                    (cw_loss / fake_steps_per_student_step).item(),
+                    cw + 1,
+                )
 
     for step in progress:
         try:

@@ -101,6 +101,7 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | `[dmd]` | `norm_floor` | `0.05` | clamp_min for the (b) denominator; inert under (a) |
 | `[optim]` | `student_lr` / `fake_lr` | `2e-5` / `3e-5` | fake runs hotter |
 | `[optim]` | `fake_steps_per_student_step` | `2` | keep the fake ahead of the moving x_pred |
+| `[optim]` | `fake_warmup_steps` | `100` | fake (critic) head-start before the main loop — kills the early grad_signal_rms spike (~step 50); `0` = off |
 | `[optim]` | `alpha_warmup_steps` | `500` | linear α_eff ramp 1→teacher_cfg |
 | `[optim]` | `grad_clip` | `1.0` | grad-norm cap (both nets) |
 | `[sampling]` | `t_distribution` | `uniform` | or `sigmoid` |

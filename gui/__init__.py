@@ -334,6 +334,16 @@ def _save(p: Path, d: dict):
     p.write_text(toml.dumps(d), encoding="utf-8")
 
 
+def _dataset_lint_sources(variant: str):
+    """The (path, label) pairs the dataset-blueprint linter scans: shared
+    ``base.toml`` plus the active variant file. ``label`` is what shows up in
+    the banner and must match the ``source=`` passed to ``lint_dataset_sections``."""
+    return (
+        (CONFIGS_DIR / "base.toml", "base.toml"),
+        (variant_path(variant), f"gui-methods/{variant}.toml"),
+    )
+
+
 def lint_variant_configs(variant: str) -> list:
     """Scan the dataset-blueprint sections of ``base.toml`` and the variant
     file for keys the trainer's validator will reject (e.g. a stale
@@ -347,10 +357,7 @@ def lint_variant_configs(variant: str) -> list:
     from library.config.dataset_keys import lint_dataset_sections
 
     issues: list = []
-    for path, label in (
-        (CONFIGS_DIR / "base.toml", "base.toml"),
-        (variant_path(variant), f"gui-methods/{variant}.toml"),
-    ):
+    for path, label in _dataset_lint_sources(variant):
         if not path.exists():
             continue
         try:
@@ -360,6 +367,52 @@ def lint_variant_configs(variant: str) -> list:
             continue
         issues.extend(lint_dataset_sections(raw, source=label, text=text))
     return issues
+
+
+def remove_unknown_dataset_keys(variant: str) -> list[str]:
+    """Surgically delete the lines flagged by :func:`lint_variant_configs` from
+    their source files, returning a list of ``"key (label)"`` descriptions of
+    what was removed.
+
+    Comment- and formatting-preserving on purpose: ``base.toml`` is heavily
+    commented and the flat ``_save`` round-trips through ``toml.dumps`` (which
+    drops all comments), so we edit the raw text line-by-line instead. Each
+    flagged line carries its own line number from the linter; we delete in
+    descending order so earlier deletions don't shift later targets, and we
+    re-verify the line still starts with ``<key> =`` before cutting it.
+    """
+    from library.config.dataset_keys import lint_dataset_sections
+
+    removed: list[str] = []
+    for path, label in _dataset_lint_sources(variant):
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            raw = toml.loads(text)
+        except (OSError, toml.TomlDecodeError):
+            continue
+        issues = lint_dataset_sections(raw, source=label, text=text)
+        targets = sorted(
+            (i for i in issues if i.line is not None),
+            key=lambda i: i.line,
+            reverse=True,
+        )
+        if not targets:
+            continue
+        lines = text.splitlines(keepends=True)
+        changed = False
+        for issue in targets:
+            idx = issue.line - 1
+            if 0 <= idx < len(lines) and re.match(
+                rf"^\s*{re.escape(issue.key)}\s*=", lines[idx]
+            ):
+                del lines[idx]
+                removed.append(f"{issue.key} ({label})")
+                changed = True
+        if changed:
+            path.write_text("".join(lines), encoding="utf-8")
+    return removed
 
 
 def merged_method_preset(method: str, preset: str) -> tuple[dict, dict[str, str]]:

@@ -51,6 +51,7 @@ from gui import (
     list_gui_variants,
     list_methods,
     merged_gui_variant_preset,
+    remove_unknown_dataset_keys,
     variant_path,
 )
 from gui import daemon as gui_daemon
@@ -201,16 +202,27 @@ class ConfigTab(QWidget):
         # Config-health banner: flags dataset-blueprint keys the trainer will
         # reject (e.g. a stale `resolution` in base.toml's [[datasets]]) before
         # a run dies in the daemon with a raw voluptuous traceback. Rebuilt on
-        # every _reload; hidden when the config is clean.
+        # every _reload; hidden when the config is clean. These keys live in the
+        # `[[datasets]]` sections, which aren't rendered as form fields, so the
+        # "Remove" button is the only in-GUI way to delete them.
+        self._config_warning_box = QWidget()
+        self._config_warning_box.setStyleSheet(
+            "background:#5c1a1a;border:1px solid #a33;border-radius:4px;"
+        )
+        _cwl = QHBoxLayout(self._config_warning_box)
+        _cwl.setContentsMargins(10, 8, 10, 8)
         self._config_warning = QLabel()
         self._config_warning.setWordWrap(True)
         self._config_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._config_warning.setStyleSheet(
-            "background:#5c1a1a;color:#ffd9d9;border:1px solid #a33;"
-            "border-radius:4px;padding:8px 10px;font-size:12px;"
+            "color:#ffd9d9;border:0;font-size:12px;"
         )
-        self._config_warning.setVisible(False)
-        lay.addWidget(self._config_warning)
+        _cwl.addWidget(self._config_warning, 1)
+        self._config_warning_btn = QPushButton(t("config_remove_keys_btn"))
+        self._config_warning_btn.clicked.connect(self._remove_unknown_keys)
+        _cwl.addWidget(self._config_warning_btn, 0, Qt.AlignTop)
+        self._config_warning_box.setVisible(False)
+        lay.addWidget(self._config_warning_box)
 
         self.progress = make_progress_bar()
         self._progress_tracker = TqdmProgressTracker(self.progress)
@@ -474,10 +486,10 @@ class ConfigTab(QWidget):
         except Exception:
             # Linting must never break the form; a config that won't even parse
             # is surfaced elsewhere (Save / load chain).
-            self._config_warning.setVisible(False)
+            self._config_warning_box.setVisible(False)
             return
         if not issues:
-            self._config_warning.setVisible(False)
+            self._config_warning_box.setVisible(False)
             return
         lines = "<br>".join(
             f"&nbsp;&nbsp;• <b>{html.escape(i.key)}</b> in "
@@ -488,7 +500,36 @@ class ConfigTab(QWidget):
         self._config_warning.setText(
             f"⚠ {t('config_bad_keys_header')}<br>{lines}"
         )
-        self._config_warning.setVisible(True)
+        self._config_warning_box.setVisible(True)
+
+    def _remove_unknown_keys(self) -> None:
+        """Delete the flagged dataset-blueprint keys from their source files.
+        These keys aren't form-editable (the `[[datasets]]` sections are skipped
+        by the flat merge), so this is the GUI's only handle on them. Surgical
+        line-delete preserves comments — see ``remove_unknown_dataset_keys``."""
+        variant = self._current_variant()
+        issues = lint_variant_configs(variant)
+        if not issues:
+            self._refresh_config_warnings(variant)
+            return
+        listing = "\n".join(f"  • {i.key}  ({i.location})" for i in issues)
+        if (
+            QMessageBox.question(
+                self,
+                t("config_remove_keys_btn"),
+                t("config_remove_keys_confirm", n=len(issues), keys=listing),
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        try:
+            removed = remove_unknown_dataset_keys(variant)
+        except Exception as e:
+            QMessageBox.warning(self, t("error"), str(e))
+            return
+        self._reload()  # rebuilds the form + re-runs the banner against disk
+        if not removed:
+            QMessageBox.warning(self, t("error"), t("config_remove_keys_none"))
 
     # ── Dirty tracking ──
 
