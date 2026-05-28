@@ -8,7 +8,7 @@
 # LoRA — load it through the standard inference path with --infer_steps 4 --cfg 1.0
 # (CFG is baked into the student during distillation).
 
-output_name = "anima_turbo_E"
+output_name = "anima_turbo_F"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -21,7 +21,7 @@ use_custom_down_autograd = true
 # Masked loss (student-only): when true, the per-image foreground mask multiplies
 # the student DMD2 gradient so distribution-matching focuses on the subject;
 # the fake/critic regression is left full-frame.
-use_masked_loss = true
+use_masked_loss = false
 
 [network]
 student_rank = 64

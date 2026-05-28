@@ -307,10 +307,19 @@ def main():
             delta_cfg = v_real_cond_ca - v_real_uncond_ca
 
             if cfg.ca_band_weight_enabled:
+                # Item 2 measurement fix (see item2_diagnosis.md): one extra
+                # no-grad teacher forward at the student's (x_t, t, c) so the
+                # FEI gap is computed at the same sampler time as x_pred.
+                # No uncond view needed — we only need x0 at t for FEI, not
+                # the CFG direction.
+                v_teacher_at_t = _forward(
+                    "teacher", x_t.detach(), t, crossattn_emb, no_grad=True
+                ).squeeze(2)
                 delta_cfg, band_diag = apply_ca_band_deficit(
                     delta_cfg,
-                    x_renoised_ca=x_renoised_ca,
-                    v_real_cond_ca=v_real_cond_ca,
+                    x_t=x_t.detach(),
+                    v_teacher_at_t=v_teacher_at_t,
+                    t=t,
                     x_pred=x_pred,
                     tau_ca=tau_ca,
                     beta=cfg.ca_band_beta,

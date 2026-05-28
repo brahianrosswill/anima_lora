@@ -3,6 +3,21 @@
 Reweights δ_cfg by where the student's x0 FEI lags the teacher's. Per Phase 0
 (turbo_C, n=90) ``w_high`` is the active arm and ``w_low`` stays ≈ 1, but both
 branches are wired because a future student's failure mode may flip.
+
+The FEI gap is measured at the **student's sampler time t** — see
+``item2_diagnosis.md``. The first wiring measured it at τ_ca on the
+teacher's denoise of the renoised x_pred, which introduced a structural
+~0.08 LP shift (the teacher's denoise smooths its input toward the data
+mean, which is LP-biased) — that floor masked Phase 0's ≈ 0.012 lever and
+inverted the active-arm sign. The fix is a single extra no-grad teacher
+forward at ``(x_t, t, c)`` so both x0 estimates live at the same σ:
+
+* ``x0_T = x_t − t · v_teacher_at_t``
+* ``x0_S = x_pred = x_t − t · v_student``
+
+When the student LoRA is near zero (early steps), ``v_student ≈
+v_teacher_at_t`` so both deficits should collapse to ≈ 0 — the on-init
+sanity check the first wiring failed.
 """
 
 from __future__ import annotations
@@ -35,8 +50,9 @@ class BandDeficitDiag:
 def apply_ca_band_deficit(
     delta_cfg: torch.Tensor,
     *,
-    x_renoised_ca: torch.Tensor,
-    v_real_cond_ca: torch.Tensor,
+    x_t: torch.Tensor,
+    v_teacher_at_t: torch.Tensor,
+    t: torch.Tensor,
     x_pred: torch.Tensor,
     tau_ca: torch.Tensor,
     beta: float,
@@ -51,25 +67,30 @@ def apply_ca_band_deficit(
 
     Inputs:
 
-    * ``delta_cfg`` — original CA difference ``v_real_cond_ca − v_real_uncond_ca``
-      in the student's working dtype.
-    * ``x_renoised_ca`` — re-noised student x_pred at τ_ca; teacher's input.
-    * ``v_real_cond_ca`` — teacher velocity at (x_renoised_ca, τ_ca, c). Used
-      to extract teacher x0 (no extra forwards).
-    * ``x_pred`` — student endpoint estimate at t (already computed in step 1).
-    * ``tau_ca`` — per-batch τ_ca in [0, 1].
+    * ``delta_cfg`` — original CA difference ``v_real_cond_ca − v_real_uncond``
+      in the student's working dtype. Lives at τ_ca.
+    * ``x_t`` — student input ``(B, 16, H, W)`` at sampler time ``t``.
+    * ``v_teacher_at_t`` — no-grad teacher velocity at ``(x_t, t, c)``; the
+      caller pays one extra forward to produce this.
+    * ``t`` — student sampler time per batch (``[B]``).
+    * ``x_pred`` — student's x0 estimate at ``t`` (already computed pre-CA).
+    * ``tau_ca`` — per-batch τ_ca in [0, 1]; gates *reweighting* application.
 
-    Outside ``[window_lo, window_hi)`` the per-sample weights collapse to 1.0,
-    so the recomposition rounds back to ``delta_cfg`` up to fp32 LP+HP roundoff.
+    The FEI gap is computed at ``t`` (not τ_ca) so both x0 estimates live at
+    the same sampler time — see module docstring. Outside
+    ``[window_lo, window_hi)`` on **τ_ca** the per-sample weights collapse to
+    1.0, so the recomposition rounds back to ``delta_cfg`` up to fp32 LP+HP
+    roundoff.
     """
     B = delta_cfg.shape[0]
     h_lat, w_lat = x_pred.shape[-2], x_pred.shape[-1]
     sigma_low_val = fei_sigma_low(h_lat, w_lat, divisor)
-    tau_ca_e_band = tau_ca.view(B, 1, 1, 1).float()
+    t_e_band = t.view(B, 1, 1, 1).float()
 
     with torch.no_grad():
-        # Teacher x0 at τ_ca:  x_renoised_ca − τ_ca·v_real_cond_ca
-        x0_T = x_renoised_ca.float() - tau_ca_e_band * v_real_cond_ca.float()
+        # Teacher x0 at student's t:  x_t − t · v_teacher_at_t.
+        # Same sampler time as the student's x_pred — no operator mismatch.
+        x0_T = x_t.float() - t_e_band * v_teacher_at_t.float()
         e_T = compute_fei_2band(x0_T, sigma_low_val)  # [B, 2]
         # Student x0 at t is just x_pred (already computed in step 1).
         e_S = compute_fei_2band(x_pred.detach().float(), sigma_low_val)
@@ -77,8 +98,10 @@ def apply_ca_band_deficit(
         # these is positive per sample — the other is 0.
         dlow_pos = (e_T[:, 0] - e_S[:, 0]).clamp_min(0.0)  # [B]
         dhigh_pos = (e_T[:, 1] - e_S[:, 1]).clamp_min(0.0)
-        # τ_ca window mask: 1 if τ_ca ∈ [window_lo, window_hi), else 0. Gate stays
-        # inside no_grad so the mask is purely numerical (no autograd branches).
+        # τ_ca window mask: 1 if τ_ca ∈ [window_lo, window_hi), else 0. Gate
+        # stays inside no_grad so the mask is purely numerical (no autograd
+        # branches). The measurement above is unconditional in t; only the
+        # *application* to δ_cfg is τ_ca-gated.
         in_window = (
             (tau_ca.float() >= window_lo) & (tau_ca.float() < window_hi)
         ).float()  # [B]

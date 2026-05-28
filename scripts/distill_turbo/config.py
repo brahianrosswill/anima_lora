@@ -132,8 +132,10 @@ def build_argparser() -> argparse.ArgumentParser:
         "still ≈ the teacher → a large, misaligned delta_dm and an early "
         "grad_signal_rms spike (~step 50). Pre-training the fake net against the "
         "student's (init ≈ teacher) x_pred distribution calibrates it first. "
-        "Run at full fake_lr; the fake scheduler is untouched. Default: TOML "
-        "(optim.fake_warmup_steps, default 0 = off).",
+        "The fake scheduler IS stepped during warmup (the main-loop scheduler "
+        "is sized over iterations + fake_warmup_steps so the 2%% LR warmup "
+        "overlaps the head-start and the fake enters the main loop at full LR). "
+        "Default: TOML (optim.fake_warmup_steps, default 0 = off).",
     )
     parser.add_argument(
         "--alpha",
@@ -415,6 +417,15 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     if fake_steps_per_student_step < 1:
         raise ValueError(
             f"optim.fake_steps_per_student_step={fake_steps_per_student_step}: must be ≥ 1"
+        )
+    if args.single_prompt_idx is not None and batch_size != 1:
+        # single-prompt mode slices the dataset to one sample. With drop_last=True
+        # and batch_size > 1 the dataloader yields zero batches and the loop
+        # silently no-ops.
+        raise ValueError(
+            f"--single_prompt_idx requires batch_size=1 (got {batch_size}). "
+            "Single-prompt overfit mode pins the dataset to one sample; a "
+            "batch_size > 1 dataloader with drop_last=True would yield zero batches."
         )
     if ca_band_weight_enabled:
         if ca_band_beta < 0.0:

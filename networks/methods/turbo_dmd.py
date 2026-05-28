@@ -113,8 +113,17 @@ class TurboDMDNetwork:
         )
 
         # Start in teacher view — both off, base DiT is exactly itself.
+        # LoRAModule defaults `enabled=True` (base.py:90), so we MUST explicitly
+        # disable both stacks here. The diff-only `set_view` short-circuits when
+        # `view == self._view`, so writing `self._view = "teacher"; set_view("teacher")`
+        # leaves both stacks at their default `enabled=True`. zero-init `lora_up`
+        # masks the bug at step 0 (no contribution from either stack), but the
+        # invariant set_view depends on — cur state matches _VIEW_FLAGS[_view] —
+        # would silently break the moment either stack carries nonzero weights
+        # before its first explicit transition.
+        self.student.set_enabled(False)
+        self.fake.set_enabled(False)
         self._view: View = "teacher"
-        self.set_view("teacher")
 
     # ----------------- view toggle -----------------
 
