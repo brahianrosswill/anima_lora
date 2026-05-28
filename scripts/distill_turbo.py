@@ -77,7 +77,11 @@ from tqdm import tqdm
 from library.anima import weights as anima_utils
 from library.anima.models import Anima
 from library.datasets.distill import CachedDataset
-from library.runtime.fei import gaussian_blur_2d
+from library.runtime.fei import (
+    compute_fei_2band,
+    fei_sigma_low,
+    gaussian_blur_2d,
+)
 from library.runtime.harness import (
     compile_dit_blocks,
     enable_training_grad_ckpt,
@@ -263,37 +267,37 @@ def main():
         help="clamp_min for the x0-norm denominator (latent scale); only active "
         "with --dm_x0_norm.",
     )
-    # σ-band LP-preview auxiliary (lever B.5, dmd2_decoupled_improvements.md §2B.5).
-    # Off by default — set --preview_lp_w > 0 to enable.
+    # CA band-deficit feedback (item 2). Phase 0 defaults pinned by
+    # bench/fera_artist/results/20260528-1902-turbo_C_phase0/.
     parser.add_argument(
-        "--preview_lp_w",
-        type=float,
-        default=-1.0,
-        help="σ-band LP-preview aux weight (0 = off, default). Adds "
-        "L_preview = mse(LP(x0_S), LP(x0_T_cfg1)) restricted to "
-        "t ∈ [preview_band_lo, preview_band_hi]. One extra teacher forward "
-        "per in-band step. See dmd2_decoupled_improvements.md §2B.5.",
+        "--ca_band_weight",
+        dest="ca_band_weight_enabled",
+        action="store_true",
+        default=None,
+        help="Per-sample band-deficit reweighting of δ_cfg in the CA branch "
+        "(item 2; see item2_plan.md). Default: TOML (ca_band_weight.enabled).",
     )
     parser.add_argument(
-        "--preview_band_lo",
-        type=float,
-        default=-1.0,
-        help="Preview band lower bound (default 0.55; matches "
-        "docs/findings/sigma_signal_where_anima_resolves.md).",
+        "--no_ca_band_weight",
+        dest="ca_band_weight_enabled",
+        action="store_false",
     )
     parser.add_argument(
-        "--preview_band_hi",
+        "--ca_band_beta",
         type=float,
         default=-1.0,
-        help="Preview band upper bound (default 0.75).",
+        help="Band-deficit gain β. β=0 is bit-identical to no band weighting "
+        "(up to LP+HP fp32 roundoff). Default: TOML (ca_band_weight.beta=0.2).",
     )
     parser.add_argument(
-        "--preview_lp_sigma_div",
+        "--ca_band_divisor",
         type=float,
         default=-1.0,
-        help="LP filter divisor: σ_low = min(H_lat, W_lat) / preview_lp_sigma_div. "
-        "Default 4.0 (FEI 2-band finding).",
+        help="σ_low = min(H_lat, W_lat) / divisor for the LP/HP split. "
+        "Phase 0 winner D/16. Default: TOML (ca_band_weight.divisor=16).",
     )
+    parser.add_argument("--ca_band_window_lo", type=float, default=-1.0)
+    parser.add_argument("--ca_band_window_hi", type=float, default=-1.0)
     parser.add_argument("--blocks_to_swap", type=int, default=0)
     parser.add_argument("--attn_mode", type=str, default="flash")
     parser.add_argument("--grad_ckpt", action="store_true", default=False)
@@ -369,28 +373,38 @@ def main():
     dm_x0_norm = bool(pick(args.dm_x0_norm, "dmd.dm_x0_norm", False))
     norm_floor = float(pick(args.norm_floor, "dmd.norm_floor", 0.05))
 
-    # σ-band LP-preview aux (lever B.5). Defaults match docs/findings/sigma_signal_*.
-    preview_lp_w = float(pick(args.preview_lp_w, "preview.lp_w", 0.0))
-    preview_band_lo = float(pick(args.preview_band_lo, "preview.band_lo", 0.55))
-    preview_band_hi = float(pick(args.preview_band_hi, "preview.band_hi", 0.75))
-    preview_lp_sigma_div = float(
-        pick(args.preview_lp_sigma_div, "preview.lp_sigma_div", 4.0)
+    # CA band-deficit feedback (item 2). Python constants — the per-step branch
+    # gates on `ca_band_weight_enabled` (compile-stable), the per-sample window
+    # gates via a tensor mask blend (no data-dependent Python branch on τ_ca).
+    if args.ca_band_weight_enabled is None:
+        ca_band_weight_enabled = bool(_flatten(cfg, "ca_band_weight.enabled", False))
+    else:
+        ca_band_weight_enabled = bool(args.ca_band_weight_enabled)
+    ca_band_beta = float(pick(args.ca_band_beta, "ca_band_weight.beta", 0.2))
+    ca_band_divisor = float(
+        pick(args.ca_band_divisor, "ca_band_weight.divisor", 16.0)
     )
-    if preview_lp_w < 0.0:
-        raise ValueError(f"preview.lp_w={preview_lp_w}: must be ≥ 0")
-    if not (0.0 <= preview_band_lo < preview_band_hi <= 1.0):
-        raise ValueError(
-            f"preview band [{preview_band_lo}, {preview_band_hi}]: require 0 ≤ lo < hi ≤ 1"
-        )
-    if preview_lp_sigma_div <= 0.0:
-        raise ValueError(
-            f"preview.lp_sigma_div={preview_lp_sigma_div}: must be > 0"
-        )
-    if preview_lp_w > 0.0:
+    ca_band_window_lo = float(
+        pick(args.ca_band_window_lo, "ca_band_weight.window_lo", 0.30)
+    )
+    ca_band_window_hi = float(
+        pick(args.ca_band_window_hi, "ca_band_weight.window_hi", 0.95)
+    )
+    if ca_band_weight_enabled:
+        if ca_band_beta < 0.0:
+            raise ValueError(f"ca_band_weight.beta={ca_band_beta}: must be ≥ 0")
+        if ca_band_divisor <= 0.0:
+            raise ValueError(
+                f"ca_band_weight.divisor={ca_band_divisor}: must be > 0"
+            )
+        if not (0.0 <= ca_band_window_lo < ca_band_window_hi <= 1.0):
+            raise ValueError(
+                f"ca_band_weight window [{ca_band_window_lo}, {ca_band_window_hi}]: "
+                "require 0 ≤ lo < hi ≤ 1"
+            )
         logger.info(
-            f"preview-LP aux ENABLED: w={preview_lp_w}, "
-            f"band=[{preview_band_lo}, {preview_band_hi}], "
-            f"σ_low_div={preview_lp_sigma_div}"
+            f"CA band-deficit ENABLED: β={ca_band_beta}, div={ca_band_divisor}, "
+            f"window=[{ca_band_window_lo}, {ca_band_window_hi}]"
         )
 
     student_lr = float(pick(args.student_lr, "optim.student_lr", 1e-5))
@@ -709,14 +723,18 @@ def main():
     acc_cos = _z()
     acc_dm_to_ca = _z()
     acc_ca_steps = _z()
-    # σ-band LP-preview diagnostic (lever B.5).
-    #   preview_lp_gap — rms(LP(x0_S) − LP(x0_T)) / rms(LP(x0_T)), in-band only.
-    #   ↓ over training = student is catching up on the coarse structure the
-    #   teacher already has in σ ∈ [preview_band_lo, preview_band_hi]. Floor
-    #   ≈ teacher's own per-σ reconstruction error in that window (norm-MSE
-    #   0.09–0.33 from sigma_signal_resolves_by_045).
-    acc_preview_gap = _z()
-    acc_preview_steps = _z()
+    # CA band-deficit diagnostics (item 2). Each per-step sum is already
+    # an in-window-mean; we accumulate them and divide by in-window step count.
+    #   band_w_high  — mean(w_high) over in-window samples (active arm on turbo_C)
+    #   band_w_low   — mean(w_low)  (≈ 1.0 expected under turbo_C)
+    #   band_dh_pos  — mean relu(e_high_T − e_high_S) — raw deficit before β-gain
+    #   band_dl_pos  — mean relu(e_low_T  − e_low_S)
+    #   band_steps   — # outer steps with any in-window sample (own denominator)
+    acc_band_w_high = _z()
+    acc_band_w_low = _z()
+    acc_band_dh_pos = _z()
+    acc_band_dl_pos = _z()
+    acc_band_steps = _z()
     running_alpha = 0.0  # pure-Python; no GPU work
 
     # ---------------- Fake (critic) head-start ----------------
@@ -829,13 +847,6 @@ def main():
         else:
             t_cpu = torch.sigmoid(sigmoid_scale * torch.randn(B, dtype=torch.float32))
         do_ca = bool((t_cpu < tau_ca_skip_above_t).any().item())  # CPU op, no sync
-        # σ-band LP-preview gating (sync-free; t_cpu already on CPU).
-        if preview_lp_w > 0.0:
-            in_band_cpu = (t_cpu >= preview_band_lo) & (t_cpu < preview_band_hi)
-            do_preview = bool(in_band_cpu.any().item())
-        else:
-            in_band_cpu = None
-            do_preview = False
         t = t_cpu.to(device=device, dtype=dtype, non_blocking=True)
 
         # --- Build x_t = (1-t)·x_0 + t·ε ---
@@ -852,6 +863,11 @@ def main():
         x_pred = x_t.squeeze(2) - t_e * v_student  # (B, 16, H, W), grad-bearing
 
         # --- 2. CA BRANCH (no grad, teacher × 2) ---
+        band_w_high_this = None
+        band_w_low_this = None
+        band_dh_pos_this = None
+        band_dl_pos_this = None
+        band_in_window_this = None
         if do_ca:
             tau_ca = sample_t_above(t.float(), min_gap=tau_ca_min_gap).to(dtype)
             eps_ca = torch.randn_like(x_pred)
@@ -864,6 +880,64 @@ def main():
                 "teacher", x_renoised_ca, tau_ca, c_null, no_grad=True
             ).squeeze(2)
             delta_cfg = v_real_cond_ca - v_real_uncond_ca
+
+            # --- 2a. CA band-deficit feedback (item 2; see item2_plan.md) ---
+            # Reweights δ_cfg by where the student's x0 FEI lags the teacher's.
+            # All branch decisions are Python-constant (`ca_band_weight_enabled`)
+            # so torch.compile sees one graph; the per-sample τ_ca window is a
+            # tensor blend, not a Python branch.
+            #
+            # Teacher x0 at τ_ca:  x_renoised_ca − τ_ca·v_real_cond_ca
+            #   (extract from the CA forward we already did — no extra forwards)
+            # Student x0 at t:     x_pred  (already computed in step 1)
+            #
+            # Phase 0 (turbo_C, n=90) found `student_over_low` at every stage,
+            # so w_high is the active arm and w_low stays ≈ 1. Both branches
+            # are wired because a future student's failure mode may flip.
+            if ca_band_weight_enabled:
+                h_lat, w_lat = x_pred.shape[-2], x_pred.shape[-1]
+                sigma_low_val = fei_sigma_low(h_lat, w_lat, ca_band_divisor)
+                tau_ca_e_band = tau_ca.view(B, 1, 1, 1).float()
+                with torch.no_grad():
+                    x0_T = (
+                        x_renoised_ca.float() - tau_ca_e_band * v_real_cond_ca.float()
+                    )
+                    e_T = compute_fei_2band(x0_T, sigma_low_val)  # [B, 2]
+                    e_S = compute_fei_2band(x_pred.detach().float(), sigma_low_val)
+                    # Per-sample relu deficits. Because e_low + e_high ≡ 1, at most
+                    # one of these is positive per sample — the other is 0.
+                    dlow_pos = (e_T[:, 0] - e_S[:, 0]).clamp_min(0.0)  # [B]
+                    dhigh_pos = (e_T[:, 1] - e_S[:, 1]).clamp_min(0.0)
+                    # τ_ca window mask: 1 if τ_ca ∈ [window_lo, window_hi), else 0.
+                    # Gate stays inside the no_grad block so the mask is purely
+                    # numerical (no autograd graph branches).
+                    in_window = (
+                        (tau_ca.float() >= ca_band_window_lo)
+                        & (tau_ca.float() < ca_band_window_hi)
+                    ).float()  # [B]
+                    iw4 = in_window.view(B, 1, 1, 1)
+                    # Effective weights — outside the window they collapse to 1.0,
+                    # giving an identity recomposition (LP+HP = δ_cfg) for those
+                    # samples up to fp32 LP+HP roundoff.
+                    w_low = 1.0 + ca_band_beta * iw4 * dlow_pos.view(B, 1, 1, 1)
+                    w_high = 1.0 + ca_band_beta * iw4 * dhigh_pos.view(B, 1, 1, 1)
+                # LP/HP split done in fp32 so the recomposition rounds back to
+                # δ_cfg cleanly when w_low=w_high=1.
+                delta_cfg_f32 = delta_cfg.float()
+                delta_cfg_lp = gaussian_blur_2d(delta_cfg_f32, sigma_low_val)
+                delta_cfg_hp = delta_cfg_f32 - delta_cfg_lp
+                delta_cfg = (
+                    w_low * delta_cfg_lp + w_high * delta_cfg_hp
+                ).to(delta_cfg.dtype)
+                # Stash diagnostics (cheap reductions, used inside the existing
+                # accumulator block below).
+                with torch.no_grad():
+                    band_in_window_this = in_window.sum()
+                    denom = band_in_window_this.clamp_min(1.0)
+                    band_w_high_this = (in_window * w_high.view(B)).sum() / denom
+                    band_w_low_this = (in_window * w_low.view(B)).sum() / denom
+                    band_dh_pos_this = (in_window * dhigh_pos).sum() / denom
+                    band_dl_pos_this = (in_window * dlow_pos).sum() / denom
         else:
             delta_cfg = torch.zeros_like(x_pred)
 
@@ -924,52 +998,6 @@ def main():
         else:
             loss_student = (grad_signal * x_pred.float()).mean()
 
-        # --- σ-band LP-preview aux (lever B.5) ---
-        # Only when t lands in [preview_band_lo, preview_band_hi]: this is the
-        # window where the teacher's x0_pred is genuinely informative (norm-MSE
-        # 0.09–0.33 per sigma_signal_resolves_by_045) but the LATENT itself
-        # doesn't carry the answer yet — i.e. the band where adapter capacity
-        # actually has room. One extra teacher CFG=1 forward at student-t; LP
-        # filter discards the HF that even the teacher doesn't have at this σ.
-        # Off when preview_lp_w == 0.0 (zero extra forwards).
-        preview_lp_gap_this = None
-        if do_preview:
-            h_lat, w_lat = x_pred.shape[-2], x_pred.shape[-1]
-            sigma_low = float(min(h_lat, w_lat)) / preview_lp_sigma_div
-            with torch.no_grad():
-                # Teacher CFG=1 at student-t. LP-band is coarse structure, so
-                # the CFG-bake signal (HF caption-adherence) is mostly orthogonal
-                # to what LP retains — saves one teacher forward vs CFG=4.
-                v_teacher_t = _forward(
-                    "teacher", x_t.detach(), t, crossattn_emb, no_grad=True
-                ).squeeze(2)
-                x0_T_lp = gaussian_blur_2d(
-                    (x_t.squeeze(2).detach() - t_e * v_teacher_t).float(),
-                    sigma_low,
-                )
-            # Student side: LP through the live grad path (conv2d, no params).
-            x0_S = x_pred.float()
-            x0_S_lp = gaussian_blur_2d(x0_S, sigma_low)
-            band_mask_e = (
-                in_band_cpu.to(device=device, dtype=torch.float32).view(B, 1, 1, 1)
-            )
-            n_in = float(in_band_cpu.sum().item())
-            diff_sq = (x0_S_lp - x0_T_lp).pow(2)
-            # Average over in-band samples only; preview_lp_w stays interpretable
-            # regardless of how many batch slots happened to be in-band this step.
-            per_elem = float(x0_S_lp[0].numel())
-            loss_preview = (diff_sq * band_mask_e).sum() / (n_in * per_elem)
-            loss_student = loss_student + preview_lp_w * loss_preview
-            # Gradient-free diagnostic — stashed for accumulation post-backward.
-            with torch.no_grad():
-                rms_diff = diff_sq.detach().mean(dim=(1, 2, 3)).sqrt()
-                rms_T = (
-                    x0_T_lp.pow(2).mean(dim=(1, 2, 3)).sqrt().clamp_min(1e-8)
-                )
-                band_mask_1d = band_mask_e.squeeze(-1).squeeze(-1).squeeze(-1)
-                preview_lp_gap_this = (
-                    (rms_diff / rms_T) * band_mask_1d
-                ).sum() / max(n_in, 1.0)
         loss_student.backward()
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(turbo.student_params(), max_norm=grad_clip)
@@ -1047,10 +1075,19 @@ def main():
                 ca_w = (tau_ca_e * (alpha_eff - 1.0) * delta_cfg.float()).pow(2).mean().sqrt()
                 acc_dm_to_ca.add_(dm_w / (ca_w + eps_r))
                 acc_ca_steps.add_(1.0)
-            # σ-band LP-preview diagnostic (only defined when preview ran).
-            if preview_lp_gap_this is not None:
-                acc_preview_gap.add_(preview_lp_gap_this)
-                acc_preview_steps.add_(1.0)
+            # CA band-deficit diagnostics — only defined when band weighting ran
+            # AND at least one batch sample was in-window. band_*_this scalars
+            # are already per-step in-window means, so we just sum them.
+            if band_w_high_this is not None and band_in_window_this is not None:
+                # Only count this step if any sample was actually weighted —
+                # otherwise the in-window-mean is undefined (we clamped denom
+                # to 1.0 above, but the per-step mean would be 0/1 = noise).
+                step_active = (band_in_window_this > 0).float()
+                acc_band_w_high.add_(band_w_high_this * step_active)
+                acc_band_w_low.add_(band_w_low_this * step_active)
+                acc_band_dh_pos.add_(band_dh_pos_this * step_active)
+                acc_band_dl_pos.add_(band_dl_pos_this * step_active)
+                acc_band_steps.add_(step_active)
         running_alpha += alpha_eff
 
         if (step + 1) % log_interval == 0:
@@ -1072,17 +1109,24 @@ def main():
                 )
                 / log_interval
             )
-            # dm_to_ca and preview_lp_gap each have their own denominator
-            # (only do_ca / in-band steps contribute respectively).
+            # dm_to_ca has its own denominator (only do_ca steps contribute).
             dm_to_ca = acc_dm_to_ca / acc_ca_steps.clamp(min=1.0)
-            preview_gap_avg = acc_preview_gap / acc_preview_steps.clamp(min=1.0)
+            # Band diagnostics have their own denominator (in-window-active steps).
+            band_denom = acc_band_steps.clamp(min=1.0)
+            band_w_high_avg = acc_band_w_high / band_denom
+            band_w_low_avg = acc_band_w_low / band_denom
+            band_dh_pos_avg = acc_band_dh_pos / band_denom
+            band_dl_pos_avg = acc_band_dl_pos / band_denom
             packed = torch.cat(
                 [
                     stacked,
                     dm_to_ca.reshape(1),
                     acc_ca_steps.reshape(1),
-                    preview_gap_avg.reshape(1),
-                    acc_preview_steps.reshape(1),
+                    band_w_high_avg.reshape(1),
+                    band_w_low_avg.reshape(1),
+                    band_dh_pos_avg.reshape(1),
+                    band_dl_pos_avg.reshape(1),
+                    acc_band_steps.reshape(1),
                 ]
             ).tolist()
             (
@@ -1098,8 +1142,11 @@ def main():
             ) = packed[0:9]
             avg_dmca = packed[9]
             ca_steps = packed[10]
-            avg_preview_gap = packed[11]
-            preview_steps = packed[12]
+            avg_band_wh = packed[11]
+            avg_band_wl = packed[12]
+            avg_band_dh = packed[13]
+            avg_band_dl = packed[14]
+            band_steps = packed[15]
             avg_a = running_alpha / log_interval
             if writer is not None:
                 writer.add_scalar("train/fake_loss", avg_f, step + 1)
@@ -1114,10 +1161,13 @@ def main():
                 writer.add_scalar("train/dm_cos", avg_cos, step + 1)
                 if ca_steps > 0:
                     writer.add_scalar("train/dm_to_ca", avg_dmca, step + 1)
-                if preview_steps > 0:
-                    writer.add_scalar(
-                        "train/preview_lp_gap", avg_preview_gap, step + 1
-                    )
+                if band_steps > 0:
+                    # Active arm under turbo_C; both logged so we catch a
+                    # post-finetune sign flip (student_under_low) automatically.
+                    writer.add_scalar("train/band_w_high", avg_band_wh, step + 1)
+                    writer.add_scalar("train/band_w_low", avg_band_wl, step + 1)
+                    writer.add_scalar("train/band_dh_pos", avg_band_dh, step + 1)
+                    writer.add_scalar("train/band_dl_pos", avg_band_dl, step + 1)
                 writer.add_scalar(
                     "train/student_lr", student_sched.get_last_lr()[0], step + 1
                 )
@@ -1128,14 +1178,17 @@ def main():
             # tqdm postfix at log_interval cadence (per-step would re-introduce
             # the syncs we just eliminated). First log_interval steps show
             # no postfix — harmless.
-            progress.set_postfix(
-                g=f"{avg_g:.2e}",
-                relg=f"{avg_relgap:.3f}",
-                cos=f"{avg_cos:.3f}",
-                dmca=f"{avg_dmca:.2f}",
-                xp=f"{avg_xp:.3f}",
-                fake=f"{avg_f:.2e}",
-            )
+            postfix = {
+                "g": f"{avg_g:.2e}",
+                "relg": f"{avg_relgap:.3f}",
+                "cos": f"{avg_cos:.3f}",
+                "dmca": f"{avg_dmca:.2f}",
+                "xp": f"{avg_xp:.3f}",
+                "fake": f"{avg_f:.2e}",
+            }
+            if band_steps > 0:
+                postfix["wh"] = f"{avg_band_wh:.3f}"
+            progress.set_postfix(**postfix)
 
             acc_fake.zero_()
             acc_grad.zero_()
@@ -1148,8 +1201,11 @@ def main():
             acc_cos.zero_()
             acc_dm_to_ca.zero_()
             acc_ca_steps.zero_()
-            acc_preview_gap.zero_()
-            acc_preview_steps.zero_()
+            acc_band_w_high.zero_()
+            acc_band_w_low.zero_()
+            acc_band_dh_pos.zero_()
+            acc_band_dl_pos.zero_()
+            acc_band_steps.zero_()
             running_alpha = 0.0
 
         # --- save ---

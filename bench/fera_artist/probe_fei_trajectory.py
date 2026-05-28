@@ -41,10 +41,41 @@ Reports:
     track lower ``e_low`` throughout, mirroring the training-time
     rankings from ``probe_fei_artist.py``.
 
+Paired-gap mode (item 2 Phase 0 — see ``item2_plan.md``). When
+``--adapter <path>`` is passed, the probe runs **two passes** on the
+same (prompt, seed) cross-product:
+
+  - Teacher pass: base DiT (no adapter), ``--guidance_scale``,
+    ``--infer_steps`` (CFG=4, 28 steps by default).
+  - Student pass: DiT with ``--adapter`` attached at
+    ``--adapter_multiplier``, at ``--student_guidance``
+    (default 1.0) and ``--student_infer_steps`` (default 4).
+
+FEI is captured at every divisor in ``--fei_sigma_low_divs`` (default
+``4,8,16``). For each (seed, stem) pair, the student's per-stage
+``t_sampler`` is matched to the teacher's 28-step trace by linear
+interpolation, and per-(stage, div) gap statistics
+``Δ_low = e_low_T − e_low_S`` are aggregated. Multiple seeds via
+``--seeds 1234,5678,...`` give variance estimates.
+
+Outputs in paired mode (in addition to the trajectory-only outputs):
+
+  - ``student_trajectory.csv`` — per-step student trace
+  - ``paired_gap.csv`` — per (pair, stage, div) row
+  - ``paired_gap.json`` — per (stage, div) cell aggregate
+
 Usage::
 
+    # Trajectory only (existing behaviour, single divisor)
     uv run python bench/fera_artist/probe_fei_trajectory.py \\
         --k_per_artist 1 --infer_steps 28 --guidance_scale 4.0 --label cfg4
+
+    # Paired teacher/student gap probe (item 2 Phase 0)
+    uv run python bench/fera_artist/probe_fei_trajectory.py \\
+        --adapter output/ckpt/anima_turbo_D.safetensors \\
+        --student_infer_steps 4 --student_guidance 1.0 \\
+        --seeds 1234,5678,9012 --max_artists 30 \\
+        --fei_sigma_low_divs 4,8,16 --label turbo_gap
 """
 
 from __future__ import annotations
@@ -156,7 +187,11 @@ def _read_caption(image_meta_path: str, image_dataset: Path) -> str:
 # Mutable handle the patched function reads + writes. set_capture_target()
 # swaps to a fresh list per generation so each artist's trace is isolated.
 _CAPTURE_TARGET: list[dict] | None = None
-_CAPTURE_DIV: float = 4.0
+# Tuple of DoG divisors to compute FEI at on every captured step.
+# Single-divisor mode (no --adapter) passes ``(d,)`` and writes legacy
+# ``e_low``/``e_high`` columns. Paired mode passes the full multi-div tuple
+# and only emits the suffixed ``e_low_d{N}`` columns.
+_CAPTURE_DIVS: tuple[float, ...] = (4.0,)
 _CAPTURE_STEP_COUNTER: dict[int, int] = {}  # id(model) -> step counter
 # Per-step ``t`` written by the set_hydra_sigma patch, read by the FEI patch.
 # The sampler calls ``set_hydra_sigma(anima, t_expand)`` immediately before
@@ -165,10 +200,25 @@ _CAPTURE_STEP_COUNTER: dict[int, int] = {}  # id(model) -> step counter
 _LAST_SIGMA_T: float | None = None
 
 
-def _set_capture(target: list[dict] | None, div: float) -> None:
-    global _CAPTURE_TARGET, _CAPTURE_DIV, _LAST_SIGMA_T
+def _div_key(div: float) -> str:
+    """Column-name suffix for a divisor. 4.0 -> 'd4', 8.5 -> 'd8p5'."""
+    if div == int(div):
+        return f"d{int(div)}"
+    return f"d{str(div).replace('.', 'p')}"
+
+
+def _set_capture(target: list[dict] | None, divs: tuple[float, ...] | float) -> None:
+    """Activate (target=list) or deactivate (target=None) FEI capture.
+
+    Accepts either a single float (legacy single-div) or a tuple of floats
+    (multi-div paired mode).
+    """
+    global _CAPTURE_TARGET, _CAPTURE_DIVS, _LAST_SIGMA_T
     _CAPTURE_TARGET = target
-    _CAPTURE_DIV = float(div)
+    if isinstance(divs, (int, float)):
+        _CAPTURE_DIVS = (float(divs),)
+    else:
+        _CAPTURE_DIVS = tuple(float(d) for d in divs)
     _LAST_SIGMA_T = None
     _CAPTURE_STEP_COUNTER.clear()
 
@@ -195,21 +245,29 @@ def _install_fei_patch() -> None:
             # `z` is the live (B, C, T, H, W) Anima latent — squeeze the T axis.
             z2d = z.squeeze(2) if z.ndim == 5 else z
             h_lat, w_lat = int(z2d.shape[-2]), int(z2d.shape[-1])
-            sigma_low = fei_sigma_low(h_lat, w_lat, _CAPTURE_DIV)
-            fei = compute_fei_2band(z2d.detach(), sigma_low)
             step = _CAPTURE_STEP_COUNTER.get(id(model), 0)
             _CAPTURE_STEP_COUNTER[id(model)] = step + 1
-            _CAPTURE_TARGET.append(
-                {
-                    "step": step,
-                    "t_sampler": _LAST_SIGMA_T if _LAST_SIGMA_T is not None else float("nan"),
-                    "h_lat": h_lat,
-                    "w_lat": w_lat,
-                    "sigma_low": sigma_low,
-                    "e_low": float(fei[0, 0].item()),
-                    "e_high": float(fei[0, 1].item()),
-                }
-            )
+            row: dict = {
+                "step": step,
+                "t_sampler": _LAST_SIGMA_T if _LAST_SIGMA_T is not None else float("nan"),
+                "h_lat": h_lat,
+                "w_lat": w_lat,
+            }
+            for div in _CAPTURE_DIVS:
+                sigma_low = fei_sigma_low(h_lat, w_lat, div)
+                fei = compute_fei_2band(z2d.detach(), sigma_low)
+                k = _div_key(div)
+                row[f"sigma_low_{k}"] = sigma_low
+                row[f"e_low_{k}"] = float(fei[0, 0].item())
+                row[f"e_high_{k}"] = float(fei[0, 1].item())
+            # Legacy single-divisor columns alias the first divisor — the
+            # existing trajectory-only outputs (fei_trajectory.csv,
+            # teacher_curve.json) keep their schema when called without --adapter.
+            first_k = _div_key(_CAPTURE_DIVS[0])
+            row["sigma_low"] = row[f"sigma_low_{first_k}"]
+            row["e_low"] = row[f"e_low_{first_k}"]
+            row["e_high"] = row[f"e_high_{first_k}"]
+            _CAPTURE_TARGET.append(row)
         original(model, z)
 
     _gen.compute_and_set_hydra_fei = patched
@@ -240,6 +298,379 @@ def _install_sigma_patch() -> None:
 
     _gen.set_hydra_sigma = patched
     log.info("installed sigma capture patch on library.inference.generation")
+
+
+# ---- shared run + paired-gap helpers ----------------------------------------
+
+
+def _run_capture_pass(
+    prompts,
+    gen_args,
+    gen_settings,
+    shared,
+    divs: tuple[float, ...],
+    seeds: list[int],
+    label: str,
+) -> tuple[dict[tuple[int, str], list[dict]], dict[str, int]]:
+    """Run generation across (seeds × prompts), capturing FEI traces.
+
+    Returns (traces, bucket_counts) where ``traces`` maps
+    ``(seed, stem) -> [capture row, ...]``. ``bucket_counts`` accumulates
+    pixel-bucket frequency across both axes (useful for the no-adapter
+    teacher path which writes it into teacher_curve.json).
+    """
+    from anima_lora import generate  # local — imported at module top in main()
+
+    traces: dict[tuple[int, str], list[dict]] = {}
+    bucket_counts: dict[str, int] = defaultdict(int)
+    total = len(seeds) * len(prompts)
+    done = 0
+    for seed in seeds:
+        for artist, stem, caption, w_px, h_px in prompts:
+            done += 1
+            gen_args.prompt = caption
+            gen_args.seed = seed
+            gen_args.image_size = (h_px, w_px)
+            capture: list[dict] = []
+            _set_capture(capture, divs)
+            try:
+                _ = generate(gen_args, gen_settings, shared_models=shared)
+            except Exception as exc:
+                log.warning(
+                    f"  [{label} {done}/{total}] seed={seed} {artist}/{stem} "
+                    f"{w_px}x{h_px}: {exc}"
+                )
+                continue
+            finally:
+                _set_capture(None, divs)
+            bucket_counts[f"{w_px}x{h_px}"] += 1
+            for c in capture:
+                c["artist"] = artist
+                c["stem"] = stem
+                c["seed"] = seed
+            traces[(seed, stem)] = capture
+            log.info(
+                f"  [{label} {done}/{total}] seed={seed} {artist}/{stem} "
+                f"@ {w_px}x{h_px}: {len(capture)} steps captured"
+            )
+    return traces, bucket_counts
+
+
+def _write_trace_csv(path: Path, rows: list[dict]) -> None:
+    """Write rows to CSV. Field order = union of keys across rows, taken
+    from the first row + any new keys appended in encounter order (we
+    don't want to lose suffix columns that show up only in later rows)."""
+    if not rows:
+        path.write_text("")
+        return
+    fieldnames: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        for k in r.keys():
+            if k not in seen:
+                seen.add(k)
+                fieldnames.append(k)
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+def _per_step_population_stats(rows: list[dict]) -> list[dict]:
+    """Aggregate ``e_low``/``e_high``/``sigma_low`` (legacy columns) per step
+    across rows. Matches the trajectory-only output schema; consumed by
+    teacher_curve.json and the plot."""
+    by_step_low: dict[int, list[float]] = defaultdict(list)
+    by_step_high: dict[int, list[float]] = defaultdict(list)
+    by_step_sigma: dict[int, list[float]] = defaultdict(list)
+    by_step_t: dict[int, float] = {}
+    for r in rows:
+        s = r["step"]
+        by_step_low[s].append(r["e_low"])
+        by_step_high[s].append(r["e_high"])
+        by_step_sigma[s].append(r["sigma_low"])
+        t_val = r.get("t_sampler", float("nan"))
+        if t_val == t_val and s not in by_step_t:
+            by_step_t[s] = float(t_val)
+    return [
+        {
+            "step": s,
+            "t_sampler": by_step_t.get(s, float("nan")),
+            "sigma_low_mean": float(mean(by_step_sigma[s])),
+            "n": len(by_step_low[s]),
+            "mean_e_low": float(mean(by_step_low[s])),
+            "std_e_low": float(pstdev(by_step_low[s])),
+            "min_e_low": float(min(by_step_low[s])),
+            "max_e_low": float(max(by_step_low[s])),
+            "mean_e_high": float(mean(by_step_high[s])),
+            "std_e_high": float(pstdev(by_step_high[s])),
+        }
+        for s in sorted(by_step_low.keys())
+    ]
+
+
+def _write_trajectory_plot(out_dir: Path, rows: list[dict],
+                           per_step_stats: list[dict], args) -> str:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, (ax_band, ax_std) = plt.subplots(1, 2, figsize=(13, 5))
+    steps_sorted = [s["step"] for s in per_step_stats]
+
+    by_artist: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    for r in rows:
+        by_artist[r["artist"]].append((r["step"], r["e_low"]))
+    for traj in by_artist.values():
+        traj.sort()
+        xs = [t[0] for t in traj]
+        ys = [t[1] for t in traj]
+        ax_band.plot(xs, ys, color="gray", alpha=0.15, linewidth=0.7)
+    mu = [s["mean_e_low"] for s in per_step_stats]
+    sd = [s["std_e_low"] for s in per_step_stats]
+    ax_band.plot(steps_sorted, mu, color="C0", linewidth=2, label="population mean")
+    ax_band.fill_between(
+        steps_sorted,
+        [m - s_ for m, s_ in zip(mu, sd)],
+        [m + s_ for m, s_ in zip(mu, sd)],
+        color="C0", alpha=0.2, label="±1σ",
+    )
+    ax_band.set_xlabel("denoising step (0 = noise, N−1 = clean)")
+    ax_band.set_ylabel("e_low(z_t)")
+    ax_band.set_ylim(0, 1)
+    ax_band.set_title(
+        f"FEI trajectory across {len(by_artist)} artists "
+        f"(CFG={args.guidance_scale:g}, {args.infer_steps} steps)"
+    )
+    ax_band.grid(alpha=0.3)
+    ax_band.legend(fontsize=8)
+
+    ax_std.plot(steps_sorted, sd, marker="o", color="C1")
+    ax_std.set_xlabel("denoising step")
+    ax_std.set_ylabel("std(e_low) across artists")
+    ax_std.set_title("Router discriminative signal (higher = better)")
+    ax_std.grid(alpha=0.3)
+
+    fig.tight_layout()
+    png = out_dir / "fei_trajectory.png"
+    fig.savefig(png, dpi=120)
+    plt.close(fig)
+    log.info(f"wrote {png}")
+    return png.name
+
+
+def _print_teacher_summary(per_step_stats: list[dict]) -> None:
+    print("\n== teacher curve across artists at each step (native buckets) ==")
+    print("step | t      | σ_low(μ) |  n  | mean   | std    | min    | max  ")
+    print("-" * 72)
+    for s in per_step_stats:
+        print(
+            f"{s['step']:>4} | {s['t_sampler']:.4f} | {s['sigma_low_mean']:>8.3f} | "
+            f"{s['n']:>3} | {s['mean_e_low']:.4f} | {s['std_e_low']:.4f} | "
+            f"{s['min_e_low']:.4f} | {s['max_e_low']:.4f}"
+        )
+    if per_step_stats:
+        peak = max(per_step_stats, key=lambda s: s["std_e_low"])
+        print(
+            f"\npeak std(e_low) = {peak['std_e_low']:.4f} at step {peak['step']} "
+            f"(t={peak['t_sampler']:.3f}, σ_low(μ)={peak['sigma_low_mean']:.2f}); "
+            "cf. training-time mixture probe at div=4, t=0.05 ≈ 0.131"
+        )
+
+
+def _interp_at_t(trace_rows: list[dict], t_query: float, key: str) -> float:
+    """Linear interpolation of ``key`` over ``t_sampler`` at ``t_query``.
+
+    Trace need not be sorted. Out-of-range t_query clamps to the nearest
+    endpoint. The sampler's ``t`` axis is schedule-derived and identical
+    across buckets (see ``library/inference/sampling.py::get_timesteps_sigmas``),
+    so interpolating across the 28-step teacher to a student stage's
+    ``t`` is the correct apples-to-apples lookup.
+    """
+    pts: list[tuple[float, float]] = []
+    for r in trace_rows:
+        t = r.get("t_sampler", float("nan"))
+        v = r.get(key)
+        if t != t or v is None:  # NaN or missing
+            continue
+        pts.append((float(t), float(v)))
+    if not pts:
+        return float("nan")
+    pts.sort(key=lambda p: p[0])
+    if t_query <= pts[0][0]:
+        return pts[0][1]
+    if t_query >= pts[-1][0]:
+        return pts[-1][1]
+    for i in range(len(pts) - 1):
+        t0, v0 = pts[i]
+        t1, v1 = pts[i + 1]
+        if t0 <= t_query <= t1:
+            if t1 == t0:
+                return v0
+            f = (t_query - t0) / (t1 - t0)
+            return (1.0 - f) * v0 + f * v1
+    return pts[-1][1]
+
+
+def _compute_paired_gap(
+    teacher_traces: dict[tuple[int, str], list[dict]],
+    student_traces: dict[tuple[int, str], list[dict]],
+    divs: tuple[float, ...],
+) -> tuple[list[dict], list[dict]]:
+    """Build per-(pair, stage, div) gap rows + per-(stage, div) aggregates.
+
+    Pairing rule: for each (seed, stem) present in both trace dicts, walk
+    the student's stages in step order. At each student stage, look up
+    teacher ``e_low_dN`` / ``e_high_dN`` by linear interpolation at the
+    student's ``t_sampler``. Δ_low > 0 means the student under-fills the
+    low band (boost LP-weight); Δ_low < 0 means the student over-fills
+    it (boost HP-weight).
+
+    Returns:
+      paired_rows: one dict per (seed, stem, stage, div).
+      aggregates: list of {stage, div, n, mean_delta_low, std_delta_low,
+        snr_low, sign_consistency_low, mean_e_low_T, mean_e_low_S,
+        mean_delta_high, ... } — one row per (stage, div) cell.
+    """
+    import math
+
+    paired_rows: list[dict] = []
+    common = sorted(set(teacher_traces.keys()) & set(student_traces.keys()))
+    if not common:
+        log.warning("no (seed, stem) pairs in common between teacher and student passes")
+        return [], []
+
+    for (seed, stem) in common:
+        t_rows = teacher_traces[(seed, stem)]
+        s_rows = sorted(student_traces[(seed, stem)], key=lambda r: r["step"])
+        if not t_rows or not s_rows:
+            continue
+        artist = s_rows[0].get("artist", "")
+        for stage_k, sr in enumerate(s_rows):
+            t_S = sr.get("t_sampler", float("nan"))
+            if t_S != t_S:
+                continue
+            for div in divs:
+                k = _div_key(div)
+                e_low_S = sr.get(f"e_low_{k}", sr.get("e_low", float("nan")))
+                e_high_S = sr.get(f"e_high_{k}", sr.get("e_high", float("nan")))
+                e_low_T = _interp_at_t(t_rows, t_S, f"e_low_{k}")
+                e_high_T = _interp_at_t(t_rows, t_S, f"e_high_{k}")
+                if any(v != v for v in (e_low_S, e_high_S, e_low_T, e_high_T)):
+                    continue
+                paired_rows.append(
+                    {
+                        "seed": seed,
+                        "artist": artist,
+                        "stem": stem,
+                        "stage": stage_k,
+                        "div": div,
+                        "t_student": float(t_S),
+                        "e_low_T": float(e_low_T),
+                        "e_low_S": float(e_low_S),
+                        "e_high_T": float(e_high_T),
+                        "e_high_S": float(e_high_S),
+                        "delta_low": float(e_low_T - e_low_S),
+                        "delta_high": float(e_high_T - e_high_S),
+                    }
+                )
+
+    # Aggregate per (stage, div).
+    by_cell: dict[tuple[int, float], list[dict]] = defaultdict(list)
+    for r in paired_rows:
+        by_cell[(r["stage"], r["div"])].append(r)
+    aggregates: list[dict] = []
+    for (stage_k, div), cell_rows in sorted(by_cell.items()):
+        if not cell_rows:
+            continue
+        d_low = [r["delta_low"] for r in cell_rows]
+        d_high = [r["delta_high"] for r in cell_rows]
+        e_T_low = [r["e_low_T"] for r in cell_rows]
+        e_S_low = [r["e_low_S"] for r in cell_rows]
+        e_T_high = [r["e_high_T"] for r in cell_rows]
+        e_S_high = [r["e_high_S"] for r in cell_rows]
+        m_low = float(mean(d_low))
+        s_low = float(pstdev(d_low)) if len(d_low) > 1 else 0.0
+        m_high = float(mean(d_high))
+        s_high = float(pstdev(d_high)) if len(d_high) > 1 else 0.0
+        sign_low = (
+            sum(1 for v in d_low if (v > 0) == (m_low > 0)) / len(d_low)
+            if d_low else 0.0
+        )
+        sign_high = (
+            sum(1 for v in d_high if (v > 0) == (m_high > 0)) / len(d_high)
+            if d_high else 0.0
+        )
+        direction_low = "student_under_low" if m_low > 0 else "student_over_low"
+        # Mean t_student inside the cell — useful when stages don't align across buckets.
+        t_S_vals = [r["t_student"] for r in cell_rows]
+        aggregates.append(
+            {
+                "stage": stage_k,
+                "div": float(div),
+                "n": len(cell_rows),
+                "t_student_mean": float(mean(t_S_vals)),
+                "mean_delta_low": m_low,
+                "std_delta_low": s_low,
+                "snr_low": (abs(m_low) / s_low) if s_low > 0 else math.inf,
+                "sign_consistency_low": float(sign_low),
+                "mean_e_low_T": float(mean(e_T_low)),
+                "mean_e_low_S": float(mean(e_S_low)),
+                "mean_delta_high": m_high,
+                "std_delta_high": s_high,
+                "snr_high": (abs(m_high) / s_high) if s_high > 0 else math.inf,
+                "sign_consistency_high": float(sign_high),
+                "mean_e_high_T": float(mean(e_T_high)),
+                "mean_e_high_S": float(mean(e_S_high)),
+                "direction": direction_low,
+            }
+        )
+    return paired_rows, aggregates
+
+
+def _print_paired_summary(aggregates: list[dict]) -> None:
+    if not aggregates:
+        print("\n== paired gap: no aggregates ==")
+        return
+    print(
+        "\n== paired gap (item 2 Phase 0): per (stage, div) student-teacher "
+        "Δ_low = e_low_T − e_low_S =="
+    )
+    print(
+        f"{'stage':>5} {'div':>5} {'n':>3} {'t_S':>6} "
+        f"{'Δ_low':>9} {'std':>7} {'SNR':>6} {'sign%':>6} {'e_T':>6} {'e_S':>6} "
+        f"{'direction':>20}"
+    )
+    print("-" * 92)
+    for a in aggregates:
+        snr_disp = f"{a['snr_low']:>6.2f}" if a["snr_low"] != float("inf") else "   inf"
+        print(
+            f"{a['stage']:>5} {int(a['div']):>5} {a['n']:>3} {a['t_student_mean']:>6.3f} "
+            f"{a['mean_delta_low']:>+9.4f} {a['std_delta_low']:>7.4f} {snr_disp} "
+            f"{a['sign_consistency_low']*100:>5.1f}% {a['mean_e_low_T']:>6.4f} "
+            f"{a['mean_e_low_S']:>6.4f} {a['direction']:>20}"
+        )
+    # Phase 0 decision rules (mirrors item2_plan.md).
+    best = max(aggregates, key=lambda a: (a["snr_low"] if a["snr_low"] != float("inf") else 0.0))
+    snr_disp = f"{best['snr_low']:.2f}" if best["snr_low"] != float("inf") else "inf"
+    sig = best["sign_consistency_low"]
+    if best["snr_low"] >= 1.0 and sig >= 0.75:
+        verdict = "GO"
+    elif best["snr_low"] >= 0.5 and sig >= 0.65:
+        verdict = "MARGINAL"
+    elif (
+        best["snr_low"] < 0.5
+        and max(abs(a["mean_delta_low"]) for a in aggregates) < 0.02
+    ):
+        verdict = "NO-GO (silent)"
+    else:
+        verdict = "NO-GO (noisy)"
+    print(
+        f"\nbest cell: stage={best['stage']} div={int(best['div'])} "
+        f"SNR={snr_disp} sign={sig*100:.1f}% → verdict: {verdict}"
+    )
 
 
 # ---- main -------------------------------------------------------------------
@@ -282,7 +713,42 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--fei_sigma_low_div", type=float, default=4.0,
-        help="DoG divisor used for the captured FEI (matches live default).",
+        help="DoG divisor used for the captured FEI (matches live default). "
+        "Ignored in paired (--adapter) mode; use --fei_sigma_low_divs instead.",
+    )
+    p.add_argument(
+        "--fei_sigma_low_divs", type=str, default="4,8,16",
+        help="Comma-separated DoG divisors for paired mode "
+        "(--adapter). Default '4,8,16' sweeps FeRA-style D/4 down to "
+        "D/16 (~DC) so Phase 0 can pick the SNR-best divisor for the "
+        "band-deficit loss. See item2_plan.md.",
+    )
+    p.add_argument(
+        "--adapter", type=str, default=None,
+        help="Path to a turbo (or other) LoRA checkpoint. When set, "
+        "runs paired teacher (CFG=4, --infer_steps) and student "
+        "(CFG=--student_guidance, --student_infer_steps with this "
+        "adapter attached) passes and writes paired_gap.csv + "
+        "paired_gap.json. Item 2 Phase 0 go/no-go probe.",
+    )
+    p.add_argument(
+        "--adapter_multiplier", type=float, default=1.0,
+        help="LoRA multiplier for --adapter (paired mode only).",
+    )
+    p.add_argument(
+        "--student_infer_steps", type=int, default=4,
+        help="Step count for the student pass (turbo target = 4).",
+    )
+    p.add_argument(
+        "--student_guidance", type=float, default=1.0,
+        help="CFG for the student pass (turbo bakes CFG=1).",
+    )
+    p.add_argument(
+        "--seeds", type=str, default=None,
+        help="Comma-separated seeds. Overrides --seed. Used in paired "
+        "mode to get per-(stage, div) variance estimates "
+        "(default 3 seeds: '1234,5678,9012'). When --adapter is unset "
+        "and --seeds is unset, --seed is used (single trace).",
     )
     p.add_argument(
         "--negative_prompt", type=str,
@@ -413,91 +879,60 @@ def main() -> None:
     shared = load_shared_models(gen_args)
     shared["conds_cache"] = {}
 
-    out_dir = make_run_dir("fera_artist", label=args.label or "trajectory")
+    out_dir = make_run_dir(
+        "fera_artist",
+        label=args.label or ("turbo_gap" if args.adapter else "trajectory"),
+    )
     log.info(f"output → {out_dir}")
 
-    rows: list[dict] = []
-    bucket_counts: dict[str, int] = defaultdict(int)
-    for idx, (artist, stem, caption, w_px, h_px) in enumerate(prompts):
-        gen_args.prompt = caption
-        gen_args.seed = args.seed  # same seed across artists isolates the prompt effect
-        gen_args.image_size = (h_px, w_px)  # native bucket per stem
-        capture: list[dict] = []
-        _set_capture(capture, args.fei_sigma_low_div)
-        try:
-            _ = generate(gen_args, gen_settings, shared_models=shared)
-        except Exception as exc:
-            log.warning(f"  [{idx + 1}/{len(prompts)}] {artist}/{stem} {w_px}x{h_px}: {exc}")
-            continue
-        finally:
-            _set_capture(None, args.fei_sigma_low_div)
-        bucket_counts[f"{w_px}x{h_px}"] += 1
-        for c in capture:
-            rows.append({"artist": artist, "stem": stem, **c})
-        log.info(
-            f"  [{idx + 1}/{len(prompts)}] {artist}/{stem} @ {w_px}x{h_px}: "
-            f"{len(capture)} steps captured"
+    # ---- divisors + seeds --------------------------------------------------
+    teacher_divs: tuple[float, ...] = (args.fei_sigma_low_div,)
+    if args.adapter:
+        teacher_divs = tuple(
+            float(d.strip()) for d in args.fei_sigma_low_divs.split(",") if d.strip()
         )
+        if not teacher_divs:
+            raise SystemExit("--fei_sigma_low_divs is empty")
+    student_divs = teacher_divs
 
-    # Free GPU before writing artifacts.
-    shared.pop("model", None)
-    clean_memory_on_device(device)
+    if args.seeds is not None:
+        seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
+    elif args.adapter:
+        seeds = [1234, 5678, 9012]
+        log.info(
+            "--adapter set without --seeds: defaulting to 3 seeds [1234, 5678, 9012]"
+        )
+    else:
+        seeds = [args.seed]
+    log.info(
+        f"divisors={list(teacher_divs)}, seeds={seeds}, "
+        f"prompts={len(prompts)} → {len(seeds) * len(prompts)} total per pass"
+    )
+
+    # ---- teacher (or trajectory-only) pass --------------------------------
+    teacher_traces, bucket_counts = _run_capture_pass(
+        prompts, gen_args, gen_settings, shared,
+        teacher_divs, seeds, label="teacher",
+    )
+    teacher_rows = [r for trace in teacher_traces.values() for r in trace]
+    if not teacher_rows:
+        raise SystemExit("no captured rows from teacher pass")
 
     csv_path = out_dir / "fei_trajectory.csv"
-    with csv_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-    log.info(f"wrote {csv_path} ({len(rows)} rows)")
+    _write_trace_csv(csv_path, teacher_rows)
+    log.info(f"wrote {csv_path} ({len(teacher_rows)} rows)")
 
-    # ---- per-step population stats ----------------------------------------
-    # ``t_sampler`` is schedule-derived (function of infer_steps + flow_shift
-    # only, see library/inference/sampling.py::get_timesteps_sigmas), so it's
-    # identical across stems/buckets — we just take the first non-NaN we see.
-    # ``sigma_low`` (the DoG kernel scale) DOES vary across buckets because
-    # σ_low = min(H_lat, W_lat) / fei_sigma_low_div; we record its bucket-
-    # weighted mean for reference.
-    by_step_low: dict[int, list[float]] = defaultdict(list)
-    by_step_high: dict[int, list[float]] = defaultdict(list)
-    by_step_sigma: dict[int, list[float]] = defaultdict(list)
-    by_step_t: dict[int, float] = {}
-    for r in rows:
-        s = r["step"]
-        by_step_low[s].append(r["e_low"])
-        by_step_high[s].append(r["e_high"])
-        by_step_sigma[s].append(r["sigma_low"])
-        t_val = r.get("t_sampler", float("nan"))
-        if t_val == t_val and s not in by_step_t:  # NaN check
-            by_step_t[s] = float(t_val)
-    steps_sorted = sorted(by_step_low.keys())
-    per_step_stats = [
-        {
-            "step": s,
-            "t_sampler": by_step_t.get(s, float("nan")),
-            "sigma_low_mean": float(mean(by_step_sigma[s])),
-            "n": len(by_step_low[s]),
-            "mean_e_low": float(mean(by_step_low[s])),
-            "std_e_low": float(pstdev(by_step_low[s])),
-            "min_e_low": float(min(by_step_low[s])),
-            "max_e_low": float(max(by_step_low[s])),
-            "mean_e_high": float(mean(by_step_high[s])),
-            "std_e_high": float(pstdev(by_step_high[s])),
-        }
-        for s in steps_sorted
-    ]
-
-    # ---- teacher_curve.json — consumed by distill_turbo for FEI-trajectory
-    # weighted CA. Schema is intentionally narrow: step → (t, mu, std) for
-    # both bands. Trainer interpolates over `t` (or floors to step) at
-    # τ_CA lookup time.
+    per_step_stats = _per_step_population_stats(teacher_rows)
     teacher_curve = {
         "schema_version": 1,
         "infer_steps": args.infer_steps,
         "guidance_scale": args.guidance_scale,
         "flow_shift": args.flow_shift,
         "fei_sigma_low_div": args.fei_sigma_low_div,
+        "fei_sigma_low_divs": list(teacher_divs),
         "n_prompts": len(prompts),
-        "n_artists": len({r["artist"] for r in rows}),
+        "n_artists": len({r["artist"] for r in teacher_rows}),
+        "n_seeds": len(seeds),
         "bucket_counts": dict(bucket_counts),
         "curve": [
             {
@@ -518,89 +953,115 @@ def main() -> None:
 
     artifacts: list[str] = [csv_path.name, curve_path.name]
     try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, (ax_band, ax_std) = plt.subplots(1, 2, figsize=(13, 5))
-
-        # Per-artist trajectories (faint) + population mean (bold).
-        by_artist: dict[str, list[tuple[int, float]]] = defaultdict(list)
-        for r in rows:
-            by_artist[r["artist"]].append((r["step"], r["e_low"]))
-        for traj in by_artist.values():
-            traj.sort()
-            xs = [t[0] for t in traj]
-            ys = [t[1] for t in traj]
-            ax_band.plot(xs, ys, color="gray", alpha=0.15, linewidth=0.7)
-        mu = [s["mean_e_low"] for s in per_step_stats]
-        sd = [s["std_e_low"] for s in per_step_stats]
-        ax_band.plot(steps_sorted, mu, color="C0", linewidth=2, label="population mean")
-        ax_band.fill_between(
-            steps_sorted,
-            [m - s_ for m, s_ in zip(mu, sd)],
-            [m + s_ for m, s_ in zip(mu, sd)],
-            color="C0", alpha=0.2, label="±1σ",
+        artifacts.append(
+            _write_trajectory_plot(out_dir, teacher_rows, per_step_stats, args)
         )
-        ax_band.set_xlabel("denoising step (0 = noise, N−1 = clean)")
-        ax_band.set_ylabel("e_low(z_t)")
-        ax_band.set_ylim(0, 1)
-        ax_band.set_title(
-            f"FEI trajectory across {len(by_artist)} artists "
-            f"(CFG={args.guidance_scale:g}, {args.infer_steps} steps)"
-        )
-        ax_band.grid(alpha=0.3)
-        ax_band.legend(fontsize=8)
-
-        ax_std.plot(steps_sorted, sd, marker="o", color="C1")
-        ax_std.set_xlabel("denoising step")
-        ax_std.set_ylabel("std(e_low) across artists")
-        ax_std.set_title("Router discriminative signal (higher = better)")
-        ax_std.grid(alpha=0.3)
-
-        fig.tight_layout()
-        png = out_dir / "fei_trajectory.png"
-        fig.savefig(png, dpi=120)
-        plt.close(fig)
-        artifacts.append(png.name)
-        log.info(f"wrote {png}")
     except Exception as exc:
         log.warning(f"plot failed (continuing): {exc}")
 
-    # ---- console summary ---------------------------------------------------
-    print("\n== teacher curve across artists at each step (native buckets) ==")
-    print("step | t      | σ_low(μ) |  n  | mean   | std    | min    | max  ")
-    print("-" * 72)
-    for s in per_step_stats:
-        print(
-            f"{s['step']:>4} | {s['t_sampler']:.4f} | {s['sigma_low_mean']:>8.3f} | "
-            f"{s['n']:>3} | {s['mean_e_low']:.4f} | {s['std_e_low']:.4f} | "
-            f"{s['min_e_low']:.4f} | {s['max_e_low']:.4f}"
+    _print_teacher_summary(per_step_stats)
+
+    # ---- student pass + paired-gap analysis (--adapter only) --------------
+    paired_aggregates: list[dict] | None = None
+    if args.adapter:
+        # Evict the no-adapter DiT so the student load attaches the LoRA cleanly.
+        shared.pop("model", None)
+        clean_memory_on_device(device)
+
+        student_req = GenerationRequest(
+            dit=args.dit,
+            vae=args.vae,
+            text_encoder=args.text_encoder,
+            prompt=prompts[0][2],
+            negative_prompt=args.negative_prompt,
+            save_path="/tmp/_fei_student_unused.png",
+            infer_steps=args.student_infer_steps,
+            guidance_scale=args.student_guidance,
+            flow_shift=args.flow_shift,
+            image_size=(prompts[0][4], prompts[0][3]),
+            seed=seeds[0],
+            lora_weight=[args.adapter],
+            lora_multiplier=[args.adapter_multiplier],
+            extra_argv=tuple(extra_argv),
+        )
+        student_gen_args = student_req.to_args()
+        student_gen_args.device = device
+        student_gen_settings = get_generation_settings(student_gen_args)
+        log.info(
+            f"student pass: adapter={args.adapter} mult={args.adapter_multiplier} "
+            f"steps={args.student_infer_steps} cfg={args.student_guidance}"
         )
 
-    # Compare to the matched-bucket training-time probe (probe_fei_artist),
-    # which reported std(e_low) ≈ 0.131 at t=0.05 div=4. Printing the
-    # nearest-step trajectory equivalent here makes the contrast cheap.
-    if per_step_stats:
-        peak = max(per_step_stats, key=lambda s: s["std_e_low"])
-        print(
-            f"\npeak std(e_low) = {peak['std_e_low']:.4f} at step {peak['step']} "
-            f"(t={peak['t_sampler']:.3f}, σ_low(μ)={peak['sigma_low_mean']:.2f}); "
-            "cf. training-time mixture probe at div=4, t=0.05 ≈ 0.131"
+        student_traces, _ = _run_capture_pass(
+            prompts, student_gen_args, student_gen_settings, shared,
+            student_divs, seeds, label="student",
         )
+        student_rows = [r for trace in student_traces.values() for r in trace]
+        if not student_rows:
+            raise SystemExit("no captured rows from student pass — adapter load failed?")
+
+        student_csv = out_dir / "student_trajectory.csv"
+        _write_trace_csv(student_csv, student_rows)
+        artifacts.append(student_csv.name)
+        log.info(f"wrote {student_csv} ({len(student_rows)} rows)")
+
+        paired_rows, paired_aggregates = _compute_paired_gap(
+            teacher_traces, student_traces, student_divs,
+        )
+
+        paired_csv = out_dir / "paired_gap.csv"
+        _write_trace_csv(paired_csv, paired_rows)
+        artifacts.append(paired_csv.name)
+        log.info(f"wrote {paired_csv} ({len(paired_rows)} rows)")
+
+        paired_json_path = out_dir / "paired_gap.json"
+        paired_json_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "adapter": args.adapter,
+                    "adapter_multiplier": args.adapter_multiplier,
+                    "student_infer_steps": args.student_infer_steps,
+                    "student_guidance": args.student_guidance,
+                    "teacher_infer_steps": args.infer_steps,
+                    "teacher_guidance": args.guidance_scale,
+                    "flow_shift": args.flow_shift,
+                    "divs": [float(d) for d in student_divs],
+                    "seeds": seeds,
+                    "n_pairs": len({(r["seed"], r["stem"]) for r in paired_rows}),
+                    "cells": paired_aggregates,
+                },
+                indent=2,
+            )
+        )
+        artifacts.append(paired_json_path.name)
+        log.info(f"wrote {paired_json_path}")
+
+        _print_paired_summary(paired_aggregates)
+
+    # Free GPU before write_result.
+    shared.pop("model", None)
+    clean_memory_on_device(device)
 
     metrics = {
-        "n_artists": len({r["artist"] for r in rows}),
+        "n_artists": len({r["artist"] for r in teacher_rows}),
         "k_per_artist": args.k_per_artist,
         "n_prompts": len(prompts),
+        "n_seeds": len(seeds),
         "infer_steps": args.infer_steps,
         "guidance_scale": args.guidance_scale,
         "flow_shift": args.flow_shift,
         "fei_sigma_low_div": args.fei_sigma_low_div,
+        "fei_sigma_low_divs": list(teacher_divs),
         "bucket_counts": dict(bucket_counts),
         "per_step_stats": per_step_stats,
     }
+    if paired_aggregates is not None:
+        metrics["paired_cells"] = paired_aggregates
+        metrics["adapter"] = args.adapter
+        metrics["adapter_multiplier"] = args.adapter_multiplier
+        metrics["student_infer_steps"] = args.student_infer_steps
+        metrics["student_guidance"] = args.student_guidance
     write_result(
         out_dir,
         script=__file__,
