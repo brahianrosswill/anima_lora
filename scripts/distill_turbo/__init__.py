@@ -21,8 +21,6 @@ Module map:
   precedence resolver, schema validation.
 * :mod:`scripts.distill_turbo.primitives` — re-noising, τ samplers, scheduler
   factory, pad-tensor cache, dataloader collate.
-* :mod:`scripts.distill_turbo.ca_band`    — CA-branch FEI band-deficit
-  reweighting (item 2; see ``item2_plan.md``).
 * :mod:`scripts.distill_turbo.warmup`     — fake (critic) head-start loop
   that runs before the main training loop.
 * :mod:`scripts.distill_turbo.metrics`    — GPU-side accumulators + single-sync
@@ -67,7 +65,13 @@ time, gradient is one ODE step from the sampled generator-t):
         desired direction.
             grad_signal  = τ_dm·Δ_dm + τ_ca·(α_eff − 1)·Δ_cfg
             loss_student = (grad_signal · x_pred).mean()
+                         + mean_var_weight · L_mv(x_pred)   # optional, lever B
             loss_student.backward()  → student.step()
+
+        The optional mean-variance reg (lever B / paper Eq. 7) is a real,
+        differentiable KL pulling each image's (μ_i, σ²_i) toward the real-latent
+        target — an auxiliary shield on the variance inflation that is the
+        over-bake's oversaturation (off when ``mean_var_weight == 0``).
 
     5.  Fake update — flow-matching loss on student's x_pred distribution:
         τ_fake ~ U[0,1]

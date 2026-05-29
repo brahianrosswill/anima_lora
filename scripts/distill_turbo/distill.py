@@ -35,7 +35,6 @@ from library.runtime.harness import (
 )
 from networks.methods.turbo_dmd import TurboDMDNetwork
 
-from .ca_band import apply_ca_band_deficit
 from .config import (
     build_argparser,
     load_turbo_config,
@@ -58,6 +57,41 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+
+def _step_tag(step: int) -> str:
+    """Human checkpoint suffix: 1000 -> ``1k``, 8000 -> ``8k``, else raw count.
+
+    Matches the hand-rolled ``_1k`` / ``_500`` naming the runs already use.
+    """
+    return f"{step // 1000}k" if step % 1000 == 0 else str(step)
+
+
+def mean_var_kl(
+    x: torch.Tensor, mu_t: torch.Tensor | float, sigma2_t: torch.Tensor | float
+) -> torch.Tensor:
+    """Mean-variance regularizer (lever B / paper Eq. 7, arXiv:2511.22677).
+
+    KL of each generated image's per-image Gaussian ``N(μ_i, σ²_i)`` toward the
+    real-latent target ``N(μ_t, σ²_t)``, averaged over the batch:
+
+        L_mv = (1/B) Σ_i ½[ (σ_i² + (μ_i − μ_t)²)/σ_t² − 1 − log(σ_i²/σ_t²) ]
+
+    Differentiable in ``x`` (= ``x_pred``), so it backprops into the student and
+    directly clamps the **variance inflation** that *is* the over-bake's
+    oversaturation (§3.2). Stats are per-image over (C, H, W); full-frame even
+    under masked loss (paper-faithful — the reg is a global distribution clamp).
+    """
+    B = x.shape[0]
+    flat = x.reshape(B, -1)
+    mu_i = flat.mean(dim=1)
+    var_i = flat.var(dim=1, unbiased=False)
+    kl = 0.5 * (
+        (var_i + (mu_i - mu_t) ** 2) / sigma2_t
+        - 1.0
+        - torch.log((var_i / sigma2_t).clamp_min(1e-8))
+    )
+    return kl.mean()
 
 
 def main():
@@ -120,17 +154,18 @@ def main():
     )
 
     student_sched = make_scheduler(student_opt, cfg.iterations, cfg.student_lr)
-    # Fake gets ``fake_steps_per_student_step`` updates per outer iteration, plus
-    # ``fake_warmup_steps`` head-start iterations BEFORE the main loop. The fake
-    # scheduler is stepped through both phases, so its total update count — and
-    # hence the ``0.02·total`` LR warmup span — is computed over
-    # ``iterations + fake_warmup_steps``. The fake LR warmup therefore overlaps
-    # the head-start (the fake enters the main loop already calibrated AND at
-    # full LR), and the cosine still lands at the end of the main loop. The
-    # student schedule is independent: ``0.02·iterations``, no head-start offset.
+    # The fake optimizer takes ``iterations · fake_steps_per_student_step``
+    # updates in the main loop plus ``fake_warmup_steps`` head-start updates
+    # BEFORE it (the head-start is now counted in fake updates directly, NOT
+    # scaled by the cadence — see warmup.py). The fake scheduler is stepped
+    # through both phases, so its total update count — and hence the ``0.02·total``
+    # LR warmup span — is sized over the same total. The fake LR warmup therefore
+    # overlaps the head-start (the fake enters the main loop already calibrated
+    # AND at full LR), and the cosine still lands at the end of the main loop.
+    # The student schedule is independent: ``0.02·iterations``, no head-start offset.
     fake_sched = make_scheduler(
         fake_opt,
-        (cfg.iterations + cfg.fake_warmup_steps) * cfg.fake_steps_per_student_step,
+        cfg.iterations * cfg.fake_steps_per_student_step + cfg.fake_warmup_steps,
         cfg.fake_lr,
     )
 
@@ -262,7 +297,6 @@ def main():
         dataloader=dataloader,
         fake_opt=fake_opt,
         fake_sched=fake_sched,
-        fake_steps_per_student_step=cfg.fake_steps_per_student_step,
         grad_clip=cfg.grad_clip,
         t_distribution=cfg.t_distribution,
         sigmoid_scale=cfg.sigmoid_scale,
@@ -271,6 +305,25 @@ def main():
         log_interval=cfg.log_interval,
         writer=writer,
     )
+
+    # ---------------- Mean-variance reg target (lever B / S2) ----------------
+    # Real-data stats the Eq.7 KL pulls each generated image toward. Either
+    # pinned (cfg.mv_sigma2_t > 0) or auto-calibrated via EMA over the real
+    # latents (the default — robust for Anima's 16-ch VAE). EMA buffers are
+    # lazily seeded on the first batch so there's no cold-start bias.
+    mv_auto = cfg.mean_var_weight > 0.0 and cfg.mv_sigma2_t <= 0.0
+    mv_mu_ema: torch.Tensor | None = None
+    mv_var_ema: torch.Tensor | None = None
+    if cfg.mean_var_weight > 0.0:
+        logger.info(
+            "mean-variance reg ON (lever B / Eq.7): weight="
+            f"{cfg.mean_var_weight}, target="
+            + (
+                f"EMA(decay={cfg.mv_ema_decay}) over real latents"
+                if mv_auto
+                else f"fixed μ_t={cfg.mv_mu_t}, σ²_t={cfg.mv_sigma2_t}"
+            )
+        )
 
     # ---------------- Training loop ----------------
     logger.info(f"starting DMD2 training: {cfg.iterations} iterations")
@@ -327,7 +380,6 @@ def main():
         x_pred = x_t.squeeze(2) - t_e * v_student  # (B, 16, H, W), grad-bearing
 
         # --- 2. CA BRANCH (no grad, teacher × 2) ---
-        band_diag = None
         if do_ca:
             tau_ca = sample_t_above(t.float(), min_gap=cfg.tau_ca_min_gap).to(dtype)
             eps_ca = torch.randn_like(x_pred)
@@ -340,28 +392,6 @@ def main():
                 "teacher", x_renoised_ca, tau_ca, c_null, no_grad=True
             ).squeeze(2)
             delta_cfg = v_real_cond_ca - v_real_uncond_ca
-
-            if cfg.ca_band_weight_enabled:
-                # Item 2 measurement fix (see item2_diagnosis.md): one extra
-                # no-grad teacher forward at the student's (x_t, t, c) so the
-                # FEI gap is computed at the same sampler time as x_pred.
-                # No uncond view needed — we only need x0 at t for FEI, not
-                # the CFG direction.
-                v_teacher_at_t = _forward(
-                    "teacher", x_t.detach(), t, crossattn_emb, no_grad=True
-                ).squeeze(2)
-                delta_cfg, band_diag = apply_ca_band_deficit(
-                    delta_cfg,
-                    x_t=x_t.detach(),
-                    v_teacher_at_t=v_teacher_at_t,
-                    t=t,
-                    x_pred=x_pred,
-                    tau_ca=tau_ca,
-                    beta=cfg.ca_band_beta,
-                    divisor=cfg.ca_band_divisor,
-                    window_lo=cfg.ca_band_window_lo,
-                    window_hi=cfg.ca_band_window_hi,
-                )
         else:
             delta_cfg = torch.zeros_like(x_pred)
 
@@ -427,6 +457,29 @@ def main():
         else:
             loss_student = (grad_signal * x_pred.float()).mean()
 
+        # Mean-variance reg (lever B / paper Eq. 7): a real, differentiable loss
+        # on x_pred that pulls each image's (μ_i, σ²_i) toward the real-latent
+        # target — an auxiliary shield clamping the variance inflation that is
+        # the over-bake's oversaturation. Stacks on top of the DM shield.
+        mv_loss = torch.zeros((), device=device)
+        if cfg.mean_var_weight > 0.0:
+            if mv_auto:
+                with torch.no_grad():
+                    rflat = latents.float().reshape(B, -1)
+                    r_mu = rflat.mean()
+                    r_var = rflat.var(unbiased=False)
+                    if mv_mu_ema is None:
+                        mv_mu_ema, mv_var_ema = r_mu, r_var
+                    else:
+                        d = cfg.mv_ema_decay
+                        mv_mu_ema = d * mv_mu_ema + (1.0 - d) * r_mu
+                        mv_var_ema = d * mv_var_ema + (1.0 - d) * r_var
+                tgt_mu, tgt_var = mv_mu_ema, mv_var_ema.clamp_min(cfg.norm_floor**2)
+            else:
+                tgt_mu, tgt_var = cfg.mv_mu_t, cfg.mv_sigma2_t
+            mv_loss = mean_var_kl(x_pred.float(), tgt_mu, tgt_var)
+            loss_student = loss_student + cfg.mean_var_weight * mv_loss
+
         loss_student.backward()
         if cfg.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(
@@ -479,6 +532,7 @@ def main():
             tau_dm_e=tau_dm_e,
             v_real_cond_dm=v_real_cond_dm,
             v_fake_cond_dm=v_fake_cond_dm,
+            mv_loss=mv_loss,
         )
         if do_ca:
             metrics.accumulate_dm_to_ca(
@@ -488,8 +542,6 @@ def main():
                 delta_dm=delta_dm,
                 tau_dm_e=tau_dm_e,
             )
-        if band_diag is not None:
-            metrics.accumulate_band(band_diag)
         metrics.add_alpha(alpha_eff)
 
         if (step + 1) % cfg.log_interval == 0:
@@ -507,18 +559,26 @@ def main():
             metrics.reset()
 
         # --- save ---
+        # Every save_every checkpoint is kept under a step-tagged name (no
+        # overwrite, so the whole training trajectory survives for eyeballing);
+        # the final step also writes the canonical bare `{output_name}` that
+        # inference / merge / `make test` look for.
         if (step + 1) % cfg.save_every == 0 or (step + 1) == cfg.iterations:
-            save_path = str(Path(cfg.output_dir) / f"{cfg.output_name}.safetensors")
-            turbo.save_student(
-                save_path,
-                dtype=torch.bfloat16,
-                metadata={
-                    "ss_turbo_student_rank": str(cfg.student_rank),
-                    "ss_turbo_student_steps": str(cfg.student_steps),
-                    "ss_turbo_teacher_cfg": str(cfg.teacher_cfg),
-                    "ss_turbo_step": str(step + 1),
-                },
-            )
+            n = step + 1
+            is_final = n == cfg.iterations
+            metadata = {
+                "ss_turbo_student_rank": str(cfg.student_rank),
+                "ss_turbo_student_steps": str(cfg.student_steps),
+                "ss_turbo_teacher_cfg": str(cfg.teacher_cfg),
+                "ss_turbo_step": str(n),
+            }
+            save_names = [f"{cfg.output_name}_{_step_tag(n)}"]
+            if is_final:
+                save_names.append(cfg.output_name)  # canonical bare name
+            for name in save_names:
+                save_path = str(Path(cfg.output_dir) / f"{name}.safetensors")
+                turbo.save_student(save_path, dtype=torch.bfloat16, metadata=metadata)
+                logger.info(f"saved checkpoint: {save_path}")
 
     if writer is not None:
         writer.close()

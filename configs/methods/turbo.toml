@@ -8,12 +8,12 @@
 # LoRA — load it through the standard inference path with --infer_steps 4 --cfg 1.0
 # (CFG is baked into the student during distillation).
 
-output_name = "anima_turbo_G"
+output_name = "anima_turbo_H"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 2000
+iterations = 1000
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -21,12 +21,12 @@ use_custom_down_autograd = true
 # Masked loss (student-only): when true, the per-image foreground mask multiplies
 # the student DMD2 gradient so distribution-matching focuses on the subject;
 # the fake/critic regression is left full-frame.
-use_masked_loss = false
+use_masked_loss = true
 
 # Curation gate (item 5; see item5_plan.md). When true, training reads only the
 # stems in the keep_list.json from `make exp-turbo-prep` (the noise/HF-curated
 # high-signal subset) instead of the full pool.
-use_prep_list = true
+use_prep_list = false
 
 [network]
 student_rank = 64
@@ -49,17 +49,21 @@ norm_floor = 0.05               # clamp_min for the (b) denominator (latent scal
 # Optimization.
 [optim]
 student_lr = 2e-5
-fake_lr = 3e-5
-fake_steps_per_student_step = 2
-fake_warmup_steps = 50         # fake (critic) head-start: fake-only updates BEFORE the
-                                # main loop, so the critic is calibrated against the student's
-                                # (init ≈ teacher) x_pred before the student LR warmup (~40 steps)
-                                # ramps to full strength — kills the early grad_signal_rms spike
-                                # (~step 50). The fake LR scheduler is sized over
-                                # (iterations + fake_warmup_steps) and stepped through this phase,
-                                # so its 0.02 LR warmup overlaps the head-start; student schedule
-                                # untouched. 0 = off.
-alpha_warmup_steps = 1000       # linear ramp α_eff: 1.0 → teacher_cfg over these steps
+fake_lr = 5e-5
+fake_steps_per_student_step = 4
+fake_warmup_steps = 400         # fake (critic) head-start: number of fake-only gradient
+                                # updates BEFORE the main loop, so the critic is calibrated
+                                # against the student's (init ≈ teacher) x_pred before the
+                                # student LR warmup (~40 steps) ramps to full strength —
+                                # kills the early grad_signal_rms spike (~step 50). Counted
+                                # in fake updates DIRECTLY (decoupled from
+                                # fake_steps_per_student_step — bumping the cadence no longer
+                                # rescales the head-start). 400 ≈ the old 100×4 magnitude.
+                                # The fake LR scheduler is sized over
+                                # (iterations·fake_steps_per_student_step + fake_warmup_steps)
+                                # and stepped through this phase, so its 0.02 LR warmup
+                                # overlaps the head-start; student schedule untouched. 0 = off.
+alpha_warmup_steps = 250       # linear ramp α_eff: 1.0 → teacher_cfg over these steps
 weight_decay = 0.0
 grad_clip = 1.0                 # student grad-norm cap
 
@@ -68,36 +72,28 @@ grad_clip = 1.0                 # student grad-norm cap
 t_distribution = "uniform"      # "uniform" or "sigmoid"
 sigmoid_scale = 1.0
 
-# CA band-deficit feedback (item 2 — `item2_plan.md`).
+# Mean-variance regularization (lever B / paper Eq. 7; proposal §3.B, run S2).
 #
-# Per-sample reweighting of δ_cfg = v_real_cond - v_real_uncond by where the
-# student's FEI lags the teacher's:
-#   w_high = 1 + β·relu(e_high_T - e_high_S)
-#   w_low  = 1 + β·relu(e_low_T  - e_low_S)
-#   δ_cfg' = w_low·LP(δ_cfg) + w_high·HP(δ_cfg)
-# Because `e_low + e_high ≡ 1`, only one branch can fire per sample; phase 0
-# on turbo_C found the student over-fills LF, so w_high is the active arm.
-# Defaults are pinned by the n=90 paired-gap probe (bench/fera_artist/
-# results/20260528-1902-turbo_C_phase0/): div=16 SNR=2.25 @ stage 2.
+# A KL of each generated image's per-image Gaussian (μ_i, σ²_i) toward the
+# real-latent target (μ_t, σ²_t):
+#   L_mv = (1/B) Σ ½[ (σ_i² + (μ_i − μ_t)²)/σ_t² − 1 − log(σ_i²/σ_t²) ]
+# added to the student loss with `weight`. It directly clamps the variance
+# INFLATION that IS the over-bake's oversaturation (paper §3.2), so it stacks
+# on the DM shield as a cheap second shield. weight=0 disables (default).
+# For run S2 use a small weight (~0.01–0.05).
 #
-# DISABLED 2026-05-29 — FALSIFIED LIVE. The wired loss measures FEI on
-# x0-estimates at the renoised-data x_t = (1-t)x0 + t·eps, but phase 0 measured
-# FEI on the student's rollout-state z_t. They disagree on sign: the live runs
-# (turbo_E/F, output/logs/turbo/20260528-212337 & …194036) fire w_low, not
-# w_high, at <=4% reweight (~no-op). The over-blur lever lives on the student's
-# own inference trajectory, which DMD2 single-call training never visits. Do
-# NOT bump beta (amplifies the wrong, mildly antagonistic arm). Revive only by
-# re-siting the measurement onto rollout states (item 4 anchors).
-# Full write-up: docs/findings/turbo_fei_band_deficit_falsified.md.
-[ca_band_weight]
-enabled = false
-beta = 0.2                      # band-deficit gain (0 = bit-identical to no-band-weighting)
-divisor = 16                    # σ_low = min(H_lat, W_lat) / divisor (phase 0 winner)
-window_lo = 0.30                # gate band-weighting OFF when τ_ca < window_lo
-window_hi = 0.95                # gate OFF when τ_ca ≥ window_hi (stage-0 degenerate noise band)
+# Target stats: leave `sigma2_t <= 0` to auto-calibrate both μ_t and σ²_t via an
+# EMA over the real latents (recommended for Anima's 16-ch VAE — the paper's
+# SDXL μ_t=0.075/σ²_t=0.81 don't transfer). Set `sigma2_t > 0` to pin explicit
+# values.
+[mean_var]
+weight = 0.0
+mu_t = 0.0                      # used only when sigma2_t > 0 (pinned target)
+sigma2_t = -1.0                 # <= 0 → EMA auto-calibrate from real latents
+ema_decay = 0.99               # EMA decay for the auto target
 
 # Logging / checkpoints.
 [io]
-save_every = 1000
+save_every = 250
 log_interval = 5
 log_dir = "output/logs/turbo"

@@ -24,12 +24,10 @@ sign-random gradient vehicle, not a real loss):
   engine and DM as the shield, so DM ≳ CA for long stretches is a red flag.
   Accumulated only on do_ca steps (own denominator).
 
-CA band-deficit diagnostics (item 2; only logged when ``band_steps > 0``):
+Mean-variance reg (lever B / paper Eq. 7; 0 when disabled):
 
-* ``band_w_high`` — mean(w_high) over in-window samples (active arm on turbo_C)
-* ``band_w_low``  — mean(w_low) (≈ 1.0 expected under turbo_C)
-* ``band_dh_pos`` — mean relu(e_high_T − e_high_S) — raw deficit before β-gain
-* ``band_dl_pos`` — mean relu(e_low_T − e_low_S)
+* ``mv`` — the per-step Eq.7 KL value (pre-weight). Higher = the student's
+  per-image stats are further from the real-latent target.
 """
 
 from __future__ import annotations
@@ -52,11 +50,7 @@ class FlushedMetrics:
     cos: float
     dm_to_ca: float
     ca_steps: float
-    band_w_high: float
-    band_w_low: float
-    band_dh_pos: float
-    band_dl_pos: float
-    band_steps: float
+    mv: float
     alpha: float
 
 
@@ -79,12 +73,8 @@ class TurboMetrics:
         # CA-conditional (own denom).
         self.dm_to_ca = z()
         self.ca_steps = z()
-        # CA-band-conditional (own denom).
-        self.band_w_high = z()
-        self.band_w_low = z()
-        self.band_dh_pos = z()
-        self.band_dl_pos = z()
-        self.band_steps = z()
+        # Mean-variance reg (lever B / Eq.7); 0 when disabled.
+        self.mv = z()
         # Pure-Python (no GPU work).
         self.alpha = 0.0
 
@@ -101,9 +91,11 @@ class TurboMetrics:
         tau_dm_e: torch.Tensor,
         v_real_cond_dm: torch.Tensor,
         v_fake_cond_dm: torch.Tensor,
+        mv_loss: torch.Tensor,
     ) -> None:
         eps_r = 1e-8
         self.fake.add_(fake_loss_mean_t.float())
+        self.mv.add_(mv_loss.detach().float())
         self.grad.add_(grad_signal.float().pow(2).mean().sqrt())
         self.dm.add_(delta_dm.float().pow(2).mean().sqrt())
         self.cfg.add_(delta_cfg.float().pow(2).mean().sqrt())
@@ -135,20 +127,6 @@ class TurboMetrics:
         self.dm_to_ca.add_(dm_w / (ca_w + eps_r))
         self.ca_steps.add_(1.0)
 
-    @torch.no_grad()
-    def accumulate_band(self, diag) -> None:
-        """Only count this step if any sample was actually weighted.
-
-        Otherwise the in-window-mean is undefined (we clamped denom to 1.0 in
-        ca_band.apply_ca_band_deficit, but the per-step mean would be 0/1 = noise).
-        """
-        step_active = (diag.in_window_count > 0).float()
-        self.band_w_high.add_(diag.w_high * step_active)
-        self.band_w_low.add_(diag.w_low * step_active)
-        self.band_dh_pos.add_(diag.dh_pos * step_active)
-        self.band_dl_pos.add_(diag.dl_pos * step_active)
-        self.band_steps.add_(step_active)
-
     def add_alpha(self, alpha_eff: float) -> None:
         self.alpha += alpha_eff
 
@@ -166,28 +144,18 @@ class TurboMetrics:
                     self.rel_gap,
                     self.mag_ratio,
                     self.cos,
+                    self.mv,
                 ]
             )
             / log_interval
         )
         # dm_to_ca has its own denominator (only do_ca steps contribute).
         dm_to_ca = self.dm_to_ca / self.ca_steps.clamp(min=1.0)
-        # Band diagnostics have their own denominator (in-window-active steps).
-        band_denom = self.band_steps.clamp(min=1.0)
-        band_w_high_avg = self.band_w_high / band_denom
-        band_w_low_avg = self.band_w_low / band_denom
-        band_dh_pos_avg = self.band_dh_pos / band_denom
-        band_dl_pos_avg = self.band_dl_pos / band_denom
         packed = torch.cat(
             [
                 stacked,
                 dm_to_ca.reshape(1),
                 self.ca_steps.reshape(1),
-                band_w_high_avg.reshape(1),
-                band_w_low_avg.reshape(1),
-                band_dh_pos_avg.reshape(1),
-                band_dl_pos_avg.reshape(1),
-                self.band_steps.reshape(1),
             ]
         ).tolist()
         return FlushedMetrics(
@@ -200,23 +168,17 @@ class TurboMetrics:
             rel_gap=packed[6],
             mag_ratio=packed[7],
             cos=packed[8],
-            dm_to_ca=packed[9],
-            ca_steps=packed[10],
-            band_w_high=packed[11],
-            band_w_low=packed[12],
-            band_dh_pos=packed[13],
-            band_dl_pos=packed[14],
-            band_steps=packed[15],
+            mv=packed[9],
+            dm_to_ca=packed[10],
+            ca_steps=packed[11],
             alpha=self.alpha / log_interval,
         )
 
     def reset(self) -> None:
         for t in (
             self.fake, self.grad, self.dm, self.cfg, self.xpred, self.v_student,
-            self.rel_gap, self.mag_ratio, self.cos,
+            self.rel_gap, self.mag_ratio, self.cos, self.mv,
             self.dm_to_ca, self.ca_steps,
-            self.band_w_high, self.band_w_low, self.band_dh_pos, self.band_dl_pos,
-            self.band_steps,
         ):
             t.zero_()
         self.alpha = 0.0
@@ -236,13 +198,7 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     writer.add_scalar("train/dm_cos", m.cos, step)
     if m.ca_steps > 0:
         writer.add_scalar("train/dm_to_ca", m.dm_to_ca, step)
-    if m.band_steps > 0:
-        # Active arm under turbo_C; both logged so we catch a post-finetune
-        # sign flip (student_under_low) automatically.
-        writer.add_scalar("train/band_w_high", m.band_w_high, step)
-        writer.add_scalar("train/band_w_low", m.band_w_low, step)
-        writer.add_scalar("train/band_dh_pos", m.band_dh_pos, step)
-        writer.add_scalar("train/band_dl_pos", m.band_dl_pos, step)
+    writer.add_scalar("train/mean_var_kl", m.mv, step)
 
 
 def tqdm_postfix(m: FlushedMetrics) -> dict:
@@ -255,6 +211,6 @@ def tqdm_postfix(m: FlushedMetrics) -> dict:
         "xp": f"{m.xpred:.3f}",
         "fake": f"{m.fake:.2e}",
     }
-    if m.band_steps > 0:
-        postfix["wh"] = f"{m.band_w_high:.3f}"
+    if m.mv > 0:
+        postfix["mv"] = f"{m.mv:.3f}"
     return postfix

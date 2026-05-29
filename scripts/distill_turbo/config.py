@@ -170,37 +170,18 @@ def build_argparser() -> argparse.ArgumentParser:
         help="clamp_min for the x0-norm denominator (latent scale); only active "
         "with --dm_x0_norm.",
     )
-    # CA band-deficit feedback (item 2). Phase 0 defaults pinned by
-    # bench/fera_artist/results/20260528-1902-turbo_C_phase0/.
+    # Mean-variance reg (lever B / paper Eq. 7; proposal §3.B / S2). Pulls each
+    # generated image's (μ_i, σ²_i) toward the real-latent target — clamps the
+    # variance inflation that is the over-bake's oversaturation.
     parser.add_argument(
-        "--ca_band_weight",
-        dest="ca_band_weight_enabled",
-        action="store_true",
-        default=None,
-        help="Per-sample band-deficit reweighting of δ_cfg in the CA branch "
-        "(item 2; see item2_plan.md). Default: TOML (ca_band_weight.enabled).",
-    )
-    parser.add_argument(
-        "--no_ca_band_weight",
-        dest="ca_band_weight_enabled",
-        action="store_false",
-    )
-    parser.add_argument(
-        "--ca_band_beta",
+        "--mean_var_weight",
         type=float,
         default=-1.0,
-        help="Band-deficit gain β. β=0 is bit-identical to no band weighting "
-        "(up to LP+HP fp32 roundoff). Default: TOML (ca_band_weight.beta=0.2).",
+        help="Weight on the Eq.7 mean-variance KL added to the student loss. "
+        "0 disables; S2 uses ~0.01–0.05. The target stats are read from TOML "
+        "([mean_var].mu_t/sigma2_t), or auto-calibrated via EMA over the real "
+        "latents when sigma2_t <= 0. Default: TOML (mean_var.weight, default 0).",
     )
-    parser.add_argument(
-        "--ca_band_divisor",
-        type=float,
-        default=-1.0,
-        help="σ_low = min(H_lat, W_lat) / divisor for the LP/HP split. "
-        "Phase 0 winner D/16. Default: TOML (ca_band_weight.divisor=16).",
-    )
-    parser.add_argument("--ca_band_window_lo", type=float, default=-1.0)
-    parser.add_argument("--ca_band_window_hi", type=float, default=-1.0)
     parser.add_argument("--blocks_to_swap", type=int, default=0)
     parser.add_argument("--attn_mode", type=str, default="flash")
     parser.add_argument("--grad_ckpt", action="store_true", default=False)
@@ -292,12 +273,11 @@ class TurboConfig:
     dm_x0_norm: bool
     norm_floor: float
 
-    # CA band-deficit (item 2)
-    ca_band_weight_enabled: bool
-    ca_band_beta: float
-    ca_band_divisor: float
-    ca_band_window_lo: float
-    ca_band_window_hi: float
+    # Mean-variance reg (lever B / Eq. 7)
+    mean_var_weight: float
+    mv_mu_t: float
+    mv_sigma2_t: float
+    mv_ema_decay: float
 
     # Optimizer + scheduler
     student_lr: float
@@ -381,23 +361,12 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     dm_x0_norm = bool(_pick(args.dm_x0_norm, cfg, "dmd.dm_x0_norm", False))
     norm_floor = float(_pick(args.norm_floor, cfg, "dmd.norm_floor", 0.05))
 
-    # CA band-deficit (item 2). All branch decisions are Python-constants
-    # (compile-stable); the per-sample τ_ca window is a tensor blend in
-    # ca_band.apply_ca_band_deficit, not a Python branch.
-    if args.ca_band_weight_enabled is None:
-        ca_band_weight_enabled = bool(_flatten(cfg, "ca_band_weight.enabled", False))
-    else:
-        ca_band_weight_enabled = bool(args.ca_band_weight_enabled)
-    ca_band_beta = float(_pick(args.ca_band_beta, cfg, "ca_band_weight.beta", 0.2))
-    ca_band_divisor = float(
-        _pick(args.ca_band_divisor, cfg, "ca_band_weight.divisor", 16.0)
-    )
-    ca_band_window_lo = float(
-        _pick(args.ca_band_window_lo, cfg, "ca_band_weight.window_lo", 0.30)
-    )
-    ca_band_window_hi = float(
-        _pick(args.ca_band_window_hi, cfg, "ca_band_weight.window_hi", 0.95)
-    )
+    # Mean-variance reg (lever B / Eq. 7). weight=0 disables. Target stats are
+    # pinned (sigma2_t > 0) or auto-calibrated via EMA over the real latents.
+    mean_var_weight = float(_pick(args.mean_var_weight, cfg, "mean_var.weight", 0.0))
+    mv_mu_t = float(_flatten(cfg, "mean_var.mu_t", 0.0))
+    mv_sigma2_t = float(_flatten(cfg, "mean_var.sigma2_t", -1.0))
+    mv_ema_decay = float(_flatten(cfg, "mean_var.ema_decay", 0.99))
 
     # Optimizer
     student_lr = float(_pick(args.student_lr, cfg, "optim.student_lr", 1e-5))
@@ -457,19 +426,17 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             "Single-prompt overfit mode pins the dataset to one sample; a "
             "batch_size > 1 dataloader with drop_last=True would yield zero batches."
         )
-    if ca_band_weight_enabled:
-        if ca_band_beta < 0.0:
-            raise ValueError(f"ca_band_weight.beta={ca_band_beta}: must be ≥ 0")
-        if ca_band_divisor <= 0.0:
-            raise ValueError(f"ca_band_weight.divisor={ca_band_divisor}: must be > 0")
-        if not (0.0 <= ca_band_window_lo < ca_band_window_hi <= 1.0):
-            raise ValueError(
-                f"ca_band_weight window [{ca_band_window_lo}, {ca_band_window_hi}]: "
-                "require 0 ≤ lo < hi ≤ 1"
-            )
+    if mean_var_weight < 0.0:
+        raise ValueError(f"mean_var.weight={mean_var_weight}: must be ≥ 0")
+    if mean_var_weight > 0.0:
+        mv_auto = mv_sigma2_t <= 0.0
         logger.info(
-            f"CA band-deficit ENABLED: β={ca_band_beta}, div={ca_band_divisor}, "
-            f"window=[{ca_band_window_lo}, {ca_band_window_hi}]"
+            f"mean-variance reg ENABLED (Eq.7): weight={mean_var_weight}, target="
+            + (
+                f"EMA(decay={mv_ema_decay}) over real latents"
+                if mv_auto
+                else f"fixed μ_t={mv_mu_t}, σ²_t={mv_sigma2_t}"
+            )
         )
     logger.info(
         "DM gradient policy: "
@@ -512,11 +479,10 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         tau_ca_skip_above_t=tau_ca_skip_above_t,
         dm_x0_norm=dm_x0_norm,
         norm_floor=norm_floor,
-        ca_band_weight_enabled=ca_band_weight_enabled,
-        ca_band_beta=ca_band_beta,
-        ca_band_divisor=ca_band_divisor,
-        ca_band_window_lo=ca_band_window_lo,
-        ca_band_window_hi=ca_band_window_hi,
+        mean_var_weight=mean_var_weight,
+        mv_mu_t=mv_mu_t,
+        mv_sigma2_t=mv_sigma2_t,
+        mv_ema_decay=mv_ema_decay,
         student_lr=student_lr,
         fake_lr=fake_lr,
         fake_steps_per_student_step=fake_steps_per_student_step,
@@ -579,6 +545,7 @@ def tb_config_text(c: TurboConfig) -> str:
         "tau_ca_min_gap": c.tau_ca_min_gap,
         "tau_ca_skip_above_t": c.tau_ca_skip_above_t,
         "t_distribution": c.t_distribution,
+        "mean_var_weight": c.mean_var_weight,
         "use_masked_loss": c.use_masked_loss,
         "data_dir": c.data_dir,
         "dit_path": c.dit_path,
