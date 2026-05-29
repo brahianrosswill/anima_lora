@@ -36,7 +36,13 @@ from library.runtime.harness import (
 from networks.methods.turbo_dmd import TurboDMDNetwork
 
 from .ca_band import apply_ca_band_deficit
-from .config import build_argparser, load_turbo_config, resolve_config, tb_config_text
+from .config import (
+    build_argparser,
+    load_turbo_config,
+    resolve_config,
+    snapshot_toml_text,
+    tb_config_text,
+)
 from .metrics import TurboMetrics, tqdm_postfix, write_scalars
 from .primitives import (
     PadCache,
@@ -169,6 +175,19 @@ def main():
         writer = SummaryWriter(log_dir=str(run_log))
         writer.add_text("config", tb_config_text(cfg))
         logger.info(f"TB logs -> {run_log}")
+
+        # Mirror the resolved config into the run log dir so the timestamped
+        # run becomes a self-contained record of "this run + the config that
+        # produced it" — the turbo analogue of train.py's .snapshot.toml.
+        snapshot_path = run_log / f"{cfg.output_name}.snapshot.toml"
+        try:
+            snapshot_path.write_text(
+                snapshot_toml_text(cfg, source_config=args.config),
+                encoding="utf-8",
+            )
+            logger.info(f"Config snapshot written: {snapshot_path}")
+        except OSError as e:
+            logger.warning(f"Could not write config snapshot to {snapshot_path}: {e}")
 
     # ---------------- Forward helper ----------------
     pad_cache = PadCache(dtype)

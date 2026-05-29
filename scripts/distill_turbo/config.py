@@ -500,6 +500,34 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     )
 
 
+def snapshot_toml_text(c: TurboConfig, *, source_config: str | None = None) -> str:
+    """Render the fully-resolved turbo config as a provenance TOML snapshot.
+
+    Unlike :func:`tb_config_text` (a TB summary of a hand-picked subset), this
+    dumps *every* resolved field — CLI overrides folded in — so the run log dir
+    becomes a self-contained record of "this run + the config that produced it".
+    It's the turbo analogue of the ``<output_name>.snapshot.toml`` that
+    ``train.py`` writes for the LoRA family (the bespoke turbo config never went
+    through that path).
+    """
+    import dataclasses
+
+    import tomlkit
+
+    doc = tomlkit.document()
+    doc.add(tomlkit.comment("Anima turbo distillation — resolved config snapshot"))
+    if source_config:
+        doc.add(tomlkit.comment(f"source config: {source_config}"))
+    doc.add(tomlkit.nl())
+    for k, v in dataclasses.asdict(c).items():
+        if v is None:
+            # tomlkit has no null; record the field as unset rather than drop it.
+            doc.add(tomlkit.comment(f"{k} = (unset)"))
+        else:
+            doc[k] = v
+    return tomlkit.dumps(doc)
+
+
 def tb_config_text(c: TurboConfig) -> str:
     """Formatted TensorBoard config summary (same key set as v1)."""
     pairs = {
