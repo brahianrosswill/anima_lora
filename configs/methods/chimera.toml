@@ -16,13 +16,13 @@
 # the denoise loss + per-pool balance loss. T-LoRA's mask is applied to
 # the content branch only (the freq branch keeps full rank at every t).
 
-network_alpha = 32
-network_dim = 32
+network_alpha = 48
+network_dim = 48
 
-learning_rate = 5e-5
-max_train_epochs = 3
-save_every_n_epochs = 3
-checkpointing_epochs = 3
+learning_rate = 2e-5
+max_train_epochs = 12
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -42,7 +42,7 @@ use_timestep_mask = true
 min_rank = 16
 alpha_rank_scale = 1.0
 channel_scaling_alpha = 0.5
-blocks_to_swap=8
+blocks_to_swap=4
 
 # -------------
 # ChimeraHydra activation. The three-axis routing fields
