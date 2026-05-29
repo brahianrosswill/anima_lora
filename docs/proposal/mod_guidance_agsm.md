@@ -1,6 +1,7 @@
 # Mod Guidance — AGSM: a contrastive term on the modulation path
 
-Status: **proposal** (2026-05-29, rev. 2026-05-29). Builds on
+Status: **proposal** (2026-05-29, rev. 2026-05-29 — Phase-0 premise probe `--mod_agsm_probe`
+built and wired into `scripts/distill_mod/distill.py`; gates whether Phase 1 is worth building). Builds on
 `docs/methods/mod-guidance.md` and **directly reuses the soft-tokens contrastive
 machinery** — negative sourcing, AGSM target-shift, EMA shadow — re-targeted from
 the soft-token bank onto `pooled_text_proj`.
@@ -76,35 +77,61 @@ constant — an ε-target shift is a v-target shift). Start `Ã(t)=1`. `λ_pref`
 `--mod_agsm` switch default **off**, so the shipped MSE-only distillation stays the
 default until the Phase-2 A/B clears.
 
-## Why no Phase-0 premise probe (deliberately skipped)
+## Phase-0 premise probe — folded into the warmup (`--mod_agsm_probe`)
 
-The soft-tokens version gated on a no-training reward-premise probe because AGSM's
-reward is the denoising likelihood and `[[project_fm_val_loss_uninformative]]` says
-generic FM-MSE doesn't track quality on Anima. Two reasons that gate is **not** needed
-here:
+An earlier draft argued the Phase-0 reward-premise probe was unnecessary here because
+the soft-tokens version **already passed** it (rank@1 0.993 shuffled / 0.958 hard,
+margin grows with σ; `[[project_agsm_reward_premise_holds]]`). **That transfer
+argument was wrong**, and the probe is now wired (`scripts/distill_mod/distill.py
+--mod_agsm_probe`, observation-only). Two things the soft-tokens probe measured differ
+from what this method needs:
 
-1. **The premise is already proven for real-caption negatives.** With mismatched
-   captions (not fabricated quality strings), the premise is just "matched ranks above
-   mismatched by FM-error" — which the soft-tokens Phase-0 probe **already passed**
-   (rank@1 0.993 shuffled / 0.958 hard, margin grows with σ;
-   `[[project_agsm_reward_premise_holds]]`). The discriminative signal lives in the
-   frozen DiT's response to conditioning; re-running it for mod guidance would re-prove
-   a held result.
-2. **Mod guidance's val loss is a different, informative quantity.** The
-   `project_fm_val_loss_uninformative` finding is about generic data-FM-MSE. Mod
-   guidance's distillation loss is `MSE(student, teacher)` — a *reconstruction-of-the-
-   gold-teacher* metric — and on this method lower distillation val loss **has** tracked
-   better samples (operator-confirmed; also why the synth-pool was added to floor the
-   real-vs-teacher gap, mod-guidance.md §distill-prep Phase 2). So the loss the term
-   builds on is trustworthy here.
+1. **Different reward target.** Soft tokens' reward anchors on the **ground-truth data
+   velocity** `v = ε − x₀` (`soft_tokens.py:1022`): "which caption best explains the
+   real image." Here the reward anchors on **`teacher_pred`** (the matched caption
+   through cross-attention): "which pooled injection best reproduces the teacher." The
+   held Phase-0 result is about the former; it does not cover the latter.
+2. **Different channel.** Soft tokens routes conditioning through a per-layer crossattn
+   splice that the **frozen** DiT already responds to strongly — and that frozen
+   response is what the probe measured. Here the entire discriminative response is
+   mediated by a **trainable, near-zero-init pooled → AdaLN MLP**. The signal is *not*
+   a frozen-DiT property; it only exists once the carry MSE has trained the projection,
+   and only to the extent the (narrow, entangled — `[[project_mod_guidance_quality_tag_axis]]`)
+   pooled channel allows.
 
-The one residual unknown is *narrowness*: the conditioning enters through a pooled
-vector → AdaLN, a tighter channel than soft tokens' per-layer splice, and the
-projection starts near-zero. That is not a premise question (no probe can pre-answer
-it) — it is exactly what the Phase-2 A/B measures. So we go straight to training.
+So *narrowness is the premise question*, not a separate Phase-2-only unknown: if the
+trained pooled channel can't separate captions, the PL weight `w_matched` stays at
+chance, `Δ → 0`, and the full term is a no-op — exactly the soft-tokens AGSM Phase-3b
+failure signature (*"Δ rotates but w stays at chance"*, `[[project_soft_tokens_agsm_pl_correction]]`).
+
+**The probe is cheap and folds into the run.** After the warmup ratio (default 0.1 —
+by then the carry MSE has trained the projection), on each log step it reuses the
+matched student forward and adds `k` no-grad forwards on mismatched pooled vectors (a
+ring buffer of recently-seen pooled vectors; B=1-safe), then reads `w_matched` off the
+**exact** `_agsm_pl_weights` math the real term would use. The loss is unchanged while
+it runs. Decision rule:
+
+- **`w_matched` hugs `1/(k+1)`** (0.33 at the default `k=2`) → channel too narrow, the
+  full term will no-op → **revert, having paid ~nothing**.
+- **`w_matched` climbs above chance** (and `reward_margin > 0`) → premise holds *live on
+  the real pathway* (the thing the soft-tokens Phase-0 could not tell us) → wire the
+  full gated term.
+
+Mod guidance's distillation val loss stays a useful companion signal here:
+`project_fm_val_loss_uninformative` is about generic data-FM-MSE, whereas the
+distillation loss `MSE(student, teacher)` is a *reconstruction-of-the-gold-teacher*
+metric, and on this method lower distillation val loss **has** tracked better samples
+(operator-confirmed; also why the synth-pool was added to floor the real-vs-teacher
+gap, mod-guidance.md §distill-prep Phase 2). But it is the companion, not the gate —
+the gate is `w_matched`.
 
 ## Phasing — gates, cheapest-first
 
+- **Phase 0 — premise probe, folded into a normal distill run (`--mod_agsm_probe`).**
+  No loss change, ~`k` no-grad forwards on log steps after the warmup ratio. Watch
+  `agsm_probe/w_matched` vs `1/(k+1)`. **GATE:** stays at chance → the pooled channel
+  can't discriminate, the full term will no-op → stop here, don't build Phase 1.
+  Above chance → proceed. (Built; see `scripts/distill_mod/distill.py`.)
 - **Phase 1 — wire the contrastive term into distillation, single MLP.** Add the k
   negative-pool injections + EMA shadow + `agsm_targets`/`agsm_losses` call to
   `distill.py`'s loss (the `pooled_text_override` student forward already exists; the
@@ -165,8 +192,10 @@ natural band is where mod guidance has the most leverage.
 - No fabricated quality negatives — negatives are real mismatched captions from the
   soft-tokens plumbing.
 - No dual ψ⁺/ψ⁻ bank — one MLP; matched/mismatched are inputs to it.
-- No Phase-0 premise probe — the matched>mismatched premise is held from soft-tokens
-  Phase 0, and mod guidance's distillation val loss is informative here.
+- No *separate* Phase-0 premise probe — but the premise **is** checked, folded into the
+  warmup as `--mod_agsm_probe` (observation-only). The soft-tokens Phase-0 result does
+  **not** transfer (different reward target: `teacher_pred` vs data-velocity; different
+  channel: trainable pooled MLP vs frozen crossattn), so the probe re-measures it live.
 - No inference-path change — the trained projection drops into the existing
   `--pooled_text_proj` / `--mod_w` / per-block surface unchanged (the *hypothesis* is
   the schedule becomes optional, not that the surface changes).
@@ -177,6 +206,8 @@ natural band is where mod guidance has the most leverage.
 - Distillation loss site (where the term composes): `scripts/distill_mod/distill.py`
   (teacher forward `:628`, student forward w/ `pooled_text_override` `:653/658`, MSE
   loss `:662`)
+- Phase-0 probe (built): `scripts/distill_mod/distill.py` `--mod_agsm_probe`
+  / `--mod_agsm_probe_{warmup,k,tau}`; logs `agsm_probe/{w_matched,reward_margin,w_chance}`
 - AGSM helpers to reuse (network-agnostic): `networks/methods/soft_tokens.py`
   (`_agsm_pl_weights`, `agsm_targets`, `agsm_losses`, `update_bank_ema`)
 - Negative sourcing to reuse: `library/datasets/base.py::setup_contrastive_negatives`
