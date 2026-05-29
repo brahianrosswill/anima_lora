@@ -37,9 +37,9 @@ from gui.tabs.adapter_tab import (
     IPAdapterTab,
 )
 from gui.tabs.config_tab import ConfigTab
-from gui.tabs.distill_tab import SPDTrainTab, TurboTrainTab
 from gui.tabs.image_tab import ImageViewerTab
 from gui.tabs.merge_tab import MergeTab
+from gui.tabs.methods_tab import MethodsTab
 from gui.tabs.preprocess_tab import PreprocessingTab
 from gui.system_dialog import (
     GITHUB_ISSUES_URL,
@@ -288,20 +288,16 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
 
-        # Experimental set: FeRA + ChimeraHydra + image-conditioning adapters.
-        # The first tab hosts a ConfigTab whose method picker exposes FeRA and
-        # ChimeraHydra (LoRA-family author-faithful research variants kept
-        # behind the experimental gate). IP-Adapter and EasyControl have their
-        # own preprocess/dataset lifecycles, so they keep dedicated tabs.
+        # Experimental set: a unified Methods picker + image-conditioning
+        # adapters. MethodsTab folds every trainable experimental method behind
+        # one dropdown — FeRA / ChimeraHydra / Soft Tokens (flat train.py
+        # methods) plus SPD / Turbo (bespoke distill loops) — so they no longer
+        # need a tab each. IP-Adapter and EasyControl have their own
+        # preprocess/dataset lifecycles, so they keep dedicated tabs.
         self.experimental_tabs = QTabWidget()
-        self.experimental_tabs.addTab(
-            ConfigTab(methods=["fera", "chimera"]),
-            t("tab_methods"),
-        )
+        self.experimental_tabs.addTab(MethodsTab(), t("tab_methods"))
         self.experimental_tabs.addTab(IPAdapterTab(), t("tab_ip_adapter"))
         self.experimental_tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
-        self.experimental_tabs.addTab(SPDTrainTab(), t("tab_spd"))
-        self.experimental_tabs.addTab(TurboTrainTab(), t("tab_turbo"))
 
         self.tab_stack = QStackedWidget()
         self.tab_stack.addWidget(self.tabs)

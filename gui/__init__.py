@@ -43,6 +43,7 @@ _METHOD_ORDER = (
     "reft",
     "fera",
     "chimera",
+    "soft_tokens",
     "ip_adapter",
     "easycontrol",
 )
@@ -55,8 +56,10 @@ _METHOD_ORDER = (
 #
 # Display order within a family is ``[variant].order`` (ascending; ties broken
 # by file stem). Family ordering in the method combo stays curated via
-# ``_METHOD_ORDER`` so we can keep training-only families (e.g. ``soft_tokens``)
-# off the GUI without renaming files. Customs under
+# ``_METHOD_ORDER``; a family omitted from it is kept off the GUI without
+# renaming its file (the picker also accepts an explicit ``methods=`` subset,
+# which is how the experimental MethodsTab surfaces soft_tokens / spd / turbo).
+# Customs under
 # ``configs/gui-methods/custom/`` are intentionally permissive — they don't
 # need a ``[variant]`` block and are surfaced under every family the same way
 # they were before.

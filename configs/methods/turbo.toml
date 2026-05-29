@@ -74,8 +74,18 @@ sigmoid_scale = 1.0
 # on turbo_C found the student over-fills LF, so w_high is the active arm.
 # Defaults are pinned by the n=90 paired-gap probe (bench/fera_artist/
 # results/20260528-1902-turbo_C_phase0/): div=16 SNR=2.25 @ stage 2.
+#
+# DISABLED 2026-05-29 — FALSIFIED LIVE. The wired loss measures FEI on
+# x0-estimates at the renoised-data x_t = (1-t)x0 + t·eps, but phase 0 measured
+# FEI on the student's rollout-state z_t. They disagree on sign: the live runs
+# (turbo_E/F, output/logs/turbo/20260528-212337 & …194036) fire w_low, not
+# w_high, at <=4% reweight (~no-op). The over-blur lever lives on the student's
+# own inference trajectory, which DMD2 single-call training never visits. Do
+# NOT bump beta (amplifies the wrong, mildly antagonistic arm). Revive only by
+# re-siting the measurement onto rollout states (item 4 anchors).
+# Full write-up: docs/findings/turbo_fei_band_deficit_falsified.md.
 [ca_band_weight]
-enabled = true
+enabled = false
 beta = 0.2                      # band-deficit gain (0 = bit-identical to no-band-weighting)
 divisor = 16                    # σ_low = min(H_lat, W_lat) / divisor (phase 0 winner)
 window_lo = 0.30                # gate band-weighting OFF when τ_ca < window_lo
