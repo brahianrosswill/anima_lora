@@ -66,6 +66,7 @@ log_every_n_steps=2
 dataloader_pin_memory = true
 persistent_data_loader_workers= true
 use_cmmd = false
+channel_scaling_alpha = 0.5
 
 # ── Dataset config ───────────────────────────────────────────────────────
 # Formerly configs/dataset_config.toml. Consumed directly by the dataset

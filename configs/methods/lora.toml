@@ -45,8 +45,6 @@ path_pattern = "channel_(caststation)/*"
 
 compile_inductor_mode = "reduce-overhead"
 
-channel_scaling_alpha = 0.5
-
 # -------------
 # Ortho-lora
 

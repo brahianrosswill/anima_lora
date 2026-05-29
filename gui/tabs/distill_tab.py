@@ -47,6 +47,7 @@ from tomlkit.items import Table, Whitespace
 
 from gui import ROOT, CONFIGS_DIR, LazyTabMixin, _read, _widget
 from gui import daemon as gui_daemon
+from gui.explanations import method_overview
 from gui.i18n import t
 from gui.progress import TqdmProgressTracker, make_progress_bar
 from gui.tabs.config_tab import ClickableLabel
@@ -278,6 +279,14 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
     # ── Explanation panel ──
 
     def _show_explain_placeholder(self) -> None:
+        # Prefer the localized HTML guide (gui/explanations/guides/<lang>/
+        # <method>.html) when one is registered — it carries its own <h2> and
+        # is translated. Methods without a guide fall back to the config's
+        # English file-header comment block built below.
+        guide = method_overview(self._config_path.stem)
+        if guide:
+            self._explain.setHtml(guide)
+            return
         title = html.escape(self.METHOD_LABEL)
         paras: list[str] = []
         cur: list[str] = []
