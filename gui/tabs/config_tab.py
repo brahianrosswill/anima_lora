@@ -214,9 +214,7 @@ class ConfigTab(QWidget):
         self._config_warning = QLabel()
         self._config_warning.setWordWrap(True)
         self._config_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._config_warning.setStyleSheet(
-            "color:#ffd9d9;border:0;font-size:12px;"
-        )
+        self._config_warning.setStyleSheet("color:#ffd9d9;border:0;font-size:12px;")
         _cwl.addWidget(self._config_warning, 1)
         self._config_warning_btn = QPushButton(t("config_remove_keys_btn"))
         self._config_warning_btn.clicked.connect(self._remove_unknown_keys)
@@ -497,9 +495,7 @@ class ConfigTab(QWidget):
             f"({html.escape(i.location)})"
             for i in issues
         )
-        self._config_warning.setText(
-            f"⚠ {t('config_bad_keys_header')}<br>{lines}"
-        )
+        self._config_warning.setText(f"⚠ {t('config_bad_keys_header')}<br>{lines}")
         self._config_warning_box.setVisible(True)
 
     def _remove_unknown_keys(self) -> None:
@@ -536,7 +532,13 @@ class ConfigTab(QWidget):
     def _connect_dirty_signal(self, w: QWidget) -> None:
         """Wire each form widget's change signal to _mark_dirty so the Save
         button reflects whether the form has drifted from the variant file."""
-        from PySide6.QtWidgets import QCheckBox, QComboBox, QLineEdit, QSpinBox
+        from PySide6.QtWidgets import (
+            QCheckBox,
+            QComboBox,
+            QLineEdit,
+            QPlainTextEdit,
+            QSpinBox,
+        )
 
         if isinstance(w, QComboBox):
             w.currentTextChanged.connect(self._mark_dirty)
@@ -545,6 +547,8 @@ class ConfigTab(QWidget):
         elif isinstance(w, QSpinBox):
             w.valueChanged.connect(self._mark_dirty)
         elif isinstance(w, QLineEdit):
+            w.textChanged.connect(self._mark_dirty)
+        elif isinstance(w, QPlainTextEdit):
             w.textChanged.connect(self._mark_dirty)
 
     def _mark_dirty(self, *_):
@@ -620,9 +624,7 @@ class ConfigTab(QWidget):
             f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{html.escape(field)}</h2>"
         ]
         if help_text:
-            parts.append(
-                f"<p style='font-size:14px; line-height:1.6;'>{help_text}</p>"
-            )
+            parts.append(f"<p style='font-size:14px; line-height:1.6;'>{help_text}</p>")
         else:
             parts.append(
                 f"<p style='color:#888; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"
@@ -855,7 +857,11 @@ class ConfigTab(QWidget):
         # The spec also tags this command job as *this tab's* preprocess, so
         # ConfigTab re-claims it on reopen and the PreprocessingTab leaves it be.
         chain_train = (
-            {"method": variant, "preset": self._IMPLICIT_PRESET, "methods_subdir": "gui-methods"}
+            {
+                "method": variant,
+                "preset": self._IMPLICIT_PRESET,
+                "methods_subdir": "gui-methods",
+            }
             if getattr(self, "_chain_train_after_preprocess", False)
             else None
         )
@@ -965,9 +971,7 @@ class ConfigTab(QWidget):
                 methods_subdir="gui-methods",
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(e))
-            )
+            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
             self._restore_idle_ui()
             return
 
@@ -1036,7 +1040,9 @@ class ConfigTab(QWidget):
         if not replay_log:
             self._stdout_tailer.read_new()  # discard backlog
         self.train_btn.setText(
-            t("train_preprocessing") if kind == "preprocess" else t("train_running_daemon")
+            t("train_preprocessing")
+            if kind == "preprocess"
+            else t("train_running_daemon")
         )
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)

@@ -57,6 +57,10 @@ use_timestep_mask = true
 min_rank = 16
 alpha_rank_scale = 1.0
 
+
+# ---
+
+sample_prompts= "masterpiece, best quality, score_7, safe. An anime girl wearing a black tank-top and denim shorts is standing outdoors. She's holding a rectangular sign out in front of her that reads \"ANIMA\". She 's looking at the viewer with a smile. The background features some trees and blue sky with clouds."
 # -------------
 # "shared_A" and route_per_layer=false -> hydralora
 

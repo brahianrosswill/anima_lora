@@ -28,6 +28,12 @@ Mean-variance reg (lever B / paper Eq. 7; 0 when disabled):
 
 * ``mv`` — the per-step Eq.7 KL value (pre-weight). Higher = the student's
   per-image stats are further from the real-latent target.
+
+DP-DMD diversity loss (objective=dpdmd only; 0 under dmd2):
+
+* ``div`` — the first-step diversity MSE ‖v_first − v_target‖² (pre-weight).
+  Falling = the student's step-1 velocity is converging on the teacher's
+  K-step anchor (the diverse landing point).
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ class FlushedMetrics:
     dm_to_ca: float
     ca_steps: float
     mv: float
+    div: float
     alpha: float
 
 
@@ -75,6 +82,8 @@ class TurboMetrics:
         self.ca_steps = z()
         # Mean-variance reg (lever B / Eq.7); 0 when disabled.
         self.mv = z()
+        # DP-DMD first-step diversity loss; 0 under the dmd2 objective.
+        self.div = z()
         # Pure-Python (no GPU work).
         self.alpha = 0.0
 
@@ -127,6 +136,11 @@ class TurboMetrics:
         self.dm_to_ca.add_(dm_w / (ca_w + eps_r))
         self.ca_steps.add_(1.0)
 
+    @torch.no_grad()
+    def add_div(self, div_loss_t: torch.Tensor) -> None:
+        """Accumulate the DP-DMD first-step diversity loss (pre-weight)."""
+        self.div.add_(div_loss_t.detach().float())
+
     def add_alpha(self, alpha_eff: float) -> None:
         self.alpha += alpha_eff
 
@@ -145,6 +159,7 @@ class TurboMetrics:
                     self.mag_ratio,
                     self.cos,
                     self.mv,
+                    self.div,
                 ]
             )
             / log_interval
@@ -169,15 +184,16 @@ class TurboMetrics:
             mag_ratio=packed[7],
             cos=packed[8],
             mv=packed[9],
-            dm_to_ca=packed[10],
-            ca_steps=packed[11],
+            div=packed[10],
+            dm_to_ca=packed[11],
+            ca_steps=packed[12],
             alpha=self.alpha / log_interval,
         )
 
     def reset(self) -> None:
         for t in (
             self.fake, self.grad, self.dm, self.cfg, self.xpred, self.v_student,
-            self.rel_gap, self.mag_ratio, self.cos, self.mv,
+            self.rel_gap, self.mag_ratio, self.cos, self.mv, self.div,
             self.dm_to_ca, self.ca_steps,
         ):
             t.zero_()
@@ -199,6 +215,7 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     if m.ca_steps > 0:
         writer.add_scalar("train/dm_to_ca", m.dm_to_ca, step)
     writer.add_scalar("train/mean_var_kl", m.mv, step)
+    writer.add_scalar("train/div_loss", m.div, step)
 
 
 def tqdm_postfix(m: FlushedMetrics) -> dict:
@@ -213,4 +230,6 @@ def tqdm_postfix(m: FlushedMetrics) -> dict:
     }
     if m.mv > 0:
         postfix["mv"] = f"{m.mv:.3f}"
+    if m.div > 0:
+        postfix["div"] = f"{m.div:.3f}"
     return postfix

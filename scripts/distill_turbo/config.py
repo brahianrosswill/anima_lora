@@ -221,6 +221,65 @@ def build_argparser() -> argparse.ArgumentParser:
         help="keep_list.json path (default: TOML prep_list_path, else "
         "post_image_dataset/turbo_prep/keep_list.json).",
     )
+
+    # ---- DP-DMD (diversity-preserved DMD; arXiv 2602.03139) ----
+    # Phase 1 objective. Replaces the CA-decoupled student loop with a genuine
+    # N-step rollout student: step 1 supervised toward a teacher K-step anchor
+    # (diversity), detached, then DMD on x_θ over steps 2..N (quality). The CA
+    # branch / α-ramp knobs (--alpha, --alpha_warmup_steps, dmd.tau_ca_*) are
+    # inert under this objective. See docs/proposal/dpdmd.md.
+    parser.add_argument(
+        "--objective",
+        type=str,
+        default=None,
+        choices=["dmd2", "dpdmd"],
+        help="Student objective: 'dmd2' (incumbent CA-decoupled, default) or "
+        "'dpdmd' (Phase-1 diversity-preserved first-step anchor). Default: TOML "
+        "`objective`, else 'dmd2'.",
+    )
+    parser.add_argument(
+        "--k_anchor",
+        type=int,
+        default=-1,
+        help="DP-DMD: teacher steps rolled to the diversity anchor (their K). "
+        "Default: TOML (dpdmd.k_anchor, default 5).",
+    )
+    parser.add_argument(
+        "--teacher_anchor_steps",
+        type=int,
+        default=-1,
+        help="DP-DMD: teacher σ-grid the K anchor is counted against. Default: "
+        "TOML (dpdmd.teacher_anchor_steps, default 28).",
+    )
+    parser.add_argument(
+        "--div_weight",
+        type=float,
+        default=-1.0,
+        help="DP-DMD: λ on the first-step diversity loss. Default: TOML "
+        "(dpdmd.div_weight, default 0.05).",
+    )
+    parser.add_argument(
+        "--detach_after_first",
+        dest="detach_after_first",
+        action="store_const",
+        const=True,
+        default=None,
+        help="DP-DMD: stop-grad after the diversity-supervised first step (the "
+        "load-bearing detach; keep True except for A/B). Default: TOML "
+        "(dpdmd.detach_after_first, default true).",
+    )
+    parser.add_argument(
+        "--no_detach_after_first",
+        dest="detach_after_first",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--flow_shift",
+        type=float,
+        default=-1.0,
+        help="DP-DMD: σ-schedule shift for the student/teacher Euler grids "
+        "(matches inference). Default: TOML (sampling.flow_shift, default 3.0).",
+    )
     return parser
 
 
@@ -263,6 +322,14 @@ class TurboConfig:
     # Curation gate (item 5)
     use_prep_list: bool
     prep_list_path: str
+
+    # Objective selector + DP-DMD (Phase 1) knobs
+    objective: str
+    k_anchor: int
+    teacher_anchor_steps: int
+    div_weight: float
+    detach_after_first: bool
+    flow_shift: float
 
     # DMD core
     student_steps: int
@@ -362,6 +429,19 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     dm_x0_norm = bool(_pick(args.dm_x0_norm, cfg, "dmd.dm_x0_norm", False))
     norm_floor = float(_pick(args.norm_floor, cfg, "dmd.norm_floor", 0.05))
 
+    # DP-DMD (Phase 1) — objective selector + diversity-anchor knobs.
+    objective = _pick(args.objective, cfg, "objective", "dmd2")
+    k_anchor = int(_pick(args.k_anchor, cfg, "dpdmd.k_anchor", 5))
+    teacher_anchor_steps = int(
+        _pick(args.teacher_anchor_steps, cfg, "dpdmd.teacher_anchor_steps", 28)
+    )
+    div_weight = float(_pick(args.div_weight, cfg, "dpdmd.div_weight", 5e-2))
+    if args.detach_after_first is None:
+        detach_after_first = bool(_flatten(cfg, "dpdmd.detach_after_first", True))
+    else:
+        detach_after_first = bool(args.detach_after_first)
+    flow_shift = float(_pick(args.flow_shift, cfg, "sampling.flow_shift", 3.0))
+
     # Mean-variance reg (lever B / Eq. 7). weight=0 disables. Target stats are
     # pinned (sigma2_t > 0) or measured exactly in a one-pass scan over the real
     # latents (sigma2_t <= 0). The target is a static dataset statistic — a global
@@ -399,6 +479,30 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     sigmoid_scale = float(_flatten(cfg, "sampling.sigmoid_scale", 1.0))
 
     # ----- Validation -----
+    if objective not in ("dmd2", "dpdmd"):
+        raise ValueError(f"objective={objective!r}: expected 'dmd2' or 'dpdmd'")
+    if objective == "dpdmd":
+        if student_steps < 2:
+            raise ValueError(
+                f"objective=dpdmd requires dmd.student_steps >= 2 (got "
+                f"{student_steps}): step 1 is diversity-supervised + detached, so "
+                "at least one further step must carry the DMD loss."
+            )
+        if not (1 <= k_anchor < teacher_anchor_steps):
+            raise ValueError(
+                f"dpdmd.k_anchor={k_anchor} must satisfy 1 <= k_anchor < "
+                f"teacher_anchor_steps={teacher_anchor_steps}."
+            )
+        if div_weight < 0.0:
+            raise ValueError(f"dpdmd.div_weight={div_weight}: must be >= 0")
+        if flow_shift <= 0.0:
+            raise ValueError(f"sampling.flow_shift={flow_shift}: must be > 0")
+        if not detach_after_first:
+            logger.warning(
+                "objective=dpdmd with detach_after_first=False: the mode-seeking "
+                "DMD gradient can override the diversity mapping (their Fig 5). "
+                "A/B only — keep True for production."
+            )
     if tau_ca_strategy not in ("above_t",):
         raise ValueError(
             f"dmd.tau_ca_strategy={tau_ca_strategy!r}: only 'above_t' supported in v1"
@@ -457,6 +561,16 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             else "(a) τ-damping [default]"
         )
     )
+    if objective == "dpdmd":
+        logger.info(
+            "objective=DP-DMD (Phase 1): first-step diversity anchor "
+            f"k_anchor={k_anchor}/{teacher_anchor_steps} teacher steps, "
+            f"div_weight={div_weight}, detach_after_first={detach_after_first}, "
+            f"student N={student_steps} @ flow_shift={flow_shift}, "
+            f"teacher_cfg={teacher_cfg}. CA branch / α-ramp inert."
+        )
+    else:
+        logger.info("objective=DMD2 (incumbent CA-decoupled).")
 
     return TurboConfig(
         dit_path=dit_path,
@@ -482,6 +596,12 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         mask_dir=mask_dir,
         use_prep_list=use_prep_list,
         prep_list_path=prep_list_path,
+        objective=objective,
+        k_anchor=k_anchor,
+        teacher_anchor_steps=teacher_anchor_steps,
+        div_weight=div_weight,
+        detach_after_first=detach_after_first,
+        flow_shift=flow_shift,
         student_steps=student_steps,
         teacher_cfg=teacher_cfg,
         tau_ca_strategy=tau_ca_strategy,
@@ -540,6 +660,12 @@ def snapshot_toml_text(c: TurboConfig, *, source_config: str | None = None) -> s
 def tb_config_text(c: TurboConfig) -> str:
     """Formatted TensorBoard config summary (same key set as v1)."""
     pairs = {
+        "objective": c.objective,
+        "k_anchor": c.k_anchor,
+        "teacher_anchor_steps": c.teacher_anchor_steps,
+        "div_weight": c.div_weight,
+        "detach_after_first": c.detach_after_first,
+        "flow_shift": c.flow_shift,
         "student_rank": c.student_rank,
         "fake_rank": c.fake_rank,
         "student_steps": c.student_steps,

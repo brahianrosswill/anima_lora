@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QSpinBox,
     QWidget,
 )
@@ -246,6 +247,9 @@ _GROUPS = {
         "discrete_flow_shift",
         "use_valid",
         "validation_split_num",
+        "sample_prompts",
+        "sample_every_n_epochs",
+        "sample_at_first",
     },
     "Performance": {
         "attn_mode",
@@ -315,6 +319,9 @@ _BASIC = {
     "min_pixels",
     "use_valid",
     "validation_split_num",
+    "sample_prompts",
+    "sample_every_n_epochs",
+    "sample_at_first",
 }
 
 
@@ -479,6 +486,20 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
     else:
         merged["validation_split_num"] = _base_validation_split_num(base)
         origin["validation_split_num"] = "base"
+
+    # Surface the sample-image knobs as first-class fields even when no TOML in
+    # the chain has set them (their argparse defaults are None/None/False, so
+    # they'd otherwise never appear in `merged`). A variant that does set them
+    # keeps its value + "method" origin from the merge loop above. Cadence uses
+    # 0 as the "disabled" sentinel (train.py coerces non-positive → None).
+    for _k, _default in (
+        ("sample_prompts", []),
+        ("sample_every_n_epochs", 0),
+        ("sample_at_first", False),
+    ):
+        if _k not in merged:
+            merged[_k] = _default
+            origin[_k] = "base"
     return merged, origin
 
 
@@ -931,6 +952,21 @@ def _image_dirs() -> dict[str, Path]:
 
 
 def _widget(v: Any, key: str = "") -> QWidget:
+    if key == "sample_prompts":
+        # One preview prompt per line. Stored in TOML as a string (single line)
+        # or an array (multi-line); train.py materializes either into the
+        # sample_prompts.txt file the sampler reads.
+        w = QPlainTextEdit()
+        if isinstance(v, (list, tuple)):
+            text = "\n".join(str(p) for p in v)
+        elif v is None:
+            text = ""
+        else:
+            text = str(v)
+        w.setPlainText(text)
+        w.setPlaceholderText("1girl, solo, ...\n(one preview prompt per line)")
+        w.setMaximumHeight(120)
+        return w
     if key == "attn_mode":
         w = QComboBox()
         w.addItems(_ATTN_MODES)
@@ -965,6 +1001,13 @@ def _widget(v: Any, key: str = "") -> QWidget:
 
 
 def _read(w: QWidget, orig: Any = None) -> Any:
+    if isinstance(w, QPlainTextEdit):
+        # sample_prompts box → list of non-empty, non-comment lines.
+        return [
+            ln.strip()
+            for ln in w.toPlainText().splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
     if isinstance(w, QComboBox):
         return w.currentText()
     if isinstance(w, QCheckBox):

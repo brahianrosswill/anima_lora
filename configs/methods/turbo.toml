@@ -8,10 +8,19 @@
 # LoRA — load it through the standard inference path with --infer_steps 4 --cfg 1.0
 # (CFG is baked into the student during distillation).
 
-output_name = "anima_turbo_H"
+output_name = "anima_turbo_I"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
+
+# Student objective:
+#   "dmd2"  — incumbent CA-decoupled DMD2 (the [dmd]/[optim] α-ramp path below).
+#   "dpdmd" — Phase-1 Diversity-Preserved DMD (arXiv 2602.03139): N-step rollout
+#             student, first step supervised toward a teacher K-step anchor then
+#             detached, DMD on x_θ over steps 2..N. The CA branch / α-ramp knobs
+#             (teacher_cfg is still used for the anchor CFG, tau_ca_*, alpha_*) are
+#             inert under dpdmd. See docs/proposal/dpdmd.md and the [dpdmd] block.
+objective = "dpdmd"
 
 iterations = 1000
 batch_size = 1
@@ -29,10 +38,10 @@ use_masked_loss = true
 use_prep_list = false
 
 [network]
-student_rank = 96
-student_alpha = 96
-fake_rank = 96
-fake_alpha = 96
+student_rank = 64
+student_alpha = 64
+fake_rank = 64
+fake_alpha = 64
 attn_mode = "flash"
 
 # DMD2 schedule (proposal §Schedule, paper Table 1 row 4: Decoupled-Hybrid).
@@ -67,10 +76,21 @@ alpha_warmup_steps = 250       # linear ramp α_eff: 1.0 → teacher_cfg over th
 weight_decay = 0.0
 grad_clip = 1.0                 # student grad-norm cap
 
+# DP-DMD (Phase 1; objective = "dpdmd"). Diversity-Preserved DMD, arXiv 2602.03139.
+# Step 1 of the N-step student rollout is supervised toward a teacher K-step CFG
+# anchor (the diverse landing point) then detached; DMD refines x_θ over steps
+# 2..N. teacher_cfg (above) is the anchor's CFG scale; student_steps is N.
+[dpdmd]
+k_anchor = 5                    # teacher steps rolled to the diversity anchor (their K)
+teacher_anchor_steps = 28       # teacher σ-grid the K is counted against
+div_weight = 0.05               # λ on the first-step diversity MSE
+detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
+
 # Generator-t sampling distribution.
 [sampling]
 t_distribution = "uniform"      # "uniform" or "sigmoid"
 sigmoid_scale = 1.0
+flow_shift = 3.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
 
 # Mean-variance regularization (lever B / paper Eq. 7; proposal §3.B, run S2).
 #
@@ -88,7 +108,7 @@ sigmoid_scale = 1.0
 # dataset statistic, so the exact scan beats a running EMA (no decay lag / batch
 # wobble, deterministic). Set `sigma2_t > 0` to pin explicit values.
 [mean_var]
-weight = 0.01
+weight = 0.0
 mu_t = 0.0                      # used only when sigma2_t > 0 (pinned target)
 sigma2_t = -1.0                 # <= 0 → measure μ_t/σ²_t exactly from real latents
 calib_batches = 0              # cap the calibration scan (0 = full pass)
