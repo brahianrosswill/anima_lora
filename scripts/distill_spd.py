@@ -63,6 +63,17 @@ logging.basicConfig(
 )
 
 
+def _collate(batch):
+    # Module-level (not a closure) so DataLoader workers can pickle it under the
+    # Windows/spawn start method — a local `main.<locals>._collate` is unpicklable.
+    return (
+        [b[0] for b in batch],
+        torch.stack([b[1] for b in batch]),
+        torch.stack([b[2] for b in batch]),
+        torch.stack([b[3] for b in batch]),  # pooled — unused
+    )
+
+
 def _flatten(cfg: dict, key_path: str, default):
     """Look up ``a.b.c`` in a nested TOML dict, falling back to ``default``."""
     node = cfg
@@ -329,14 +340,6 @@ def main():
             "single-prompt overfit mode: pinned idx=%d (latent=%s)",
             args.single_prompt_idx,
             os.path.basename(only[0]),
-        )
-
-    def _collate(batch):
-        return (
-            [b[0] for b in batch],
-            torch.stack([b[1] for b in batch]),
-            torch.stack([b[2] for b in batch]),
-            torch.stack([b[3] for b in batch]),  # pooled — unused
         )
 
     dataloader = torch.utils.data.DataLoader(

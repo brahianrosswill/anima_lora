@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import torch
 
 
@@ -88,21 +90,25 @@ class PadCache:
         return pad
 
 
+def _collate_impl(batch, use_masked_loss: bool):
+    out = [
+        [b[0] for b in batch],
+        torch.stack([b[1] for b in batch]),
+        torch.stack([b[2] for b in batch]),
+        torch.stack([b[3] for b in batch]),
+    ]
+    if use_masked_loss:
+        out.append(torch.stack([b[4] for b in batch]))  # [B, 1, H, W] mask
+    return tuple(out)
+
+
 def make_collate(use_masked_loss: bool):
     """Stacking collate that optionally appends the per-image mask.
 
     Pooled-text is unused by turbo but ``CachedDataset`` always returns it.
+
+    Returns a ``functools.partial`` over the module-level ``_collate_impl`` (not a
+    closure) so DataLoader workers can pickle it under the Windows/spawn start
+    method — a local ``make_collate.<locals>._collate`` is unpicklable.
     """
-
-    def _collate(batch):
-        out = [
-            [b[0] for b in batch],
-            torch.stack([b[1] for b in batch]),
-            torch.stack([b[2] for b in batch]),
-            torch.stack([b[3] for b in batch]),
-        ]
-        if use_masked_loss:
-            out.append(torch.stack([b[4] for b in batch]))  # [B, 1, H, W] mask
-        return tuple(out)
-
-    return _collate
+    return functools.partial(_collate_impl, use_masked_loss=use_masked_loss)
