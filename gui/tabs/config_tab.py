@@ -472,9 +472,32 @@ class ConfigTab(QWidget):
         # so the initial setValue/addItems calls don't trip the dirty flag.
         for w in self._w.values():
             self._connect_dirty_signal(w)
+
+        # Sample-image previews are part of the evaluation surface, so they
+        # follow the `use_valid` master toggle: when validation is off, the
+        # sample fields grey out and saving forces sampling off (see
+        # _save_preset). Wire the checkbox so the form reflects this live.
+        self._wire_sample_fields_to_use_valid()
+
         self._clear_dirty()
 
         self._refresh_config_warnings(variant)
+
+    def _wire_sample_fields_to_use_valid(self) -> None:
+        """Bind the sample-prompt widgets' enabled state to the `use_valid`
+        checkbox so previews visibly belong to the evaluation toggle."""
+        use_valid_w = self._w.get("use_valid")
+        sample_keys = ("sample_prompts", "sample_every_n_epochs", "sample_at_first")
+        sample_ws = [self._w[k] for k in sample_keys if k in self._w]
+        if use_valid_w is None or not sample_ws:
+            return
+
+        def _apply(enabled: bool):
+            for w in sample_ws:
+                w.setEnabled(bool(enabled))
+
+        _apply(use_valid_w.isChecked())
+        use_valid_w.toggled.connect(_apply)
 
     def _refresh_config_warnings(self, variant: str) -> None:
         """Show/hide the config-health banner based on a torch-free scan of the
@@ -664,6 +687,18 @@ class ConfigTab(QWidget):
             v = _read(w, baseline)
             if k in method_orig or v != baseline:
                 out[k] = v
+
+        # Sample previews follow the `use_valid` master toggle: when validation
+        # is off, force sampling off in the written config (the cadence/at-first
+        # knobs gate `sampling_enabled` in train.py). The typed prompts are left
+        # intact so re-enabling validation brings them back. Only override when
+        # something would actually have sampled — avoids writing noise keys.
+        _uv = self._w.get("use_valid")
+        if _uv is not None and not bool(_read(_uv)):
+            if out.get("sample_every_n_epochs"):
+                out["sample_every_n_epochs"] = 0
+            if out.get("sample_at_first"):
+                out["sample_at_first"] = False
 
         use_valid_w = self._w.get("use_valid")
         if use_valid_w is not None:

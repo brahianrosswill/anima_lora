@@ -999,6 +999,7 @@ class AnimaTrainer:
         tokenizer,
         text_encoder,
         unet,
+        network=None,
     ):
         text_encoders = (
             text_encoder if isinstance(text_encoder, list) else [text_encoder]
@@ -1019,6 +1020,7 @@ class AnimaTrainer:
             tokenize_strategy,
             text_encoding_strategy,
             self.sample_prompts_te_outputs,
+            network=network,
         )
 
     def prepare_unet_with_accelerator(
@@ -2427,6 +2429,18 @@ class AnimaTrainer:
 
             accelerator.end_training()
             optimizer_eval_fn()
+
+            # Deferred sample decode: sample latents were stashed per epoch (the
+            # VAE was never brought to GPU mid-run, to avoid OOM). Decode them
+            # now that the loop has freed its activation / block-swap memory.
+            # Park the DiT on CPU first so the VAE decode gets the full budget.
+            if is_main_process and args.sample_prompts:
+                try:
+                    accelerator.unwrap_model(loop_state.unet).to("cpu")
+                except Exception:
+                    pass
+                clean_memory_on_device(accelerator.device)
+                anima_train_utils.decode_pending_samples(accelerator, args, vae)
 
             if is_main_process and (args.save_state or args.save_state_on_train_end):
                 save_state_on_train_end(args, accelerator)
