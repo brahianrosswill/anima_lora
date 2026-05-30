@@ -85,7 +85,8 @@ loss  = loss_dmd + λ · loss_div                      # λ = 5e-2 default
 ```
 
 No perceptual loss, no GAN, no extra modules, no teacher-generated reference
-images. Output is still a plain LoRA run at `--infer_steps 4 --cfg 1.0`.
+images. Output is still a plain LoRA run at `--infer_steps 2 --cfg 1.0`
+(matched to the `student_steps=2` rollout).
 
 Reference: `dpdmd/train_sd35_dpdmd.py:435-527` (anchor rollout → `v_target` →
 first-step `div_loss` → detach → `N−1` student rollout → `compute_dmd_loss`).
@@ -151,7 +152,7 @@ structural change; everything else is deletion or reuse.
 | DM branch | renoise-DMD vs fake, single-step | standard DMD on `x_θ` (steps 2..N) | **keep / re-site** |
 | Fake critic update | `fake_steps_per_student_step` inner loop | unchanged | **keep** |
 | Teacher | no-grad teacher forwards | + K-step CFG anchor rollout | **extend** |
-| Output | plain LoRA, 4-step cfg=1 | identical | **keep** |
+| Output | plain LoRA, 4-step cfg=1 | plain LoRA, 2-step cfg=1 (matched to N) | **keep / retarget** |
 
 ### 3.1 New config knobs (`scripts/distill_turbo/config.py`) — AS BUILT
 
@@ -390,7 +391,7 @@ direction or the other — the dual-path state is temporary by design.
   `project_dpdmd_pivot_phase0`.
 
 **Invariants that must survive removal:** the output is still a plain LoRA run at
-`--infer_steps 4 --cfg 1.0`; `merge` / inference are untouched; `make exp-turbo` /
+`--infer_steps 2 --cfg 1.0` (matched to `student_steps=2`); `merge` / inference are untouched; `make exp-turbo` /
 `exp-test-turbo` targets keep working (they just stop accepting the CA flags).
 Land the deletion behind `make test-unit` (config-resolution + registry tests)
 and one short `dpdmd` smoke run.

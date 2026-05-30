@@ -62,7 +62,7 @@ make update                # update from a GitHub release (--dry-run / --version
 ruff check . --fix && ruff format .
 ```
 
-Gotchas: `merge` refuses ReFT / Hydra moe / postfix (not foldable) unless `--allow-partial`. `turbo` output is a normal LoRA — infer with `--infer_steps 4 --cfg 1.0`.
+Gotchas: `merge` refuses ReFT / Hydra moe / postfix (not foldable) unless `--allow-partial`. `turbo` output is a normal LoRA — infer with `--infer_steps 2 --cfg 1.0` (matched to the DP-DMD `student_steps=2` rollout).
 
 ## Key entry points
 
@@ -131,7 +131,7 @@ Each method has a deep-dive doc; the prose below is one-line orientation plus th
 | **EasyControl** | Extended self-attn image conditioning; frozen DiT, per-block cond LoRA + scalar `b_cond` gate. Source `easycontrol-dataset/`. | `docs/experimental/easycontrol.md` |
 | **Soft Tokens** | SoftREPA per-layer × per-t soft text tokens (~1M params); frozen DiT, per-block `Block.forward` splice into `crossattn_emb`. | InfoNCE objective intentionally skipped. `configs/methods/soft_tokens.toml` |
 | **ChimeraHydra** | Dual-pool additive MoE: content pool (network ContentRouter on pooled `crossattn_emb`) + freq pool (network FreqRouter on FEI+σ), two A's per Linear off disjoint SVD subspaces. Both pools always centered-gate; the per-Linear `lx_c` content router + non-centered path were removed. | T-LoRA mask hits content branch only. `docs/experimental/chimera-hydra.md`, `networks/lora_modules/chimera.py` |
-| **Turbo** | Decoupled-Hybrid DMD2 distillation; output is a normal LoRA. | Bespoke schema read by `scripts/distill_turbo/` — don't `print-config`. `docs/experimental/dmd2-decoupled.md` (ops) + `docs/structure/dmd2-decoupled.md` (math). |
+| **Turbo** | DP-DMD (diversity-preserved DMD) distillation; output is a normal LoRA. | Bespoke schema read by `scripts/distill_turbo/` — don't `print-config`. `docs/experimental/dpdmd.md` (ops); CA-era history in `docs/structure/dmd2-decoupled.md` + `docs/proposal/dmd2_decoupled_improvements.md`. |
 | **Postfix-tail inversion** | Per-image inversion *probe* (training method archived 2026-05-20). | Observation tool, not a deployable adapter. `library/inference/postfix_inversion.py` |
 
 ## Preprocessing & scripts

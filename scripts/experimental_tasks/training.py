@@ -14,13 +14,13 @@ from scripts.tasks._common import PY, _preset, bespoke_preset_flags, run, train
 
 
 def cmd_turbo(extra):
-    """Turbo Anima — Decoupled DMD2 distillation (docs: docs/experimental/dmd2-decoupled.md).
+    """Turbo Anima — DP-DMD distillation (docs: docs/experimental/dpdmd.md).
 
     Bypasses train.py / accelerate (single-GPU bespoke loop, like distill-mod).
     Reads ``configs/methods/turbo.toml``; trailing args are forwarded so user
     CLI flags override TOML values, e.g.::
 
-        make exp-turbo                                  # defaults: rank=48, 4-step
+        make exp-turbo                                  # defaults: rank=64, 2-step
         make exp-turbo ARGS="--student_rank 64 --iterations 5000"
         make exp-turbo ARGS="--single_prompt_idx 0"     # Phase 0 single-prompt overfit
 

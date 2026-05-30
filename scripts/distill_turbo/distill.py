@@ -1,11 +1,11 @@
-"""Turbo distillation main loop — single-call DMD2.
+"""Turbo distillation main loop — DP-DMD (diversity-preserved DMD).
 
 Usage:
     python -m scripts.distill_turbo.distill [--config configs/methods/turbo.toml] ...
 
 The math walkthrough lives in :mod:`scripts.distill_turbo`; this file is the
-per-step orchestrator (sample t, student/CA/DM/fake forwards, optimizer steps,
-save).
+per-step orchestrator (teacher K-step anchor → diversity-supervised first step →
+DMD-refined N-step student rollout → fake/critic update → save).
 """
 
 from __future__ import annotations
@@ -50,7 +50,6 @@ from .primitives import (
     make_scheduler,
     renoise,
     sample_t,
-    sample_t_above,
 )
 from .warmup import run_fake_warmup
 
@@ -311,11 +310,15 @@ def main():
         ``TurboDMDNetwork.set_view``), and the cudagraph step-begin marker
         is hoisted to once per outer step in the loop below.
 
-        The DiT is frozen (``freeze_dit`` in ``__init__``) and grad-ckpt is
-        off in this script's default path, so ``model.training`` is left at
-        whatever it was post-construction — toggling it per forward only
-        gated grad-ckpt setup that isn't active here, and the recursive
-        submodule walk it triggered was the dominant per-forward CPU stall.
+        The DiT is frozen (``freeze_dit`` in ``__init__``), so ``model.training``
+        is left at its post-construction value (``True``) for the whole run —
+        grad-ckpt (``cfg.grad_ckpt``, default on) is gated on ``self.training``
+        inside ``Block.forward``, so it stays armed without a per-forward toggle.
+        We deliberately do NOT flip train/eval per forward: the no_grad teacher/
+        fake forwards build no backward graph regardless, and the recursive
+        submodule walk a per-forward toggle triggered was the dominant
+        per-forward CPU stall. Grad-ckpt's recompute only bites on the grad-
+        bearing student/fake-update forwards.
         """
         turbo.set_view(view)
         if model.blocks_to_swap:
@@ -333,32 +336,28 @@ def main():
                 x_in, t_b, c, padding_mask=pad, skip_pooled_text_proj=True
             )
 
-    # ---------------- DP-DMD (Phase 1) setup ----------------
+    # ---------------- DP-DMD setup ----------------
     # The student/teacher Euler grids are static (token-count-invariant flow-
     # matching σ schedule), so build them once. Both span σ: 1 → 0; the student
     # has `student_steps + 1` points, the teacher anchor grid `teacher_anchor_steps
-    # + 1`. `dpdmd_sigmas[i] - dpdmd_sigmas[i+1]` is the Euler dt for step i.
-    student_sigmas: list[float] = []
-    teacher_anchor_sigmas: list[float] = []
-    t_k_anchor = 0.0
-    if cfg.objective == "dpdmd":
-        student_sigmas = (
-            get_timesteps_sigmas(cfg.student_steps, cfg.flow_shift, "cpu")[1].tolist()
-        )
-        teacher_anchor_sigmas = (
-            get_timesteps_sigmas(cfg.teacher_anchor_steps, cfg.flow_shift, "cpu")[1]
-            .tolist()
-        )
-        # Continuous time at the anchor (incoming σ after k_anchor teacher steps).
-        # `v_target = (ε − z_tk)/(1 − t_k)` — a σ mismatch here silently mis-scales
-        # the diversity target (proposal §6.3), so it's read from the teacher grid,
-        # not the student grid.
-        t_k_anchor = float(teacher_anchor_sigmas[cfg.k_anchor])
-        logger.info(
-            f"DP-DMD grids: student σ={['%.3f' % s for s in student_sigmas]}, "
-            f"anchor t_k={t_k_anchor:.4f} (teacher step {cfg.k_anchor}/"
-            f"{cfg.teacher_anchor_steps})"
-        )
+    # + 1`. `sigmas[i] - sigmas[i+1]` is the Euler dt for step i.
+    student_sigmas = (
+        get_timesteps_sigmas(cfg.student_steps, cfg.flow_shift, "cpu")[1].tolist()
+    )
+    teacher_anchor_sigmas = (
+        get_timesteps_sigmas(cfg.teacher_anchor_steps, cfg.flow_shift, "cpu")[1]
+        .tolist()
+    )
+    # Continuous time at the anchor (incoming σ after k_anchor teacher steps).
+    # `v_target = (ε − z_tk)/(1 − t_k)` — a σ mismatch here silently mis-scales
+    # the diversity target (proposal §6.3), so it's read from the teacher grid,
+    # not the student grid.
+    t_k_anchor = float(teacher_anchor_sigmas[cfg.k_anchor])
+    logger.info(
+        f"DP-DMD grids: student σ={['%.3f' % s for s in student_sigmas]}, "
+        f"anchor t_k={t_k_anchor:.4f} (teacher step {cfg.k_anchor}/"
+        f"{cfg.teacher_anchor_steps})"
+    )
 
     def _teacher_cfg_velocity(x, t_b, c_cond, c_null):
         """CFG-guided teacher velocity ``v_u + α·(v_c − v_u)`` (no grad, fp32).
@@ -425,7 +424,7 @@ def main():
     )
 
     # ---------------- Training loop ----------------
-    logger.info(f"starting DMD2 training: {cfg.iterations} iterations")
+    logger.info(f"starting DP-DMD training: {cfg.iterations} iterations")
     progress = tqdm(range(cfg.iterations), desc="turbo")
     metrics = TurboMetrics(device)
 
@@ -454,230 +453,126 @@ def main():
         # the script switches to ``mode="reduce-overhead"``.
         torch.compiler.cudagraph_mark_step_begin()
 
-        if cfg.objective == "dpdmd":
-            # ============ DP-DMD (Phase 1) student update ============
-            # No single t / x_t: the student rolls the full N-step Euler grid
-            # from pure noise ε. The CA branch / α-ramp are gone; step 1 is
-            # supervised toward a teacher K-step anchor (diversity) and detached,
-            # then DMD refines x_θ over steps 2..N (quality). See dpdmd.md §3.2.
-            do_ca = False
-            tau_ca_e = None
-            alpha_eff = 0.0
-            eps = torch.randn_like(latents)  # shared start for anchor + student
+        # ============ DP-DMD student update ============
+        # No single t / x_t: the student rolls the full N-step Euler grid from
+        # pure noise ε. Step 1 is supervised toward a teacher K-step anchor
+        # (diversity) and detached, then DMD refines x_θ over steps 2..N
+        # (quality). See dpdmd.md §3.2.
+        eps = torch.randn_like(latents)  # shared start for anchor + student
 
-            # --- teacher K-step CFG anchor (no grad) → v_target ---
-            c_null = uncond_for_batch(uncond_base, crossattn_emb)
-            z = eps
-            for i in range(cfg.k_anchor):
-                s_i = teacher_anchor_sigmas[i]
-                s_next = teacher_anchor_sigmas[i + 1]
-                t_b = torch.full((B,), s_i, device=device, dtype=dtype)
-                v = _teacher_cfg_velocity(z, t_b, crossattn_emb, c_null)
-                z = (z.float() - (s_i - s_next) * v).to(dtype)
-            # Average velocity ε→z_tk over [t_k, 1]; this is exactly the target
-            # for the student's t=1 first step (Euler x_next = x − dt·v_first).
-            v_target = ((eps.float() - z.float()) / (1.0 - t_k_anchor)).detach()
+        # --- teacher K-step CFG anchor (no grad) → v_target ---
+        c_null = uncond_for_batch(uncond_base, crossattn_emb)
+        z = eps
+        for i in range(cfg.k_anchor):
+            s_i = teacher_anchor_sigmas[i]
+            s_next = teacher_anchor_sigmas[i + 1]
+            t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+            v = _teacher_cfg_velocity(z, t_b, crossattn_emb, c_null)
+            z = (z.float() - (s_i - s_next) * v).to(dtype)
+        # Average velocity ε→z_tk over [t_k, 1]; this is exactly the target
+        # for the student's t=1 first step (Euler x_next = x − dt·v_first).
+        v_target = ((eps.float() - z.float()) / (1.0 - t_k_anchor)).detach()
 
-            # --- student N-step rollout; step 1 div-supervised + detached ---
-            x = eps
-            x.requires_grad_()  # grad-ckpt needs a grad-requiring forward input
-            v_first = None
-            for i in range(cfg.student_steps):
-                s_i = student_sigmas[i]
-                s_next = student_sigmas[i + 1]
-                t_b = torch.full((B,), s_i, device=device, dtype=dtype)
-                v = _forward(
-                    "student", x, t_b, crossattn_emb, no_grad=False
-                ).squeeze(2)
-                x = x - (s_i - s_next) * v
-                if i == 0:
-                    v_first = v
-                    if cfg.detach_after_first:
-                        # Load-bearing stop-grad: the DMD reverse-KL from steps
-                        # 2..N must NOT flow back into the diversity mapping
-                        # (their Fig 5). The fresh leaf re-enables grad-ckpt for
-                        # the remaining steps.
-                        x = x.detach().requires_grad_()
-            x_pred = x  # = x_θ (B,16,H,W); v_student aliases v_first for metrics
-            v_student = v_first
+        # --- student N-step rollout; step-0 div-supervised + (optionally) detached ---
+        # Split forward/backward: under `detach_after_first` the step-0 forward
+        # graph is severed from the steps 2..N DMD chain, so we backward the
+        # diversity term IMMEDIATELY and free step-0's activations BEFORE the DMD
+        # chain builds its own graph. Peak student-forward activations then stay at
+        # ONE forward (the longer of {step-0, the N-1 DMD chain}) instead of holding
+        # both concurrently — the two losses share no graph, so a single combined
+        # backward was only ever paying 2× activation memory for nothing. This is
+        # what lets grad-ckpt be optional at small N: the "unroll" it tames is N-1
+        # steps deep on the DMD chain, NOT the (now-freed) step-0 graph. With the
+        # detach OFF (A/B), the graphs are entangled and we MUST keep one combined
+        # backward (the diversity term is folded in at assembly below).
+        split_bwd = cfg.detach_after_first
 
-            # --- DMD on x_θ (steps 2..N), against teacher + fake ---
-            # The real score is CFG-GUIDED (v_u + α·(v_c − v_u)), NOT cond-only.
-            # This is the un-decoupling: under the incumbent CA-decoupled dmd2 the
-            # DM branch was deliberately unguided because CFG lived in the separate
-            # CA branch (delta_cfg). DP-DMD deletes the CA branch, so guidance must
-            # ride the single DMD real score — exactly like the reference
-            # `compute_dmd_loss` (dpdmd/train_sd35_dpdmd.py:118-129, teacher cat
-            # cond+uncond → v_u + scale·(v_c−v_u)). Without it v_real≈v_fake (both
-            # unguided cond preds collapse, dm_cos≈0.9999) and the quality gradient
-            # is noise. The fake stays cond-only, matching the reference.
-            tau_dm = torch.rand(B, device=device, dtype=dtype)
-            eps_dm = torch.randn_like(x_pred)
-            x_renoised_dm = renoise(x_pred.detach(), tau_dm, eps_dm)
-            v_real_cond_dm = _teacher_cfg_velocity(
-                x_renoised_dm, tau_dm, crossattn_emb, c_null
+        x = eps
+        x.requires_grad_()  # grad-ckpt needs a grad-requiring forward input
+        # Step 0: the diversity-supervised first step (grad → v_first).
+        s0, s0_next = student_sigmas[0], student_sigmas[1]
+        t_b = torch.full((B,), s0, device=device, dtype=dtype)
+        v_first = _forward("student", x, t_b, crossattn_emb, no_grad=False).squeeze(2)
+        x = x - (s0 - s0_next) * v_first
+        div_loss_t = nn.functional.mse_loss(v_first.float(), v_target)
+        if split_bwd:
+            # Load-bearing stop-grad: the DMD reverse-KL from steps 2..N must NOT
+            # flow back into the diversity mapping (their Fig 5). Backward the
+            # diversity term against the step-0 graph now (accumulates into the
+            # student .grad buffers), then re-leaf so the DMD chain gets a fresh
+            # grad-ckpt root. The optimizer step waits for the DMD backward below.
+            (cfg.div_weight * div_loss_t).backward()
+            x = x.detach().requires_grad_()
+
+        # Steps 2..N: the DMD-refined rollout (grad flows to x_pred).
+        for i in range(1, cfg.student_steps):
+            s_i = student_sigmas[i]
+            s_next = student_sigmas[i + 1]
+            t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+            v = _forward(
+                "student", x, t_b, crossattn_emb, no_grad=False
+            ).squeeze(2)
+            x = x - (s_i - s_next) * v
+        x_pred = x  # = x_θ (B,16,H,W); v_student aliases v_first for metrics
+        v_student = v_first
+
+        # --- DMD on x_θ (steps 2..N), against teacher + fake ---
+        # The real score is CFG-GUIDED (v_u + α·(v_c − v_u)), NOT cond-only.
+        # Guidance rides the single DMD real score — exactly like the reference
+        # `compute_dmd_loss` (dpdmd/train_sd35_dpdmd.py:118-129, teacher cat
+        # cond+uncond → v_u + scale·(v_c−v_u)). Without it v_real≈v_fake (both
+        # unguided cond preds collapse, dm_cos≈0.9999) and the quality gradient
+        # is noise. The fake stays cond-only, matching the reference.
+        tau_dm = torch.rand(B, device=device, dtype=dtype)
+        eps_dm = torch.randn_like(x_pred)
+        x_renoised_dm = renoise(x_pred.detach(), tau_dm, eps_dm)
+        v_real_cond_dm = _teacher_cfg_velocity(
+            x_renoised_dm, tau_dm, crossattn_emb, c_null
+        )
+        v_fake_cond_dm = _forward(
+            "fake", x_renoised_dm, tau_dm, crossattn_emb, no_grad=True
+        ).squeeze(2)
+        delta_dm = v_real_cond_dm - v_fake_cond_dm
+
+        tau_dm_e = tau_dm.view(B, 1, 1, 1).float()
+        grad_dm = tau_dm_e * delta_dm.float()
+        if cfg.dm_x0_norm:
+            denom = (
+                (tau_dm_e * v_real_cond_dm.float())
+                .abs()
+                .mean(dim=(1, 2, 3), keepdim=True)
+                .clamp_min(cfg.norm_floor)
             )
-            v_fake_cond_dm = _forward(
-                "fake", x_renoised_dm, tau_dm, crossattn_emb, no_grad=True
-            ).squeeze(2)
-            delta_dm = v_real_cond_dm - v_fake_cond_dm
-            delta_cfg = torch.zeros_like(x_pred)  # no CA branch under DP-DMD
+            grad_dm = grad_dm / denom
+        grad_signal = grad_dm.detach()
 
-            tau_dm_e = tau_dm.view(B, 1, 1, 1).float()
-            grad_dm = tau_dm_e * delta_dm.float()
-            if cfg.dm_x0_norm:
-                denom = (
-                    (tau_dm_e * v_real_cond_dm.float())
-                    .abs()
-                    .mean(dim=(1, 2, 3), keepdim=True)
-                    .clamp_min(cfg.norm_floor)
-                )
-                grad_dm = grad_dm / denom
-            grad_signal = grad_dm.detach()
-
-            # --- assemble: DMD surrogate on x_θ + λ·diversity + optional mean-var ---
-            if mask is not None:
-                loss_dmd = (grad_signal * x_pred.float() * mask).mean()
-            else:
-                loss_dmd = (grad_signal * x_pred.float()).mean()
-            div_loss_t = nn.functional.mse_loss(v_first.float(), v_target)
-            loss_student = loss_dmd + cfg.div_weight * div_loss_t
-
-            mv_loss = torch.zeros((), device=device)
-            if cfg.mean_var_weight > 0.0:
-                mv_loss = mean_var_kl(x_pred.float(), mv_tgt_mu, mv_tgt_var)
-                loss_student = loss_student + cfg.mean_var_weight * mv_loss
-
-            loss_student.backward()
-            if cfg.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    turbo.student_params(), max_norm=cfg.grad_clip
-                )
-            student_opt.step()
-            student_opt.zero_grad(set_to_none=True)
-            student_sched.step()
+        # --- assemble: DMD surrogate on x_θ (+ optional mean-var) ---
+        # The diversity term was already backwarded above when split_bwd; otherwise
+        # it rides this combined backward (graphs still entangled). grad_clip below
+        # runs once on the ACCUMULATED .grad (div + DMD), so the clipped norm is the
+        # full student gradient either way.
+        if mask is not None:
+            loss_dmd = (grad_signal * x_pred.float() * mask).mean()
         else:
-            # ============ DMD2 (incumbent CA-decoupled) student update ============
-            # Sample generator-t on CPU so the do_ca skip-check below stays sync-free
-            # (proposal R5: skip CA when t is very late — collapsed interval → noisy
-            # grad). Mid-step .item() on a device tensor would drain the CUDA
-            # pipeline between the student forward and CA branch.
-            if cfg.t_distribution == "uniform":
-                t_cpu = torch.rand(B, dtype=torch.float32)
-            else:
-                t_cpu = torch.sigmoid(cfg.sigmoid_scale * torch.randn(B, dtype=torch.float32))
-            do_ca = bool((t_cpu < cfg.tau_ca_skip_above_t).any().item())  # CPU op
-            t = t_cpu.to(device=device, dtype=dtype, non_blocking=True)
+            loss_dmd = (grad_signal * x_pred.float()).mean()
+        loss_student = loss_dmd
 
-            # Build x_t = (1-t)·x_0 + t·ε.
-            eps = torch.randn_like(latents)
-            t_e = t.view(B, 1, 1, 1)
-            x_t = (
-                (1.0 - t_e) * latents + t_e * eps
-            ).requires_grad_()  # requires_grad for grad-ckpt
+        mv_loss = torch.zeros((), device=device)
+        if cfg.mean_var_weight > 0.0:
+            mv_loss = mean_var_kl(x_pred.float(), mv_tgt_mu, mv_tgt_var)
+            loss_student = loss_student + cfg.mean_var_weight * mv_loss
 
-            # --- 1. STUDENT FORWARD (grad to student) ---
-            v_student = _forward("student", x_t, t, crossattn_emb, no_grad=False)
-            # v_student: (B, 16, 1, H, W). Drop temporal dim for arithmetic.
-            v_student = v_student.squeeze(2)
-            x_pred = x_t.squeeze(2) - t_e * v_student  # (B, 16, H, W), grad-bearing
+        if not split_bwd:
+            loss_student = loss_student + cfg.div_weight * div_loss_t
 
-            # --- 2. CA BRANCH (no grad, teacher × 2) ---
-            if do_ca:
-                tau_ca = sample_t_above(t.float(), min_gap=cfg.tau_ca_min_gap).to(dtype)
-                eps_ca = torch.randn_like(x_pred)
-                x_renoised_ca = renoise(x_pred.detach(), tau_ca, eps_ca)
-                v_real_cond_ca = _forward(
-                    "teacher", x_renoised_ca, tau_ca, crossattn_emb, no_grad=True
-                ).squeeze(2)
-                c_null = uncond_for_batch(uncond_base, crossattn_emb)
-                v_real_uncond_ca = _forward(
-                    "teacher", x_renoised_ca, tau_ca, c_null, no_grad=True
-                ).squeeze(2)
-                delta_cfg = v_real_cond_ca - v_real_uncond_ca
-            else:
-                delta_cfg = torch.zeros_like(x_pred)
-
-            # --- 3. DM BRANCH (no grad teacher + no grad fake) ---
-            tau_dm = torch.rand(B, device=device, dtype=dtype)
-            eps_dm = torch.randn_like(x_pred)
-            x_renoised_dm = renoise(x_pred.detach(), tau_dm, eps_dm)
-            v_real_cond_dm = _forward(
-                "teacher", x_renoised_dm, tau_dm, crossattn_emb, no_grad=True
-            ).squeeze(2)
-            v_fake_cond_dm = _forward(
-                "fake", x_renoised_dm, tau_dm, crossattn_emb, no_grad=True
-            ).squeeze(2)
-            delta_dm = v_real_cond_dm - v_fake_cond_dm
-
-            # --- 4. ASSEMBLE + BACKWARD into student ---
-            warmup_frac = min(1.0, (step + 1) / max(1, cfg.alpha_warmup_steps))
-            alpha_eff = cfg.teacher_cfg * warmup_frac + 1.0 * (1.0 - warmup_frac)
-
-            # DMD2 gradient in x0 space. The DiT predicts velocity (v = ε − x0), so
-            # the teacher/fake x0-prediction gap converts to velocity with a +τ
-            # factor: x0_real − x0_fake = −τ·Δ_dm. We want x_pred to move toward
-            # x0_real (and the CFG-baked endpoint), so the surrogate-loss gradient
-            # on x_pred is +τ·grad_signal — descent then steps x_pred by −τ·grad,
-            # the desired direction. Each branch carries its OWN renoise level τ.
-            tau_dm_e = tau_dm.view(B, 1, 1, 1).float()
-            grad_dm = tau_dm_e * delta_dm.float()
-            if cfg.dm_x0_norm:
-                # Policy (b): DMD per-sample x0-space magnitude normalization. The DM
-                # x0-gap is x0_real − x_renoised = −τ·v_real_cond_dm, so its
-                # magnitude is denom = τ·mean|v_real|. Dividing by it cancels τ
-                # across the bulk (only the clamp_min bites, for τ < norm_floor /
-                # mean|v_real|) → ≈ Δ_dm / mean|v_real|. This REPLACES the τ-damping
-                # in grad_dm; stacking the two is policy (c) and is NOT what this
-                # does. DM term only — the CA engine below keeps its own τ_ca
-                # weighting.
-                denom = (
-                    (tau_dm_e * v_real_cond_dm.float())
-                    .abs()
-                    .mean(dim=(1, 2, 3), keepdim=True)
-                    .clamp_min(cfg.norm_floor)
-                )
-                grad_dm = grad_dm / denom
-            grad_signal = grad_dm
-            tau_ca_e = None
-            if do_ca:
-                tau_ca_e = tau_ca.view(B, 1, 1, 1).float()
-                grad_signal = (
-                    grad_signal + tau_ca_e * (alpha_eff - 1.0) * delta_cfg.float()
-                )
-            grad_signal = grad_signal.detach()
-
-            # DMD2 grad trick: a dummy scalar whose ∂/∂x_pred equals grad_signal.
-            # Backward walks x_pred -> v_student -> student params; the optimizer's
-            # descent step then moves x_pred along −τ·grad_signal toward x0_real.
-            # Masked loss (student-only): zeroing the surrogate in background latents
-            # zeroes the student push there, focusing distribution-matching on the
-            # foreground. Normalization stays /numel (no renorm by mask area),
-            # matching apply_masked_loss — so a masked run sees a lower effective
-            # gradient.
-            if mask is not None:
-                loss_student = (grad_signal * x_pred.float() * mask).mean()
-            else:
-                loss_student = (grad_signal * x_pred.float()).mean()
-
-            # Mean-variance reg (lever B / paper Eq. 7): a real, differentiable loss
-            # on x_pred that pulls each image's (μ_i, σ²_i) toward the real-latent
-            # target — an auxiliary shield clamping the variance inflation that is
-            # the over-bake's oversaturation. Stacks on top of the DM shield.
-            mv_loss = torch.zeros((), device=device)
-            if cfg.mean_var_weight > 0.0:
-                mv_loss = mean_var_kl(x_pred.float(), mv_tgt_mu, mv_tgt_var)
-                loss_student = loss_student + cfg.mean_var_weight * mv_loss
-
-            loss_student.backward()
-            if cfg.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    turbo.student_params(), max_norm=cfg.grad_clip
-                )
-            student_opt.step()
-            student_opt.zero_grad(set_to_none=True)
-            student_sched.step()
-            div_loss_t = torch.zeros((), device=device)  # DP-DMD-only metric
+        loss_student.backward()
+        if cfg.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(
+                turbo.student_params(), max_norm=cfg.grad_clip
+            )
+        student_opt.step()
+        student_opt.zero_grad(set_to_none=True)
+        student_sched.step()
 
         # --- 5. FAKE UPDATE ---
         # Run ``fake_steps_per_student_step`` inner updates against the same
@@ -716,7 +611,6 @@ def main():
             fake_loss_mean_t=fake_loss_mean_t,
             grad_signal=grad_signal,
             delta_dm=delta_dm,
-            delta_cfg=delta_cfg,
             x_pred=x_pred,
             v_student=v_student,
             tau_dm_e=tau_dm_e,
@@ -724,16 +618,7 @@ def main():
             v_fake_cond_dm=v_fake_cond_dm,
             mv_loss=mv_loss,
         )
-        if do_ca:
-            metrics.accumulate_dm_to_ca(
-                tau_ca_e=tau_ca_e,
-                alpha_eff=alpha_eff,
-                delta_cfg=delta_cfg,
-                delta_dm=delta_dm,
-                tau_dm_e=tau_dm_e,
-            )
-        metrics.add_alpha(alpha_eff)
-        metrics.add_div(div_loss_t)  # 0 under the dmd2 objective
+        metrics.add_div(div_loss_t)
 
         if (step + 1) % cfg.log_interval == 0:
             m = metrics.flush(cfg.log_interval)
@@ -758,15 +643,14 @@ def main():
             n = step + 1
             is_final = n == cfg.iterations
             metadata = {
-                "ss_turbo_objective": cfg.objective,
+                "ss_turbo_objective": "dpdmd",
                 "ss_turbo_student_rank": str(cfg.student_rank),
                 "ss_turbo_student_steps": str(cfg.student_steps),
                 "ss_turbo_teacher_cfg": str(cfg.teacher_cfg),
                 "ss_turbo_step": str(n),
+                "ss_turbo_k_anchor": str(cfg.k_anchor),
+                "ss_turbo_div_weight": str(cfg.div_weight),
             }
-            if cfg.objective == "dpdmd":
-                metadata["ss_turbo_k_anchor"] = str(cfg.k_anchor)
-                metadata["ss_turbo_div_weight"] = str(cfg.div_weight)
             save_names = [f"{cfg.output_name}_{_step_tag(n)}"]
             if is_final:
                 save_names.append(cfg.output_name)  # canonical bare name

@@ -41,7 +41,7 @@ use_ortho = true
 use_timestep_mask = true
 min_rank = 16
 alpha_rank_scale = 1.0
-blocks_to_swap=4
+blocks_to_swap=0
 
 # -------------
 # ChimeraHydra activation. The three-axis routing fields

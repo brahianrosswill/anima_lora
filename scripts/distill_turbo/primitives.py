@@ -18,17 +18,6 @@ def renoise(
     return (1.0 - tau_e) * x_pred + tau_e * eps
 
 
-def sample_t_above(t: torch.Tensor, min_gap: float = 0.05) -> torch.Tensor:
-    """Sample τ ~ U(t + min_gap, 1.0) per batch element.
-
-    Clamps the lower bound so very-late steps (t ≈ 1) don't collapse to a
-    near-empty interval (proposal R5).
-    """
-    lower = (t + min_gap).clamp(max=1.0 - 1e-4)
-    u = torch.rand_like(t)
-    return lower + u * (1.0 - lower)
-
-
 def sample_t(
     B: int,
     *,

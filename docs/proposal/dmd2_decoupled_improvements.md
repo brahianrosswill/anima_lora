@@ -1,7 +1,7 @@
 # Decoupled DMD2 — improvement proposal (diagnostics + validated levers)
 
 > Improvement proposal for the shipped Decoupled DMD2 (Turbo) distillation. For the
-> method itself see `docs/experimental/dmd2-decoupled.md` (usage / ops) and
+> method itself see `docs/experimental/dpdmd.md` (usage / ops) and
 > `docs/structure/dmd2-decoupled.md` (math / walkthrough). This doc is the live
 > decision log: which levers survived contact with Anima's constraints, and the
 > metric-driven rules for picking the next one.
