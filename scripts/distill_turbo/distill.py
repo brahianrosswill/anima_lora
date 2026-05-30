@@ -94,6 +94,51 @@ def mean_var_kl(
     return kl.mean()
 
 
+def calibrate_mean_var(
+    dataloader: torch.utils.data.DataLoader,
+    *,
+    max_batches: int = 0,
+    norm_floor: float = 0.05,
+) -> tuple[float, float]:
+    """Exact one-pass global mean/variance of the real cached latents.
+
+    The Eq.7 reg target is a static dataset statistic — a single scalar
+    ``(μ, σ²)`` over every latent element — so we measure it directly rather
+    than EMA-tracking it during training. Accumulates count / sum / sum-of-
+    squares in fp64 (population variance, ``unbiased=False`` — matching the
+    per-image stats in :func:`mean_var_kl`) for numerical stability across the
+    whole pool. ``max_batches <= 0`` scans the full dataset; a positive cap
+    trades a little exactness for I/O (the global scalar converges fast).
+    Returns ``(μ_t, σ²_t)`` with σ²_t floored at ``norm_floor²``.
+    """
+    n = 0
+    s = 0.0
+    s2 = 0.0
+    seen = 0
+    for batch in dataloader:
+        # Batch layout mirrors the training loop: masked adds a trailing mask.
+        latents = batch[1].double()
+        flat = latents.reshape(-1)
+        n += flat.numel()
+        s += float(flat.sum())
+        s2 += float((flat * flat).sum())
+        seen += 1
+        if max_batches > 0 and seen >= max_batches:
+            break
+    if n == 0:
+        raise RuntimeError(
+            "mean-variance calibration scanned 0 latents — empty dataloader "
+            "(check data_dir / curation keep_list / drop_last vs batch_size)."
+        )
+    mu = s / n
+    var = max(s2 / n - mu * mu, norm_floor**2)
+    logger.info(
+        f"mean-variance calibration: scanned {seen} batches / {n:,} latent "
+        f"elements → μ_t={mu:.6g}, σ²_t={var:.6g}"
+    )
+    return mu, var
+
+
 def main():
     args = build_argparser().parse_args()
     cfg = resolve_config(args, load_turbo_config(args.config))
@@ -287,6 +332,39 @@ def main():
                 x_in, t_b, c, padding_mask=pad, skip_pooled_text_proj=True
             )
 
+    # ---------------- Mean-variance reg target (lever B / S2) ----------------
+    # Real-data stats the Eq.7 KL pulls each generated image toward. Either
+    # pinned (cfg.mv_sigma2_t > 0) or measured EXACTLY in a one-pass scan over
+    # the real latents (cfg.mv_sigma2_t <= 0). The target is a static dataset
+    # statistic — a single global (μ, σ²) over all latent elements — so an exact
+    # pre-pass strictly beats a running EMA: no decay lag, no batch-to-batch
+    # wobble, deterministic, and free in the hot loop. Computed in fp64 via the
+    # numerically-stable count/sum/sumsq route over the same `latents` the
+    # dataloader yields (the REAL training latents — NOT teacher-synthetic, since
+    # the reg is a shield against the teacher's variance inflation). Runs BEFORE
+    # the fake head-start: it's model-independent, so doing it first fails fast on
+    # an empty/misconfigured pool instead of after burning warmup compute.
+    mv_auto = cfg.mean_var_weight > 0.0 and cfg.mv_sigma2_t <= 0.0
+    mv_tgt_mu = cfg.mv_mu_t
+    mv_tgt_var = cfg.mv_sigma2_t
+    if cfg.mean_var_weight > 0.0:
+        if mv_auto:
+            mv_tgt_mu, mv_tgt_var = calibrate_mean_var(
+                dataloader,
+                max_batches=cfg.mv_calib_batches,
+                norm_floor=cfg.norm_floor,
+            )
+        logger.info(
+            "mean-variance reg ON (lever B / Eq.7): weight="
+            f"{cfg.mean_var_weight}, target="
+            + (
+                f"measured μ_t={mv_tgt_mu:.6g}, σ²_t={mv_tgt_var:.6g} "
+                f"(exact, over real latents)"
+                if mv_auto
+                else f"fixed μ_t={mv_tgt_mu}, σ²_t={mv_tgt_var}"
+            )
+        )
+
     # ---------------- Fake (critic) head-start ----------------
     data_iter = iter(dataloader)
     data_iter = run_fake_warmup(
@@ -305,25 +383,6 @@ def main():
         log_interval=cfg.log_interval,
         writer=writer,
     )
-
-    # ---------------- Mean-variance reg target (lever B / S2) ----------------
-    # Real-data stats the Eq.7 KL pulls each generated image toward. Either
-    # pinned (cfg.mv_sigma2_t > 0) or auto-calibrated via EMA over the real
-    # latents (the default — robust for Anima's 16-ch VAE). EMA buffers are
-    # lazily seeded on the first batch so there's no cold-start bias.
-    mv_auto = cfg.mean_var_weight > 0.0 and cfg.mv_sigma2_t <= 0.0
-    mv_mu_ema: torch.Tensor | None = None
-    mv_var_ema: torch.Tensor | None = None
-    if cfg.mean_var_weight > 0.0:
-        logger.info(
-            "mean-variance reg ON (lever B / Eq.7): weight="
-            f"{cfg.mean_var_weight}, target="
-            + (
-                f"EMA(decay={cfg.mv_ema_decay}) over real latents"
-                if mv_auto
-                else f"fixed μ_t={cfg.mv_mu_t}, σ²_t={cfg.mv_sigma2_t}"
-            )
-        )
 
     # ---------------- Training loop ----------------
     logger.info(f"starting DMD2 training: {cfg.iterations} iterations")
@@ -463,21 +522,7 @@ def main():
         # the over-bake's oversaturation. Stacks on top of the DM shield.
         mv_loss = torch.zeros((), device=device)
         if cfg.mean_var_weight > 0.0:
-            if mv_auto:
-                with torch.no_grad():
-                    rflat = latents.float().reshape(B, -1)
-                    r_mu = rflat.mean()
-                    r_var = rflat.var(unbiased=False)
-                    if mv_mu_ema is None:
-                        mv_mu_ema, mv_var_ema = r_mu, r_var
-                    else:
-                        d = cfg.mv_ema_decay
-                        mv_mu_ema = d * mv_mu_ema + (1.0 - d) * r_mu
-                        mv_var_ema = d * mv_var_ema + (1.0 - d) * r_var
-                tgt_mu, tgt_var = mv_mu_ema, mv_var_ema.clamp_min(cfg.norm_floor**2)
-            else:
-                tgt_mu, tgt_var = cfg.mv_mu_t, cfg.mv_sigma2_t
-            mv_loss = mean_var_kl(x_pred.float(), tgt_mu, tgt_var)
+            mv_loss = mean_var_kl(x_pred.float(), mv_tgt_mu, mv_tgt_var)
             loss_student = loss_student + cfg.mean_var_weight * mv_loss
 
         loss_student.backward()

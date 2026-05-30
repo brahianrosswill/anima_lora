@@ -179,8 +179,9 @@ def build_argparser() -> argparse.ArgumentParser:
         default=-1.0,
         help="Weight on the Eq.7 mean-variance KL added to the student loss. "
         "0 disables; S2 uses ~0.01–0.05. The target stats are read from TOML "
-        "([mean_var].mu_t/sigma2_t), or auto-calibrated via EMA over the real "
-        "latents when sigma2_t <= 0. Default: TOML (mean_var.weight, default 0).",
+        "([mean_var].mu_t/sigma2_t), or measured exactly in a one-pass scan over "
+        "the real latents when sigma2_t <= 0. Default: TOML (mean_var.weight, "
+        "default 0).",
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0)
     parser.add_argument("--attn_mode", type=str, default="flash")
@@ -277,7 +278,7 @@ class TurboConfig:
     mean_var_weight: float
     mv_mu_t: float
     mv_sigma2_t: float
-    mv_ema_decay: float
+    mv_calib_batches: int
 
     # Optimizer + scheduler
     student_lr: float
@@ -362,11 +363,16 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     norm_floor = float(_pick(args.norm_floor, cfg, "dmd.norm_floor", 0.05))
 
     # Mean-variance reg (lever B / Eq. 7). weight=0 disables. Target stats are
-    # pinned (sigma2_t > 0) or auto-calibrated via EMA over the real latents.
+    # pinned (sigma2_t > 0) or measured exactly in a one-pass scan over the real
+    # latents (sigma2_t <= 0). The target is a static dataset statistic — a global
+    # scalar (μ, σ²) over the cached training latents — so an exact pre-pass beats
+    # the old running EMA (no decay lag, no batch wobble, deterministic).
+    # `calib_batches` caps that scan (0 = full pass; the global scalar converges
+    # in a few hundred images, so a cap is a cheap-but-near-exact knob).
     mean_var_weight = float(_pick(args.mean_var_weight, cfg, "mean_var.weight", 0.0))
     mv_mu_t = float(_flatten(cfg, "mean_var.mu_t", 0.0))
     mv_sigma2_t = float(_flatten(cfg, "mean_var.sigma2_t", -1.0))
-    mv_ema_decay = float(_flatten(cfg, "mean_var.ema_decay", 0.99))
+    mv_calib_batches = int(_flatten(cfg, "mean_var.calib_batches", 0))
 
     # Optimizer
     student_lr = float(_pick(args.student_lr, cfg, "optim.student_lr", 1e-5))
@@ -433,7 +439,12 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         logger.info(
             f"mean-variance reg ENABLED (Eq.7): weight={mean_var_weight}, target="
             + (
-                f"EMA(decay={mv_ema_decay}) over real latents"
+                "exact one-pass over real latents"
+                + (
+                    " (full pass)"
+                    if mv_calib_batches <= 0
+                    else f" (≤{mv_calib_batches} batches)"
+                )
                 if mv_auto
                 else f"fixed μ_t={mv_mu_t}, σ²_t={mv_sigma2_t}"
             )
@@ -482,7 +493,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         mean_var_weight=mean_var_weight,
         mv_mu_t=mv_mu_t,
         mv_sigma2_t=mv_sigma2_t,
-        mv_ema_decay=mv_ema_decay,
+        mv_calib_batches=mv_calib_batches,
         student_lr=student_lr,
         fake_lr=fake_lr,
         fake_steps_per_student_step=fake_steps_per_student_step,
