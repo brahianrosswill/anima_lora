@@ -52,8 +52,8 @@ dependencies = [
     "spandrel>=0.4.2",
     "sqlalchemy>=2.1.0b2",
     "aiohttp>=3.13.5",
-    "comfy-cli>=1.7.3",
-    "comfy-aimdo>=0.2.14",
+    "comfy-cli>=1.10.3",
+    "comfy-aimdo>=0.3.0",
     "av>=17.0.1",
     "alembic>=1.18.4",
     "pydantic-settings>=2.14.0",
@@ -63,6 +63,7 @@ dependencies = [
     "pytest>=9.0.3",
     "blake3>=1.0.8",
     "softtorch>=0.1.1",
+    "torchaudio>=2.11.0",
 ]
 
 [project.optional-dependencies]
