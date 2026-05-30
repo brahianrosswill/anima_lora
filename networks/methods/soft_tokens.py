@@ -314,6 +314,12 @@ class SoftTokensNetwork(AdapterNetworkBase):
         self.n_layers = n_layers
         self.n_t_buckets = n_t_buckets
         self.splice_position = splice_position
+        # Stored for AdapterNetworkBase API compatibility (set_multiplier), but
+        # NOT applied to the injected tokens: soft tokens splice in at full
+        # magnitude regardless of multiplier (see _make_block_hook). Unlike
+        # LoRA, there is no `* multiplier` scale on the delta — the tokens enter
+        # cross-attention directly, so `set_multiplier(0)` does NOT disable them.
+        # Gate the whole adapter at the trainer/loader level to turn them off.
         self.multiplier = multiplier
 
         # Contrastive objective (training-only; extra forwards live in
@@ -518,6 +524,10 @@ class SoftTokensNetwork(AdapterNetworkBase):
             step_tokens = net._step_layer_tokens
             if step_tokens is not None:
                 # (B, K, D) for this layer. Cast to crossattn dtype/device.
+                # net.multiplier is intentionally NOT applied here — soft tokens
+                # splice in at full magnitude (no LoRA-style `* multiplier`
+                # scale), so set_multiplier(0) does not disable them. See the
+                # note at the `self.multiplier` assignment in __init__.
                 layer_tok = step_tokens[layer_idx].to(
                     dtype=crossattn_emb.dtype, device=crossattn_emb.device
                 )
