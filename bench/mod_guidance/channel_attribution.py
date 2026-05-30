@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -95,6 +96,46 @@ DEFAULT_TAGS = ["score_9", "holding a sword"]
 DEFAULT_NEG = ""
 
 EPS = 1e-8
+
+# Anima caption SLOT_ORDER is (rating, count, character, copyright, artist,
+# general) -- see library/captioning/anima_tagger.py:90. Booru quality/meta tags
+# (score_N, masterpiece, res/recency) are NOT a slot; the training captions place
+# them right after the leading rating literal. So a quality tag spliced at the
+# TAIL (general band) is off-distribution, and since cross-attn is position-
+# sensitive (the `order` experiment), that skews the swap measurement. We insert
+# quality tags after the rating band; everything else appends to the general band.
+_QUALITY_RE = re.compile(
+    r"^(score_\d(_up)?|masterpiece|(best|high|normal|low|worst) quality"
+    r"|absurdres|highres|lowres|newest|oldest|recent|old|year \d{4})$",
+    re.IGNORECASE,
+)
+
+
+def _is_quality_tag(tag: str) -> bool:
+    return bool(_QUALITY_RE.match(tag.strip()))
+
+
+def _splice_tag(base: str, tag: str, slot: str) -> str:
+    """Insert `tag` into `base` at its schema-correct position.
+
+    slot: auto    -> after_rating for quality/meta tags, append otherwise
+          after_rating -> right after a leading rating literal (else prepend)
+          append  -> general band (tail)
+          prepend -> very front
+    """
+    from library.captioning.taxonomy import CAPTION_RATINGS
+
+    toks = [t.strip() for t in base.split(",") if t.strip()]
+    if slot == "auto":
+        slot = "after_rating" if _is_quality_tag(tag) else "append"
+    if slot == "prepend":
+        return ", ".join([tag] + toks)
+    if slot == "append":
+        return ", ".join(toks + [tag])
+    # after_rating: place between the rating literal and the count band.
+    if toks and toks[0].lower() in CAPTION_RATINGS:
+        return ", ".join([toks[0], tag] + toks[1:])
+    return ", ".join([tag] + toks)  # no rating band -> front of prompt
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +209,13 @@ def build_dit(args, device):
     anima_utils.load_pooled_text_proj(model, args.pooled_text_proj, device)
     model.to(device)
     model.eval()
+    # compile_blocks turns on native-shape flattening + traces one block graph per
+    # distinct token count. The bench renders at a single bucket, so this is ~1-2
+    # graphs that amortise across every render in the sweep. MUST run after
+    # load_pooled_text_proj so the traced forward sees the live modulation path.
+    if args.compile:
+        logger.info(f"  torch.compile blocks (mode={args.compile_mode})")
+        model.compile_blocks(mode=args.compile_mode)
     return model
 
 
@@ -283,6 +331,7 @@ def decode_and_featurize(latents: dict, args, device) -> dict[str, Rendered]:
             px = px.to("cpu", dtype=torch.float32)[0].clamp(-1, 1)  # (3,H,W)
             pixels[key] = px
             r = Rendered()
+            r.latent = lat  # (16, H_lat, W_lat) fp32 cpu -- primary decomposition space
             # DC-blowout proxies: spatial std collapse + tone toward a flat fill.
             r.pixel_std = float(px.std(dim=(-2, -1)).mean())
             r.tone = float(((px + 1) / 2).mean())
@@ -329,12 +378,12 @@ def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
 # --------------------------------------------------------------------------- #
 # Experiments -- each builds jobs, then consumes the rendered map.
 # --------------------------------------------------------------------------- #
-def exp_swap(prompts, tags, seeds, neg):
+def exp_swap(prompts, tags, seeds, neg, tag_slot):
     """2x2 channel decomposition. Returns (jobs, lambda(rendered)->rows)."""
     jobs, specs = [], []
     for pi, base in enumerate(prompts):
         for ti, tag in enumerate(tags):
-            tagged = f"{base}, {tag}"
+            tagged = _splice_tag(base, tag, tag_slot)
             for s in seeds:
                 kb = f"swap/p{pi}t{ti}s{s}"
                 conf = {
@@ -368,7 +417,14 @@ def _swap_rows(R, specs):
 
 
 def exp_order(prompts, seeds, neg, n_perm, rng):
-    """Permute comma-tags: pooled identical (sanity-checked), movement = cross-attn."""
+    """Pure cross-attn isolator. Permute the comma-tags in the cross-attn sequence
+    while PINNING pooled = pool(canonical) on every render (via pool_prompt=canon).
+
+    Pooling happens *post-encoder* (contextualised Qwen3 + LLM-adapter), so a raw
+    reorder is NOT pooled-invariant -- the encoder is order-sensitive. Pinning the
+    pooled override forces the mod channel constant by construction, so 100% of the
+    canon-vs-perm image movement is cross-attn. _order_pooled_drift logs how much
+    pooled *would* have moved unpinned (the encoder's order-sensitivity), for context."""
     jobs, specs = [], []
     for pi, base in enumerate(prompts):
         toks = [t.strip() for t in base.split(",") if t.strip()]
@@ -379,10 +435,11 @@ def exp_order(prompts, seeds, neg, n_perm, rng):
             perms.append(", ".join(q))
         canon = ", ".join(toks)
         for s in seeds:
+            # pool_prompt=canon everywhere -> pooled channel pinned -> isolator.
             jobs.append(RenderJob(f"order/p{pi}s{s}/canon", canon, canon, s))
             jobs.append(RenderJob(f"order/p{pi}s{s}/canon2", canon, canon, s + 100000))
             for j, pm in enumerate(perms):
-                jobs.append(RenderJob(f"order/p{pi}s{s}/perm{j}", pm, pm, s))
+                jobs.append(RenderJob(f"order/p{pi}s{s}/perm{j}", pm, canon, s))
             specs.append((base, canon, perms, s, pi))
     return jobs, lambda R: _order_rows(R, specs)
 
@@ -439,7 +496,9 @@ def _intensity_rows(R, specs, w_points):
 # --------------------------------------------------------------------------- #
 # Grid saving (read the grids!)
 # --------------------------------------------------------------------------- #
-def save_grids(pixels, run_dir, experiment):
+def save_grids(pixels, run_dir, experiment, thumb=512):
+    """One labelled grid PNG per render group. Thumbnails preserve aspect ratio
+    (longer side = `thumb`) so non-square buckets aren't squashed."""
     try:
         from PIL import Image, ImageDraw
     except Exception:
@@ -448,9 +507,11 @@ def save_grids(pixels, run_dir, experiment):
 
     def to_img(px):
         x = ((px.clamp(-1, 1) + 1) * 127.5).to(torch.uint8).numpy().transpose(1, 2, 0)
-        return Image.fromarray(x)
+        img = Image.fromarray(x)
+        scale = thumb / max(img.width, img.height)
+        return img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
 
-    # Group keys by their grid prefix (everything before the last "/").
+    header = max(16, thumb // 24)
     groups: dict[str, list[str]] = {}
     for k in pixels:
         if not k.startswith(experiment):
@@ -459,15 +520,16 @@ def save_grids(pixels, run_dir, experiment):
     artifacts = []
     for grp, keys in sorted(groups.items()):
         keys = sorted(keys)
-        thumbs = [to_img(pixels[k]).resize((256, 256)) for k in keys]
+        thumbs = [to_img(pixels[k]) for k in keys]
         labels = [k.rsplit("/", 1)[1] for k in keys]
-        w = sum(t.width for t in thumbs)
-        canvas = Image.new("RGB", (w, 256 + 16), (16, 16, 16))
-        x = 0
+        gw = sum(t.width for t in thumbs)
+        gh = max(t.height for t in thumbs) + header
+        canvas = Image.new("RGB", (gw, gh), (16, 16, 16))
         d = ImageDraw.Draw(canvas)
+        x = 0
         for t, lbl in zip(thumbs, labels):
-            canvas.paste(t, (x, 16))
-            d.text((x + 2, 2), lbl, fill=(230, 230, 230))
+            canvas.paste(t, (x, header))
+            d.text((x + 3, 3), lbl, fill=(230, 230, 230))
             x += t.width
         name = grp.replace("/", "_") + ".png"
         canvas.save(run_dir / name)
@@ -476,6 +538,35 @@ def save_grids(pixels, run_dir, experiment):
 
 
 # --------------------------------------------------------------------------- #
+def sample_dataset_prompts(dataset_dir: str, n: int, max_chars: int) -> list[str]:
+    """Sample N real captions from `.txt` sidecars under dataset_dir.
+
+    image_dataset/ is a symlink to nested artist dirs, so rglob (which follows the
+    start symlink) is used rather than a plain walk. Captions are the dense, real
+    prompts where the geometry-only finding's numbers collapse 5-25x -- the regime
+    we actually care about. Deterministic via a dedicated rng so permutation draws
+    elsewhere stay stable."""
+    root = Path(dataset_dir)
+    txts = sorted(str(p) for p in root.rglob("*.txt"))
+    if not txts:
+        raise SystemExit(f"No .txt captions found under {root} (symlink? try --dataset_dir)")
+    rng = np.random.default_rng(987)
+    rng.shuffle(txts)
+    out: list[str] = []
+    for t in txts:
+        try:
+            cap = Path(t).read_text(encoding="utf-8").strip().replace("\n", ", ")
+        except Exception:
+            continue
+        if not cap:
+            continue
+        out.append(cap[:max_chars])
+        if len(out) >= n:
+            break
+    logger.info(f"Sampled {len(out)} real captions from {root}")
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dit", default="models/diffusion_models/anima-base-v1.0.safetensors")
@@ -483,8 +574,16 @@ def main():
     p.add_argument("--text_encoder", default="models/text_encoders/qwen_3_06b_base.safetensors")
     p.add_argument("--pooled_text_proj", required=True, help="trained pooled_text_proj checkpoint")
     p.add_argument("--experiment", choices=["swap", "order", "intensity", "all"], default="all")
-    p.add_argument("--prompts", type=str, default=None, help="';'-separated base prompts")
+    p.add_argument("--prompts", type=str, default=None, help="';'-separated base prompts (wins over --dataset_samples)")
+    p.add_argument("--dataset_samples", type=int, default=0, help="sample N real captions from --dataset_dir instead of the built-in defaults")
+    p.add_argument("--dataset_dir", type=str, default="image_dataset", help="caption (.txt) source for --dataset_samples")
+    p.add_argument("--max_prompt_chars", type=int, default=400, help="truncate sampled captions to this length")
     p.add_argument("--tags", type=str, default=None, help="','-separated tags to splice (swap)")
+    p.add_argument(
+        "--tag_slot", choices=["auto", "after_rating", "append", "prepend"], default="auto",
+        help="where to insert a spliced tag (auto: quality->after rating, else append). "
+        "Anima SLOT_ORDER puts quality/meta after the rating literal; appending is off-distribution.",
+    )
     p.add_argument("--negative", type=str, default=DEFAULT_NEG)
     p.add_argument("--seeds", type=str, default="0", help="','-separated seeds")
     p.add_argument("--n_perm", type=int, default=3, help="order: permutations per prompt")
@@ -497,14 +596,19 @@ def main():
     p.add_argument("--guidance_scale", type=float, default=4.0)
     p.add_argument("--flow_shift", type=float, default=3.0)
     p.add_argument("--attn_mode", type=str, default="torch")
+    p.add_argument("--compile", action="store_true", help="torch.compile DiT blocks (amortises across the sweep)")
+    p.add_argument("--compile_mode", type=str, default="default")
+    p.add_argument("--grid_thumb", type=int, default=512, help="per-image grid thumbnail longer-side px")
     p.add_argument("--label", type=str, default=None)
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    prompts = (
-        [s.strip() for s in args.prompts.split(";") if s.strip()]
-        if args.prompts else DEFAULT_PROMPTS
-    )
+    if args.prompts:
+        prompts = [s.strip() for s in args.prompts.split(";") if s.strip()]
+    elif args.dataset_samples > 0:
+        prompts = sample_dataset_prompts(args.dataset_dir, args.dataset_samples, args.max_prompt_chars)
+    else:
+        prompts = DEFAULT_PROMPTS
     tags = (
         [s.strip() for s in args.tags.split(",") if s.strip()]
         if args.tags else DEFAULT_TAGS
@@ -518,7 +622,7 @@ def main():
     # Build all jobs + their row-extractors.
     jobs, extractors = [], []
     if "swap" in exps:
-        j, f = exp_swap(prompts, tags, seeds, args.negative)
+        j, f = exp_swap(prompts, tags, seeds, args.negative, args.tag_slot)
         jobs += j
         extractors.append(f)
     if "order" in exps:
@@ -550,9 +654,9 @@ def main():
     model = build_dit(args, device)
     cross_cache = encode_prompts(model, sorted(needed), args, device)
 
-    # Sanity: order experiment relies on pooled being permutation-invariant.
+    # Informational: how much pooled would drift under reorder (we pin it).
     if "order" in exps:
-        _order_pool_sanity(jobs, cross_cache)
+        _order_pooled_drift(jobs, cross_cache)
 
     logger.info("[2/4] denoising (DiT)")
     latents = render_jobs(model, jobs, cross_cache, args, device)
@@ -573,7 +677,7 @@ def main():
     artifacts = ["rows.csv"]
     _write_csv(run_dir / "rows.csv", rows)
     for e in exps:
-        artifacts += save_grids(pixels, run_dir, e)
+        artifacts += save_grids(pixels, run_dir, e, thumb=args.grid_thumb)
 
     metrics = _summarize(rows)
     _log_summary(metrics)
@@ -585,25 +689,29 @@ def main():
     logger.info(f"\nDone. Results -> {run_dir}")
 
 
-def _order_pool_sanity(jobs, cross_cache):
-    """Assert pooled(perm) == pooled(canon): the order experiment's whole premise."""
-    worst = 0.0
-    # Compare each order group's pooled vectors -- they share the same token bag.
+def _order_pooled_drift(jobs, cross_cache):
+    """Report the encoder's pooled order-sensitivity (informational).
+
+    The order experiment PINS pooled=pool(canon) via the override, so pooled does
+    not contaminate the cross-attn attribution. But it's worth knowing how much the
+    pooled vector *would* drift unpinned -- that drift is pure Qwen3/LLM-adapter
+    order-sensitivity (post-encoder contextualisation), not the DiT. Compares each
+    group's raw cross-attn prompts (canon vs perms) against the canon pooled."""
     by_group: dict[str, list[str]] = {}
     for j in jobs:
         if j.key.startswith("order"):
             by_group.setdefault(j.key.rsplit("/", 1)[0], []).append(j.cross_prompt)
-    for grp, prompts in by_group.items():
+    worst, rel = 0.0, 0.0
+    for prompts in by_group.values():
         pooled = [_pool(cross_cache[p].float()) for p in prompts]
         ref = pooled[0]
         for v in pooled[1:]:
             worst = max(worst, float((v - ref).abs().max()))
-    logger.info(f"  order pooled-invariance check: max|Δpool| = {worst:.2e} (expect ~0)")
-    if worst > 1e-2:
-        logger.warning(
-            "  pooled vectors are NOT permutation-identical -- order experiment "
-            "attribution is contaminated (check tokenizer / padding)."
-        )
+            rel = max(rel, float((v - ref).norm() / (ref.norm() + EPS)))
+    logger.info(
+        f"  encoder pooled order-drift (suppressed via override): "
+        f"max|Δpool|={worst:.2e}, rel‖Δ‖={rel:.3f}"
+    )
 
 
 def _write_csv(path, rows):

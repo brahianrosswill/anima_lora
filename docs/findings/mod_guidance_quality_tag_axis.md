@@ -1,17 +1,116 @@
-# Mod guidance: why duplicated/aligned tags degrade, and the quality-tag direction structure
+# Mod guidance: the pooled-text "quality axis" — DEMOTED (geometry-only); replaced by image-space channel attribution
 
-This records why putting a tag in **both** the positive prompt and the
+> **STATUS (2026-05-30): the "quality axis" framing is demoted. Read this first.**
+>
+> Two load-bearing claims in this doc were never tested the way they were
+> stated, and one is contradicted by the doc's own data:
+>
+> 1. **It is not a "quality axis" — it is a content-magnitude axis.** The doc's
+>    own Finding 1 shows an *arbitrary artist tag drives the axis 3–4× harder
+>    than `score_9`* (`@sincos +0.31` vs `score_9 +0.07`). There is no sense in
+>    which `@sincos` is "more quality" than `score_9`; what the projection
+>    actually measures is the **magnitude of a tag's pooled shift along whatever
+>    direction your steering pair happens to point**, and that direction is
+>    dominated by high-variance content channels. The doc half-admits this
+>    ("the steering axis isn't pure 'quality'; it correlates with strong,
+>    specific content"). So: the robust core is the trivial *"strong content
+>    tags make large pooled marginals"*; the *quality* interpretation is
+>    falsified. Do **not** cite this as a quality lever.
+>
+> 2. **"Double-drive degrades quality / DC-blowout" was never imaged.** Every
+>    number below lives in `pooled_text_proj` **geometry** (cosines between
+>    projected pooled vectors). Not a single image was sampled. The
+>    over-saturation / pink-DC-blowout claim is *inferred from cosines*, never
+>    observed — exactly the kind of geometry-space claim that, on Anima, has a
+>    track record of not surviving contact with pixels (cf.
+>    [[project_fm_val_loss_uninformative]]).
+>
+> 3. **Position artifact.** The geometry scan measured tags **appended at the
+>    tail** (general band). But Anima's caption `SLOT_ORDER` (rating → count →
+>    character → copyright → artist → general,
+>    `library/captioning/anima_tagger.py:90`) puts booru quality/meta tags right
+>    after the rating literal, and artist `@`-tags in their own pre-general slot.
+>    So the comparison pitted correctly-placed artist tags against an
+>    **off-distribution tail `score_9`** — and cross-attn is strongly
+>    position-sensitive (see below). The "artists beat `score_9` 3–4×" gap is
+>    therefore *partly a placement mismatch*, not only content-magnitude.
+>
+> **What replaces it — image-space channel attribution**
+> (`bench/mod_guidance/channel_attribution.py`). A tag edit enters the DiT
+> through two separable inputs — the pooled/mod channel (`max → pooled_text_proj
+> → AdaLN`) and the cross-attn channel (full `crossattn_emb` sequence) — split via
+> `pooled_text_override`. Full run (2026-05-31, 6 dense real captions × 2 seeds,
+> tags spliced at their *correct* slot; `results/20260531-0005-full/`):
+>
+> | tag | pool_share (latent / PE) | cross_share | cos(cross,pool) |
+> |---|---|---|---|
+> | `score_9` | 0.50 / 0.77 | 0.97 | +0.27 |
+> | `masterpiece` | 0.50 / 0.71 | 1.04 | +0.27 |
+> | `holding a sword` (content) | 0.40 / 0.44 | 0.98 | +0.23 |
+>
+> Reads (n=12/tag, pool_share σ≈0.2–0.3 — directional):
+>
+> - **The mod channel is a real, *quality-selective* lever — not inert.** Quality
+>   tags route ~0.5 (latent) / ~0.7+ (PE) of their image movement through pooled,
+>   vs ~0.4 / 0.44 for the content tag. Cross-attn is the larger single channel
+>   (~1.0), but pooled is a substantial secondary contributor, *more so for
+>   quality than content*. The original *intuition* (quality acts via pooled
+>   modulation) survives; the "axis"/geometry framing and the tail-append
+>   measurement were the wrong parts. (Tail-append gave pool_share 0.22 —
+>   placement roughly doubled it, corroborating point 3.)
+> - **"Double-drive" is mild reinforcement, not over-saturation:** cos ≈ +0.26,
+>   but additivity residual ≈ 0.63 — strongly non-linear interaction, not a clean
+>   superposition.
+> - **DC-blowout from a hard push is NOT reproduced** under the shipped schedule
+>   (blocks 8–26, tonal-DC blocks 0–7 protected): sweeping steering `w`→8 gives
+>   only +3% pixel-std drop / ~1% tone shift, and the effect *saturates* past
+>   w≈3 (pushing harder stops changing the image rather than degrading it). The
+>   doc's pink/DC-blowout was likely an unprotected-schedule / duplication
+>   artifact, not an intrinsic property of pooled steering.
+> - **Cross-attn is strongly order-sensitive:** reordering the tags (pooled pinned)
+>   moves the image 64% (latent) / 84% (PE) of a *full seed change* — which is why
+>   tag placement (point 3) is load-bearing.
+>
+> **Qualitative read of the `swap` grids (eyeball, valence — what the scalar
+> magnitudes can't show; n=12/tag, treat as a hypothesis):** the pooled/mod
+> channel behaves like a **global grade/polish operator, not a content editor** —
+> consistent with AdaLN being a per-feature-channel shift applied uniformly across
+> all spatial positions (it can shift tone/contrast/sharpness but cannot move
+> content). Observed pattern: when **BB is already good, BT (pooled-only) reads
+> slightly *better* than BB** (a small finish on already-right content); when **BB
+> is poor, TB (cross-attn-only) beats BT** (only the content channel can repair
+> structure — a global grade can't rescue a bad base). This also explains why
+> `pool_share` is higher in PE (~0.7, mean-pooled → tuned to global tone) than in
+> latent (~0.5): the metric most attuned to grading is the one that most rewards
+> the pooled channel. **Practical framing: mod-guidance/quality-pooled is a
+> finishing knob conditional on a good base, not a quality rescue.** To harden:
+> stratify `swap` pairs by base quality and check the sign of `BT−BB` (good
+> stratum) vs `TB−BB` (poor stratum) — not yet done.
+>
+> The geometry analysis below is preserved as the **original record** — a valid
+> map of the pooled-projection space, useful for reasoning about the *mechanism*,
+> but its "quality" labels, its tail-append placement, and its "degrades quality"
+> conclusion are the demoted parts.
+
+---
+
+## Original geometry-only analysis (pooled-projection space; quality labels demoted)
+
+This recorded why putting a tag in **both** the positive prompt and the
 mod-guidance steering prompt (or even just in the positive prompt while
-steering is on) degrades quality, plus a map of how booru "quality" tags sit in
-the `pooled_text_proj` modulation space. The short version:
+steering is on) was *believed* to degrade quality, plus a map of how booru
+"quality" tags sit in the `pooled_text_proj` modulation space. The short
+version (read with the STATUS box above):
 
 1. The base modulation and the steering delta **both** read the same
    `crossattn_emb.max(dim=1)` → `pooled_text_proj`. A tag that pushes the
    projected modulation along the steering axis gets that axis driven **twice**
-   → over-saturation / DC blowout (`docs/methods/mod-guidance.md`).
+   in *projection geometry* (`docs/methods/mod-guidance.md`). **Whether this
+   double-drive actually degrades the image was never measured — see STATUS.**
 2. The hazard is **directional overlap**, not string duplication. It must be
-   measured *in context* (max-pool is non-additive), and an **artist tag can
-   drive the quality axis ~3–4× harder than `score_9` itself**.
+   measured *in context* (max-pool is non-additive), and an **artist tag drives
+   the axis ~3–4× harder than `score_9` itself** — which is the evidence the
+   axis is content-magnitude, not quality (STATUS point 1).
 3. The `score_X` ladder *looks like* **a rotation, not a magnitude scale**:
    measured against a near-empty base, `score_9`/`absurdres` and
    `masterpiece`/`best quality`/`score_6` read as two near-opposite poles with
@@ -35,8 +134,10 @@ base** and shrink ~5–25× / reorient on dense prompts — max-pool saturation.
 
 Mechanism reference: `library/anima/models.py:1726-1736` (base pooled inject),
 `library/inference/corrections/mod_guidance.py:108-122` (steering delta).
-Reproduce: `bench/mod_guidance/run_bench.py` + `plot_quality_axis.py` +
-`base_sensitivity.py`.
+Reproduce (geometry, original — scripts were never committed): the numbers below
+were produced by an uncommitted `bench/mod_guidance/{run_bench,plot_quality_axis,
+base_sensitivity}.py`; the live, committed bench is
+`bench/mod_guidance/channel_attribution.py` (image-space channel attribution).
 
 ## Mechanism
 
@@ -232,6 +333,12 @@ Three things change, one holds:
 
 ## Practical rules
 
+> These rules describe **projection geometry**, and each says "degrade" / "cancel"
+> / "fights itself" as if confirmed in the image — they were not (STATUS point 2).
+> They predict *where the pooled marginals point*, not that the picture gets
+> worse. Use them as hypotheses to check against the channel-attribution bench,
+> not as established image-space behaviour.
+
 - **Risk is matched to your steering convention, not to "good artist".** A tag
   is hazardous to put in the positive prompt exactly when it shares the quality
   *pole* of the tag in your steering `p₊`. Steering with `score_9` → keep
@@ -247,18 +354,26 @@ Three things change, one holds:
 
 ## Reproduce
 
+**Live, committed bench (image-space channel attribution — the current tool):**
+
 ```bash
-# full vocab scan + per-anchor alignment + anchor cosine matrix
-uv run python bench/mod_guidance/run_bench.py --label vocab-scan \
-    --anchor_tags "score_9,score_8,score_7,score_6,masterpiece,best quality,absurdres"
-# the figure (reloads the DiT; recency overlay included)
-uv run python bench/mod_guidance/plot_quality_axis.py
-# base-prompt sensitivity: full vocab re-scored against 3 dense real captions
-uv run python bench/mod_guidance/base_sensitivity.py
+uv run python bench/mod_guidance/channel_attribution.py \
+    --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
+    --experiment all --dataset_samples 6 \
+    --tags "score_9,masterpiece,holding a sword" --seeds 0,1 --compile --label full
 ```
 
-Both use `anima-base-v1.0.safetensors` + newest
-`output/ckpt/pooled_text_proj*.safetensors`, `attn_mode=torch`, bf16. Artist/
-character/copyright vocab from `post_image_dataset/captions/caption_index.json`.
-Note bf16 precision makes the smallest entries (~0.001) noise; the flagged tier
-(`|push_ratio| ≥ 0.05`) and the pole structure are robust.
+This decomposes a tag's *image* movement into a cross-attn delta and a pooled/mod
+delta (the `swap` experiment), isolates pure cross-attn order-sensitivity by
+pinning the pooled vector (`order`), and sweeps the steering weight to test the
+DC-blowout claim in pixels (`intensity`). Use `--dataset_samples` for the dense
+real-prompt regime where the geometry numbers below collapse. Read the saved
+grids, not just the scalars.
+
+**Geometry scan (original — scripts were never committed):** the
+`pooled_text_proj`-space numbers in this doc came from an uncommitted
+`bench/mod_guidance/{run_bench,plot_quality_axis,base_sensitivity}.py` run against
+`anima-base-v1.0.safetensors` + `output/ckpt/pooled_text_proj*.safetensors`,
+`attn_mode=torch`, bf16, with artist/character vocab from
+`post_image_dataset/captions/caption_index.json`. They are not re-runnable as
+written; treat the tables as a frozen geometry record (and see STATUS).
