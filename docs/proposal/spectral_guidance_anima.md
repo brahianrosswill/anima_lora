@@ -1,5 +1,15 @@
 # spectral_guidance — using Anima's diffusion-operator spectrum for preservation-aware steering
 
+> 🪦 **SHELVED 2026-05-30 — Phase 0.1 NO-GO.** The probe killed the load-bearing
+> premise: Anima's round-trip operator `T_t T_t*` stays near-full-rank through the
+> editing band (top-4 energy ≈ 0.15 at σ≈0.45, the isotropic floor) and only
+> collapses in the σ>0.85 hopeless tail — there is no low-dim `span{φ_{t,k}}` to
+> anchor, and no transition near σ≈0.45 (the proposal's assumption that the P2
+> window lines up with `project_sigma_signal_resolves_by_045` is what failed — that
+> finding measures *accuracy*, not operator *rank*; the two σ-axes don't coincide).
+> Conditional + unconditional agree. Write-up: `docs/findings/spectral_guidance_no_subspace.md`.
+> Arm C (spectrum-as-diagnostic) survives. Everything below is the original proposal.
+
 Source: Moreira et al., "Spectral Guidance for Flexible and Efficient Control of
 Diffusion Models" ([arXiv:2605.28900v1](https://arxiv.org/abs/2605.28900), CMU /
 IST, May 2026). Local copy: `2605.28900v1.pdf`.

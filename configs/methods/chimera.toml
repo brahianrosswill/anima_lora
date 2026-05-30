@@ -86,8 +86,8 @@ max_data_loader_n_workers=1
 # Routing scope. Every Linear matched by this regex becomes a chimera
 # leaf; non-matching layers fall back to OrthoLoRA (single-pool Cayley,
 # no router). Same default as the other hydra variants.
-# router_targets = ".*(output_proj|mlp\\.layer[12])$"
-router_targets = ".*(cross_attn\\.output_proj|mlp\\.layer[12])$"
+router_targets = ".*(output_proj|mlp\\.layer[12])$"
+# router_targets = ".*(cross_attn\\.output_proj|mlp\\.layer[12])$"
 # output_name = "anima_chimera-0521"
 [[datasets]]
 validation_split_num = 8
