@@ -162,7 +162,7 @@ def main():
     # compile each block._forward (native-shape flatten, one graph per token count;
     # the pool spans more than the 2 CONSTANT_TOKEN_BUCKETS families).
     place_dit_for_training(model, device, blocks_to_swap=cfg.blocks_to_swap)
-    compile_dit_blocks(model, enabled=cfg.torch_compile, mode="reduce-overhead")
+    compile_dit_blocks(model, enabled=cfg.torch_compile, mode="")
     enable_training_grad_ckpt(model, enabled=cfg.grad_ckpt)
 
     # ---------------- LoRA stacks ----------------
@@ -502,12 +502,21 @@ def main():
             v_student = v_first
 
             # --- DMD on x_θ (steps 2..N), against teacher + fake ---
+            # The real score is CFG-GUIDED (v_u + α·(v_c − v_u)), NOT cond-only.
+            # This is the un-decoupling: under the incumbent CA-decoupled dmd2 the
+            # DM branch was deliberately unguided because CFG lived in the separate
+            # CA branch (delta_cfg). DP-DMD deletes the CA branch, so guidance must
+            # ride the single DMD real score — exactly like the reference
+            # `compute_dmd_loss` (dpdmd/train_sd35_dpdmd.py:118-129, teacher cat
+            # cond+uncond → v_u + scale·(v_c−v_u)). Without it v_real≈v_fake (both
+            # unguided cond preds collapse, dm_cos≈0.9999) and the quality gradient
+            # is noise. The fake stays cond-only, matching the reference.
             tau_dm = torch.rand(B, device=device, dtype=dtype)
             eps_dm = torch.randn_like(x_pred)
             x_renoised_dm = renoise(x_pred.detach(), tau_dm, eps_dm)
-            v_real_cond_dm = _forward(
-                "teacher", x_renoised_dm, tau_dm, crossattn_emb, no_grad=True
-            ).squeeze(2)
+            v_real_cond_dm = _teacher_cfg_velocity(
+                x_renoised_dm, tau_dm, crossattn_emb, c_null
+            )
             v_fake_cond_dm = _forward(
                 "fake", x_renoised_dm, tau_dm, crossattn_emb, no_grad=True
             ).squeeze(2)

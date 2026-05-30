@@ -209,12 +209,27 @@ loss_div = mse(v_first, v_target.detach())
 x_theta  = x_stu
 
 # --- DMD on x_theta (steps 2..N), against teacher + fake ---
-loss_dmd = dmd_loss(x_theta, teacher, fake)   # reuse current renoise-DMD machinery
+loss_dmd = dmd_loss(x_theta, teacher_CFG, fake_cond)   # real score is CFG-GUIDED
 loss = loss_dmd + div_weight * loss_div
 ```
 
 The fake-critic update branch (`distill.py:539+`) is unchanged — it still
 regresses the fake to the student's `x_θ` distribution at resampled τ.
+
+> **⚠ CFG trap — the real score in `dmd_loss` MUST be CFG-guided
+> (`v_u + α·(v_c − v_u)`), not cond-only.** "Reuse current renoise-DMD
+> machinery" above is misleading: the incumbent's DM branch is *deliberately
+> cond-only* because under the CA-decoupled scheme guidance lived in the
+> separate CA branch (`delta_cfg`). DP-DMD deletes the CA branch, so guidance
+> has to ride the single DMD real score — exactly like the reference
+> `compute_dmd_loss` (`dpdmd/train_sd35_dpdmd.py:118-129`). The original Phase-1
+> port (`anima_turbo_I`, 2026-05-30) copied the cond-only teacher verbatim and
+> dropped CFG entirely → `v_real ≈ v_fake` (`dm_cos ≈ 0.9999` in TB), the
+> quality gradient went to noise, and the student looked worse than `g_agg_250`.
+> Fixed at `distill.py:517` by routing the DM real score through
+> `_teacher_cfg_velocity`. The fake stays cond-only (matches the reference).
+> If the incumbent CA path is ever decommissioned (§8), do **not** revert the
+> DM teacher to cond-only — un-decoupling the DMD term is now load-bearing.
 
 ### 3.3 Constraints that survive contact with Anima
 

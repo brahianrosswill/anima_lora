@@ -185,7 +185,7 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0)
     parser.add_argument("--attn_mode", type=str, default="flash")
-    parser.add_argument("--grad_ckpt", action="store_true", default=False)
+    parser.add_argument("--grad_ckpt", action="store_true", default=True)
     parser.add_argument("--no_grad_ckpt", dest="grad_ckpt", action="store_false")
     parser.add_argument(
         "--torch_compile",

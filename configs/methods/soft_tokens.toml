@@ -21,10 +21,12 @@ network_dim = 4
 #                      since base tokens still train normally). Drop to ~20 if
 #                      that becomes the bottleneck.
 # init_std           — base-tokens init std. t_offsets is zero-init.
-# splice_position    — "end_of_sequence" (default) overwrites the K tail
-#                      zero-padding slots; preserves the strongest sinks.
-#                      "front_of_padding" scatters at [seqlens[i], +K) per
-#                      sample (caption-position-aware).
+# splice_position    — "front_of_padding" (shipped below; algorithm-faithful —
+#                      SoftREPA appends soft tokens to the text sequence) scatters
+#                      at [seqlens[i], +K) per sample, caption-position-aware.
+#                      "end_of_sequence" (constructor fallback) overwrites the K
+#                      tail zero-padding slots; compile-friendly, preserves the
+#                      strongest front sinks, but an Anima-specific shortcut.
 #
 # ── Contrastive objective (SoftREPA InfoNCE via cached-TE negatives) ──────────
 # A training-only objective that sharpens prompt-following (data-conditioned) by
@@ -60,42 +62,38 @@ network_dim = 4
 # contrastive_warmup_ratio      — hold λ_con at 0 for the first fraction of
 #                                 steps (lets plain FM shape the bank first).
 #
-# ── AGSM objective (bounded target-shift) — docs/proposal/soft_tokens_agsm.md ──
-# Alternative to InfoNCE on the SAME extra-forward plumbing (negatives, warmup,
-# every_n, compose seam). Diagnoses SoftREPA's instability as unbounded negative
-# divergence and fixes it by regressing toward fixed shifted targets instead of
-# maximizing negative error (paper Algorithm 1 / Eq. 17, single-bank Phase 2):
-#   positives → v_target + γ⁺·Δ⁺,   negatives → v_target − γ⁻·Δ⁻_j
-# with per-candidate Plackett–Luce guidance off an EMA shadow of the bank's own
-# predictions (reward-free self-distillation; no external scorer):
-#   w_j   = softmax_j( −‖v̂_ema_j − v_target‖² / τ )   over {matched, neg₁…neg_k}
-#   Δ_j   = v̂_ema_j − Σ_k w_k·v̂_ema_k
-# As the matched caption wins (w_matched→1) the baseline → v̂⁺_ema so Δ→0 and the
-# target relaxes to plain FM — the normalized self-annealing that bounds it.
-# τ is contrastive_tau (above). Phase 2 = single bank, constant Ã(t)=1. Costs
-# ~(2k+1) extra forwards/firing-step vs InfoNCE's k (the EMA value passes), all
-# no_grad except the deferred negative replay — keep contrastive_k ∈ {1,2}.
-# contrastive_objective         — "infonce" (default) | "agsm".
-# agsm_gamma                    — γ⁺, positive-branch target-shift magnitude.
-#                                 Sweep ~0.25–1.0 (paper SD3 γ⁺=1).
-# agsm_gamma_neg                — γ⁻, negative-branch magnitude. Unset ⇒ = γ⁺
-#                                 (symmetric). Paper's flow model (SD3) used a
-#                                 deliberately weaker γ⁻=0.1 for stability.
-# agsm_ema_decay                — EMA decay for the bank shadow that Δ is read
-#                                 off (must be in (0,1); slower = steadier Δ).
-# agsm_dual_bank                — dual token banks ψ⁺/ψ⁻ (Phase 3a, paper §3.3).
-#                                 false (default) = single shared bank (Phase 2,
-#                                 bit-identical, 3D on-disk). true = a branch axis
-#                                 on the bank: ψ⁺ is spliced on the anchor +
-#                                 positive value passes (and is the ONLY bank used
-#                                 at inference — Appendix H found injecting ψ⁻ at
-#                                 inference over-suppresses detail), ψ⁻ on the
-#                                 negative value passes (training-only). Lets the
-#                                 negative push refine ψ⁻ without spending
+# contrastive_objective         — "infonce" (default) | "softrank".
+#   "softrank" (docs/proposal/soft_tokens_softrank.md): differentiable listwise
+#   rank of the matched caption among the candidates via softtorch.rank,
+#   L = softtorch.rank(r)[matched] − 1. Gradient flows THROUGH the ordering yet
+#   stays bounded (unlike infonce's unbounded negative push). Costs k extra
+#   forwards/firing-step (same as infonce). Requires the `softtorch` dependency
+#   (pot/torchopt/numba). REQUIRES contrastive_k >= 2: softtorch standardizes the
+#   candidate axis, which is degenerate (gap-independent) with a single negative.
+#   Does NOT use contrastive_tau — see softrank_softness / softrank_method below.
+#   (AGSM was the third objective; removed 2026-05-30 — w_matched stayed pinned at
+#   chance in the live A/B, softrank won on eyeball + curves.)
+# softrank_method               — softtorch.rank relaxation: "neuralsort" (default)
+#   has a smooth gradient through ties (the near-miss regime where matched ≈ best
+#   negative — the informative moment); "softsort" is faster but its gradient goes
+#   ~flat at exact ties. Both pure-torch / GPU-resident. (ot / fast_soft_sort are
+#   excluded — Sinkhorn / Numba-CPU sync, perf sinks in the training loop.)
+# softrank_softness             — softtorch.rank softness (its temperature) for the
+#   softrank objective. softtorch's default 0.1 is the right scale because
+#   standardize=True puts the candidate axis at unit scale. Lower = sharper rank /
+#   stronger pull; sweep ~0.05–0.3. Ignored by infonce.
+# dual_bank                     — dual token banks ψ⁺/ψ⁻. false (default) = single
+#                                 shared bank (3D on-disk). true = a branch axis on
+#                                 the bank: ψ⁺ is spliced on the anchor + positive
+#                                 value passes (and is the ONLY bank used at
+#                                 inference — injecting ψ⁻ over-suppresses detail),
+#                                 ψ⁻ on the negative value passes (training-only).
+#                                 Lets the negative push refine ψ⁻ without spending
 #                                 generative fidelity on the kept bank. Doubles the
-#                                 bank params + EMA shadow; ψ⁻ is free at inference.
-#                                 Checkpoints stamp ss_n_banks; single-bank
-#                                 checkpoints stay loadable.
+#                                 bank params; ψ⁻ is free at inference. The load side
+#                                 keys off the on-disk tensor rank (4D ⇒ dual), so
+#                                 single-bank checkpoints stay loadable.
+#                                 (Accepts the old name `agsm_dual_bank` as an alias.)
 
 network_args = [
     "n_layers=6",
@@ -104,21 +102,18 @@ network_args = [
     "splice_position=front_of_padding",
     "contrastive_weight=0.15",
     "contrastive_every_n=3",
-    "contrastive_k=1",
+    "contrastive_k=2",
     "contrastive_negative_mode=hard_backoff",
 
-    "contrastive_objective=agsm",
-    "agsm_gamma=1.0",
-    "agsm_gamma_neg=0.1",
-    "agsm_ema_decay=0.99",
-    # Phase 3a A/B: flip on for dual ψ⁺/ψ⁻ banks (inference keeps ψ⁺ only).
-    "agsm_dual_bank=true",
+    "contrastive_objective=softrank",
+    # Dual ψ⁺/ψ⁻ banks (inference keeps ψ⁺ only).
+    "dual_bank=true",
 
     "contrastive_jaccard_alpha=1.0",
     "contrastive_tau=0.5",
     "contrastive_warmup_ratio=0.1",
 ]
-output_name = "anima_soft_tokens_tenth2"
+output_name = "anima_soft_tokens_softrank"
 weight_decay=1e-4
 # Soft tokens are independent of the cached crossattn (they overwrite zero-
 # padding tail), so cache_llm_adapter_outputs is the right default.
@@ -139,4 +134,4 @@ logging_dir = "output/logs"
 log_with = "tensorboard"
 
 max_data_loader_n_workers=1
-validation_split_num = 8
+validation_split_num = 0

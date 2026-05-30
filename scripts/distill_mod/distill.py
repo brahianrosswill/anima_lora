@@ -50,7 +50,6 @@ from library.inference.uncond import (  # noqa: E402
     load_uncond_crossattn,
     uncond_for_batch,
 )
-from networks.methods.soft_tokens import SoftTokensNetwork  # noqa: E402
 from scripts.distill_mod.teacher_cache import (  # noqa: E402
     TeacherCache,
     ValTeacherCache,
@@ -116,7 +115,10 @@ def main():
         help="Number of transformer blocks to offload to CPU",
     )
     parser.add_argument(
-        "--save_every", type=int, default=1000, help="Save checkpoint every N iterations"
+        "--save_every",
+        type=int,
+        default=1000,
+        help="Save checkpoint every N iterations",
     )
     parser.add_argument(
         "--attn_mode",
@@ -279,46 +281,6 @@ def main():
         "calls, so the first pass fills a (batch_idx, sigma_idx) cache and every "
         "subsequent pass skips teacher forwards entirely.",
     )
-    # --- AGSM premise probe (observation-only; see docs/proposal/mod_guidance_agsm.md) ---
-    # Folds the missing Phase-0 reward-premise check into the run: once the carry
-    # MSE has trained the projection (after the warmup ratio), it measures whether
-    # the *trained* pooled→AdaLN channel can discriminate captions at all — i.e.
-    # whether the matched pooled vector reproduces the teacher velocity better than
-    # mismatched ones. If w_matched never beats 1/(k+1), the channel is too narrow
-    # for the full AGSM term to be anything but a no-op (the soft-tokens Phase-3b
-    # failure signature: "Δ rotates but w stays at chance") → revert, having paid
-    # nothing. The loss is UNCHANGED while the probe runs; it adds k no-grad student
-    # forwards only on log steps.
-    parser.add_argument(
-        "--mod_agsm_probe",
-        action="store_true",
-        help="Log the AGSM reward-premise observable (w_matched, reward margin) "
-        "without changing the loss. Decides whether the full --mod_agsm term is "
-        "worth wiring. See docs/proposal/mod_guidance_agsm.md.",
-    )
-    parser.add_argument(
-        "--mod_agsm_probe_warmup",
-        type=float,
-        default=0.1,
-        help="Gate the probe on after this fraction of iterations (float<1) or "
-        "absolute step (>=1) — by then the carry MSE has trained the projection "
-        "to carry text, so the discrimination signal is the channel's, not zero-init's.",
-    )
-    parser.add_argument(
-        "--mod_agsm_probe_k",
-        type=int,
-        default=2,
-        help="Number of mismatched pooled negatives per probe (chance w_matched = "
-        "1/(k+1); k>=2 so chance=0.33 is readable above noise — k=1's 0.5 is too coarse).",
-    )
-    parser.add_argument(
-        "--mod_agsm_probe_tau",
-        type=float,
-        default=0.5,
-        help="Plackett–Luce temperature for the probe softmax (matches soft-tokens "
-        "contrastive_tau=0.5 so w_matched is on the same scale the real term uses).",
-    )
-
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -579,30 +541,10 @@ def main():
         ValTeacherCache() if val_enabled and not args.no_val_teacher_cache else None
     )
 
-    # --- AGSM probe state: a ring buffer of recently-seen pooled vectors to draw
-    # mismatched negatives from (B=1-safe, resolution-independent — the pooled
-    # vector is a bare (1024,) AdaLN input, so a negative from any bucket is valid).
-    probe_warmup_steps = (
-        int(args.mod_agsm_probe_warmup)
-        if args.mod_agsm_probe_warmup >= 1
-        else int(args.mod_agsm_probe_warmup * args.iterations)
-    )
-    pooled_neg_buffer: list[torch.Tensor] = []
-    POOLED_BUFFER_CAP = 64
-    if args.mod_agsm_probe and args.blocks_to_swap > 0:
-        logger.warning(
-            "--mod_agsm_probe with blocks_to_swap>0: the extra probe forwards are "
-            "not audited for the offloader-desync bug (project_blockswap_extra_forwards_gradcache). "
-            "Probe forwards re-prepare block swap each call, but prefer blocks_to_swap=0 for the probe run."
-        )
-
     progress = tqdm(range(args.iterations), desc="distill")
     accum_loss_t = torch.zeros((), device=device)
-    probe_announced = False
     for step in progress:
         accum_loss_t.zero_()
-        probe_w_matched = None
-        probe_margin = None
 
         for accum_step in range(grad_accum):
             # Get batch (infinite cycling)
@@ -723,71 +665,6 @@ def main():
             loss.backward()
             accum_loss_t += loss.detach()
 
-            # --- AGSM premise probe (observation-only; loss above is untouched) ---
-            # Reuses the matched student forward as v_match (index 0); adds k no-grad
-            # negative forwards (other captions' pooled vectors through the SAME
-            # projection) and reads w_matched off the exact PL-weight math the real
-            # term would use. Live projection, not EMA — the question is whether the
-            # *trained* channel discriminates, which is what gates the full term.
-            probe_now = (
-                args.mod_agsm_probe
-                and accum_step == grad_accum - 1
-                and (step + 1) % args.log_interval == 0
-                and (step + 1) >= probe_warmup_steps
-                and len(pooled_neg_buffer) >= args.mod_agsm_probe_k
-            )
-            if probe_now:
-                with torch.no_grad():
-                    # Clone v_match off the shared compiled static buffer before the
-                    # negative forwards overwrite it (same reason teacher_pred clones).
-                    v_match = student_pred.detach().float().clone()
-                    vt = teacher_pred.float()
-                    chosen = random.sample(
-                        range(len(pooled_neg_buffer)), args.mod_agsm_probe_k
-                    )
-                    neg_preds = []
-                    for j in chosen:
-                        neg_pool = (
-                            pooled_neg_buffer[j]
-                            .to(device, dtype=dtype)
-                            .unsqueeze(0)
-                            .expand(B, -1)
-                        )
-                        if model.blocks_to_swap:
-                            model.prepare_block_swap_before_forward()
-                        torch.compiler.cudagraph_mark_step_begin()
-                        with torch.autocast("cuda", dtype=dtype):
-                            v_neg = model.forward_mini_train_dit(
-                                noisy_input,
-                                timesteps,
-                                uncond_crossattn,
-                                padding_mask=padding_mask,
-                                pooled_text_override=neg_pool,
-                            )
-                        neg_preds.append(v_neg.float().clone())
-                    # (B, m=k+1, ...), index 0 = matched — identical layout to agsm_targets.
-                    ema_all = torch.stack([v_match, *neg_preds], dim=1)
-                    w = SoftTokensNetwork._agsm_pl_weights(
-                        ema_all, vt, args.mod_agsm_probe_tau
-                    )  # (B, m)
-                    rew = (
-                        -(ema_all - vt.unsqueeze(1))
-                        .pow(2)
-                        .reshape(B, args.mod_agsm_probe_k + 1, -1)
-                        .mean(dim=2)
-                    )
-                    probe_w_matched = float(w[:, 0].mean().item())
-                    probe_margin = float(
-                        (rew[:, 0] - rew[:, 1:].mean(dim=1)).mean().item()
-                    )
-
-            # Feed the negative ring buffer (every micro-step; CPU-resident, capped).
-            if args.mod_agsm_probe:
-                for b in range(B):
-                    pooled_neg_buffer.append(pooled_text[b].detach().to("cpu"))
-                if len(pooled_neg_buffer) > POOLED_BUFFER_CAP:
-                    del pooled_neg_buffer[:-POOLED_BUFFER_CAP]
-
         # Grad-norm snapshot before stepping (cheap; ~8M params)
         grad_norm = None
         if writer is not None and (step + 1) % args.log_interval == 0:
@@ -815,24 +692,6 @@ def main():
                 hit_rate = teacher_cache.hits / tc_total if tc_total else 0.0
                 writer.add_scalar("teacher_cache/hit_rate", hit_rate, step + 1)
                 writer.add_scalar("teacher_cache/size", len(teacher_cache), step + 1)
-            if probe_w_matched is not None:
-                writer.add_scalar("agsm_probe/w_matched", probe_w_matched, step + 1)
-                writer.add_scalar("agsm_probe/reward_margin", probe_margin, step + 1)
-                writer.add_scalar(
-                    "agsm_probe/w_chance", 1.0 / (args.mod_agsm_probe_k + 1), step + 1
-                )
-
-        if probe_w_matched is not None:
-            chance = 1.0 / (args.mod_agsm_probe_k + 1)
-            progress.set_postfix(w_matched=f"{probe_w_matched:.3f}/{chance:.2f}")
-            if not probe_announced:
-                logger.info(
-                    f"[agsm-probe @ step {step + 1}] active (k={args.mod_agsm_probe_k}, "
-                    f"chance={chance:.3f}). Watch agsm_probe/w_matched: stays ~chance "
-                    f"→ channel too narrow, full --mod_agsm term will no-op → revert; "
-                    f"climbs above chance → premise holds, wire the term."
-                )
-                probe_announced = True
 
         if (step + 1) % log_interval == 0:
             avg = running_loss / log_interval

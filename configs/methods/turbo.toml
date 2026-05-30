@@ -22,7 +22,7 @@ output_dir = "output/ckpt"
 #             inert under dpdmd. See docs/proposal/dpdmd.md and the [dpdmd] block.
 objective = "dpdmd"
 
-iterations = 1000
+iterations = 250
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -46,7 +46,7 @@ attn_mode = "flash"
 
 # DMD2 schedule (proposal §Schedule, paper Table 1 row 4: Decoupled-Hybrid).
 [dmd]
-student_steps = 4               # production target — sampler runs 4 Euler steps at inference
+student_steps = 2               # production target — sampler runs 4 Euler steps at inference
 teacher_cfg = 4               # α — matches Anima's production CFG=4 (baked into student)
 tau_ca_strategy = "above_t"     # τ_CA > t  (CA focuses on still-unresolved content)
 tau_dm_strategy = "uniform"     # τ_DM ∈ [0, 1]  (DM corrects global artifacts)
@@ -60,7 +60,7 @@ norm_floor = 0.05               # clamp_min for the (b) denominator (latent scal
 student_lr = 2e-5
 fake_lr = 3e-5
 fake_steps_per_student_step = 4
-fake_warmup_steps = 200         # fake (critic) head-start: number of fake-only gradient
+fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
                                 # against the student's (init ≈ teacher) x_pred before the
                                 # student LR warmup (~40 steps) ramps to full strength —
@@ -81,7 +81,7 @@ grad_clip = 1.0                 # student grad-norm cap
 # anchor (the diverse landing point) then detached; DMD refines x_θ over steps
 # 2..N. teacher_cfg (above) is the anchor's CFG scale; student_steps is N.
 [dpdmd]
-k_anchor = 5                    # teacher steps rolled to the diversity anchor (their K)
+k_anchor = 12                    # teacher steps rolled to the diversity anchor (their K)
 teacher_anchor_steps = 28       # teacher σ-grid the K is counted against
 div_weight = 0.05               # λ on the first-step diversity MSE
 detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
