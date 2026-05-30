@@ -208,3 +208,21 @@ Config chain: `configs/base.toml → configs/presets.toml[<preset>] → configs/
 Toolkit code: [MIT](LICENSE).
 
 Anima / CircleStone **base model weights** ship under the **CircleStone Labs Non-Commercial License v1.0** and are not relicensed by this repo. Any LoRA, fine-tune, or merged checkpoint trained from those weights is a Derivative and inherits the non-commercial terms. See [NOTICE](NOTICE).
+
+
+## License & Attribution
+
+This project is distributed under two licenses:
+
+- **Original Anima LoRA code** — code authored by the Anima LoRA Contributors is
+  licensed under the **MIT License** (see [`LICENSE`](LICENSE)).
+- **Code derived from kohya-ss/sd-scripts** — the project was originally adapted
+  from [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts), which is
+  licensed under the **Apache License, Version 2.0**. The full Apache 2.0 text
+  is included as [`LICENSE-APACHE`](LICENSE-APACHE), and attribution plus a
+  statement of modifications is provided in [`NOTICE`](NOTICE).
+
+Files that contain code adapted from kohya-ss/sd-scripts carry an
+"Adapted from kohya-ss/sd-scripts" header; those files remain under the
+Apache License 2.0. We are grateful to kohya-ss and the sd-scripts contributors
+for their foundational work.
