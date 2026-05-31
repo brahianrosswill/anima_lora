@@ -12,11 +12,11 @@ inference-side turbo code; you load it through the normal LoRA path and run
 > bias (it never reaches a fixed point — see [[project_turbo_alpha4_overdistill]]),
 > and every CA-side lever came back inert or harmful
 > ([[project_turbo_fei_gap_phase0]], `ca_band`). DP-DMD removes the CA branch
-> entirely. The CA-era decision log survives at
-> `docs/proposal/dmd2_decoupled_improvements.md` and the structural walkthrough
-> (shared flow-matching velocity↔x0 math + the now-historical CA sections) at
-> `docs/structure/dmd2-decoupled.md`. The original migration proposal is archived
-> at `_archive/proposals/dpdmd.md`.
+> entirely. The structural walkthrough (diversity-anchor / DMD gradient split,
+> flow-matching velocity↔x0 math, the per-step schedule) lives at
+> `docs/structure/dpdmd.md`; the CA-era decision log survives at
+> `docs/proposal/dmd2_decoupled_improvements.md`. The original migration proposal
+> is archived at `_archive/proposals/dpdmd.md`.
 
 - **Training:** `scripts/distill_turbo/distill.py` — bespoke single-GPU loop
   (bypasses `train.py`/accelerate, like `distill-mod` / `distill-spd`).
@@ -195,8 +195,8 @@ the teacher anchor. The live TB scalars:
   Distillation*. Reference impl: `dpdmd/train_sd35_dpdmd.py` (SD3.5-M, flow-matching).
 - `_archive/proposals/dpdmd.md` — the migration proposal (Phase 0 GO, the
   pose-vs-pooled-cosine metric caveat, the depth-m fallback).
-- `docs/structure/dmd2-decoupled.md` — shared flow-matching velocity↔x0 conversion
-  and sign convention (CA-specific sections historical).
+- `docs/structure/dpdmd.md` — structural walkthrough: the diversity-anchor / DMD
+  gradient split, the flow-matching velocity↔x0 conversion, and the sign convention.
 - `docs/proposal/dmd2_decoupled_improvements.md` — CA-era decision log; the record
   of why the CA branch was abandoned.
 - `docs/findings/asymflow_parameterization.md` — Anima's `u = ε − x0` velocity path

@@ -84,7 +84,7 @@ Seams in the per-step loop (`generation.py:708-826`):
   - **Completion matrix** = `bench/cns/calibrate.py`: drives the Phase-0 euler
     capture across the **deploy config** — `--cfg 4.0`, top-`--n_aspects 3`
     `DCW_ASPECT_BUCKETS` ((1200,896),(1344,800),(896,1200), all (H,W)) — and
-    bundles per-aspect γ[A,T,F] into `models/calibration/cns_gamma.npz` (the
+    bundles per-aspect γ[A,T,F] into `networks/calibration/cns_gamma.npz` (the
     artifact `--cns auto` loads). γ measured from the deterministic euler ODE at
     cfg=4.0 (Alg. 2); recoloring then applies on er_sde. `gamma_probe.py` stays
     the single-config Phase-0 staircase check; calibrate.py reuses its helpers.

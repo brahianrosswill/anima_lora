@@ -5,7 +5,7 @@ Builds the *deployable* γ(f, t) artifact that `--cns` consumes at inference.
 Where `gamma_probe.py` is the read-only Phase-0 staircase check (one config),
 this drives it across the **deploy config** — cfg=4.0 at the top-N most-frequent
 aspect buckets — and bundles the per-aspect γ matrices into a single
-`models/calibration/cns_gamma.npz`.
+`networks/calibration/cns_gamma.npz`.
 
 γ is measured from the *deterministic euler ODE* trajectory at the deploy cfg
 (Alg. 2): per step, x0_pred = latents − σ·v, then
@@ -32,7 +32,7 @@ Run from repo root (anima_lora/):
     python bench/cns/calibrate.py --cfg 4.0 --extra --lora_weight output/ckpt/<x>.safetensors
 
 Output:
-    models/calibration/cns_gamma.npz   (the shipped artifact `--cns auto` loads)
+    networks/calibration/cns_gamma.npz   (the shipped artifact `--cns auto` loads)
     bench/cns/results/<ts>-calib-cfg<c>/   (bench record: result.json + heatmaps)
 """
 

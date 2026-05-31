@@ -543,7 +543,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Enable CNS noise recoloring on the er_sde path. Pass a path to a "
         "cns_gamma.npz completion matrix, or 'auto' for the shipped default "
-        "(models/calibration/cns_gamma.npz). No-op on --sampler euler/lcm.",
+        "(networks/calibration/cns_gamma.npz). No-op on --sampler euler/lcm.",
     )
     parser.add_argument(
         "--cns_strength",
