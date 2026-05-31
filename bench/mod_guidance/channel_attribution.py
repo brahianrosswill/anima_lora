@@ -38,9 +38,55 @@ This bench answers the live, mechanistic questions in IMAGE / LATENT space:
                weight w (the doc's actual double-drive mechanism) and measure
                off-baseline movement + the DC-blowout proxy (pixel spatial std /
                tone shift). Directly tests "does a hard push drift quality worse".
+    origin     Base-vs-distill split of the pooled channel's tag response. The
+               pooled->AdaLN path is 100% distillation-induced (zero-init proj +
+               enable_pooled_text_modulation=False in the base DiT -> identity), and
+               distillation never trained on quality tags. So there is NO native
+               pooled path to swap in; the meaningful split is the BASE-MODEL
+               upstream pooled movement (max(crossattn_emb), pure Qwen3 + LLM-adapter,
+               no trained proj) vs the DISTILLED proj's gain on it. Tells us whether
+               quality-selectivity originates upstream (proj = tag-agnostic
+               pass-through -> teacher-quality-conditioning has little headroom) or
+               in the distilled proj (it amplifies quality -> headroom exists).
+               Render-free -- pure pooled-vector geometry, but in the mechanistically
+               exact spot the demoted geometry-only finding never isolated.
 
-All three save image grids -- READ THE GRIDS, the scalar metrics are a guide, not
-the verdict (cf. the pose-blind PE-cosine lesson elsewhere in this repo).
+    sigma_window  PHASE 0 of docs/findings/mod_guidance_quality_tag_axis.md (§ Schedule axis).
+               [CLOSED 2026-05-31: C1 DEAD -- the grade can't live in the σ<0.45 tail;
+               it saturates ~4x short of uniform even dose-matched. Tool kept, axis dead.]
+               The shipped steering schedule is per-block but σ-BLIND (applied at
+               every denoising step). This gates that same schedule to an σ-band and
+               renders the swap-prompt set under: off (unguided), uniform (σ-blind,
+               shipped), a SWEEP of low windows (σ<0.55 / <0.45 / <0.35) each in two
+               dose flavours -- equal_w (fixed w, isolates per-step leverage) and
+               equal_dose (w boosted by uniform_steps/window_steps, matches integrated
+               steering) -- and a σ>=0.45 high complement. The dose split matters: at
+               flow_shift=3 the σ<0.45 tail is only ~4/20 steps, so an equal-w tail
+               arm under-doses ~5x vs uniform; without the dose-matched arm "tail ≈
+               off" could falsely kill the σ axis. Readout vs unguided: pixel SSIM
+               (structure preserved), LF/HF latent-energy split of the steering delta
+               (where the effect landed), structural J, grids. Tests C1 -- can the
+               grade live in the tail (low ≈ uniform effect at HIGHER SSIM, esp.
+               dose-matched) or does the tail lack leverage. No new architecture.
+
+    layer_window  PHASE 0b of docs/findings/mod_guidance_quality_tag_axis.md (§ Schedule axis).
+               [CLOSED 2026-05-31: C2 FALSIFIED -- it's pure DOSE, not placement. Partial
+               arms interpolate off<->full (weaker-fulls, not different-fulls); full [8-27]
+               wins, its movement is correction not drift. Shipped 8-26 full-dose validated.
+               Tool kept for future schedule probes, axis dead.]
+               Phase 0 killed the σ axis; the LAYER axis (the source paper's actual
+               contribution) is the live thread. Anima ships only a hand-set 8-26 block
+               range, never image-validated per-block. This steers ONE block at a time
+               (single mode: [l, l+1)) -- or a cumulative [8..L] range (marginal-per-
+               block view) -- at the shipped w, and reads delta_norm + pixel SSIM-to-
+               unguided per block. Tests C2: does layer placement separate GRADE (effect
+               at HIGH SSIM) from DRIFT (effect at LOW SSIM)? Flat map -> no layer lever,
+               proposal closes; differentiated -> the grade set is the "proper layers"
+               (a static / aspect-LUT / training-free-online schedule becomes real).
+               Same readout as sigma_window; only the steered block range varies.
+
+All experiments save image grids -- READ THE GRIDS, the scalar metrics are a guide,
+not the verdict (cf. the pose-blind PE-cosine lesson elsewhere in this repo).
 
 Outputs land in bench/mod_guidance/results/<ts>[-label]/ via bench/_common.py.
 
@@ -55,6 +101,22 @@ Run
         --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
         --experiment swap --prompts "1girl, solo, outdoors" --tags "score_9" \
         --infer_steps 12 --label smoke
+
+    # Phase 0: σ-window ablation of the shipped steering schedule (C1 test).
+    # Sweeps low windows x {equal_w, equal_dose} so a narrow tail window isn't
+    # falsely killed by under-dosing. Read the grids at --grid_thumb 768.
+    uv run python bench/mod_guidance/channel_attribution.py \
+        --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
+        --experiment sigma_window --dataset_samples 6 --seeds 0,1 \
+        --sigwin_dose both --compile --label phase0
+
+    # Phase 0b: per-block grade-vs-drift map of the shipped steering schedule.
+    # Steers one block at a time over the shipped 8-26 band; read SSIM (structure
+    # preserved = grade) + delta_norm per block, and the grids at --grid_thumb 768.
+    uv run python bench/mod_guidance/channel_attribution.py \
+        --pooled_text_proj output/ckpt/pooled_text_proj-0530.safetensors \
+        --experiment layer_window --dataset_samples 6 --seeds 0,1 \
+        --layerwin_mode single --compile --label phase0b
 """
 
 from __future__ import annotations
@@ -62,6 +124,7 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +132,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 # bench/ is not an installed package -- bootstrap the repo root onto sys.path so
 # `library` / `bench._common` import the same way the sibling benches do.
@@ -154,11 +218,25 @@ class RenderJob:
     mod_w: float = 0.0
     mod_pos: Optional[str] = None
     mod_neg: Optional[str] = None
+    # layer_window (Phase 0b): the block range the steering schedule covers. Defaults
+    # to the shipped step_i8_skip27 band (8..26). The layer_window experiment overrides
+    # these per render to steer a single block [l, l+1) or a cumulative range [8, L+1).
+    mod_start_layer: int = 8
+    mod_end_layer: int = 27
+    # sigma_window (Phase 0): per-step gating of the steering schedule by an σ-band.
+    # Steering is active at step i iff  mod_sigma_lo <= σ_i < mod_sigma_hi. Both None
+    # -> no per-step gate (schedule applied at every step = the shipped σ-blind path,
+    # also what the intensity experiment wants). The band lets us sweep soft windows
+    # (<0.55 / <0.45 / <0.35) and, by boosting mod_w on a narrow band, dose-match a
+    # tail-only arm to uniform's integrated steering (w x active_steps).
+    mod_sigma_lo: Optional[float] = None
+    mod_sigma_hi: Optional[float] = None
 
 
 @dataclass
 class Rendered:
     latent: torch.Tensor = None  # (16, H_lat, W_lat) fp32 cpu
+    pixel: torch.Tensor = None  # (3, H, W) [-1,1] fp32 cpu -- for SSIM (sigma_window)
     pe: torch.Tensor = None  # (D,) unit fp32 cpu
     pixel_std: float = 0.0  # mean over channels of per-image spatial std
     tone: float = 0.0  # mean abs pixel value in [0,1] (DC / pink proxy)
@@ -260,8 +338,10 @@ def render_jobs(model, jobs, cross_cache, args, device) -> dict[str, torch.Tenso
 
     out: dict[str, torch.Tensor] = {}
     for job in jobs:
-        # Steering buffers (intensity experiment) or off.
-        if job.mod_w > 0.0:
+        # Steering buffers (intensity / sigma_window experiments) or off.
+        armed = job.mod_w > 0.0
+        full_sched_t = zero_sched_t = None
+        if armed:
             from library.inference.corrections.mod_guidance import build_mod_schedule
 
             pos_c = cross_cache[job.mod_pos].to(device, dtype=dtype)
@@ -271,9 +351,15 @@ def render_jobs(model, jobs, cross_cache, args, device) -> dict[str, torch.Tenso
                     _pool(negc).to(proj_dtype)
                 )
             sched_args = argparse.Namespace(
-                mod_w=job.mod_w, mod_start_layer=8, mod_end_layer=27, mod_taper=0
+                mod_w=job.mod_w, mod_start_layer=job.mod_start_layer,
+                mod_end_layer=job.mod_end_layer, mod_taper=0
             )
             _set_mod_buffers(model, d, build_mod_schedule(sched_args, len(model.blocks)))
+            # Keep the armed schedule + an all-zero schedule so we can toggle the
+            # steering on/off per step (σ-gating) by copy_ into the live buffer --
+            # a buffer write, not a recompile trigger.
+            full_sched_t = model._mod_guidance_schedule.clone()
+            zero_sched_t = torch.zeros_like(full_sched_t)
         else:
             _zero_mod_buffers(model)
 
@@ -288,6 +374,14 @@ def render_jobs(model, jobs, cross_cache, args, device) -> dict[str, torch.Tenso
         )
 
         for i, t in enumerate(timesteps):
+            # sigma_window: gate the steering schedule by this step's σ-band. No band
+            # (both None) leaves the once-set schedule alone (the shipped σ-blind path).
+            if armed and (job.mod_sigma_lo is not None or job.mod_sigma_hi is not None):
+                sig = float(sigmas[i])
+                lo = job.mod_sigma_lo if job.mod_sigma_lo is not None else -1.0
+                hi = job.mod_sigma_hi if job.mod_sigma_hi is not None else float("inf")
+                on = lo <= sig < hi
+                model._mod_guidance_schedule.copy_(full_sched_t if on else zero_sched_t)
             t_exp = t.expand(latents.shape[0])
             with torch.no_grad(), torch.autocast(device_type=device.type, dtype=dtype):
                 noise_pred = model.forward_mini_train_dit(
@@ -332,6 +426,7 @@ def decode_and_featurize(latents: dict, args, device) -> dict[str, Rendered]:
             pixels[key] = px
             r = Rendered()
             r.latent = lat  # (16, H_lat, W_lat) fp32 cpu -- primary decomposition space
+            r.pixel = px  # (3, H, W) [-1,1] fp32 cpu -- SSIM space (sigma_window)
             # DC-blowout proxies: spatial std collapse + tone toward a flat fill.
             r.pixel_std = float(px.std(dim=(-2, -1)).mean())
             r.tone = float(((px + 1) / 2).mean())
@@ -373,6 +468,60 @@ def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
     if na < EPS or nb < EPS:
         return 0.0
     return float((a @ b) / (na * nb))
+
+
+# --- sigma_window structural readouts -------------------------------------- #
+# SSIM measures structure PRESERVED vs the unguided render (high = composition
+# untouched); the LF/HF split says WHERE the steering's effect landed (HF tail =
+# the detail band the grade is supposed to move; LF = composition disturbance).
+_SSIM_WIN = 11
+
+
+def _gaussian_window(ws: int = _SSIM_WIN, sigma: float = 1.5) -> torch.Tensor:
+    coords = torch.arange(ws, dtype=torch.float32) - (ws - 1) / 2
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g = g / g.sum()
+    return g[:, None] @ g[None, :]  # (ws, ws)
+
+
+def _ssim(a: torch.Tensor, b: torch.Tensor, ws: int = _SSIM_WIN) -> float:
+    """Mean SSIM between two (3, H, W) images in [-1, 1] (channel-averaged,
+    Gaussian-windowed). Self-contained -- no skimage dependency."""
+    a = ((a.clamp(-1, 1) + 1) / 2).unsqueeze(0).float()  # (1, 3, H, W) in [0,1]
+    b = ((b.clamp(-1, 1) + 1) / 2).unsqueeze(0).float()
+    c = a.shape[1]
+    win = _gaussian_window(ws).to(a.dtype).expand(c, 1, ws, ws)
+    pad = ws // 2
+    conv = lambda x: F.conv2d(x, win, padding=pad, groups=c)  # noqa: E731
+    mu_a, mu_b = conv(a), conv(b)
+    mu_a2, mu_b2, mu_ab = mu_a * mu_a, mu_b * mu_b, mu_a * mu_b
+    sa = conv(a * a) - mu_a2
+    sb = conv(b * b) - mu_b2
+    sab = conv(a * b) - mu_ab
+    c1, c2 = 0.01**2, 0.03**2
+    smap = ((2 * mu_ab + c1) * (2 * sab + c2)) / ((mu_a2 + mu_b2 + c1) * (sa + sb + c2))
+    return float(smap.mean())
+
+
+# Radial-frequency cutoff (fraction of Nyquist) splitting "composition" (LF) from
+# "detail/texture" (HF) in latent space. 0.25 keeps the coarse layout below the line.
+_LF_CUTOFF = 0.25
+
+
+def _lf_hf_energy(delta_chw: torch.Tensor, cutoff: float = _LF_CUTOFF) -> tuple[float, float]:
+    """Split a (C, H, W) latent delta's spectral energy into low/high frequency
+    bands by normalized radial frequency. Returns (lf_energy, hf_energy)."""
+    d = delta_chw.float()
+    spec = torch.fft.rfft2(d, dim=(-2, -1))  # (C, H, Wf)
+    power = (spec.real**2 + spec.imag**2).sum(0)  # (H, Wf)
+    h, w = d.shape[-2], d.shape[-1]
+    fy = torch.fft.fftfreq(h).abs().reshape(-1, 1)  # (H, 1) in [0, 0.5]
+    fx = torch.fft.rfftfreq(w).reshape(1, -1)  # (1, Wf) in [0, 0.5]
+    radial = torch.sqrt(fy**2 + fx**2) / (0.5 * math.sqrt(2.0))  # ~[0, 1]
+    lf_mask = radial <= cutoff
+    lf = float(power[lf_mask].sum())
+    hf = float(power[~lf_mask].sum())
+    return lf, hf
 
 
 # --------------------------------------------------------------------------- #
@@ -494,11 +643,270 @@ def _intensity_rows(R, specs, w_points):
 
 
 # --------------------------------------------------------------------------- #
+# sigma_window (Phase 0): σ-window ablation of the shipped steering schedule.
+# --------------------------------------------------------------------------- #
+def _sigwin_arms(w, thresholds, dose_mode, sigmas_active):
+    """Build the (name, lo, hi, w) arm table for the σ-window ablation.
+
+    Two confounds the bench must separate (the reason the single-threshold v1 was
+    inconclusive, see proposal kill-condition note):
+      1. WHERE in σ the steering acts (per-step leverage)  -- the question of interest.
+      2. HOW MUCH total steering it applies (integrated dose = w x active_steps). At
+         flow_shift=3 a σ<0.45 window is only ~4/20 steps, so an equal-w tail arm
+         carries ~5x LESS dose than uniform -- "tail ≈ off" could just be under-dosing.
+
+    So for each soft threshold t we emit a low arm gated to σ<t, in up to two dose
+    flavours: equal_w (same w as uniform -> isolates marginal/leverage) and equal_dose
+    (w boosted by uniform_steps/window_steps -> matches integrated dose, asking "can
+    the tail deliver the grade at all if you spend the same budget there"). Plus a
+    σ>=0.45 high complement (the structure-forming bulk) and the σ-blind uniform.
+    """
+    n_total = len(sigmas_active)
+    arms = [("uniform", None, None, w)]  # σ-blind shipped path (gate disabled)
+    for t in thresholds:
+        n = sum(1 for x in sigmas_active if x < t)
+        ratio = n_total / max(n, 1)
+        lbl = f"{int(round(t * 100)):03d}"  # 0.45 -> "045"
+        if dose_mode in ("equal_w", "both"):
+            arms.append((f"low{lbl}", 0.0, t, w))  # leverage at fixed w
+        if dose_mode in ("equal_dose", "both") and n < n_total:
+            arms.append((f"low{lbl}d", 0.0, t, w * ratio))  # dose-matched to uniform
+    arms.append(("high045", 0.45, float("inf"), w))  # structure-forming complement
+    return arms
+
+
+def exp_sigma_window(prompts, seeds, steer_pos, steer_neg, w, thresholds, dose_mode, sigmas_active):
+    """Render each prompt under unguided + a σ-band sweep of the shipped steering.
+
+    Tests proposal claim C1 (docs/findings/mod_guidance_quality_tag_axis.md (§ Schedule axis)):
+    does restricting the *existing* steering schedule to the σ<t refinement tail
+    preserve the grade effect while better preserving resolved structure, vs the
+    σ-blind ("uniform") application? Each arm reuses the shipped per-block schedule
+    (build_mod_schedule step_i8_skip27); only the σ-gate (and, for dose-matched arms,
+    the scalar w) differ. See _sigwin_arms for the arm table + dose rationale.
+    """
+    arms = _sigwin_arms(w, thresholds, dose_mode, sigmas_active)
+    arm_names = [a[0] for a in arms]
+    jobs, specs = [], []
+    for pi, base in enumerate(prompts):
+        for s in seeds:
+            kb = f"sigma_window/p{pi}s{s}"
+            jobs.append(RenderJob(f"{kb}/off", base, base, s))
+            for name, lo, hi, wv in arms:
+                jobs.append(RenderJob(
+                    f"{kb}/{name}", base, base, s,
+                    mod_w=float(wv), mod_pos=steer_pos, mod_neg=steer_neg,
+                    mod_sigma_lo=lo, mod_sigma_hi=hi,
+                ))
+            specs.append((base, s, pi, arm_names))
+    return jobs, lambda R: _sigwin_rows(R, specs)
+
+
+def _sigwin_rows(R, specs, lam: float = 1.0):
+    rows = []
+    for base, s, pi, modes in specs:
+        off = R[f"sigma_window/p{pi}s{s}/off"]
+        for m in modes:
+            r = R[f"sigma_window/p{pi}s{s}/{m}"]
+            delta = r.latent - off.latent  # (16, H, W) steering effect in latent space
+            lf, hf = _lf_hf_energy(delta)
+            tot = lf + hf + EPS
+            rows.append({
+                "experiment": "sigma_window", "space": "image", "base": base, "seed": s,
+                "mode": m,
+                "ssim_to_off": _ssim(r.pixel, off.pixel),  # structure PRESERVED (high=good)
+                "delta_norm": _norm(_flat(delta)),  # total steering effect magnitude
+                "lf_energy": lf, "hf_energy": hf,
+                "hf_frac": hf / tot,  # fraction of effect in the detail band
+                "J": hf - lam * lf,  # structural objective: HF on-target - λ·LF disturbance
+            })
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# layer_window (Phase 0b): per-block grade-vs-drift map of the steering schedule.
+# --------------------------------------------------------------------------- #
+def _parse_blocks(spec: str) -> list[int]:
+    """Parse a block spec into a sorted unique list. Accepts ranges ('8-26'),
+    explicit lists ('8,10,12'), or a mix ('8-12,20,24-26')."""
+    out: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return sorted(out)
+
+
+def _split_contiguous(blocks: list[int], n: int) -> list[list[int]]:
+    """Split a sorted block list into n nearly-equal contiguous groups."""
+    n = max(1, min(n, len(blocks)))
+    L = len(blocks)
+    out = []
+    for i in range(n):
+        a, b = i * L // n, (i + 1) * L // n
+        if b > a:
+            out.append(blocks[a:b])
+    return out
+
+
+def _layerwin_arms(blocks: list[int], mode: str, n_bands: int = 3) -> list[tuple[str, int, int]]:
+    """Build the (name, start_layer, end_layer) arm table for the per-block map.
+
+    single      one arm per block l, steering only [l, l+1) -> the direct per-block
+                effect. THE grade-vs-drift map (does steering block l grade or drift).
+    cumulative  one arm per L, steering [blocks[0], L+1) -> the marginal-per-block view
+                (block l's marginal contribution = cum..L minus cum..L-1). Disentangles
+                blocks whose single-block effect is masked by interactions.
+    band        n_bands contiguous thirds (early/mid/late) of the probed range -- a dose
+                between a single block (≈off, safe) and the full stack (high effect but,
+                per the Phase-0b grids, breaks hands). Localizes the full-stack damage to
+                a third before a finer leave-one-out, when scalar SSIM is blind to the
+                hand grade/drift the effect actually lives in.
+
+    Every mode also emits a `full` arm covering the whole probed range -- with the
+    default blocks (8..26) that IS the shipped step_i8_skip27 path, the reference the
+    sub-range arms decompose. end_layer is exclusive (matches build_mod_schedule).
+    """
+    arms: list[tuple[str, int, int]] = []
+    if mode in ("single", "both"):
+        for lyr in blocks:
+            arms.append((f"L{lyr:02d}", lyr, lyr + 1))
+    if mode in ("cumulative", "both"):
+        b0 = blocks[0]
+        for lyr in blocks:
+            arms.append((f"cum{b0:02d}-{lyr:02d}", b0, lyr + 1))
+    if mode == "band":
+        for g in _split_contiguous(blocks, n_bands):
+            arms.append((f"b{g[0]:02d}-{g[-1]:02d}", g[0], g[-1] + 1))
+    arms.append((f"full{blocks[0]:02d}-{blocks[-1]:02d}", blocks[0], blocks[-1] + 1))
+    return arms
+
+
+def exp_layer_window(prompts, seeds, steer_pos, steer_neg, w, blocks, mode, n_bands=3):
+    """Render each prompt under unguided + a per-block sweep of the shipped steering.
+
+    Tests proposal claim C2 (docs/findings/mod_guidance_quality_tag_axis.md (§ Schedule axis)):
+    does layer placement separate GRADE (effect at high structure-SSIM) from DRIFT
+    (effect at low SSIM)? Each arm reuses the shipped pooled delta + scalar w; only
+    the steered block range differs (steered σ-blind, every step, like the shipped
+    path). The readout per arm vs unguided is delta_norm (did it move the image) +
+    pixel SSIM (was structure preserved). See _layerwin_arms for the arm table.
+
+    Flat map (every block ≈ same delta & SSIM) -> no layer lever, proposal closes.
+    Differentiated (a grade set + a drift set) -> the "proper layers" are the grade
+    set; a static / aspect-LUT / training-free-online schedule becomes real.
+    """
+    arms = _layerwin_arms(blocks, mode, n_bands)
+    arm_names = [a[0] for a in arms]
+    jobs, specs = [], []
+    for pi, base in enumerate(prompts):
+        for s in seeds:
+            kb = f"layer_window/p{pi}s{s}"
+            jobs.append(RenderJob(f"{kb}/off", base, base, s))
+            for name, start, end in arms:
+                jobs.append(RenderJob(
+                    f"{kb}/{name}", base, base, s,
+                    mod_w=float(w), mod_pos=steer_pos, mod_neg=steer_neg,
+                    mod_start_layer=start, mod_end_layer=end,
+                ))
+            specs.append((base, s, pi, arm_names))
+    return jobs, lambda R: _layerwin_rows(R, specs)
+
+
+def _layerwin_rows(R, specs, lam: float = 1.0):
+    rows = []
+    for base, s, pi, modes in specs:
+        off = R[f"layer_window/p{pi}s{s}/off"]
+        for m in modes:
+            r = R[f"layer_window/p{pi}s{s}/{m}"]
+            delta = r.latent - off.latent  # (16, H, W) steering effect in latent space
+            lf, hf = _lf_hf_energy(delta)
+            tot = lf + hf + EPS
+            rows.append({
+                "experiment": "layer_window", "space": "image", "base": base, "seed": s,
+                "mode": m,
+                "ssim_to_off": _ssim(r.pixel, off.pixel),  # structure PRESERVED (high=grade)
+                "delta_norm": _norm(_flat(delta)),  # total steering effect magnitude
+                "lf_energy": lf, "hf_energy": hf,
+                "hf_frac": hf / tot,  # fraction of effect in the detail band
+                "J": hf - lam * lf,  # guide only (HF-noise trap) -- read SSIM + grids
+            })
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# origin: base-model upstream vs distilled-proj split (render-free)
+# --------------------------------------------------------------------------- #
+def origin_specs(prompts, tags, tag_slot):
+    """(base, tagged, tag, is_quality) per (prompt, tag). Seed-independent: text
+    encoding is deterministic, so the pooled vector doesn't depend on the seed."""
+    specs = []
+    for base in prompts:
+        for tag in tags:
+            tagged = _splice_tag(base, tag, tag_slot)
+            specs.append((base, tagged, tag, _is_quality_tag(tag)))
+    return specs
+
+
+def compute_origin_rows(specs, cross_cache, model, device):
+    """Split a tag's pooled-channel response into its base-model and distilled parts.
+
+    Upstream (rel_dpool): ‖pool(base+tag) − pool(base)‖ / ‖pool(base)‖, computed on
+    the raw max-pooled crossattn vector -- 100% Qwen3 TE + LLM-adapter (ships with the
+    base DiT), NO trained proj. This is the only piece a quality tag's routing could
+    inherit from the base model.
+
+    Downstream (rel_dproj): the same movement after the trained pooled_text_proj --
+    100% distilled, and distilled *without* quality tags. proj_gain = rel_dproj /
+    rel_dpool is how much the distilled proj amplifies (or attenuates) this tag's
+    upstream pooled movement on its way into AdaLN.
+
+    Read: if quality's rel_dpool already exceeds content's AND proj_gain is ~tag-
+    agnostic, the quality-selectivity is upstream (base encoder) and the proj is a
+    pass-through -> conditioning the distill teacher on quality buys little. If
+    proj_gain is larger for quality than content, the distilled proj is preferentially
+    amplifying quality directions -> headroom for a quality-conditioned teacher."""
+    proj = model.pooled_text_proj
+    w_dtype = proj[0].weight.dtype
+    rows = []
+    with torch.no_grad():
+        for base, tagged, tag, is_q in specs:
+            pb = _pool(cross_cache[base].to(device, dtype=w_dtype))  # (1, 1024) base
+            pt = _pool(cross_cache[tagged].to(device, dtype=w_dtype))
+            yb = proj(pb)  # (1, model_channels) distilled modulation
+            yt = proj(pt)
+            d_pool = (pt - pb).reshape(-1).float()
+            d_proj = (yt - yb).reshape(-1).float()
+            rel_dpool = float(d_pool.norm() / (pb.reshape(-1).float().norm() + EPS))
+            rel_dproj = float(d_proj.norm() / (yb.reshape(-1).float().norm() + EPS))
+            rows.append({
+                "experiment": "origin", "space": "pooled", "base": base, "tag": tag,
+                "is_quality": bool(is_q),
+                "rel_dpool": rel_dpool,  # upstream base-model encoder movement
+                "rel_dproj": rel_dproj,  # after distilled proj
+                "proj_gain": rel_dproj / (rel_dpool + EPS),
+                "norm_dproj": float(d_proj.norm()),  # absolute AdaLN-space movement
+            })
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # Grid saving (read the grids!)
 # --------------------------------------------------------------------------- #
-def save_grids(pixels, run_dir, experiment, thumb=512):
-    """One labelled grid PNG per render group. Thumbnails preserve aspect ratio
-    (longer side = `thumb`) so non-square buckets aren't squashed."""
+def save_grids(pixels, run_dir, experiment, thumb=512, cols=0):
+    """One labelled grid PNG per render group, laid out as a 2D grid (per-cell label
+    above each thumbnail). Thumbnails preserve aspect ratio (longer side = `thumb`)
+    so non-square buckets aren't squashed; all renders in a group share a resolution
+    so the cells tile cleanly.
+
+    `cols`: fixed column count (0 = auto). Auto keeps a small group on a single row
+    (≤8 cells, e.g. swap's BB/TT/TB/BT) but wraps a large sweep (layer_window's ~21
+    per-block arms) to a near-square grid that's actually eyeball-able."""
     try:
         from PIL import Image, ImageDraw
     except Exception:
@@ -522,15 +930,20 @@ def save_grids(pixels, run_dir, experiment, thumb=512):
         keys = sorted(keys)
         thumbs = [to_img(pixels[k]) for k in keys]
         labels = [k.rsplit("/", 1)[1] for k in keys]
-        gw = sum(t.width for t in thumbs)
-        gh = max(t.height for t in thumbs) + header
-        canvas = Image.new("RGB", (gw, gh), (16, 16, 16))
+        n = len(thumbs)
+        ncol = cols if cols and cols > 0 else (n if n <= 8 else math.ceil(math.sqrt(n)))
+        ncol = max(1, min(ncol, n))
+        nrow = math.ceil(n / ncol)
+        cw = max(t.width for t in thumbs)  # uniform cell size (one resolution per group)
+        ch = max(t.height for t in thumbs)
+        cell_h = ch + header
+        canvas = Image.new("RGB", (cw * ncol, cell_h * nrow), (16, 16, 16))
         d = ImageDraw.Draw(canvas)
-        x = 0
-        for t, lbl in zip(thumbs, labels):
-            canvas.paste(t, (x, header))
-            d.text((x + 3, 3), lbl, fill=(230, 230, 230))
-            x += t.width
+        for idx, (t, lbl) in enumerate(zip(thumbs, labels)):
+            r, c = divmod(idx, ncol)
+            x, y = c * cw, r * cell_h
+            canvas.paste(t, (x, y + header))
+            d.text((x + 3, y + 3), lbl, fill=(230, 230, 230))
         name = grp.replace("/", "_") + ".png"
         canvas.save(run_dir / name)
         artifacts.append(name)
@@ -538,14 +951,16 @@ def save_grids(pixels, run_dir, experiment, thumb=512):
 
 
 # --------------------------------------------------------------------------- #
-def sample_dataset_prompts(dataset_dir: str, n: int, max_chars: int) -> list[str]:
+def sample_dataset_prompts(dataset_dir: str, n: int, max_chars: int, min_chars: int = 0) -> list[str]:
     """Sample N real captions from `.txt` sidecars under dataset_dir.
 
     image_dataset/ is a symlink to nested artist dirs, so rglob (which follows the
     start symlink) is used rather than a plain walk. Captions are the dense, real
     prompts where the geometry-only finding's numbers collapse 5-25x -- the regime
-    we actually care about. Deterministic via a dedicated rng so permutation draws
-    elsewhere stay stable."""
+    we actually care about. `min_chars` keeps only LENGTHY (dense, busy-scene) captions
+    -- the regime where the steering's hand grade/drift fires (Phase 0b: short/canonical
+    poses barely move). Deterministic via a dedicated rng so permutation draws elsewhere
+    stay stable."""
     root = Path(dataset_dir)
     txts = sorted(str(p) for p in root.rglob("*.txt"))
     if not txts:
@@ -558,12 +973,17 @@ def sample_dataset_prompts(dataset_dir: str, n: int, max_chars: int) -> list[str
             cap = Path(t).read_text(encoding="utf-8").strip().replace("\n", ", ")
         except Exception:
             continue
-        if not cap:
+        if not cap or len(cap) < min_chars:  # min_chars -> lengthy/dense only
             continue
-        out.append(cap[:max_chars])
+        if len(cap) > max_chars:  # truncate at a tag (comma) boundary, not mid-tag
+            cut = cap[:max_chars].rfind(",")
+            cap = cap[:cut] if cut > 0 else cap[:max_chars]
+        out.append(cap.strip())
         if len(out) >= n:
             break
-    logger.info(f"Sampled {len(out)} real captions from {root}")
+    if len(out) < n:
+        logger.warning(f"Only {len(out)}/{n} captions >= {min_chars} chars under {root}")
+    logger.info(f"Sampled {len(out)} real captions from {root} (min_chars={min_chars})")
     return out
 
 
@@ -573,11 +993,18 @@ def main():
     p.add_argument("--vae", default="models/vae/qwen_image_vae.safetensors")
     p.add_argument("--text_encoder", default="models/text_encoders/qwen_3_06b_base.safetensors")
     p.add_argument("--pooled_text_proj", required=True, help="trained pooled_text_proj checkpoint")
-    p.add_argument("--experiment", choices=["swap", "order", "intensity", "all"], default="all")
+    p.add_argument(
+        "--experiment",
+        choices=["swap", "order", "intensity", "origin", "sigma_window", "layer_window", "all"],
+        default="all",
+        help="'all' runs swap/order/intensity/origin; 'sigma_window' (Phase-0 σ-schedule "
+        "ablation) and 'layer_window' (Phase-0b per-block grade-vs-drift map) run on their own.",
+    )
     p.add_argument("--prompts", type=str, default=None, help="';'-separated base prompts (wins over --dataset_samples)")
     p.add_argument("--dataset_samples", type=int, default=0, help="sample N real captions from --dataset_dir instead of the built-in defaults")
     p.add_argument("--dataset_dir", type=str, default="image_dataset", help="caption (.txt) source for --dataset_samples")
     p.add_argument("--max_prompt_chars", type=int, default=400, help="truncate sampled captions to this length")
+    p.add_argument("--prompt_min_chars", type=int, default=0, help="--dataset_samples: keep only captions at least this long (lengthy/dense scenes where the hand grade/drift fires)")
     p.add_argument("--tags", type=str, default=None, help="','-separated tags to splice (swap)")
     p.add_argument(
         "--tag_slot", choices=["auto", "after_rating", "append", "prepend"], default="auto",
@@ -590,6 +1017,30 @@ def main():
     p.add_argument("--w_points", type=str, default="0,2,3,5,8", help="intensity: steering w sweep")
     p.add_argument("--steer_pos", type=str, default="score_9, absurdres", help="intensity steering p+")
     p.add_argument("--steer_neg", type=str, default="", help="intensity steering p-")
+    # sigma_window (Phase 0): faithful shipped steering pair + the σ split point.
+    p.add_argument("--sigwin_pos", type=str, default="absurdres, masterpiece, score_9", help="sigma_window steering p+ (shipped default)")
+    p.add_argument("--sigwin_neg", type=str, default="worst quality, low quality, score_1", help="sigma_window steering p- (shipped default)")
+    p.add_argument("--sigwin_w", type=float, default=3.0, help="sigma_window steering weight (shipped mod_w default)")
+    p.add_argument("--sigwin_thresholds", type=str, default="0.45", help="sigma_window: σ-window cutoff(s); each emits a σ<t 'low' arm. Default 0.45 (the structure-resolution boundary); comma-sep to sweep soft windows.")
+    p.add_argument(
+        "--sigwin_dose", choices=["equal_w", "equal_dose", "both"], default="both",
+        help="sigma_window dose control: equal_w (fixed w -> per-step leverage), equal_dose "
+        "(w boosted by uniform_steps/window_steps -> matched integrated dose), or both. "
+        "Avoids falsely killing the σ axis by under-dosing a narrow tail window.",
+    )
+    # layer_window (Phase 0b): same shipped steering pair; the probe is WHICH blocks.
+    p.add_argument("--layerwin_pos", type=str, default="absurdres, masterpiece, score_9", help="layer_window steering p+ (shipped default)")
+    p.add_argument("--layerwin_neg", type=str, default="worst quality, low quality, score_1", help="layer_window steering p- (shipped default)")
+    p.add_argument("--layerwin_w", type=float, default=3.0, help="layer_window steering weight (shipped mod_w default)")
+    p.add_argument("--layerwin_blocks", type=str, default="8-26", help="layer_window: blocks to probe (range '8-26' / list '8,12,20' / mix). Default = the shipped step_i8_skip27 band.")
+    p.add_argument(
+        "--layerwin_mode", choices=["single", "cumulative", "band", "both"], default="single",
+        help="layer_window: 'single' steers one block at a time (the direct per-block "
+        "grade-vs-drift map); 'cumulative' steers [b0..L] (marginal-per-block view); "
+        "'band' steers contiguous thirds (early/mid/late -- localizes the full-stack "
+        "hand damage before a finer probe); 'both' = single+cumulative.",
+    )
+    p.add_argument("--layerwin_bands", type=int, default=3, help="layer_window band mode: number of contiguous bands to split the probed range into")
     p.add_argument("--height", type=int, default=DEFAULT_H)
     p.add_argument("--width", type=int, default=DEFAULT_W)
     p.add_argument("--infer_steps", type=int, default=20)
@@ -598,7 +1049,8 @@ def main():
     p.add_argument("--attn_mode", type=str, default="torch")
     p.add_argument("--compile", action="store_true", help="torch.compile DiT blocks (amortises across the sweep)")
     p.add_argument("--compile_mode", type=str, default="default")
-    p.add_argument("--grid_thumb", type=int, default=512, help="per-image grid thumbnail longer-side px")
+    p.add_argument("--grid_thumb", type=int, default=768, help="per-image grid thumbnail longer-side px")
+    p.add_argument("--grid_cols", type=int, default=0, help="grid columns (0=auto: single row if <=8 cells, else near-square 2D wrap)")
     p.add_argument("--label", type=str, default=None)
     args = p.parse_args()
 
@@ -606,7 +1058,9 @@ def main():
     if args.prompts:
         prompts = [s.strip() for s in args.prompts.split(";") if s.strip()]
     elif args.dataset_samples > 0:
-        prompts = sample_dataset_prompts(args.dataset_dir, args.dataset_samples, args.max_prompt_chars)
+        prompts = sample_dataset_prompts(
+            args.dataset_dir, args.dataset_samples, args.max_prompt_chars, args.prompt_min_chars
+        )
     else:
         prompts = DEFAULT_PROMPTS
     tags = (
@@ -617,7 +1071,7 @@ def main():
     w_points = [float(w) for w in args.w_points.split(",") if w.strip()]
     rng = np.random.default_rng(1234)  # fixed seed -> reproducible permutations
 
-    exps = ["swap", "order", "intensity"] if args.experiment == "all" else [args.experiment]
+    exps = ["swap", "order", "intensity", "origin"] if args.experiment == "all" else [args.experiment]
 
     # Build all jobs + their row-extractors.
     jobs, extractors = [], []
@@ -633,6 +1087,30 @@ def main():
         j, f = exp_intensity(prompts, seeds, args.negative, w_points, args.steer_pos, args.steer_neg)
         jobs += j
         extractors.append(f)
+    if "sigma_window" in exps:
+        from library.inference import sampling as _inf
+        thresholds = [float(t) for t in args.sigwin_thresholds.split(",") if t.strip()]
+        # σ actually used at each model call (flow_shift-warped) -> dose accounting.
+        _, _sig = _inf.get_timesteps_sigmas(args.infer_steps, args.flow_shift, torch.device("cpu"))
+        sigmas_active = _sig.tolist()[: args.infer_steps]
+        j, f = exp_sigma_window(
+            prompts, seeds, args.sigwin_pos, args.sigwin_neg, args.sigwin_w,
+            thresholds, args.sigwin_dose, sigmas_active,
+        )
+        jobs += j
+        extractors.append(f)
+    if "layer_window" in exps:
+        blocks = _parse_blocks(args.layerwin_blocks)
+        if not blocks:
+            raise SystemExit("--layerwin_blocks parsed to an empty block list")
+        j, f = exp_layer_window(
+            prompts, seeds, args.layerwin_pos, args.layerwin_neg, args.layerwin_w,
+            blocks, args.layerwin_mode, args.layerwin_bands,
+        )
+        jobs += j
+        extractors.append(f)
+    # origin is render-free (pooled-vector geometry) -- it needs encodings, not jobs.
+    orig_specs = origin_specs(prompts, tags, args.tag_slot) if "origin" in exps else []
 
     # Collect every prompt that any job needs to encode.
     needed = {args.negative}
@@ -644,6 +1122,9 @@ def main():
             needed.add(j.mod_pos)
         if j.mod_neg:
             needed.add(j.mod_neg)
+    for base, tagged, _tag, _q in orig_specs:
+        needed.add(base)
+        needed.add(tagged)
 
     logger.info(f"Channel-attribution bench: {len(jobs)} renders, {len(needed)} prompts, exps={exps}")
 
@@ -658,6 +1139,9 @@ def main():
     if "order" in exps:
         _order_pooled_drift(jobs, cross_cache)
 
+    # origin: render-free, but needs the live proj -> compute before freeing the DiT.
+    origin_rows = compute_origin_rows(orig_specs, cross_cache, model, device) if orig_specs else []
+
     logger.info("[2/4] denoising (DiT)")
     latents = render_jobs(model, jobs, cross_cache, args, device)
     del model
@@ -665,11 +1149,15 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    logger.info("[3/4] decode (VAE) + [4/4] features (PE)")
-    rendered, pixels = decode_and_featurize(latents, args, device)
+    if latents:
+        logger.info("[3/4] decode (VAE) + [4/4] features (PE)")
+        rendered, pixels = decode_and_featurize(latents, args, device)
+    else:
+        logger.info("[3/4] no renders (origin-only) -- skipping VAE/PE")
+        rendered, pixels = {}, {}
 
     # ---- metrics
-    rows = []
+    rows = list(origin_rows)
     for f in extractors:
         rows += f(rendered)
 
@@ -677,7 +1165,7 @@ def main():
     artifacts = ["rows.csv"]
     _write_csv(run_dir / "rows.csv", rows)
     for e in exps:
-        artifacts += save_grids(pixels, run_dir, e, thumb=args.grid_thumb)
+        artifacts += save_grids(pixels, run_dir, e, thumb=args.grid_thumb, cols=args.grid_cols)
 
     metrics = _summarize(rows)
     _log_summary(metrics)
@@ -748,6 +1236,56 @@ def _summarize(rows):
     if intensity_rows:
         out["intensity.max_pixel_std_drop"] = max(r["pixel_std_drop"] for r in intensity_rows)
         out["intensity.n_points"] = len({r["w"] for r in intensity_rows})
+    sigwin_rows = [r for r in rows if r["experiment"] == "sigma_window"]
+    if sigwin_rows:
+        modes = sorted({r["mode"] for r in sigwin_rows})
+
+        def sw_mode(m):
+            return lambda r: r["experiment"] == "sigma_window" and r["mode"] == m
+
+        for m in modes:
+            pred = sw_mode(m)
+            out[f"sigma_window.{m}.ssim_to_off_mean"] = agg(pred, "ssim_to_off")
+            out[f"sigma_window.{m}.hf_frac_mean"] = agg(pred, "hf_frac")
+            out[f"sigma_window.{m}.delta_norm_mean"] = agg(pred, "delta_norm")
+            out[f"sigma_window.{m}.J_mean"] = agg(pred, "J")
+        out["sigma_window.modes"] = ",".join(modes)
+        out["sigma_window.n"] = len(sigwin_rows)
+    layerwin_rows = [r for r in rows if r["experiment"] == "layer_window"]
+    if layerwin_rows:
+        modes = sorted({r["mode"] for r in layerwin_rows})
+
+        def lw_mode(m):
+            return lambda r: r["experiment"] == "layer_window" and r["mode"] == m
+
+        for m in modes:
+            pred = lw_mode(m)
+            out[f"layer_window.{m}.ssim_to_off_mean"] = agg(pred, "ssim_to_off")
+            out[f"layer_window.{m}.delta_norm_mean"] = agg(pred, "delta_norm")
+            out[f"layer_window.{m}.hf_frac_mean"] = agg(pred, "hf_frac")
+            out[f"layer_window.{m}.J_mean"] = agg(pred, "J")
+        # Differentiation signal across the single-block arms (L##): spread of SSIM /
+        # delta_norm. Flat (low spread) -> no layer lever (proposal closes); wide
+        # spread with an effect set splitting on SSIM -> a grade set exists.
+        single = [m for m in modes if m.startswith("L")]
+        if single:
+            ssims = [out[f"layer_window.{m}.ssim_to_off_mean"] for m in single]
+            deltas = [out[f"layer_window.{m}.delta_norm_mean"] for m in single]
+            out["layer_window.single.ssim_spread"] = float(max(ssims) - min(ssims))
+            out["layer_window.single.delta_spread"] = float(max(deltas) - min(deltas))
+        out["layer_window.modes"] = ",".join(modes)
+        out["layer_window.n"] = len(layerwin_rows)
+    origin_rows = [r for r in rows if r["experiment"] == "origin"]
+    if origin_rows:
+        def omean(field, q):
+            vals = [r[field] for r in origin_rows if r["is_quality"] == q]
+            return float(np.mean(vals)) if vals else None
+
+        for q, lbl in ((True, "quality"), (False, "content")):
+            out[f"origin.{lbl}.rel_dpool_mean"] = omean("rel_dpool", q)
+            out[f"origin.{lbl}.rel_dproj_mean"] = omean("rel_dproj", q)
+            out[f"origin.{lbl}.proj_gain_mean"] = omean("proj_gain", q)
+        out["origin.n"] = len(origin_rows)
     out["n_rows"] = len(rows)
     return out
 
@@ -769,11 +1307,70 @@ def _log_summary(m):
             logger.info(f"order[{sp}]  order_dist / seed_floor = {ovs:.3f}")
     if "intensity.max_pixel_std_drop" in m:
         logger.info(f"intensity   max pixel-std drop vs w0 = {m['intensity.max_pixel_std_drop']:+.3f}")
+    if "sigma_window.n" in m:
+        logger.info("sigma_window (vs unguided; SSIM high=structure preserved, hf_frac high=effect in detail band):")
+        for mode in m["sigma_window.modes"].split(","):
+            ss = m.get(f"sigma_window.{mode}.ssim_to_off_mean")
+            hf = m.get(f"sigma_window.{mode}.hf_frac_mean")
+            dn = m.get(f"sigma_window.{mode}.delta_norm_mean")
+            jj = m.get(f"sigma_window.{mode}.J_mean")
+            if ss is not None:
+                logger.info(
+                    f"  {mode:8s}  ssim_to_off={ss:.3f}  hf_frac={hf:.3f}  "
+                    f"delta_norm={dn:.3f}  J={jj:+.2e}"
+                )
+        logger.info(
+            "  arms: uniform(σ-blind) | low{T}=σ<0.T equal-w | low{T}d=dose-matched (w boosted) | high045=σ>=0.45.\n"
+            "  C1 true  -> a dose-matched tail arm (low045d / low055d) reaches ~uniform's grade at HIGHER ssim.\n"
+            "  C1 dead  -> tail arms ≈ off even dose-matched (or they saturate/blow up) while uniform≈high045\n"
+            "             -> leverage is high-σ only, tail can't carry the grade; don't schedule into the tail.\n"
+            "  Watch the confound: low{T} (equal-w) under-doses ~5x vs uniform -- judge leverage from low{T}d.\n"
+            "  READ THE GRIDS (sigma_window_*.png, 768px) -- scalar J is a guide (HF-noise inflates it), not the verdict."
+        )
+    if "layer_window.n" in m:
+        logger.info("layer_window (Phase 0b; vs unguided -- per arm: ssim high=structure preserved=GRADE, low=DRIFT):")
+        for mode in m["layer_window.modes"].split(","):
+            ss = m.get(f"layer_window.{mode}.ssim_to_off_mean")
+            dn = m.get(f"layer_window.{mode}.delta_norm_mean")
+            hf = m.get(f"layer_window.{mode}.hf_frac_mean")
+            jj = m.get(f"layer_window.{mode}.J_mean")
+            if ss is not None:
+                logger.info(
+                    f"  {mode:10s}  ssim_to_off={ss:.3f}  delta_norm={dn:.3f}  "
+                    f"hf_frac={hf:.3f}  J={jj:+.2e}"
+                )
+        sp_s = m.get("layer_window.single.ssim_spread")
+        sp_d = m.get("layer_window.single.delta_spread")
+        if sp_s is not None:
+            logger.info(f"  single-block spread: ssim={sp_s:.3f}  delta_norm={sp_d:.3f}")
+        logger.info(
+            "  arms: L## = steer block ## only (per-block map) | cum## = cumulative [b0..##] |"
+            " full## = whole probed band (= shipped path at default blocks).\n"
+            "  C2 true  -> differentiated: a GRADE set (delta_norm up, ssim HIGH) vs a DRIFT set"
+            " (delta_norm up, ssim LOW) -> the 'proper layers' are the grade set.\n"
+            "  C2 dead  -> FLAT: every steered block ≈ same delta_norm & ssim (small spread)"
+            " -> no layer lever, hand-set 8-26 is as good as any -> proposal closes.\n"
+            "  READ THE GRIDS (layer_window_*.png, 768px) -- scalar J is a guide (HF-noise trap), not the verdict."
+        )
+    if "origin.n" in m:
+        for lbl in ("quality", "content"):
+            dp = m.get(f"origin.{lbl}.rel_dpool_mean")
+            pj = m.get(f"origin.{lbl}.rel_dproj_mean")
+            g = m.get(f"origin.{lbl}.proj_gain_mean")
+            if dp is not None:
+                logger.info(
+                    f"origin[{lbl:7s}]  rel_dpool(base)={dp:.3f}  "
+                    f"rel_dproj(distilled)={pj:.3f}  proj_gain={g:.3f}"
+                )
     logger.info(
         "\nReads: pool_share≈0 -> the mod channel barely carries the edit (topic low-value). "
         "cos(cross,pool)>0 -> channels reinforce (preload/double-drive); <0 -> conflict/cancel. "
         "order/seed≪1 -> cross-attn weakly order-sensitive. "
-        "Large pixel-std drop at high w -> DC-blowout is real in image space."
+        "Large pixel-std drop at high w -> DC-blowout is real in image space.\n"
+        "origin: quality rel_dpool > content AND proj_gain tag-agnostic -> quality-selectivity is "
+        "UPSTREAM (base encoder); distilled proj is a pass-through, teacher-quality-conditioning has "
+        "little headroom. proj_gain(quality) > proj_gain(content) -> the distilled proj amplifies "
+        "quality directions -> headroom for a quality-conditioned distill teacher."
     )
 
 

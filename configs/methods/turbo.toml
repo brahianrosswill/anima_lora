@@ -16,7 +16,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 2000
+iterations = 250
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -77,7 +77,7 @@ detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 
 # τ sampling distribution for the fake/critic update (+ fake warmup).
 [sampling]
-t_distribution = "uniform"      # "uniform" or "sigmoid"
+t_distribution = "sigmoid"      # "uniform" or "sigmoid"
 sigmoid_scale = 1.0
 flow_shift = 3.0                # σ-schedule shift for the DP-DMD Euler grids (matches inference)
 
@@ -104,6 +104,6 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 500
+save_every = 250
 log_interval = 5
 log_dir = "output/logs/turbo"
