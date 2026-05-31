@@ -532,6 +532,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "so the α path is the only mode now. α=0.2 is the production default.",
     )
 
+    # CNS: Colored Noise Sampling (arXiv:2605.30332). Recolors the er_sde
+    # injected noise by sqrt(1-γ) from a precomputed completion matrix so the
+    # fixed stochastic budget lands in unresolved frequency bands. Training-free,
+    # er_sde-only (no-op on euler). γ is calibrated per (cfg×aspect) by
+    # bench/cns/calibrate.py. See docs/methods (bench/cns/plan.md).
+    parser.add_argument(
+        "--cns",
+        type=str,
+        default=None,
+        help="Enable CNS noise recoloring on the er_sde path. Pass a path to a "
+        "cns_gamma.npz completion matrix, or 'auto' for the shipped default "
+        "(models/calibration/cns_gamma.npz). No-op on --sampler euler/lcm.",
+    )
+    parser.add_argument(
+        "--cns_strength",
+        type=float,
+        default=1.0,
+        help="Blend white↔recolored noise (then RMS-renormalize). 1.0 = full "
+        "CNS, 0.0 = pass-through. Safety knob for over-injection off-manifold.",
+    )
+
     # arguments for batch and interactive modes
     parser.add_argument(
         "--from_file", type=str, default=None, help="Read prompts from a file"

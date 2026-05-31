@@ -11,12 +11,12 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_I"
+output_name = "anima_turbo"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 250
+iterations = 2000
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -48,8 +48,8 @@ norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (late
 # Optimization.
 [optim]
 student_lr = 2e-5
-fake_lr = 3e-5
-fake_steps_per_student_step = 4
+fake_lr = 2e-5
+fake_steps_per_student_step = 5
 fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
                                 # against the student's (init ≈ teacher) x_pred before the
@@ -104,6 +104,6 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 250
+save_every = 500
 log_interval = 5
 log_dir = "output/logs/turbo"
