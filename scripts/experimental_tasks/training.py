@@ -9,8 +9,27 @@ vars + extra argv into the right ``train.py`` (via ``accelerate launch``) or
 
 from __future__ import annotations
 
+import os
+
 from scripts.tasks import preprocess as _preprocess
 from scripts.tasks._common import PY, _preset, bespoke_preset_flags, run, train
+
+# EasyControl control-task projects under easycontrol_adapters/. Each maps to a
+# configs/methods/<name>.toml that swaps the cond source / caption policy and an
+# easycontrol_adapters/<name>/ project (mangafy/prep etc.). Selected at runtime
+# via the EASYADAPTER env var (exported by the Makefile), e.g.
+# ``make exp-easycontrol EASYADAPTER=colorize``.
+_EASYADAPTERS = {"colorize"}
+
+
+def _easyadapter() -> str:
+    """Resolve the EASYADAPTER env var (validated). "" → default easycontrol."""
+    adapter = (os.environ.get("EASYADAPTER") or "").strip()
+    if adapter and adapter not in _EASYADAPTERS:
+        raise SystemExit(
+            f"Unknown EASYADAPTER={adapter!r}. Known: {sorted(_EASYADAPTERS)}."
+        )
+    return adapter
 
 
 def cmd_turbo(extra):
@@ -112,14 +131,28 @@ def cmd_ip_adapter_preprocess(extra):
 
 
 def cmd_easycontrol(extra):
-    train("easycontrol", extra)
+    """EasyControl. ``EASYADAPTER=<name>`` selects a control-task project under
+    easycontrol_adapters/ (e.g. ``colorize``) → runs configs/methods/<name>.toml;
+    unset → the default ref==target easycontrol.toml."""
+    train(_easyadapter() or "easycontrol", extra)
 
 
 def cmd_easycontrol_preprocess(extra):
     """Full EasyControl preprocess: VAE latents + text-encoder outputs.
 
     Source: ``easycontrol-dataset/``  Caches: ``post_image_dataset/easycontrol/``.
+
+    ``EASYADAPTER=colorize`` instead builds the colorization *condition* cache
+    (mangafy the existing color images → VAE-encode into
+    ``post_image_dataset/colorize_cond/``); the color target latents + TE are
+    reused from the LoRA cache, so no target re-encode is needed. See
+    ``easycontrol_adapters/colorization/prep.py``.
     """
+    adapter = _easyadapter()
+    if adapter == "colorize":
+        run([PY, "easycontrol_adapters/colorization/prep.py", *extra])
+        return
+
     src = "easycontrol-dataset"
     dst = "post_image_dataset/easycontrol"
     run(
