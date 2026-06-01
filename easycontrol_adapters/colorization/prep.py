@@ -4,9 +4,13 @@
 Two idempotent stages:
 
 1. **Mangafy** — walk every color image under ``--src`` (the existing resized
-   training images), run :func:`mangafy.mangafy_array` (XDoG lineart + algorithmic
-   screentone), and write the B&W result to ``--staging`` mirroring the source
-   subpath. Skips already-staged PNGs unless ``--overwrite``.
+   training images), screen each to a synthetic B&W manga page, and write the
+   result to ``--staging`` mirroring the source subpath. Two engines via
+   ``--engine``: ``sd`` (default, Phase B) runs the learned sketch2manga screening
+   (:func:`screentone_sd.screentone_array`, on-manifold tones, needs
+   ``make exp-easycontrol-download EASYADAPTER=colorize``); ``cv2`` runs the fast
+   XDoG + algorithmic-screentone fallback (:func:`mangafy.mangafy_array`, no
+   downloads). Skips already-staged PNGs unless ``--overwrite``.
 
 2. **Encode** — VAE-encode the staged manga images into ``--cond_cache_dir`` via
    the existing ``library.preprocess.cache_latents`` (same ``{stem}_{WxH}_anima.npz``
@@ -27,15 +31,17 @@ import argparse
 import zlib
 from pathlib import Path
 
+from typing import Callable
+
 import numpy as np
 import torch
 from PIL import Image
 
-# When run as a file, this script's dir is sys.path[0] → import the sibling.
-from mangafy import mangafy_array
-
 from library.preprocess import cache_latents, tqdm_progress
 from library.preprocess._dataset import walk_images
+
+# Screener: color RGB uint8 (H,W,3) + per-stem seed → B&W RGB uint8 (H,W,3) same size.
+Screener = Callable[[np.ndarray, int], np.ndarray]
 
 
 def _stable_seed(name: str) -> int:
@@ -47,6 +53,7 @@ def stage_mangafy(
     src: Path,
     staging: Path,
     *,
+    screener: Screener,
     recursive: bool,
     overwrite: bool,
     limit: int | None,
@@ -65,11 +72,34 @@ def stage_mangafy(
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         img = np.array(Image.open(p).convert("RGB"))
-        manga = mangafy_array(img, seed=_stable_seed(rel.stem))
+        manga = screener(img, _stable_seed(rel.stem))
         Image.fromarray(manga).save(out)
         written += 1
         progress(1, detail=p.name)
     return len(images), written
+
+
+def build_screener(args) -> Screener:
+    """Resolve ``--engine`` to a ``(img, seed) → manga`` callable.
+
+    Imports are deferred so the heavy ``sd`` stack (diffusers / controlnet_aux)
+    is only loaded when actually selected, and ``cv2`` stays download-free."""
+    if args.engine == "cv2":
+        from mangafy import mangafy_array
+
+        return lambda img, seed: mangafy_array(img, seed=seed)
+
+    from screentone_sd import screentone_array
+
+    return lambda img, seed: screentone_array(
+        img,
+        seed=seed,
+        steps=args.steps,
+        cfg=args.cfg,
+        long_side=args.long_side,
+        strength=args.strength,
+        tone_period=args.tone_period,
+    )
 
 
 def stage_encode(
@@ -118,6 +148,31 @@ def main() -> None:
     parser.add_argument("--staging", default="post_image_dataset/colorize_staging")
     parser.add_argument("--cond_cache_dir", default="post_image_dataset/colorize_cond")
     parser.add_argument("--vae", default="models/vae/qwen_image_vae.safetensors")
+    parser.add_argument(
+        "--engine",
+        choices=["sd", "cv2"],
+        default="sd",
+        help="condition synthesizer: sd = learned sketch2manga screening (Phase B, "
+        "needs `make exp-easycontrol-download EASYADAPTER=colorize`); "
+        "cv2 = XDoG+halftone fallback (no downloads)",
+    )
+    parser.add_argument("--steps", type=int, default=40, help="sd engine: diffusion steps")
+    parser.add_argument("--cfg", type=float, default=9.0, help="sd engine: guidance scale")
+    parser.add_argument(
+        "--strength",
+        type=float,
+        default=0.6,
+        help="sd engine: img2img denoise (lower = more faithful to source structure)",
+    )
+    parser.add_argument(
+        "--tone_period",
+        type=float,
+        default=4.5,
+        help="sd engine: halftone dot period (px at long_side); larger = coarser dots",
+    )
+    parser.add_argument(
+        "--long_side", type=int, default=1024, help="sd engine: screening resolution"
+    )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--chunk_size", type=int, default=64)
     parser.add_argument(
@@ -139,11 +194,20 @@ def main() -> None:
         seen, written = stage_mangafy(
             src,
             staging,
+            screener=build_screener(args),
             recursive=args.recursive,
             overwrite=args.overwrite,
             limit=args.limit,
         )
-        print(f"\nMangafy: {written} written, {seen - written} skipped/seen={seen}")
+        print(
+            f"\nMangafy ({args.engine}): {written} written, "
+            f"{seen - written} skipped/seen={seen}"
+        )
+        if args.engine == "sd":
+            # Free the SD pipeline's VRAM before the encode stage loads the Qwen VAE.
+            from screentone_sd import unload
+
+            unload()
 
     if not args.skip_encode:
         stats = stage_encode(

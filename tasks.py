@@ -272,6 +272,11 @@ COMMANDS = {
         "[experimental] Full EasyControl preprocess: latents + text emb. "
         "Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/.",
     ),
+    "exp-easycontrol-download": (
+        exp_training.cmd_easycontrol_download,
+        "[experimental] Download an EasyControl adapter's extra weights. "
+        "EASYADAPTER=colorize → Sketch2Manga screening weights (~5.7GB).",
+    ),
     "exp-test-soft": (
         exp_inference.cmd_test_soft,
         "[experimental] Inference with latest soft_tokens weight "
