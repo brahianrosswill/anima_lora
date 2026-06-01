@@ -11,12 +11,12 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_J500"
+output_name = "anima_turbo_J"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 250
+iterations = 2000
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -98,6 +98,6 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 500
+save_every = 2000
 log_interval = 5
 log_dir = "output/logs/turbo"

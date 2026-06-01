@@ -1,11 +1,5 @@
 # Soft Tokens — per-layer time-indexed soft text tokens (SoftREPA-style
 # parameterization, plain FM loss).
-#
-# Reference: Lee et al., "Aligning Text to Image in Diffusion Models is Easier
-# Than You Think" (NeurIPS 2025) — arXiv:2503.08250. We adopt only the
-# parameterization (per-layer × per-t soft tokens) and skip the contrastive
-# InfoNCE objective; trained under standard flow-matching loss.
-#
 
 network_module = "networks.methods.soft_tokens"
 
@@ -27,73 +21,6 @@ network_dim = 4
 #                      "end_of_sequence" (constructor fallback) overwrites the K
 #                      tail zero-padding slots; compile-friendly, preserves the
 #                      strongest front sinks, but an Anima-specific shortcut.
-#
-# ── Contrastive objective (SoftREPA InfoNCE via cached-TE negatives) ──────────
-# A training-only objective that sharpens prompt-following (data-conditioned) by
-# making the matched text explain the anchor's latent better than mismatched
-# text. Each negative costs one extra full DiT forward, so keep contrastive_k
-# small. Off by default (weight 0.0 = plain-FM behavior, bit-identical).
-# See docs/proposal/soft_tokens_contrastive.md.
-# contrastive_weight            — λ_con. 0.0 disables (and the dataset stops
-#                                 producing negatives, so no extra forwards).
-# contrastive_k                 — negatives per step → (k+1)× step time. Keep 1–2.
-# contrastive_every_n           — run the negative forwards only every Nth
-#                                 optimizer step (1 = every step). Manual
-#                                 frequency knob, NOT auto-scaled: effective
-#                                 strength ≈ weight × 1/N, so bump
-#                                 contrastive_weight if you want to hold the
-#                                 average pull constant. Costs no extra memory
-#                                 (firing-step peak unchanged, off-steps cheaper).
-# contrastive_negative_mode     — negative sourcing: "shuffled" (unrelated),
-#                                 "jaccard" (shuffled + tag-overlap logit
-#                                 down-weight), "hard" (same-artist/diff-char),
-#                                 or "hard_backoff" (tiered same-artist → same-
-#                                 copyright → same-artist-`original` → shuffled).
-#                                 Setup log prints the level mix; genuine-negative
-#                                 rate tracks caption_index.json char coverage —
-#                                 regen with `make caption-index` if stale.
-# contrastive_jaccard_alpha     — logit penalty for "jaccard" mode (ℓ_neg −= α·s,
-#                                 sweep 0.5–2.0). Unused by other modes.
-# contrastive_tau               — temperature on the −FM-error logit. InfoNCE: the
-#                                 softmax temperature. AGSM: the Plackett–Luce
-#                                 temperature for the candidate weights w_j (lower
-#                                 = sharper preference for the best-matching
-#                                 caption → faster Δ self-annealing).
-# contrastive_warmup_ratio      — hold λ_con at 0 for the first fraction of
-#                                 steps (lets plain FM shape the bank first).
-#
-# contrastive_objective         — "infonce" (default) | "softrank".
-#   "softrank" (docs/proposal/soft_tokens_softrank.md): differentiable listwise
-#   rank of the matched caption among the candidates via softtorch.rank,
-#   L = softtorch.rank(r)[matched] − 1. Gradient flows THROUGH the ordering yet
-#   stays bounded (unlike infonce's unbounded negative push). Costs k extra
-#   forwards/firing-step (same as infonce). Requires the `softtorch` dependency
-#   (pot/torchopt/numba). REQUIRES contrastive_k >= 2: softtorch standardizes the
-#   candidate axis, which is degenerate (gap-independent) with a single negative.
-#   Does NOT use contrastive_tau — see softrank_softness / softrank_method below.
-#   (AGSM was the third objective; removed 2026-05-30 — w_matched stayed pinned at
-#   chance in the live A/B, softrank won on eyeball + curves.)
-# softrank_method               — softtorch.rank relaxation: "neuralsort" (default)
-#   has a smooth gradient through ties (the near-miss regime where matched ≈ best
-#   negative — the informative moment); "softsort" is faster but its gradient goes
-#   ~flat at exact ties. Both pure-torch / GPU-resident. (ot / fast_soft_sort are
-#   excluded — Sinkhorn / Numba-CPU sync, perf sinks in the training loop.)
-# softrank_softness             — softtorch.rank softness (its temperature) for the
-#   softrank objective. softtorch's default 0.1 is the right scale because
-#   standardize=True puts the candidate axis at unit scale. Lower = sharper rank /
-#   stronger pull; sweep ~0.05–0.3. Ignored by infonce.
-# dual_bank                     — dual token banks ψ⁺/ψ⁻. false (default) = single
-#                                 shared bank (3D on-disk). true = a branch axis on
-#                                 the bank: ψ⁺ is spliced on the anchor + positive
-#                                 value passes (and is the ONLY bank used at
-#                                 inference — injecting ψ⁻ over-suppresses detail),
-#                                 ψ⁻ on the negative value passes (training-only).
-#                                 Lets the negative push refine ψ⁻ without spending
-#                                 generative fidelity on the kept bank. Doubles the
-#                                 bank params; ψ⁻ is free at inference. The load side
-#                                 keys off the on-disk tensor rank (4D ⇒ dual), so
-#                                 single-bank checkpoints stay loadable.
-#                                 (Accepts the old name `agsm_dual_bank` as an alias.)
 
 network_args = [
     "n_layers=6",
@@ -106,7 +33,6 @@ network_args = [
     "contrastive_negative_mode=hard_backoff",
 
     "contrastive_objective=softrank",
-    # Dual ψ⁺/ψ⁻ banks (inference keeps ψ⁺ only).
     "dual_bank=true",
 
     "contrastive_jaccard_alpha=1.0",
