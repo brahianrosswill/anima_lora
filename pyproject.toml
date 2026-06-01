@@ -65,6 +65,7 @@ dependencies = [
     "softtorch>=0.1.1",
     "torchaudio>=2.11.0",
     "controlnet-aux>=0.0.10",
+    "scikit-learn>=1.9.0rc1",
 ]
 
 [project.optional-dependencies]
