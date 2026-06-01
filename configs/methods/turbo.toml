@@ -16,7 +16,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 2000
+iterations = 12000
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -26,10 +26,10 @@ gradient_checkpointing = false
 unsloth_offload_checkpointing = false
 
 [network]
-student_rank = 64
-student_alpha = 64
-fake_rank = 64
-fake_alpha = 64
+student_rank = 96
+student_alpha = 96
+fake_rank = 128
+fake_alpha = 128
 attn_mode = "flash"
 
 # DMD schedule.
@@ -41,8 +41,8 @@ norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (late
 
 # Optimization.
 [optim]
-student_lr = 2e-5
-fake_lr = 2e-5
+student_lr = 1e-5
+fake_lr = 1e-5
 fake_steps_per_student_step = 5
 fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
