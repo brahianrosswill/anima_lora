@@ -11,7 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo"
+output_name = "anima_turbo_J"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -20,16 +20,10 @@ iterations = 2000
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
-
-# Masked loss (student-only): when true, the per-image foreground mask multiplies
-# the student DMD2 gradient so distribution-matching focuses on the subject;
-# the fake/critic regression is left full-frame.
 use_masked_loss = true
 
-# Curation gate (item 5; see item5_plan.md). When true, training reads only the
-# stems in the keep_list.json from `make exp-turbo-prep` (the noise/HF-curated
-# high-signal subset) instead of the full pool.
-use_prep_list = false
+gradient_checkpointing = false
+unsloth_offload_checkpointing = false
 
 [network]
 student_rank = 64
@@ -70,8 +64,8 @@ grad_clip = 1.0                 # student grad-norm cap
 # DMD refines x_θ over steps 2..N. teacher_cfg (above) is the anchor's CFG scale;
 # student_steps is N.
 [dpdmd]
-k_anchor = 14                    # teacher steps rolled to the diversity anchor (their K)
-teacher_anchor_steps = 28       # teacher σ-grid the K is counted against
+k_anchor = 4                    # teacher steps rolled to the diversity anchor (their K)
+teacher_anchor_steps = 8        # teacher σ-grid the K is counted against
 div_weight = 0.05               # λ on the first-step diversity MSE
 detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 
@@ -104,6 +98,6 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 500
+save_every = 2000
 log_interval = 5
 log_dir = "output/logs/turbo"

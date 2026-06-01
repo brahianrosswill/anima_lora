@@ -94,6 +94,10 @@ class DreamBoothSubsetParams(BaseSubsetParams):
     alpha_mask: bool = False
     mask_dir: Optional[str] = None
     cache_dir: Optional[str] = None
+    # Optional parallel cache holding the *condition* latent (stem-matched to
+    # this subset's images). When set, the loader pairs each target latent with
+    # the cond latent from here — used by cond≠target tasks like colorization.
+    cond_cache_dir: Optional[str] = None
 
 
 @dataclass
@@ -192,6 +196,7 @@ class ConfigSanitizer:
         "is_reg": bool,
         "alpha_mask": bool,
         "cache_dir": str,
+        "cond_cache_dir": str,
         "mask_dir": str,
         "recursive": bool,
     }

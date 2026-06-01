@@ -116,14 +116,13 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | top | `iterations` | `2000` | |
 | top | `use_custom_down_autograd` | `true` | keeps activation memory down so swap can stay 0 (see [[project_custom_down_autograd_distill_lever]]) |
 | top | `use_masked_loss` | `true` | **student-only** mask on the DMD grad; fake/critic stays full-frame |
-| top | `use_prep_list` | `false` | gate training on the curation keep_list ([[project_item5_turbo_curation_phase0]]) |
 | `[network]` | `student_rank` / `fake_rank` | `64` / `64` | `fake_rank ≥ student_rank` (fake is a score *tracker*, capacity ceiling on DM strength) |
 | `[dmd]` | `student_steps` (N) | `2` | Euler steps the student rolls; inference matches (`--infer_steps 2`) |
 | `[dmd]` | `teacher_cfg` (α) | `4` | CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4) |
 | `[dmd]` | `dm_x0_norm` | `true` | per-sample x0-space magnitude normalization of the DM grad ([[project_turbo_dmd_x0_norm_wins]]) |
 | `[dmd]` | `norm_floor` | `0.05` | clamp_min for the `dm_x0_norm` denominator (latent scale) |
-| `[dpdmd]` | `k_anchor` (K) | `14` | teacher steps rolled to the diversity anchor |
-| `[dpdmd]` | `teacher_anchor_steps` | `28` | teacher σ-grid the K is counted against |
+| `[dpdmd]` | `k_anchor` (K) | `4` | teacher steps rolled to the diversity anchor |
+| `[dpdmd]` | `teacher_anchor_steps` | `8` | teacher σ-grid the K is counted against |
 | `[dpdmd]` | `div_weight` (λ) | `0.05` | weight on the first-step diversity MSE |
 | `[dpdmd]` | `detach_after_first` | `true` | **load-bearing** stop-grad after step 1; keep True (A/B only) |
 | `[optim]` | `student_lr` / `fake_lr` | `2e-5` / `3e-5` | fake runs hotter |
@@ -137,6 +136,30 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 Validation enforces `student_steps ≥ 2` (step 1 is diversity-supervised + detached,
 so at least one further step must carry the DMD loss) and
 `1 ≤ k_anchor < teacher_anchor_steps`.
+
+**Anchor fidelity — why the defaults dropped `14/28 → 4/8` (2026-06-01).** Both
+ratios anchor at the *same* σ-fraction (`14/28 = 4/8 = 0.5`), so the diversity
+anchor lands at the same continuous time; the only change is how coarsely the
+teacher integrates to it (4 Euler forwards vs 14 — the anchor rollout gets ~3.5×
+cheaper). A/B'd at 500 steps, sigmoid τ, `div_weight=0.05`, every other knob
+identical (logs `20260531-144835` k14/t28 vs `20260601-121104` k4/t8): training
+metrics are a **wash**. `dm_cos` (~0.979), `dm_mag_ratio` (~0.99), and `dm_rel_gap`
+(~0.18–0.19) are flat within run-to-run noise; `div_loss` is equal-to-marginally
+*lower* under k4/t8 (tailμ 0.093 vs 0.095); no instability spike. The only
+systematic difference is `v_student_rms` / `x_pred_std` sitting ~1–2% higher in the
+low-k run — the variance-inflation / over-bake lean ([[project_turbo_alpha4_overdistill]],
+[[project_turbo_dmd_x0_norm_wins]]) — but well inside noise at this length.
+
+Caveat before reading this as "lower K is free": **`div_loss` measures how well the
+student *hits* the anchor, not how *diverse* the anchor is.** A k4 anchor is a
+coarser, smoother target, so equal-or-lower `div_loss` does not prove the diversity
+injection survived — a less-faithfully-integrated anchor can land off the teacher's
+true trajectory, which these scalars can't see. The anchor's whole job is pose
+de-collapse on real captions, and that only shows in sample grids (the PE-pooled
+metric is blind to pose — [[project_dpdmd_pivot_phase0]]). Verdict on the lowered
+defaults is therefore metrics-green / grid-pending: A/B `anima_turbo_J500_500`
+(k4/t8) vs `anima_turbo_I_sigmoid_500` (k14/t28) at `--infer_steps 2 --cfg 1.0` and
+read pose diversity + saturation, not the scalars.
 
 ## Inference: step count
 

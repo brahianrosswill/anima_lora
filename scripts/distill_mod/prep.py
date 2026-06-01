@@ -167,8 +167,8 @@ def main() -> None:
     parser.add_argument(
         "--buckets",
         type=str,
-        default="1200x896",
-        # default=",".join(_DEFAULT_SYNTH_BUCKETS),
+        # default="1200x896",
+        default=",".join(_DEFAULT_SYNTH_BUCKETS),
         help=(
             "Comma-separated (H_pix x W_pix) resolution allowlist for synthesis. "
             "Default = DCW_ASPECT_NAMES (top-5 by frequency in "

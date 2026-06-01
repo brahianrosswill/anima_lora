@@ -64,6 +64,7 @@ dependencies = [
     "blake3>=1.0.8",
     "softtorch>=0.1.1",
     "torchaudio>=2.11.0",
+    "controlnet-aux>=0.0.10",
 ]
 
 [project.optional-dependencies]

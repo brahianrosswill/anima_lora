@@ -180,6 +180,8 @@ This command automatically downloads the following three items and organizes the
 
 The same command also pulls **SAM3** and **MIT**, which are only used by the optional masked-loss step (see §8.2). Masking itself is opt-in, and even within it either segmenter can be toggled off — feel free to ignore these checkpoints if you're not training with masked loss.
 
+> **SAM3 is a gated model.** Its weights live in a gated Hugging Face repository, so before the download can succeed you must visit <https://huggingface.co/facebook/sam3>, click **Request access**, and **wait for approval** (granted by the repo owner — this can take anywhere from minutes to a few days). Until access is granted, the SAM3 download will fail with a 403/gated error. The three core models above (DiT, text encoder, VAE) are *not* gated, and `make download-models` continues past a blocked SAM3 — so a pending SAM3 request won't stop you from training without masked loss. Once approved, run `make download-sam3` to fetch it.
+
 > **If the download is interrupted**: you can re-download individual components with targets like `make download-anima`, `make download-sam3`, or `make download-mit`.
 
 ---

@@ -1210,6 +1210,44 @@ class BaseDataset(torch.utils.data.Dataset):
             )
         return feats
 
+    def _load_cond_latent(
+        self, subset, image_info, flipped: bool
+    ) -> Optional[torch.Tensor]:
+        """Load the *condition* latent for cond≠target tasks (e.g. colorization).
+
+        Resolves a stem-matched ``{stem}_{WxH}_anima.npz`` under
+        ``subset.cond_cache_dir`` (nested under the source subpath, mirroring the
+        target cache). Returns the bucket-matched tensor, flip-aligned to the
+        target, or ``None`` when the subset has no ``cond_cache_dir`` configured
+        (→ caller falls back to the ref==target latent)."""
+        cond_dir = getattr(subset, "cond_cache_dir", None)
+        if not cond_dir:
+            return None
+        npz_path = self.latents_caching_strategy.get_latents_npz_path(
+            image_info.absolute_path,
+            image_info.bucket_reso,
+            cache_dir=str(cond_dir),
+            image_dir=subset.image_dir,
+        )
+        if not os.path.exists(npz_path):
+            raise FileNotFoundError(
+                f"Condition latent cache missing for {image_info.absolute_path!r}: "
+                f"{npz_path}. Run the cond prep step first "
+                f"(e.g. `make exp-easycontrol-preprocess EASYADAPTER=colorize`)."
+            )
+        cond, _, _, cond_flipped, _ = self.latents_caching_strategy.load_latents_from_disk(
+            npz_path, image_info.bucket_reso
+        )
+        if flipped:
+            if cond_flipped is None:
+                raise ValueError(
+                    f"flip_aug is on but the cond cache {npz_path} has no flipped "
+                    f"latent. Set flip_aug=false for cond≠target subsets (latents "
+                    f"can't be flipped post-hoc) or regenerate the cond cache."
+                )
+            cond = cond_flipped
+        return torch.FloatTensor(cond)
+
     def setup_contrastive_negatives(
         self,
         index_path: str,
@@ -1402,6 +1440,9 @@ class BaseDataset(torch.utils.data.Dataset):
         captions = []
         input_ids_list = []
         latents_list = []
+        # Optional condition latent (cond≠target tasks, e.g. colorization);
+        # stays all-None when no subset sets cond_cache_dir.
+        cond_latents_list: List[Optional[torch.Tensor]] = []
         alpha_mask_list = []
         images = []
         original_sizes_hw = []
@@ -1534,6 +1575,7 @@ class BaseDataset(torch.utils.data.Dataset):
 
             images.append(image)
             latents_list.append(latents)
+            cond_latents_list.append(self._load_cond_latent(subset, image_info, flipped))
             alpha_mask_list.append(alpha_mask)
 
             target_size = (
@@ -1807,6 +1849,14 @@ class BaseDataset(torch.utils.data.Dataset):
 
         example["latents"] = (
             torch.stack(latents_list) if latents_list[0] is not None else None
+        )
+        # Condition latent for cond≠target tasks (colorization). All samples in a
+        # bucket share the resolution, so the cond latents share shape with the
+        # targets and a plain stack works. None when no cond_cache_dir is set.
+        example["cond_latents"] = (
+            torch.stack(cond_latents_list)
+            if cond_latents_list and cond_latents_list[0] is not None
+            else None
         )
         example["captions"] = captions
 
