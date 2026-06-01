@@ -51,7 +51,9 @@ def _build_cns_recolorer(args):
         return None
     from library.inference.corrections.cns import CNSRecolorer
 
-    recolorer = CNSRecolorer.from_path(spec, strength=getattr(args, "cns_strength", 1.0))
+    recolorer = CNSRecolorer.from_path(
+        spec, strength=getattr(args, "cns_strength", 1.0)
+    )
     logger.info("CNS noise recoloring enabled (strength=%.2f).", recolorer.strength)
     return recolorer
 
@@ -170,7 +172,14 @@ class GenerationSettings:
 
 
 def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
-    device = torch.device(args.device)
+    # ``inference.parse_args`` defaults ``--device`` to None and resolves it in
+    # main()'s body, but programmatic callers (GenerationRequest.to_args(), bench
+    # probes) skip that block. Resolve the cuda-else-cpu default here so the one
+    # chokepoint every caller funnels through can't see ``args.device is None``.
+    dev = getattr(args, "device", None) or (
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    device = torch.device(dev)
     logger.info(f"Using device: {device}, DiT weight precision: bfloat16")
     return GenerationSettings(device=device)
 
