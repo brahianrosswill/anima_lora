@@ -123,12 +123,23 @@ def render_pipeline(img_rgb, res: s1.Stage1Result, run_dir, gt_grid=None):
     ax[4].set_title(f"DBSCAN regions ({n_reg}){qtxt}", fontsize=9)
     ax[4].axis("off")
 
-    # Final writing mask R (upsampled region) over the image
+    # Final writing mask R (grown extent) over the image; seed (peak region)
+    # outlined inside it when a grow step expanded it.
     ax[5].imshow(img_rgb, extent=(0, W, H, 0))
-    ax[5].imshow(res.region_mask.astype(float), extent=(0, W, H, 0), cmap="spring",
-                 alpha=0.5, interpolation="nearest")
-    ax[5].set_title(f"writing mask R ({res.latent_mask.shape[0]}x{res.latent_mask.shape[1]} latent)",
-                    fontsize=9)
+    ax[5].imshow(res.grown_mask.astype(float), extent=(0, W, H, 0), cmap="spring",
+                 alpha=0.45, interpolation="nearest")
+    grow_note = ""
+    if not np.array_equal(res.grown_mask, res.region_mask):
+        seed_show = np.where(res.region_mask, 1.0, np.nan)
+        ax[5].imshow(seed_show, extent=(0, W, H, 0), cmap="cool", alpha=0.85,
+                     interpolation="nearest")
+        pr = res.params
+        grow_note = (f"\nseed {int(res.region_mask.sum())}p → grown "
+                     f"{int(res.grown_mask.sum())}p "
+                     f"(dil={pr['grow_dilate']} bbox={pr['grow_bbox']} "
+                     f"minf={pr['grow_min_frac']:g})")
+    ax[5].set_title(f"writing mask R ({res.latent_mask.shape[0]}x"
+                    f"{res.latent_mask.shape[1]} latent){grow_note}", fontsize=9)
     ax[5].axis("off")
     if gt_grid is not None:
         _draw_grid_box(ax[5], gt_grid, W, H, color="lime")
@@ -345,10 +356,32 @@ def main():
                    help="ref_mode=concentration: keep top (1-q) peakiest maps for Y.")
     p.add_argument("--top_k", type=int, default=24)
     p.add_argument("--nbhd", type=int, default=3)
+    p.add_argument("--thresh_mode", default="otsu",
+                   choices=["otsu", "quantile", "peak_rel"],
+                   help="binarization: otsu (contrast-sensitive); quantile/peak_rel "
+                        "(contrast-invariant, pair with --region_select peak for "
+                        "un-rendered text).")
+    p.add_argument("--thr_q", type=float, default=0.85,
+                   help="thresh_mode=quantile: keep the top (1-thr_q) patches.")
+    p.add_argument("--thr_rel", type=float, default=0.55,
+                   help="thresh_mode=peak_rel: keep patches >= thr_rel * peak.")
     p.add_argument("--dbscan_eps", type=float, default=1.5)
     p.add_argument("--dbscan_min_samples", type=int, default=4)
     p.add_argument("--tau_q", type=float, default=0.8)
-    p.add_argument("--region_select", default="mass", choices=["q", "qmass", "mass"])
+    p.add_argument("--region_select", default="mass",
+                   choices=["q", "qmass", "mass", "peak", "centroid"],
+                   help="centroid = region at the mass-weighted attention centroid "
+                        "(robust to sink peaks on soft maps); peak = region holding "
+                        "the global argmax; mass = largest warm blob.")
+    # Grow the placed-but-tight seed to a Stage-2 injection extent (no-op by default).
+    p.add_argument("--grow_dilate", type=int, default=0,
+                   help="dilate the selected region by N patches (isotropic).")
+    p.add_argument("--grow_bbox", action="store_true",
+                   help="rectangularize the grown region to its bounding box.")
+    p.add_argument("--grow_min_frac", type=float, default=0.0,
+                   help="coverage floor (frac of patch grid); dilate until met.")
+    p.add_argument("--grow_max_dilate", type=int, default=8,
+                   help="cap on extra dilation iters used to reach grow_min_frac.")
     p.add_argument("--gt_box", type=float, nargs=4, default=None,
                    metavar=("X0", "Y0", "X1", "Y1"),
                    help="Optional pixel-space writing box for IoU validation.")
@@ -377,13 +410,19 @@ def main():
         anchor_mode=a.anchor_mode, anchor_combine=a.anchor_combine,
         select_mode=a.select_mode, ref_mode=a.ref_mode, ref_reduce=a.ref_reduce,
         ref_conc_q=a.ref_conc_q,
-        top_k=a.top_k, nbhd=a.nbhd, dbscan_eps=a.dbscan_eps,
+        top_k=a.top_k, nbhd=a.nbhd,
+        thresh_mode=a.thresh_mode, thr_q=a.thr_q, thr_rel=a.thr_rel,
+        dbscan_eps=a.dbscan_eps,
         dbscan_min_samples=a.dbscan_min_samples, tau_q=a.tau_q,
         region_select=a.region_select,
+        grow_dilate=a.grow_dilate, grow_bbox=a.grow_bbox,
+        grow_min_frac=a.grow_min_frac, grow_max_dilate=a.grow_max_dilate,
     )
 
-    # Unsupervised quality metrics: attention lift inside R vs outside.
-    rm = res.region_mask
+    # Unsupervised quality metrics: attention lift inside R vs outside. Measured on
+    # the grown mask (what Stage-2 actually injects into) — growing into cooler
+    # margin lowers lift, which is the placement/extent tradeoff made visible.
+    rm = res.grown_mask
     inside = float(res.aggregate[rm].mean()) if rm.any() else 0.0
     outside = float(res.aggregate[~rm].mean()) if (~rm).any() else 0.0
     lift = inside / (outside + 1e-9)
@@ -394,7 +433,8 @@ def main():
         gt_grid = s1.box_to_grid_mask(a.gt_box, hp, wp, W, H)
         iou_metrics = {
             "gt_box": a.gt_box,
-            "iou_region_vs_gt": s1.hard_iou(res.region_mask, gt_grid),
+            "iou_region_vs_gt": s1.hard_iou(res.grown_mask, gt_grid),
+            "iou_seed_vs_gt": s1.hard_iou(res.region_mask, gt_grid),
             "iou_otsu_vs_gt": s1.hard_iou(res.binary, gt_grid),
         }
         print(f"[stage1] IoU(region,gt)={iou_metrics['iou_region_vs_gt']:.3f}  "
@@ -411,6 +451,7 @@ def main():
         denoised=res.denoised.astype(np.float32),
         binary=res.binary.astype(np.uint8),
         region_mask=res.region_mask.astype(np.uint8),
+        grown_mask=res.grown_mask.astype(np.uint8),
         latent_mask=res.latent_mask,
         label_map=res.label_map.astype(np.int16),
         reference=res.reference.astype(np.float32),
@@ -437,6 +478,7 @@ def main():
         "selected_region_idx": res.selected_idx,
         "region_stats": res.region_stats,
         "region_mask_patches": int(res.region_mask.sum()),
+        "grown_mask_patches": int(res.grown_mask.sum()),
         "latent_mask_frac": float(res.latent_mask.mean()),
         "otsu_thr": res.otsu_thr,
         "agg_lift_in_vs_out": lift,

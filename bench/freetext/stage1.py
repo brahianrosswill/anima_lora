@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.ndimage import uniform_filter, zoom
+from scipy.ndimage import binary_dilation, uniform_filter, zoom
 from sklearn.cluster import DBSCAN
 
 
@@ -249,12 +249,19 @@ def select_region(
 
     mode: ``q``     — Eq-5 confidence q_i (paper-literal: fraction above τ);
           ``qmass`` — q_i * region size (guards against a 1-patch q=1 winner);
-          ``mass``  — mean(M)·size = total attention mass in the region.
+          ``mass``  — mean(M)·size = total attention mass in the region;
+          ``peak``  — the region *containing the global argmax* of ``M`` (the
+                      most-confident attention point), mass tie-break.
 
-    On Anima ``mass`` is the default: the writing region is a *broad* warm band
-    (text spread across a sign), whereas the sharper-but-smaller peaks the
-    Eq-5 q-score rewards are face / ViT-border attention sinks. Ranking by total
-    region mass picks the sign; q / qmass pick the face. See README.
+    ``mass`` ranks by total region mass — fine when the threshold cleanly
+    isolates the writing band, but it reduces to "largest warm blob" and
+    over-grabs when the map is *soft / low-contrast* (e.g. text the base can't
+    render crisply): a low threshold merges sign+body into one giant component,
+    which then wins on size. ``peak`` is robust to that: it anchors on the single
+    most-confident patch (which the n=3 validation shows stays on the sign even
+    for un-rendered Korean) and returns whatever connected region holds it,
+    regardless of a larger neighbour. Falls back to ``mass`` only if the peak
+    landed in DBSCAN noise. See README / stage1_progress.md.
     Returns ``best_idx = -1`` when there are no candidate regions.
     """
     if not regions:
@@ -262,6 +269,41 @@ def select_region(
     scores, tau = region_scores(M, regions, tau_q)
     sizes = [int(r.sum()) for r in regions]
     means = [float(M[r].mean()) for r in regions]
+    stats = {"scores": scores, "sizes": sizes, "means": means, "tau": tau}
+    if mode == "peak":
+        py, px = np.unravel_index(int(np.argmax(M)), M.shape)
+        stats["peak_yx"] = [int(py), int(px)]
+        holding = [i for i, r in enumerate(regions) if bool(r[py, px])]
+        if holding:  # regions are disjoint, so at most one
+            stats["peak_in_region"] = True
+            best = max(holding, key=lambda i: means[i] * sizes[i])
+            return best, stats
+        stats["peak_in_region"] = False  # peak fell in DBSCAN noise -> mass
+        key = [m * s for m, s in zip(means, sizes)]
+        return int(np.argmax(key)), stats
+    if mode == "centroid":
+        # Mass-weighted centroid of M -> region containing it (nearest region if
+        # it lands in DBSCAN noise). Robust where ``peak`` is not: a sparse
+        # edge/corner ViT sink can be the single hottest patch on a soft
+        # (un-rendered) writing region, but it barely moves the centroid, which
+        # tracks where the *bulk* of attention mass sits — the sign. See
+        # stage1_progress.md (Validation).
+        ys_g, xs_g = np.mgrid[0 : M.shape[0], 0 : M.shape[1]]
+        w = M / (float(M.sum()) + 1e-12)
+        cy, cx = float((ys_g * w).sum()), float((xs_g * w).sum())
+        stats["centroid_yx"] = [round(cy, 1), round(cx, 1)]
+        ci = min(M.shape[0] - 1, max(0, int(round(cy))))
+        cj = min(M.shape[1] - 1, max(0, int(round(cx))))
+        holding = [i for i, r in enumerate(regions) if bool(r[ci, cj])]
+        if holding:
+            stats["centroid_in_region"] = True
+            return max(holding, key=lambda i: means[i] * sizes[i]), stats
+        stats["centroid_in_region"] = False
+        rc = [(float(np.nonzero(r)[0].mean()), float(np.nonzero(r)[1].mean()))
+              for r in regions]
+        best = int(min(range(len(regions)),
+                       key=lambda i: (rc[i][0] - cy) ** 2 + (rc[i][1] - cx) ** 2))
+        return best, stats
     if mode == "q":
         key = scores
     elif mode == "qmass":
@@ -271,7 +313,59 @@ def select_region(
     else:
         raise ValueError(f"unknown region select mode {mode!r}")
     best = int(np.argmax(key))
-    return best, {"scores": scores, "sizes": sizes, "means": means, "tau": tau}
+    return best, stats
+
+
+def _bbox_fill(m: np.ndarray) -> np.ndarray:
+    """Fill the axis-aligned bounding box of a boolean mask (rectangular band)."""
+    m = np.asarray(m, dtype=bool)
+    ys, xs = np.nonzero(m)
+    if len(xs) == 0:
+        return m
+    out = np.zeros_like(m)
+    out[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1] = True
+    return out
+
+
+def grow_region(
+    region: np.ndarray,
+    *,
+    dilate: int = 0,
+    bbox: bool = False,
+    min_frac: float = 0.0,
+    max_dilate: int = 8,
+) -> np.ndarray:
+    """Grow a (correctly-placed but tight) peak-seeded region to a Stage-2
+    injection extent. All knobs default to no-op (returns the seed unchanged).
+
+    The peak-seeded extractor nails *placement* but the region can be tiny
+    (un-rendered text → soft map → ~0.2% of latent), which is too small for SGMI
+    to splice a glyph string into. This grows the seed without moving it:
+
+      dilate:   isotropic binary-dilation by this many patches.
+      bbox:     replace the mask with its bounding-box rectangle (text occupies a
+                rectangular band; re-applied after any min_frac dilation).
+      min_frac: coverage floor (fraction of the patch grid); keep dilating one
+                patch at a time (up to ``max_dilate`` extra iters) until met —
+                rescues the tiny soft-attention cases.
+
+    Stage-2 will additionally shape this toward the glyph-raster bbox/aspect; that
+    needs the glyph and lives there.
+    """
+    m = np.asarray(region, dtype=bool).copy()
+    if not m.any():
+        return m
+    if dilate > 0:
+        m = binary_dilation(m, iterations=dilate)
+    if bbox:
+        m = _bbox_fill(m)
+    extra = 0
+    while min_frac > 0.0 and m.mean() < min_frac and extra < max_dilate:
+        m = binary_dilation(m, iterations=1)
+        if bbox:
+            m = _bbox_fill(m)
+        extra += 1
+    return m
 
 
 def to_latent_mask(region: np.ndarray, h_lat: int, w_lat: int) -> np.ndarray:
@@ -318,7 +412,8 @@ class Stage1Result:
     regions: list[np.ndarray]
     selected_idx: int
     region_stats: dict
-    region_mask: np.ndarray  # best region at patch grid (hp, wp) bool
+    region_mask: np.ndarray  # best region (seed) at patch grid (hp, wp) bool
+    grown_mask: np.ndarray  # region after grow_region (== region_mask if no grow)
     latent_mask: np.ndarray  # R at latent resolution (h_lat, w_lat) uint8   (Eq 6)
     selected_tl: list  # (step_idx, block) pairs kept by the §3.1.2 selection
     scores: np.ndarray  # selection score per candidate map (soft-IoU or concentration)
@@ -343,11 +438,18 @@ def localize(
     ref_conc_q: float = 0.75,
     top_k: int = 24,
     nbhd: int = 3,
+    thresh_mode: str = "otsu",
     otsu_bins: int = 64,
+    thr_q: float = 0.85,
+    thr_rel: float = 0.55,
     dbscan_eps: float = 1.5,
     dbscan_min_samples: int = 4,
     tau_q: float = 0.8,
     region_select: str = "mass",
+    grow_dilate: int = 0,
+    grow_bbox: bool = False,
+    grow_min_frac: float = 0.0,
+    grow_max_dilate: int = 8,
 ) -> Stage1Result:
     """Run the full Stage-1 pipeline.
 
@@ -410,12 +512,31 @@ def localize(
     # 3.1.3 topology-aware region selection (Eq 5-6)
     denoised = neighborhood_aggregate(M, size=nbhd)
     denoised = normalize01(denoised)
-    thr = otsu_threshold(denoised, bins=otsu_bins)
+    # Binarize. Otsu (default) maximizes inter-class variance but is
+    # contrast-sensitive: on a soft/low-contrast map it picks a low threshold and
+    # merges the writing band into its surroundings. ``quantile`` (keep the top
+    # 1-thr_q patches) and ``peak_rel`` (keep patches >= thr_rel * peak) are
+    # contrast-invariant — pair either with region_select="peak" for un-rendered
+    # text. See stage1_progress.md (Validation).
+    if thresh_mode == "otsu":
+        thr = otsu_threshold(denoised, bins=otsu_bins)
+    elif thresh_mode == "quantile":
+        thr = float(np.quantile(denoised, thr_q))
+    elif thresh_mode == "peak_rel":
+        thr = thr_rel * float(denoised.max())
+    else:
+        raise ValueError(f"unknown thresh_mode {thresh_mode!r}")
     B = denoised >= thr
     regions, label_map = dbscan_regions(B, eps=dbscan_eps, min_samples=dbscan_min_samples)
     best, stats = select_region(denoised, regions, tau_q=tau_q, mode=region_select)
     region_mask = regions[best] if best >= 0 else np.zeros((hp, wp), dtype=bool)
-    R = to_latent_mask(region_mask, h_lat, w_lat)
+    # Grow the (placed-but-tight) seed to a Stage-2 injection extent (no-op by
+    # default). R is built from the grown mask.
+    grown_mask = grow_region(
+        region_mask, dilate=grow_dilate, bbox=grow_bbox,
+        min_frac=grow_min_frac, max_dilate=grow_max_dilate,
+    )
+    R = to_latent_mask(grown_mask, h_lat, w_lat)
 
     return Stage1Result(
         aggregate=M,
@@ -427,6 +548,7 @@ def localize(
         selected_idx=best,
         region_stats=stats,
         region_mask=region_mask,
+        grown_mask=grown_mask,
         latent_mask=R,
         selected_tl=selected_tl,
         scores=scores,
@@ -442,10 +564,17 @@ def localize(
             ref_conc_q=ref_conc_q,
             top_k=top_k,
             nbhd=nbhd,
+            thresh_mode=thresh_mode,
             otsu_bins=otsu_bins,
+            thr_q=thr_q,
+            thr_rel=thr_rel,
             dbscan_eps=dbscan_eps,
             dbscan_min_samples=dbscan_min_samples,
             tau_q=tau_q,
             region_select=region_select,
+            grow_dilate=grow_dilate,
+            grow_bbox=grow_bbox,
+            grow_min_frac=grow_min_frac,
+            grow_max_dilate=grow_max_dilate,
         ),
     )
