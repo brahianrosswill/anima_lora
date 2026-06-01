@@ -14,15 +14,17 @@ Three-stage mix (chosen after A/B'ing alternatives — see ``README.md`` Phase B
    manga-flattened* grayscale — white skin/background, simplified tonal regions —
    without redrawing (txt2img redrew the image + hallucinated backgrounds; ScreenVAE
    blurred fine detail).
-2. **Halftone the sd tone.** apply an algorithmic clustered-dot screen
-   (:func:`mangafy._screentone`) to the sd tone. Because the sd stage already
-   flattened the tone, the dots land *selectively* — only in genuinely shaded
-   regions, not carpeting bright skin the way raw-luminance cv2 mangafy did.
+2. **Screen the sd tone.** apply an algorithmic screen (:func:`mangafy._render_tone`)
+   to the sd tone — the toned value range is split into a few luminance bands, each
+   screened with its own pattern (dot / parallel-line / cross-hatch), so the texture
+   changes where the value (명암) changes instead of one flat screen. Because the sd
+   stage already flattened the tone, ink lands *selectively* — only in genuinely
+   shaded regions, not carpeting bright skin the way raw-luminance cv2 mangafy did.
 3. **Composite the ink line.** overlay the learned ctrlnet lineart
    (``LineartDetector``, fine) as crisp black strokes.
 
 Net: aligned to the color target (sd), clean manga-like regions (sd flattening),
-selective real screentone dots (halftone over the flattened tone), crisp ink lines.
+selective real screentone (per-value dot/line/cross screen over the flattened tone), crisp ink lines.
 
 Public contract mirrors :func:`mangafy.mangafy_array` exactly — color RGB uint8
 ``(H, W, 3)`` → grayscale RGB uint8 ``(H, W, 3)`` of the **same** size — so it's a
@@ -42,7 +44,7 @@ import torch
 from PIL import Image
 
 from library.env import resolve_under_home
-from mangafy import _screentone  # sibling: algorithmic clustered-dot halftone
+from mangafy import _render_tone  # sibling: region-wise algorithmic screentone
 
 _MANGATONE = "models/sketch2manga/mangatone.ckpt"
 _VAE = "models/sketch2manga/vae/mangatone_default.ckpt"
@@ -131,7 +133,9 @@ def _line01(line_pil: Image.Image, size: tuple[int, int]) -> np.ndarray:
 
     Normalizes polarity (some detectors emit white-on-black) so the composite step
     can ``min`` it against the tone to drop ink lines in."""
-    a = np.asarray(line_pil.convert("L").resize(size, Image.Resampling.LANCZOS), np.float32)
+    a = np.asarray(
+        line_pil.convert("L").resize(size, Image.Resampling.LANCZOS), np.float32
+    )
     a /= 255.0
     if a.mean() < 0.5:  # mostly black → invert to white-bg / black-line
         a = 1.0 - a
@@ -156,8 +160,8 @@ def screentone_array(
     Same size in/out (stages 1–2 run at ``long_side`` and are resized back), and a
     3-channel grayscale result for the RGB-only Qwen VAE — drop-in for
     :func:`mangafy.mangafy_array`. ``strength`` is the img2img denoise; ``seed``
-    (e.g. a stable hash of the stem) makes the result reproducible and jitters the
-    halftone angle so the model keys on structure, not one fixed dot operator."""
+    (e.g. a stable hash of the stem) makes the result reproducible and drives the
+    per-value-band screen split so the model keys on structure, not one fixed dot operator."""
     if img_rgb.ndim == 2:
         img_rgb = np.stack([img_rgb] * 3, axis=-1)
     img_rgb = img_rgb[:, :, :3]
@@ -193,22 +197,23 @@ def screentone_array(
         generator=generator,
     ).images[0]
 
-    # Stage 2 — halftone the (flattened) sd tone. Per-stem angle jitter for variety.
+    # Stage 2 — screen the (flattened) sd tone. Per-stem region split + pattern/angle
+    # jitter so the cond isn't one flat screen (several dot/line/cross zones a page).
     tone_gray = np.asarray(sd_tone.convert("L"), np.float32) / 255.0
-    angle = float(np.random.default_rng(seed).uniform(0.0, 90.0))
+    rng = np.random.default_rng(seed)
     short = float(min(h, w))
     period = tone_period * max(0.5, short / 900.0)
-    dots = _screentone(
+    tone = _render_tone(
         tone_gray,
+        rng=rng,
         period=period,
-        angle=angle,
         white_cut=_TONE_WHITE_CUT,
         black_cut=_TONE_BLACK_CUT,
     )
 
-    # Stage 3 — composite the ink line (ink wherever dots OR line are dark).
+    # Stage 3 — composite the ink line (ink wherever tone OR line are dark).
     line01 = _line01(line_pil, (w, h))
-    manga = np.minimum(dots, line01)
+    manga = np.minimum(tone, line01)
 
     out = Image.fromarray((np.clip(manga, 0.0, 1.0) * 255.0).astype(np.uint8), "L")
     out = out.convert("RGB").resize((w0, h0), Image.Resampling.LANCZOS)

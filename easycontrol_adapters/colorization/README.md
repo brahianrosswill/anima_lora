@@ -14,7 +14,10 @@ desaturating. We invert the direction:
 - **target** = the color illustrations we already have (`post_image_dataset/lora/`
   latents + captions — reused as-is, nothing re-cached).
 - **condition** = a synthetic *mangafied* version of the same image (XDoG lineart
-  + algorithmic screentone), cached to a parallel `cond_cache_dir`.
+  + algorithmic screentone — the toned value range is split into a few luminance
+  bands and each gets its own *pattern*: clustered dots, parallel-line/hatch tone,
+  or cross-hatch, so darks/mids/lights carry distinct tones the way a real page picks
+  tone by value), cached to `cond_cache_dir`.
 
 Synthesizing a manga-like condition matches the inference distribution (real
 screentoned pages) far better than naive grayscale. EasyControl's extended
@@ -45,7 +48,7 @@ optional prompt when it matters. This is expected, not a bug.
 
 | File | Role |
 |------|------|
-| `mangafy.py` | color RGB → B&W manga (XDoG lineart + screentone halftone), per-stem jitter |
+| `mangafy.py` | color RGB → B&W manga (XDoG lineart + dot/line/cross screentone), per-stem jitter |
 | `prep.py` | mangafy `resized/` images → staging dir → VAE-encode into `colorize_cond/` |
 
 Configs: `configs/datasets/colorize.toml`, `configs/methods/colorize.toml`.
