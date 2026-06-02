@@ -28,7 +28,7 @@ network_args = [
     "apply_ffn_lora=1",
 ]
 
-output_name = "anima_colorize_sigmoid"
+output_name = "anima_colorize_full"
 sigmoid_bias=0
 logging_dir = "output/logs"
 log_with = "tensorboard"

@@ -1146,8 +1146,16 @@ def _make_patched_block_forward(
     cond_lora_ffn1 = ec_net.cond_lora_ffn1[block_idx] if ec_net.apply_ffn_lora else None
     cond_lora_ffn2 = ec_net.cond_lora_ffn2[block_idx] if ec_net.apply_ffn_lora else None
 
-    # Lazy import to avoid a circular at module load.
+    # The last block's cond_x_out is discarded (no block consumes it — see the
+    # next-block write below), so its cond self-attn output, output proj, and
+    # MLP are dead compute: cond_lora_o / cond_lora_ffn on the final block never
+    # reach the loss. Only its cond K/V (fed to the target's extended attention)
+    # are live. Skip the discarded cond-stream evolution on the last block.
+    is_last = block_idx == ec_net.num_blocks - 1
+
+    # Lazy imports to avoid a circular at module load.
     from library.anima.models import apply_rotary_pos_emb_qk
+    from networks import attention_dispatch as anima_attention
 
     def _two_stream_inner(
         x_B_T_H_W_D,
@@ -1270,29 +1278,37 @@ def _make_patched_block_forward(
             attn_params=attn_params,
         )
 
-        # Cond's own self-attention — small (S_c × S_c), plain torch SDPA.
-        # cond_q/k/v are BSHD: (B, S_c, n_h, d_h). SDPA expects (B, n_h, S, d_h).
-        cq = cond_q.transpose(1, 2)
-        ck = cond_k.transpose(1, 2)
-        cv = cond_v.transpose(1, 2)
-        cond_attn_out = F.scaled_dot_product_attention(cq, ck, cv)
-        # Back to (B, S_c, n_h*d_h) for output_proj.
-        B_c = cond_x_B_S_D.shape[0]
-        S_c = cond_x_B_S_D.shape[1]
-        cond_attn_out = cond_attn_out.transpose(1, 2).reshape(B_c, S_c, -1)
-
-        # Output projections + LoRA on cond + gated residuals.
-        target_attn_proj = attn.output_proj(target_attn_out)
-        cond_attn_proj = attn.output_proj(cond_attn_out) + eff_scale * cond_lora_o(
-            cond_attn_out
-        )
-        # Output dropout (Anima has nn.Identity by default; harmless when on).
-        target_attn_proj = attn.output_dropout(target_attn_proj)
-        cond_attn_proj = attn.output_dropout(cond_attn_proj)
-
+        # Target output projection + gated residual (always runs).
+        target_attn_proj = attn.output_dropout(attn.output_proj(target_attn_out))
         target_attn_5d = target_attn_proj.unflatten(1, (T_dim, H_dim, W_dim))
         x_B_T_H_W_D = x_B_T_H_W_D + ga_self_5 * target_attn_5d
-        cond_x_B_S_D = cond_x_B_S_D + cond_gate_self_attn * cond_attn_proj
+
+        # Cond stream's own self-attention + output proj + residual. Only feeds
+        # the next block, so it's dead on the last block (cond K/V already
+        # consumed by the target extended attention above).
+        if not is_last:
+            # Route through the same dispatched backend (flash when available)
+            # and softmax_scale as the target, instead of a bare SDPA. cond_q/k/v
+            # are already BLHD (B, S_c, n_h, d_h) — dispatch_attention's expected
+            # layout — and it returns [B, S_c, n_h*d_h].
+            #
+            # cond_q/k/v can be fp32 here: the trainable cond LoRA delta (fp32)
+            # promotes cond_qkv to fp32 and the q/k/v norms keep it there. Flash
+            # only accepts fp16/bf16, so cast all three to the target attention's
+            # compute dtype (bf16 under autocast; no-op in pure-fp32 training).
+            # Mirrors _extended_target_attention, which casts cond_k/cond_v to
+            # target_k.dtype before its own flash call.
+            cond_q = cond_q.to(target_v.dtype)
+            cond_k = cond_k.to(target_v.dtype)
+            cond_v = cond_v.to(target_v.dtype)
+            cond_attn_out = anima_attention.dispatch_attention(
+                [cond_q, cond_k, cond_v], attn_params=attn_params
+            )
+            cond_attn_proj = attn.output_dropout(
+                attn.output_proj(cond_attn_out)
+                + eff_scale * cond_lora_o(cond_attn_out)
+            )
+            cond_x_B_S_D = cond_x_B_S_D + cond_gate_self_attn * cond_attn_proj
 
         # ============ 2. CROSS-ATTENTION (target only) ============
         target_cross_normed = (
@@ -1315,18 +1331,21 @@ def _make_patched_block_forward(
         x_B_T_H_W_D = x_B_T_H_W_D + ga_mlp_5 * target_mlp_out
 
         # Cond MLP — re-implement layer1/act/layer2 inline so we can splice
-        # FFN LoRA at layer1 and layer2 outputs (matches Phase 1.5).
-        cond_mlp_normed = (
-            block.layer_norm_mlp(cond_x_B_S_D) * (1 + cond_scale_mlp) + cond_shift_mlp
-        )
-        cond_mlp_h = block.mlp.layer1(cond_mlp_normed)
-        if cond_lora_ffn1 is not None:
-            cond_mlp_h = cond_mlp_h + eff_scale * cond_lora_ffn1(cond_mlp_normed)
-        cond_mlp_h = block.mlp.activation(cond_mlp_h)
-        cond_mlp_out = block.mlp.layer2(cond_mlp_h)
-        if cond_lora_ffn2 is not None:
-            cond_mlp_out = cond_mlp_out + eff_scale * cond_lora_ffn2(cond_mlp_h)
-        cond_x_B_S_D = cond_x_B_S_D + cond_gate_mlp * cond_mlp_out
+        # FFN LoRA at layer1 and layer2 outputs (matches Phase 1.5). Discarded
+        # on the last block (cond_x_out unused), so skip the FFN entirely there.
+        if not is_last:
+            cond_mlp_normed = (
+                block.layer_norm_mlp(cond_x_B_S_D) * (1 + cond_scale_mlp)
+                + cond_shift_mlp
+            )
+            cond_mlp_h = block.mlp.layer1(cond_mlp_normed)
+            if cond_lora_ffn1 is not None:
+                cond_mlp_h = cond_mlp_h + eff_scale * cond_lora_ffn1(cond_mlp_normed)
+            cond_mlp_h = block.mlp.activation(cond_mlp_h)
+            cond_mlp_out = block.mlp.layer2(cond_mlp_h)
+            if cond_lora_ffn2 is not None:
+                cond_mlp_out = cond_mlp_out + eff_scale * cond_lora_ffn2(cond_mlp_h)
+            cond_x_B_S_D = cond_x_B_S_D + cond_gate_mlp * cond_mlp_out
 
         return x_B_T_H_W_D, cond_x_B_S_D
 
