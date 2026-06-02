@@ -40,7 +40,17 @@ _XDOG_K = 1.6  # second-Gaussian scale ratio
 _XDOG_SHARP = 18.0  # p — DoG sharpening; higher = thinner/harder lines
 _XDOG_EPS = 0.10  # soft-threshold midpoint
 _XDOG_PHI = 12.0  # soft-threshold slope
-_TONE_PERIOD = 5.0  # screen period (px) — ~ manga screentone LPI at ~900px
+_TONE_PERIOD = 2.3  # dot screen period (px) — fine manga screentone pitch at ~900px
+_HATCH_PERIOD = 3  # line/cross period (px) — a touch coarser than dots, fine hatch tone
+# The screen is rendered at this supersample factor, hard-thresholded, then resolved by
+# an **area-average** downscale (cv2.INTER_AREA = exact ss×ss box mean, the correct
+# supersample resolve), so fine and rotated screens anti-alias into smooth gray instead
+# of folding into coarse low-frequency moiré (a rotated line/cross at ~3px is near Nyquist
+# on the native grid → beat stripes; resolved at NxN it downsamples cleanly). ss sets the
+# number of gray coverage levels (ss² → here 16), so it's the tone-smoothness knob; area
+# beats Gaussian/Lanczos/soft-threshold resolves, which wash the texture or ring. Output
+# tone is anti-aliased gray in [0,1], not 1-bit — also closer to a real scan.
+_TONE_SS = 4
 _TONE_ANGLE = 45.0  # screen rotation (deg)
 _TONE_WHITE_CUT = 0.90  # luminance ≥ this → pure white (highlights, no tone)
 _TONE_BLACK_CUT = 0.14  # luminance ≤ this → solid black (deep shadow)
@@ -139,6 +149,34 @@ def _luma_band_labels(
     return np.clip(np.digitize(gray, edges), 0, n - 1).astype(np.int32)
 
 
+def _band_plan(
+    rng: np.random.Generator,
+    *,
+    n_bands: int | None,
+    kind: str | None,
+    angle: float | None,
+    period: float,
+    hatch_period: float,
+) -> tuple[int, list[tuple[str, float, float]]]:
+    """Seeded per-band screen plan: ``(n, [(kind, angle_deg, base_period), …])``.
+
+    Consumes ``rng`` in the exact order the rendering loop needs (band count →
+    per-band patterns → per-band angle then period), so a CPU and a GPU renderer
+    fed the same seed pick the *same* structure — only the pixel math differs."""
+    n = max(1, n_bands if n_bands is not None else _pick_band_count(rng))
+    kinds = [kind] * n if kind is not None else _band_kinds(n, rng)
+    plan: list[tuple[str, float, float]] = []
+    for i in range(n):
+        ki = kinds[i]
+        base = period if ki == "dot" else hatch_period
+        ra = angle if angle is not None else float(rng.uniform(0.0, 90.0))
+        # jitter the period per band (only with >1) so the bands differ in scale too;
+        # range kept tight so a band can't balloon back to a coarse screen
+        rp = base if n == 1 else base * float(rng.uniform(0.85, 1.3))
+        plan.append((str(ki), ra, rp))
+    return n, plan
+
+
 def _render_tone(
     gray: np.ndarray,
     *,
@@ -146,11 +184,13 @@ def _render_tone(
     period: float,
     white_cut: float,
     black_cut: float,
+    hatch_period: float | None = None,
+    ss: int = _TONE_SS,
     kind: str | None = None,
     angle: float | None = None,
     n_bands: int | None = None,
 ) -> np.ndarray:
-    """Luminance-band screentone. float32 in {0,1}; ink = 0, paper = 1.
+    """Luminance-band screentone. float32 in [0,1]; ink = 0, paper = 1.
 
     Splits the toned value range into ``n_bands`` luminance bands (random count unless
     pinned) and screens each band with its own pattern (dot/line/cross), angle, and
@@ -160,23 +200,89 @@ def _render_tone(
     pattern only changes *which* texture fills it. Highlights/shadows past the cuts are
     flattened (manga convention).
 
+    Dots use ``period``; line/cross use the coarser ``hatch_period`` (defaults to 2× the
+    dot period) — fine dots + clean coarse hatch, the real-page split. The screen is
+    rendered at ``ss``× resolution, thresholded, then **area-downscaled**, so fine and
+    rotated screens anti-alias into smooth gray rather than aliasing into coarse moiré;
+    the returned tone is therefore continuous gray in [0,1], not 1-bit.
+
     ``kind`` / ``angle`` / ``n_bands`` pin those choices when given (QA / one fixed
     operator); otherwise they're drawn from the seeded ``rng``."""
+    if hatch_period is None:
+        hatch_period = period * 2.0
     h, w = gray.shape
-    n = max(1, n_bands if n_bands is not None else _pick_band_count(rng))
-    labels = _luma_band_labels(gray, black_cut=black_cut, white_cut=white_cut, n=n)
-    kinds = [kind] * n if kind is not None else _band_kinds(n, rng)
-    tone = np.ones_like(gray)  # 1 = paper, 0 = ink
-    for i in range(n):
-        ra = angle if angle is not None else float(rng.uniform(0.0, 90.0))
-        # jitter the period per band (only with >1) so the bands differ in scale too
-        rp = period if n == 1 else period * float(rng.uniform(0.75, 1.5))
-        screen = _screen_field(h, w, period=rp, angle=ra, kind=kinds[i])
+    ss = max(1, int(ss))
+    gs = (
+        cv2.resize(gray, (w * ss, h * ss), interpolation=cv2.INTER_LINEAR)
+        if ss > 1
+        else gray
+    )
+    hs, ws = gs.shape
+    n, plan = _band_plan(
+        rng,
+        n_bands=n_bands,
+        kind=kind,
+        angle=angle,
+        period=period,
+        hatch_period=hatch_period,
+    )
+    labels = _luma_band_labels(gs, black_cut=black_cut, white_cut=white_cut, n=n)
+    tone = np.ones_like(gs)  # 1 = paper, 0 = ink
+    for i, (ki, ra, rp) in enumerate(plan):
+        screen = _screen_field(hs, ws, period=rp * ss, angle=ra, kind=ki)
         sel = labels == i
-        tone[sel] = (gray[sel] >= screen[sel]).astype(np.float32)
-    tone[gray >= white_cut] = 1.0
-    tone[gray <= black_cut] = 0.0
+        tone[sel] = (gs[sel] >= screen[sel]).astype(np.float32)
+    tone[gs >= white_cut] = 1.0
+    tone[gs <= black_cut] = 0.0
+    if ss > 1:  # area-average downscale → anti-aliased gray tone (kills moiré)
+        tone = cv2.resize(tone, (w, h), interpolation=cv2.INTER_AREA)
     return tone
+
+
+def resolve_params(
+    img_rgb: np.ndarray, rng: np.random.Generator, overrides: dict
+) -> dict:
+    """Resolve all seeded/overridable knobs into a flat dict (backend-agnostic).
+
+    Draws the per-image jitter from ``rng`` so any backend (numpy or torch) that
+    is handed the *same* generator picks identical knobs — the GPU port reuses
+    this verbatim and only swaps out the pixel math. Returns the scalars plus the
+    raw ``overrides`` passthrough for ``ss`` / ``tone_kind`` / ``angle`` /
+    ``n_bands`` (consumed later by the band plan)."""
+    # Scale the line/dot size with the image's short side so a fixed period
+    # doesn't turn into mush on small images or vanish on large ones.
+    short = float(min(img_rgb.shape[:2]))
+    scale = max(0.5, short / 900.0)
+    return dict(
+        sigma=overrides.get(
+            "sigma", _XDOG_SIGMA * scale * float(rng.uniform(0.8, 1.25))
+        ),
+        k=overrides.get("k", _XDOG_K),
+        sharp=overrides.get("sharp", _XDOG_SHARP * float(rng.uniform(0.8, 1.2))),
+        eps=overrides.get("eps", _XDOG_EPS),
+        phi=overrides.get("phi", _XDOG_PHI),
+        period=overrides.get(
+            "period", _TONE_PERIOD * scale * float(rng.uniform(0.9, 1.2))
+        ),
+        hatch_period=overrides.get(
+            "hatch_period", _HATCH_PERIOD * scale * float(rng.uniform(0.9, 1.2))
+        ),
+        white_cut=overrides.get("white_cut", _TONE_WHITE_CUT),
+        black_cut=overrides.get("black_cut", _TONE_BLACK_CUT),
+        # jitter luma weights around BT.601 so the cond isn't a single fixed operator
+        luma_weights=overrides.get(
+            "luma_weights",
+            (
+                0.299 * float(rng.uniform(0.85, 1.15)),
+                0.587 * float(rng.uniform(0.9, 1.1)),
+                0.114 * float(rng.uniform(0.7, 1.3)),
+            ),
+        ),
+        ss=int(overrides.get("ss", _TONE_SS)),
+        tone_kind=overrides.get("tone_kind"),
+        angle=overrides.get("angle"),
+        n_bands=overrides.get("n_bands"),
+    )
 
 
 def mangafy_array(
@@ -189,8 +295,9 @@ def mangafy_array(
 
     ``seed`` (e.g. a stable hash of the image stem) drives reproducible per-image
     jitter of the XDoG/screen knobs. Any knob can be pinned via ``overrides``
-    (``sigma``, ``k``, ``sharp``, ``eps``, ``phi``, ``period``, ``angle``,
-    ``white_cut``, ``black_cut``, ``tone_kind``, ``n_bands``, ``luma_weights``).
+    (``sigma``, ``k``, ``sharp``, ``eps``, ``phi``, ``period``, ``hatch_period``,
+    ``ss``, ``angle``, ``white_cut``, ``black_cut``, ``tone_kind``, ``n_bands``,
+    ``luma_weights``).
     Pinning ``tone_kind`` / ``angle`` / ``n_bands`` forces a single fixed screen
     (e.g. ``n_bands=1, tone_kind="line"`` for QA)."""
     if img_rgb.ndim == 2:
@@ -198,43 +305,23 @@ def mangafy_array(
     img_rgb = img_rgb[:, :, :3]
 
     rng = np.random.default_rng(seed)
+    p = resolve_params(img_rgb, rng, overrides)
 
-    # Scale the line/dot size with the image's short side so a fixed period
-    # doesn't turn into mush on small images or vanish on large ones.
-    short = float(min(img_rgb.shape[:2]))
-    scale = max(0.5, short / 900.0)
-
-    sigma = overrides.get("sigma", _XDOG_SIGMA * scale * float(rng.uniform(0.8, 1.25)))
-    k = overrides.get("k", _XDOG_K)
-    sharp = overrides.get("sharp", _XDOG_SHARP * float(rng.uniform(0.8, 1.2)))
-    eps = overrides.get("eps", _XDOG_EPS)
-    phi = overrides.get("phi", _XDOG_PHI)
-    period = overrides.get(
-        "period", _TONE_PERIOD * scale * float(rng.uniform(0.85, 1.3))
+    gray = _luminance(img_rgb, p["luma_weights"])
+    line = _xdog(
+        gray, sigma=p["sigma"], k=p["k"], sharp=p["sharp"], eps=p["eps"], phi=p["phi"]
     )
-    white_cut = overrides.get("white_cut", _TONE_WHITE_CUT)
-    black_cut = overrides.get("black_cut", _TONE_BLACK_CUT)
-    # jitter luma weights around BT.601 so the cond isn't a single fixed operator
-    luma_weights = overrides.get(
-        "luma_weights",
-        (
-            0.299 * float(rng.uniform(0.85, 1.15)),
-            0.587 * float(rng.uniform(0.9, 1.1)),
-            0.114 * float(rng.uniform(0.7, 1.3)),
-        ),
-    )
-
-    gray = _luminance(img_rgb, luma_weights)
-    line = _xdog(gray, sigma=sigma, k=k, sharp=sharp, eps=eps, phi=phi)
     tone = _render_tone(
         gray,
         rng=rng,
-        period=period,
-        white_cut=white_cut,
-        black_cut=black_cut,
-        kind=overrides.get("tone_kind"),
-        angle=overrides.get("angle"),
-        n_bands=overrides.get("n_bands"),
+        period=p["period"],
+        hatch_period=p["hatch_period"],
+        ss=p["ss"],
+        white_cut=p["white_cut"],
+        black_cut=p["black_cut"],
+        kind=p["tone_kind"],
+        angle=p["angle"],
+        n_bands=p["n_bands"],
     )
     # ink wherever either the line or the screen is dark
     manga = np.minimum(line, tone)

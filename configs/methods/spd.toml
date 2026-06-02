@@ -12,26 +12,20 @@
 # shape-agnostic; only the learned behavior is coupled to the schedule below,
 # so it is snapshotted into the safetensors metadata (R2).
 
-output_name = "anima_spd_8k_policy"
+output_name = "anima_spd_16k_scheduled"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 8000
+iterations = 16000
 batch_size = 1
 seed = 42
 # compile_inductor_mode = "reduce-overhead"
 
 [network]
-rank = 96
-alpha = 96
+rank = 64
+alpha = 64
 attn_mode = "flash"
-# SmoothQuant-style per-channel input pre-scaling on the LoRA down projection
-# (vendored stats: networks/calibration/channel_stats.safetensors). 0.0 = off /
-# paper-faithful; 0.5 = sqrt balance; 1.0 = full flatten. inv_scale is baked into
-# the saved weights at write time, so inference needs no extra plumbing. Only ever
-# bench-validated on plain identity-LoRA — treat as experimental on a distill
-# objective and A/B against 0.0. CLI override: --channel_scaling_alpha.
 channel_scaling_alpha = 0.5
 
 # SPD schedule — the segment geometry this LoRA learns and MUST infer with.
@@ -48,25 +42,8 @@ label = "single_0.5_sigma0.5"
 # marginally-uniform *within* each stage (paper's U(0,1)); stage_weights then tilt
 # how much of the gradient budget lands on each stage WITHOUT disturbing in-band σ
 # density. All-ones (or omitted) = exact band-width-proportional baseline.
-#
-# The adapter's value concentrates *after* the σ transition — stage>0 is the
-# full-res, low-σ tail where (a) the off-manifold spectral-expansion handoff lands
-# and (b) Anima synthesises the high-freq detail (structure resolves by σ≈0.45;
-# e_low triples in the σ<0.45 tail). Stage 0 is low-res denoising the frozen base
-# already does well, and its errors get partly re-noised at the handoff — but DON'T
-# zero it: the on-policy stage>0 *entry* is rolled with the adapter on, so an
-# under-supervised stage 0 hands stage 1 a worse state to clean up. Tilt, don't
-# starve. Recommended opt-in tilt to A/B: [0.3, 0.7] (~70% of stage mass post-
-# transition). Shipped default is the identity band-width baseline — the analytic
-# val signal here doesn't track perceptual quality (see
-# memory/project_fm_val_loss_uninformative.md), so judge a tilt by CMMD/eyeball,
-# not val/loss. CLI: --stage_weights 0.3 0.7.
 stage_weights = [0.3, 0.7]
-# Optional R2 robustness: jitter the transition σ by ±this (absolute, uniform)
-# each step so the segment geometry is learned as a band, not a point. 0 = off.
 sigma_jitter = 0.0
-# flow_shift for the on-policy rollout σ schedule — MUST match the deployed SPD
-# sampler (the bench used 1.0). Only read when [onpolicy].enabled. CLI: --flow_shift.
 flow_shift = 3.0
 
 # On-policy (DAgger) stage entry. The analytic target trains each stage>0 entry
@@ -87,7 +64,7 @@ dagger_warmup = 0.25
 ratio = 1.0
 # Euler steps in the no-grad prefix rollout. Fewer than deploy is fine (only a
 # plausible on-policy state is needed) and keeps the extra forwards cheap.
-rollout_steps = 12
+rollout_steps = 18
 
 [optim]
 lr = 1e-5

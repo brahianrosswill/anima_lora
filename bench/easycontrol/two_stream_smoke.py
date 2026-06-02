@@ -66,13 +66,12 @@ def main():
         "--target_h",
         type=int,
         default=64,
-        help="target latent H (in latent-pixels). 64 → 128 patches "
-        "horizontally — well below 4096 static tokens.",
+        help="target latent H (in latent-pixels). Cond and target each run "
+        "at their own native token count (no static padding).",
     )
     p.add_argument("--target_w", type=int, default=64)
     p.add_argument("--cond_h", type=int, default=64)
     p.add_argument("--cond_w", type=int, default=64)
-    p.add_argument("--cond_token_count", type=int, default=1024)
     p.add_argument("--gradient_checkpointing", action="store_true")
     p.add_argument(
         "--no_cond",
@@ -115,7 +114,6 @@ def main():
         b_cond_init="-10.0",
         cond_scale="1.0",
         apply_ffn_lora="1",
-        cond_token_count=str(args.cond_token_count),
     )
     net = net.to(device=device, dtype=dtype)
     net.apply_to(text_encoders=None, unet=dit, apply_unet=True)

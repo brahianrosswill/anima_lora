@@ -53,7 +53,7 @@ _CONTROLNET = "models/sketch2manga/control_v11p_sd15_lineart.pth"
 _PROMPT = "greyscale, monochrome, screentone"
 _NEGATIVE = ""
 _STRENGTH = 0.6  # img2img denoise — lower = more faithful to the source structure
-_TONE_PERIOD = 4.5  # halftone dot period (px) at the SD long-side
+_TONE_PERIOD = 2.6  # fine halftone dot period (px) at the SD long-side
 _TONE_WHITE_CUT = 0.90  # sd-tone ≥ this → stays white (highlights/skin, no dots)
 _TONE_BLACK_CUT = 0.10  # sd-tone ≤ this → solid black
 
@@ -207,6 +207,7 @@ def screentone_array(
         tone_gray,
         rng=rng,
         period=period,
+        hatch_period=period * 1.25,  # line/cross only slightly coarser than dots (fine hatch)
         white_cut=_TONE_WHITE_CUT,
         black_cut=_TONE_BLACK_CUT,
     )

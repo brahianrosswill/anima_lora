@@ -129,25 +129,27 @@ For the default `r = 16`, `D = 2048`, `num_blocks = 28`, `mlp_ratio = 4.0`:
 Set `apply_ffn_lora=0` in `network_args` to drop the FFN LoRA — halves the
 trainable count.
 
-## `cond_token_count`: cond static-pad budget
+## Cond token count: native, no static padding
 
-Cond is static-padded to `cond_token_count` so block compute sees a single
-S_c across all batches and buckets (compile-friendly). This is EasyControl's
-own cond-stream padding, independent of the DiT's native-shape flatten. The
-default is **4096**; for the common ref==target setup (where cond is the SAME
-cached VAE latent used by target) cond's native tokens just pad up to it.
-(Note: the 4200-token bucket family exceeds 4096 — raise `cond_token_count`
-to 4200 if you train on those buckets.)
+The cond stream runs at the cond latent's **native** token count — there is no
+static-pad knob. Anima's native-shape bucketing already makes every forward run
+at its real token count (one bucket per batch → uniform S_c within a batch), and
+the DiT keys its compiled block graph on token count alone (two families: 4032 /
+4200). `encode_cond_latent` just flattens the patch-embedded cond latent and
+returns it at that count.
 
-| `cond_token_count` | What you get                                                 | Memory cost vs no-cond baseline |
-| -----------------: | ------------------------------------------------------------ | -------------------------------: |
-| 4096               | full target-resolution reference; ref==target lossless       | ~1.3 GiB                        |
-| 2048               | ~2× downsampled reference                                    | ~0.7 GiB                        |
-| 1024               | matches official EasyControl's 32×32 reference (cond_size=512) | ~0.4 GiB                      |
+For the common ref==target setup the cond is the SAME cached VAE latent the
+target uses, so its token count is identical to the target's and lands on one of
+the two bucket families automatically. Static-padding to a fixed budget (the
+removed `cond_token_count`, default 4096) was both unnecessary under native
+bucketing and broken for the 4200-token family (4200 > 4096), and it leaked zero
+tokens into the cond stream's self-attention and into target's LSE-extended
+attention — the same padding-leak the DiT's static-pad path was removed to avoid.
 
-If you set `cond_token_count` lower than the cond latent's native token
-count, `encode_cond_latent` raises — the caller must downsample explicitly
-(or we add automatic latent-space resize as a future enhancement).
+Memory scales with the cond latent's resolution: a lower-resolution reference
+produces fewer cond tokens and a smaller KV cache. To match the official
+EasyControl's small (e.g. 32×32) reference, downsample the cond image upstream
+rather than capping the token count here.
 
 ## Usage
 
@@ -192,12 +194,14 @@ gradient checkpointing on, target latent 64×64, batch 1, bf16):
 | Configuration                            | Peak GPU memory |
 | ---------------------------------------- | --------------: |
 | Baseline DiT only (no cond)              | ~5.0 GiB        |
-| Two-stream, `cond_token_count=1024`      | ~5.4 GiB        |
-| Two-stream, `cond_token_count=4096`      | ~6.3 GiB        |
+| Two-stream, low-res cond (~1024 tokens)  | ~5.4 GiB        |
+| Two-stream, full-res cond (~4096 tokens) | ~6.3 GiB        |
 
 A real training step on 16 GiB GPUs (live observed) lands around **7.8 GiB**
-at `cond_token_count=4096`. The Phase 1.5 design pinned ~1.4 GiB more on
-top of this and did not fit on 16 GiB at constant-bucket S_c.
+for a full-resolution (ref==target) cond at constant-bucket S_c. The Phase 1.5
+design pinned ~1.4 GiB more on top of this and did not fit on 16 GiB.
+Cond memory now scales with the reference's native resolution — there is no
+fixed token budget.
 
 ## Inference KV cache
 
@@ -242,15 +246,16 @@ when CFG runs the DiT at `B>1` (cond/uncond batched), `K_c/V_c` are expanded
 on the batch dim automatically. CFG-via-two-separate-forwards (the current
 default at `B=1` per branch) just reuses the cache directly.
 
-**Memory.** At default `S_c = 4096`, `n_heads = 16`, `head_dim = 128`,
+**Memory.** At a full-resolution `S_c = 4096`, `n_heads = 16`, `head_dim = 128`,
 `num_blocks = 28`, bf16, batch 1:
 
 ```
 2 (K + V) × 28 blocks × 4096 × 16 × 128 × 2 bytes ≈ 896 MiB
 ```
 
-Lower `cond_token_count` scales the cache linearly (e.g. ~448 MiB at
-`cond_token_count = 2048`). The startup log reports the actual size:
+A lower-resolution reference scales the cache linearly with its native token
+count (e.g. ~448 MiB at ~2048 cond tokens). The startup log reports the actual
+size:
 
 ```
 EasyControl: precomputed cond KV cache (28 blocks × 2 tensors, ~939 MB)
@@ -263,7 +268,7 @@ cond LoRA (ffn1/ffn2), and the cond residual writes. Target-side cost
 collapses to `_extended_target_attention` (LSE-decomposed flash) + baseline
 cross-attn + baseline MLP. Practical end-to-end speedup vs the no-cache path
 scales with `S_c / S_t` and the FFN LoRA ratio; expect a meaningful drop in
-per-step wall time at `cond_token_count = 4096`.
+per-step wall time for a full-resolution cond.
 
 **Correctness.** The cache stores the exact tensors the two-stream path
 would have produced (same modules, same scale, same RoPE). Setting
@@ -282,10 +287,10 @@ cond_scale)` change; subsequent KSampler steps use the cache automatically.
 
 ## Limitations
 
-1. **`cond_token_count` is a manual budget.** If you pass a cond latent that
-   would produce more tokens than `cond_token_count`, `encode_cond_latent`
-   raises; the caller must downsample upstream. Automatic latent-space
-   downsample (preserving aspect ratio) is a candidate follow-up.
+1. **Cond runs at the reference's native resolution.** There is no token-count
+   cap — to shrink the cond stream (memory / speed), downsample the reference
+   image upstream. Automatic latent-space downsample (preserving aspect ratio)
+   is a candidate follow-up.
 2. **No spatial-control positional alignment.** Cond uses its own native
    RoPE positions (matches the official's "subject" mode). The official's
    `resize_position_encoding` interpolates cond positions into target's

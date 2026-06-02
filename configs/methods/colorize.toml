@@ -20,21 +20,20 @@ network_dim = 32
 network_alpha = 32
 
 network_args = [
-    "b_cond_init=-10.0",
+    "b_cond_init=-4.0",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
-    "cond_token_count=4096",
 ]
 
-output_name = "anima_colorize"
-
+output_name = "anima_colorize_sigmoid"
+sigmoid_bias=1
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-learning_rate = 5e-5
-max_train_epochs = 6
-save_every_n_epochs = 3
-checkpointing_epochs = 3
+learning_rate = 1e-4
+max_train_epochs = 1
+save_every_n_epochs = 1
+checkpointing_epochs = 1
 
 use_easycontrol = true
 easycontrol_drop_p = 0.1
@@ -42,7 +41,7 @@ easycontrol_drop_p = 0.1
 # Caption-free default: drop the caption ~80% of training steps (→ uncond T5("")
 # embedding) so colorization is driven by the manga STRUCTURE, not text. Inference
 # works with an empty prompt; an optional short prompt ("pink hair") still steers.
-caption_dropout_rate = 0.8
+caption_dropout_rate = 0.9
 
 # The manga cond is already a lossy hint (lineart + screentone), so keep the
 # training-time cond perturbation small — high noise would erase the line

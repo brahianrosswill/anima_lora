@@ -4,8 +4,8 @@ Architecture (adapter-only — DiT frozen):
 
   reference image (clean VAE latent, 4D [B, C, H, W])
       -> DiT.x_embedder (frozen, reused)             [B, T_c, H_c, W_c, D]
-      -> flatten -> static-pad to cond_token_count    [B, S_c, D]
-      -> cond_rope = DiT.pos_embedder at cond shape, padded to S_c
+      -> flatten to native token count                [B, S_c, D]
+      -> cond_rope = DiT.pos_embedder at cond's native shape
       -> cond_temb = DiT.t_embedder(zeros) (cond is "clean", t=0)
 
   Per Anima Block (patched ``Block.forward``):
@@ -104,14 +104,6 @@ DEFAULT_MLP_RATIO = 4.0
 DEFAULT_LORA_DIM = 16
 DEFAULT_LORA_ALPHA = 16
 DEFAULT_B_COND_INIT = -10.0
-# Cond is static-padded to this token count. Default 4096 matches Anima's
-# constant-token bucketing (target is also static-padded to 4096), so for the
-# common ref==target setup the cond latent's native tokens (≤ 4096 by bucket
-# design) just pad to 4096 with no downsample required. Lower it (e.g. 1024)
-# to match the official EasyControl's 32×32 reference image if memory is
-# tight; ``encode_cond_latent`` will then refuse cond latents that would
-# exceed the budget — the caller must downsample explicitly.
-DEFAULT_COND_TOKEN_COUNT = 4096
 
 
 class _LoRAProj(nn.Module):
@@ -162,7 +154,6 @@ def create_network(
     b_cond_init = float(kwargs.get("b_cond_init", DEFAULT_B_COND_INIT))
     cond_scale = float(kwargs.get("cond_scale", 1.0))
     apply_ffn_lora = bool(int(kwargs.get("apply_ffn_lora", 1)))
-    cond_token_count = int(kwargs.get("cond_token_count", DEFAULT_COND_TOKEN_COUNT))
 
     num_blocks = (
         getattr(unet, "num_blocks", DEFAULT_NUM_BLOCKS)
@@ -191,7 +182,6 @@ def create_network(
         b_cond_init=b_cond_init,
         cond_scale=cond_scale,
         apply_ffn_lora=apply_ffn_lora,
-        cond_token_count=cond_token_count,
         multiplier=multiplier,
     )
 
@@ -231,9 +221,6 @@ def create_network_from_weights(
     b_cond_init = float(metadata.get("ss_b_cond_init", DEFAULT_B_COND_INIT))
     cond_scale = float(kwargs.get("cond_scale") or metadata.get("ss_cond_scale", 1.0))
     apply_ffn_lora = bool(int(metadata.get("ss_apply_ffn_lora", 1)))
-    cond_token_count = int(
-        metadata.get("ss_cond_token_count", DEFAULT_COND_TOKEN_COUNT)
-    )
 
     network = EasyControlNetwork(
         num_blocks=num_blocks,
@@ -245,7 +232,6 @@ def create_network_from_weights(
         b_cond_init=b_cond_init,
         cond_scale=cond_scale,
         apply_ffn_lora=apply_ffn_lora,
-        cond_token_count=cond_token_count,
         multiplier=multiplier,
     )
     return network, weights_sd
@@ -267,7 +253,6 @@ class EasyControlNetwork(AdapterNetworkBase):
         b_cond_init: float,
         cond_scale: float,
         apply_ffn_lora: bool,
-        cond_token_count: int,
         multiplier: float = 1.0,
     ):
         super().__init__()
@@ -286,7 +271,6 @@ class EasyControlNetwork(AdapterNetworkBase):
         self.b_cond_init = b_cond_init
         self.cond_scale = cond_scale
         self.apply_ffn_lora = apply_ffn_lora
-        self.cond_token_count = cond_token_count
         self.multiplier = multiplier
 
         D = hidden_size
@@ -346,7 +330,7 @@ class EasyControlNetwork(AdapterNetworkBase):
         #                        use_adaln_lora flag)
         #   "cond_rope"        : (cos, sin) RoPE tables for cond at S_c
         #                        (matches the shape DiT.pos_embedder produces,
-        #                        padded to cond_token_count)
+        #                        at cond's native token count)
         # cond_x_init for block 0 lives on block_modules[0]._easycontrol_cond_x_in.
         self._cond_state: Optional[dict] = None
 
@@ -363,7 +347,7 @@ class EasyControlNetwork(AdapterNetworkBase):
             f"EasyControlNetwork: blocks={num_blocks}, hidden={hidden_size}/{num_heads}h, "
             f"r={cond_lora_dim} alpha={cond_lora_alpha}, ffn_lora={apply_ffn_lora}, "
             f"b_cond_init={b_cond_init}, cond_scale={cond_scale}, "
-            f"cond_token_count={cond_token_count}, params={total / 1e6:.1f}M"
+            f"params={total / 1e6:.1f}M"
         )
 
     # ------------------------------------------------------------ apply / hook
@@ -427,11 +411,17 @@ class EasyControlNetwork(AdapterNetworkBase):
         padding_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Patch-embed the clean VAE latent into ``[B, S_c, D]`` cond tokens
-        plus the matching RoPE table at cond's native (smaller) shape.
+        plus the matching RoPE table at cond's native shape.
 
         Reuses the DiT's (frozen) ``x_embedder`` and ``pos_embedder``. Both
-        outputs are static-padded to ``cond_token_count`` so block compute
-        sees a single S_c across all batches / buckets.
+        outputs are kept at cond's native token count — no static padding.
+        Anima's native-shape bucketing makes every forward run at its real
+        token count (one bucket per batch → uniform S_c within a batch), and
+        for the common ref==target setup cond's shape equals the target's, so
+        S_c lands on one of the two bucket families (4032 / 4200). Padding
+        would only leak zero tokens into the cond stream's self-attention and
+        into target's LSE-extended attention (the same padding-leak the
+        static-pad path was removed to avoid).
 
         Args:
             cond_latent: ``[B, C, H, W]`` (image) or ``[B, C, T, H, W]`` (video).
@@ -439,7 +429,7 @@ class EasyControlNetwork(AdapterNetworkBase):
                 requires it, a default all-ones mask is synthesized.
         Returns:
             ``(cond_x, cond_rope)``:
-              - ``cond_x``:    ``[B, S_c, D]``,    S_c = cond_token_count
+              - ``cond_x``:    ``[B, S_c, D]``,    S_c = cond's native token count
               - ``cond_rope``: ``(cos, sin)`` each ``[S_c, 1, 1, D_head]``
         """
         if self._dit is None:
@@ -466,27 +456,8 @@ class EasyControlNetwork(AdapterNetworkBase):
             fps=None,
             padding_mask=padding_mask,
         )
-        # Flatten cond_x to [B, S_c_native, D].
+        # Flatten cond_x to [B, S_c, D] at cond's native token count.
         cond_x = cond_x_5d.flatten(1, 3)
-        S_c_native = cond_x.shape[1]
-        S_c_static = self.cond_token_count
-
-        if S_c_native > S_c_static:
-            raise ValueError(
-                f"cond latent produces {S_c_native} tokens > cond_token_count={S_c_static}. "
-                f"Either lower the reference resolution or raise cond_token_count."
-            )
-        if S_c_native < S_c_static:
-            cond_x = F.pad(cond_x, (0, 0, 0, S_c_static - S_c_native))
-
-        # Pad RoPE (cos, sin) to S_c_static. Each is [S_c_native, 1, 1, D_head].
-        if cond_rope is not None:
-            cos, sin = cond_rope
-            if cos.shape[0] < S_c_static:
-                pad = (0, 0, 0, 0, 0, 0, 0, S_c_static - cos.shape[0])
-                cos = F.pad(cos, pad)
-                sin = F.pad(sin, pad)
-            cond_rope = (cos, sin)
 
         return cond_x, cond_rope
 
@@ -704,7 +675,6 @@ class EasyControlNetwork(AdapterNetworkBase):
             "ss_b_cond_init": str(self.b_cond_init),
             "ss_cond_scale": str(self.cond_scale),
             "ss_apply_ffn_lora": str(int(self.apply_ffn_lora)),
-            "ss_cond_token_count": str(self.cond_token_count),
         }
 
     def load_weights(self, file):

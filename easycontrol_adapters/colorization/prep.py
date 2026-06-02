@@ -28,7 +28,9 @@ The cond cache is paired with the color target at train time by the loader's
 from __future__ import annotations
 
 import argparse
+import os
 import zlib
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from typing import Callable
@@ -49,21 +51,103 @@ def _stable_seed(name: str) -> int:
     return zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF
 
 
+def _make_screener(engine: str, sd_kwargs: dict) -> Screener:
+    """Resolve ``engine`` to a ``(img, seed) → manga`` callable.
+
+    Imports are deferred so the heavy ``sd`` stack (diffusers / controlnet_aux)
+    is only loaded when actually selected, and ``cv2`` stays download-free. Takes
+    plain (picklable) args rather than the argparse Namespace so it can be rebuilt
+    inside a worker process."""
+    if engine == "cv2":
+        import cv2
+
+        cv2.setNumThreads(
+            1
+        )  # one cv2 thread per worker — the pool gives the parallelism
+        from mangafy import mangafy_array
+
+        return lambda img, seed: mangafy_array(img, seed=seed)
+
+    if engine == "gpu":
+        # Same algorithmic screentone as cv2, but the trig screens + XDoG blurs run on
+        # CUDA — one serial GPU pass, no ProcessPool. Structurally identical per seed.
+        from mangafy_gpu import mangafy_array_gpu
+
+        return lambda img, seed: mangafy_array_gpu(img, seed=seed)
+
+    from screentone_sd import screentone_array
+
+    return lambda img, seed: screentone_array(img, seed=seed, **sd_kwargs)
+
+
+# ── Worker process state (cv2 engine only) ───────────────────────────────────
+# The screener (a closure over a cv2/numpy module) isn't picklable, so each worker
+# rebuilds it once in its initializer and stashes it — plus the constant paths — in
+# a module global, then maps over image paths. The mangafy math is pure numpy/cv2,
+# so this scales ~linearly with cores; the seeded per-stem jitter keeps every worker
+# bit-identical to the serial path.
+_WORKER: dict = {}
+
+
+def _worker_init(
+    engine: str, sd_kwargs: dict, src: Path, staging: Path, overwrite: bool
+):
+    _WORKER.update(
+        screener=_make_screener(engine, sd_kwargs),
+        src=src,
+        staging=staging,
+        overwrite=overwrite,
+    )
+
+
+def _worker_process(path_str: str) -> int:
+    p = Path(path_str)
+    rel = p.relative_to(_WORKER["src"])
+    out = (_WORKER["staging"] / rel).with_suffix(".png")
+    if out.exists() and not _WORKER["overwrite"]:
+        return 0
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img = np.array(Image.open(p).convert("RGB"))
+    manga = _WORKER["screener"](img, _stable_seed(rel.stem))
+    Image.fromarray(manga).save(out)
+    return 1
+
+
 def stage_mangafy(
     src: Path,
     staging: Path,
     *,
-    screener: Screener,
+    engine: str,
+    sd_kwargs: dict,
     recursive: bool,
     overwrite: bool,
     limit: int | None,
+    workers: int,
 ) -> tuple[int, int]:
     images = walk_images(src, recursive=recursive)
     if limit:
         images = images[:limit]
-    written = 0
     progress = tqdm_progress("Mangafy")
     progress(0, total=len(images))
+
+    # The sd engine holds a single GPU pipeline, so it stays serial; the cv2 engine
+    # fans out across processes (``--workers``) when there's more than one to use.
+    if engine == "cv2" and workers > 1 and len(images) > 1:
+        written = 0
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_worker_init,
+            initargs=(engine, sd_kwargs, src, staging, overwrite),
+        ) as ex:
+            # small chunks: each image is ~seconds of cv2 work, so IPC overhead is
+            # negligible and fine-grained chunks load-balance variable image sizes well.
+            for w in ex.map(_worker_process, [str(p) for p in images], chunksize=2):
+                written += w
+                progress(1)
+        return len(images), written
+
+    screener = _make_screener(engine, sd_kwargs)
+    written = 0
     for p in images:
         rel = p.relative_to(src)
         out = (staging / rel).with_suffix(".png")
@@ -77,29 +161,6 @@ def stage_mangafy(
         written += 1
         progress(1, detail=p.name)
     return len(images), written
-
-
-def build_screener(args) -> Screener:
-    """Resolve ``--engine`` to a ``(img, seed) → manga`` callable.
-
-    Imports are deferred so the heavy ``sd`` stack (diffusers / controlnet_aux)
-    is only loaded when actually selected, and ``cv2`` stays download-free."""
-    if args.engine == "cv2":
-        from mangafy import mangafy_array
-
-        return lambda img, seed: mangafy_array(img, seed=seed)
-
-    from screentone_sd import screentone_array
-
-    return lambda img, seed: screentone_array(
-        img,
-        seed=seed,
-        steps=args.steps,
-        cfg=args.cfg,
-        long_side=args.long_side,
-        strength=args.strength,
-        tone_period=args.tone_period,
-    )
 
 
 def stage_encode(
@@ -150,14 +211,19 @@ def main() -> None:
     parser.add_argument("--vae", default="models/vae/qwen_image_vae.safetensors")
     parser.add_argument(
         "--engine",
-        choices=["sd", "cv2"],
-        default="sd",
+        choices=["sd", "cv2", "gpu"],
+        default="gpu",
         help="condition synthesizer: sd = learned sketch2manga screening (Phase B, "
         "needs `make exp-easycontrol-download EASYADAPTER=colorize`); "
-        "cv2 = XDoG+halftone fallback (no downloads)",
+        "cv2 = XDoG+halftone fallback (no downloads, CPU ProcessPool); "
+        "gpu = same XDoG+halftone math on CUDA (no downloads, fast, serial)",
     )
-    parser.add_argument("--steps", type=int, default=40, help="sd engine: diffusion steps")
-    parser.add_argument("--cfg", type=float, default=9.0, help="sd engine: guidance scale")
+    parser.add_argument(
+        "--steps", type=int, default=40, help="sd engine: diffusion steps"
+    )
+    parser.add_argument(
+        "--cfg", type=float, default=9.0, help="sd engine: guidance scale"
+    )
     parser.add_argument(
         "--strength",
         type=float,
@@ -172,6 +238,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--long_side", type=int, default=1024, help="sd engine: screening resolution"
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(8, os.cpu_count() or 1),
+        help="cv2 engine: parallel mangafy worker processes (1 = serial). The sd "
+        "engine ignores this (single GPU pipeline).",
     )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--chunk_size", type=int, default=64)
@@ -191,13 +264,22 @@ def main() -> None:
     cond_cache_dir = Path(args.cond_cache_dir)
 
     if not args.skip_mangafy:
+        sd_kwargs = dict(
+            steps=args.steps,
+            cfg=args.cfg,
+            long_side=args.long_side,
+            strength=args.strength,
+            tone_period=args.tone_period,
+        )
         seen, written = stage_mangafy(
             src,
             staging,
-            screener=build_screener(args),
+            engine=args.engine,
+            sd_kwargs=sd_kwargs,
             recursive=args.recursive,
             overwrite=args.overwrite,
             limit=args.limit,
+            workers=args.workers,
         )
         print(
             f"\nMangafy ({args.engine}): {written} written, "

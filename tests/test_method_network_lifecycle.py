@@ -68,7 +68,6 @@ def _make_easycontrol():
         b_cond_init=-10.0,
         cond_scale=1.0,
         apply_ffn_lora=True,
-        cond_token_count=8,
     )
 
 

@@ -675,7 +675,7 @@ INFERENCE_BASE = [
     "--infer_steps",
     "28",
     "--flow_shift",
-    "1.0",
+    "3.0",
     "--sampler",
     "euler",
     "--guidance_scale",
