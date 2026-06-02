@@ -38,12 +38,25 @@ full caption.
 The color-only TE cache lives in its own `text_cache_dir`
 (`post_image_dataset/colorize_text`) — a TE-only redirect, so the **latents still
 come from the shared `lora/` cache** (nothing re-encoded there). Built by
-`prep.py`'s text stage as a multi-variant cache: v0 = the full color set,
-v1+ = shuffled with ~30% of color tags dropped (`--text_tag_dropout_rate`), so
+`prep.py`'s text stage as a multi-variant cache (shipped defaults:
+`--text_shuffle_variants 2`, `--text_tag_dropout_rate 0.5`): v0 = the full color
+set, v1 = smart-shuffled with each color tag independently dropped at p≈0.5, so
 the model learns to colorize from a *partial* color spec, not just a complete
-palette. `caption_dropout_rate = 0.5` + `use_shuffled_caption_variants = true`
-then mix three regimes per step: ~50% empty (auto-color), ~10% full colors,
-~40% partial colors.
+palette.
+
+Two independent knobs shape the per-step caption, and it's worth not conflating
+them:
+
+- **`caption_dropout_rate = 0.05`** — the *auto-color floor*. ~5% of steps drop
+  the caption entirely (→ uncond `T5("")`), training the empty-prompt default.
+  Keep it low: this knob does **not** balance full-vs-partial color, and a high
+  rate (the old `0.9`) over-trains the unconditional path into weak, arbitrary
+  steering.
+- **`use_shuffled_caption_variants = true`** — the *full-vs-partial balance*. On
+  the captioned steps, the loader draws **20% v0 (full colors) / 80% v1+
+  (partial)** (`strategy.py`), so partial prompts ("pink hair" alone) work.
+
+Composed, the per-step regime is **~5% empty / ~19% full / ~76% partial**.
 
 At inference:
 

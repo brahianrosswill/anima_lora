@@ -40,14 +40,16 @@ use_easycontrol = true
 easycontrol_drop_p = 0.0
 masked_loss = false
 
-# Captions are color-only (text_cache_dir), so a dropped step trains the
-# auto-color mode and a kept step trains prompt→color control. A low rate keeps
-# a strong prompt→color binding while still seeing some empty prompts.
+# Auto-color floor only: a dropped step (→ uncond) trains the empty-prompt
+# default. Keep it LOW — 0.05 ≈ 5% empty steps, enough to anchor auto-color
+# without starving prompt→color control. The full-vs-partial balance is the
+# tag-dropout variant cache below, not this knob.
 caption_dropout_rate = 0.05
 
-# The color-only TE cache is multi-variant (prep.py text stage): v0 = full
-# color set, v1+ = shuffled with ~30% of color tags dropped. This makes the
-# loader sample them so the model handles partial color prompts.
+# Full-vs-partial color balance. The color-only TE cache is multi-variant
+# (prep.py text stage defaults: 2 variants, ~50% per-tag drop): v0 = full color
+# set, v1 = shuffled with each color tag dropped at p≈0.5. This makes the loader
+# draw 20% v0 / 80% v1+ per step, so the model handles partial color prompts.
 use_shuffled_caption_variants = true
 
 # The manga cond is already a lossy hint (lineart + screentone) — keep the

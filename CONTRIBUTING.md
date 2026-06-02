@@ -20,10 +20,17 @@ Five areas where outside contributions would have the biggest impact right now. 
 
 Per-block cond LoRA on self-attn + FFN with a logit-bias gate. DiT frozen; trains a handful of cond LoRA blocks plus a scalar gate. The architecture is naturally contribution-friendly: each control type is one independent adapter, no method changes required. See [`docs/experimental/easycontrol.md`](docs/experimental/easycontrol.md). The wall right now is the **adapter zoo** around it.
 
-- **Trained adapters** — canny, depth, pose, lineart, scribble, segmentation, … each one a self-contained PR with model card, training config, and samples. Hosted under a HuggingFace collection (planned: `anima-easycontrol`). *[Tier 1.5 — bench numbers and side-by-side samples carry the PR; no new method code]*
-- **Per-task dataset spec** — one doc per control type covering pair format, recommended size (~2k pairs), where to source signal images. Currently undocumented. *[Tier 1]*
+**There is already one shipped control task to copy: colorize** (`easycontrol_adapters/colorization/`). It's the worked template for everything below — a per-task project that builds its own *condition* (mangafied B&W → color) while reusing the shipped network unchanged. A new control type follows the same mold rather than inventing structure:
+
+- a **project dir** under `easycontrol_adapters/<task>/` (the condition builder + `prep.py` + a README), exactly like `easycontrol_adapters/colorization/`;
+- a **method config** `configs/methods/<task>.toml` (+ a `configs/gui-methods/<task>.toml` GUI variant), selected at runtime by the **`EASYADAPTER=<task>`** env var — *not* a `make easycontrol-<task>` target. The existing `make exp-easycontrol[-preprocess] EASYADAPTER=<task>` and `make exp-test-easycontrol EASYADAPTER=<task>` targets already dispatch on it;
+- a **dataset blueprint** `configs/datasets/<task>.toml` wiring the `cond_cache_dir` (and `text_cache_dir` if the task reshapes the text channel, as colorize does).
+
+Read colorize's [README](easycontrol_adapters/colorization/README.md) before starting a new one — its caption policy, cond-noise, and inference-settings notes generalize. Concretely, the zoo still needs:
+
+- **Trained adapters** — canny, depth, pose, lineart, scribble, segmentation, … each one a self-contained PR in colorize's shape (project dir + `configs/methods/<task>.toml` + model card + samples). Hosted under a HuggingFace collection (planned: `anima-easycontrol`). *[Tier 1.5 — bench numbers and side-by-side samples carry the PR; no new method code]*
+- **Per-task dataset spec** — one doc per control type covering pair format, recommended size (~2k pairs), where to source signal images. colorize's README is the only one written so far. *[Tier 1]*
 - **Toy datasets** — 200-pair CC-licensed bundles per control type so a contributor can validate the pipeline before committing to a full dataset. *[Tier 1]*
-- **One-command training aliases** — `make easycontrol-canny`, `make easycontrol-depth`, … as per-task preset configs in `configs/methods/easycontrol/`. *[Tier 1]*
 - **Control-fidelity eval harness** — held-out ~100-pair sets per control type that re-extract the signal from generation (canny→canny, depth→depth, …) and report a fidelity metric vs the input. Lets adapter PRs be reviewed on numbers rather than vibes. The current `bench/easycontrol/` directory has equivalence + smoke scripts only; the harness slot is empty. *[Tier 1.5]*
 
 ### 2. Turbo LoRA (Decoupled DMD distillation)

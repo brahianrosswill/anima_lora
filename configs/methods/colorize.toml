@@ -42,18 +42,24 @@ use_easycontrol = true
 easycontrol_drop_p = 0.0
 masked_loss = false
 
-# Balanced dropout: captions are now color-only (text_cache_dir), so a dropped
-# step (→ uncond T5("")) trains the auto-color mode while a kept step trains
-# prompt→color control. ~0.5 keeps both modes strong. (Was 0.9 with full
-# captions, which over-trained the unconditional path and gave weak, arbitrary
-# color steering — see image-compare diagnosis.)
+# Caption dropout only sets the auto-color floor: captions are color-only
+# (text_cache_dir), so a dropped step (→ uncond T5("")) trains the auto-color
+# mode. Keep it LOW — at 0.05 ~5% of steps go empty, just enough to anchor the
+# empty-prompt default without starving prompt→color control. (Was 0.9 with
+# full captions, which over-trained the unconditional path and gave weak,
+# arbitrary color steering — see image-compare diagnosis.) The full-vs-partial
+# color balance is NOT this knob; it's the tag-dropout variant cache below.
 caption_dropout_rate = 0.05
 
-# The color-only TE cache is multi-variant (prep.py --text_shuffle_variants):
-# v0 = full color set, v1+ = shuffled with ~30% of color tags dropped. This
-# flag makes the loader sample them (20% v0 / 80% partial), training robustness
-# to partial color prompts ("pink hair" alone). Without it the loader would
-# always use v0 and the tag dropout would be inert.
+# The full-vs-partial color balance lives here, not in caption_dropout. The
+# color-only TE cache is multi-variant (built by prep.py's text stage with its
+# defaults: --text_shuffle_variants 2, --text_tag_dropout_rate 0.5): v0 = full
+# color set, v1 = smart-shuffled with each color tag independently dropped at
+# p≈0.5. This flag makes the loader draw a variant per step — 20% v0 / 80% v1+
+# (strategy.py) — so the model learns to colorize from a *partial* color spec
+# ("pink hair" alone), not just a complete palette. Without it the loader pins
+# v0 and the tag dropout is inert. Net per-step regime: ~5% empty / ~19% full /
+# ~76% partial.
 use_shuffled_caption_variants = true
 
 # The manga cond is already a lossy hint (lineart + screentone), so keep the
