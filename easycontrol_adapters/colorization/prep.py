@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Mangafy + cache condition latents for the colorization EasyControl task.
+"""Mangafy + cache condition latents (and color-only text) for the colorization
+EasyControl task.
 
-Two idempotent stages:
+Three idempotent stages:
 
 1. **Mangafy** — walk every color image under ``--src`` (the existing resized
    training images), screen each to a synthetic B&W manga page, and write the
@@ -17,8 +18,18 @@ Two idempotent stages:
    format as the target latent cache), at the image's **native size** so each
    cond latent shape matches its target latent exactly. Skips cached resolutions.
 
+3. **Text** — re-encode the *target* captions filtered to **color tags only**
+   (:func:`color_caption.filter_to_colors`) into ``--text_cache_dir``, mirroring
+   the source subpath. Reads ``.txt`` from ``--caption_src`` (the caption master,
+   nested identically to the resized tree), so the TE caches key-match the
+   colorize loader's ``image_dir=post_image_dataset/resized`` lookup. The colorize
+   dataset points its subset ``text_cache_dir`` here, so training reads
+   color-only captions while latents still come from the shared lora cache.
+   Skipped without ``--qwen3``/``--dit`` (omit via ``--skip_text``).
+
 The cond cache is paired with the color target at train time by the loader's
-``cond_cache_dir`` subset knob (stem-matched). Run from the repo root::
+``cond_cache_dir`` subset knob (stem-matched); the color-only text by
+``text_cache_dir``. Run from the repo root::
 
     python easycontrol_adapters/colorization/prep.py            # full dataset
     python easycontrol_adapters/colorization/prep.py --limit 8  # quick QA batch
@@ -203,6 +214,101 @@ def stage_encode(
     return stats
 
 
+def stage_text(
+    caption_src: Path,
+    text_cache_dir: Path,
+    *,
+    qwen3_path: str,
+    dit_path: str,
+    t5_tokenizer_path: str | None,
+    batch_size: int,
+    recursive: bool,
+    shuffle_variants: int,
+    tag_dropout_rate: float,
+):
+    """Cache color-only TE embeddings for the color targets into ``text_cache_dir``.
+
+    Loads Qwen3 + the DiT's LLM adapter (needed to produce ``crossattn_emb``),
+    then runs ``library.preprocess.cache_text_embeddings`` over ``caption_src``
+    with the color-only caption filter. ``caption_src`` (the caption master) is
+    nested identically to ``post_image_dataset/resized``, so the resulting TE
+    paths key-match the colorize loader's resized-rooted lookup.
+
+    With ``shuffle_variants > 0`` each cache holds v0 (the full color set) plus
+    shuffled variants with ``tag_dropout_rate`` of the color tags dropped. The
+    color filter runs *before* variant generation, and the filtered caption has
+    no ``@artist`` prefix, so every color tag is drop-eligible — this teaches the
+    model to colorize from a *partial* color spec ("pink hair" alone) rather than
+    expecting a complete palette every time.
+    """
+    from color_caption import filter_to_colors
+
+    from library.anima import weights as anima_utils
+    from library.anima.strategy import AnimaTextEncodingStrategy, AnimaTokenizeStrategy
+    from library.preprocess import cache_text_embeddings
+
+    text_cache_dir.mkdir(parents=True, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Loading Qwen3 text encoder from {qwen3_path} ...")
+    text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
+        qwen3_path, dtype=torch.bfloat16, device=str(device)
+    )
+    t5_tokenizer = anima_utils.load_t5_tokenizer(t5_tokenizer_path)
+    print(f"Loading LLM adapter from {dit_path} ...")
+    llm_adapter = anima_utils.load_llm_adapter(
+        dit_path, dtype=torch.bfloat16, device=str(device)
+    )
+
+    tokenize_strategy = AnimaTokenizeStrategy(
+        qwen3_tokenizer=qwen3_tokenizer, t5_tokenizer=t5_tokenizer
+    )
+    encoding_strategy = AnimaTextEncodingStrategy()
+
+    # The colorize loader reuses the shared T5("") uncond sidecar for caption
+    # dropout, staged by `make preprocess`; re-stage idempotently in case the
+    # color run is the first to touch it.
+    from library.inference.uncond import (
+        DEFAULT_UNCOND_DIR,
+        stage_uncond_sidecar_with_models,
+    )
+
+    stage_uncond_sidecar_with_models(
+        DEFAULT_UNCOND_DIR,
+        text_encoder,
+        tokenize_strategy,
+        encoding_strategy,
+        llm_adapter,
+        device=device,
+        overwrite=False,
+    )
+
+    # Note: --limit applies to the mangafy/encode stages only; the text stage
+    # encodes the whole caption_src tree (cache_text_embeddings walks it itself
+    # and skips already-cached files, so re-runs are cheap).
+    stats = cache_text_embeddings(
+        caption_src,
+        tokenize_strategy,
+        encoding_strategy,
+        text_encoder,
+        llm_adapter=llm_adapter,
+        device=device,
+        cache_dir=text_cache_dir,
+        recursive=recursive,
+        batch_size=batch_size,
+        caption_transform=filter_to_colors,
+        caption_shuffle_variants=shuffle_variants,
+        caption_tag_dropout_rate=tag_dropout_rate,
+        progress=tqdm_progress("Caching color-only text"),
+    )
+
+    text_encoder.to("cpu")
+    del text_encoder, llm_adapter
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return stats
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--src", default="post_image_dataset/resized")
@@ -257,6 +363,44 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="cap #images (QA)")
     parser.add_argument("--skip_mangafy", action="store_true")
     parser.add_argument("--skip_encode", action="store_true")
+    parser.add_argument("--skip_text", action="store_true", help="skip color-only TE stage")
+    # ── color-only text stage ────────────────────────────────────────────────
+    parser.add_argument(
+        "--caption_src",
+        default="image_dataset",
+        help="caption master (.txt sidecars), nested like post_image_dataset/resized",
+    )
+    parser.add_argument(
+        "--text_cache_dir",
+        default="post_image_dataset/colorize_text",
+        help="where color-only TE caches go; the colorize dataset's text_cache_dir",
+    )
+    parser.add_argument(
+        "--qwen3", default="models/text_encoders/qwen_3_06b_base.safetensors"
+    )
+    parser.add_argument(
+        "--dit",
+        default="models/diffusion_models/anima-base-v1.0.safetensors",
+        help="DiT for the LLM adapter (produces crossattn_emb)",
+    )
+    parser.add_argument("--t5_tokenizer_path", default=None)
+    parser.add_argument(
+        "--text_batch_size", type=int, default=16, help="text stage encode batch"
+    )
+    parser.add_argument(
+        "--text_shuffle_variants",
+        type=int,
+        default=2,
+        help="color-caption variants per image (v0=full colors, v1+=shuffled "
+        "+ tag-dropped). 0 = single full-color caption.",
+    )
+    parser.add_argument(
+        "--text_tag_dropout_rate",
+        type=float,
+        default=0.5,
+        help="per-color-tag dropout in v1+ variants — trains robustness to "
+        "partial color prompts. Ignored when --text_shuffle_variants <= 0.",
+    )
     args = parser.parse_args()
 
     src = Path(args.src)
@@ -303,6 +447,23 @@ def main() -> None:
         print(
             f"\nCond latent caching complete: {stats.written} cached, "
             f"{stats.skipped} skipped (already existed)"
+        )
+
+    if not args.skip_text:
+        tstats = stage_text(
+            Path(args.caption_src),
+            Path(args.text_cache_dir),
+            qwen3_path=args.qwen3,
+            dit_path=args.dit,
+            t5_tokenizer_path=args.t5_tokenizer_path,
+            batch_size=args.text_batch_size,
+            recursive=args.recursive,
+            shuffle_variants=args.text_shuffle_variants,
+            tag_dropout_rate=args.text_tag_dropout_rate,
+        )
+        print(
+            f"\nColor-only text caching complete: {tstats.written} cached, "
+            f"{tstats.skipped} skipped (already existed)"
         )
 
 

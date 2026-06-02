@@ -59,6 +59,7 @@ _DB_SUBSET_DISTINCT_KEYS = frozenset(
         "alpha_mask",
         "cache_dir",
         "cond_cache_dir",
+        "text_cache_dir",
         "mask_dir",
         "recursive",
     }

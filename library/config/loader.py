@@ -98,6 +98,11 @@ class DreamBoothSubsetParams(BaseSubsetParams):
     # this subset's images). When set, the loader pairs each target latent with
     # the cond latent from here — used by cond≠target tasks like colorization.
     cond_cache_dir: Optional[str] = None
+    # Optional redirect for *text-encoder* caches only (latents/PE still come
+    # from cache_dir). When set, the subset's TE caches are read from here
+    # instead of cache_dir — lets a task swap in re-encoded captions (e.g.
+    # color-only captions for colorization) without re-caching the latents.
+    text_cache_dir: Optional[str] = None
 
 
 @dataclass
@@ -197,6 +202,7 @@ class ConfigSanitizer:
         "alpha_mask": bool,
         "cache_dir": str,
         "cond_cache_dir": str,
+        "text_cache_dir": str,
         "mask_dir": str,
         "recursive": bool,
     }

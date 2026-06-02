@@ -888,9 +888,15 @@ class BaseDataset(torch.utils.data.Dataset):
             subset = self.image_to_subset.get(info.image_key)
             # check disk cache exists and size of text encoder outputs
             if caching_strategy.cache_to_disk:
+                # text_cache_dir (when set) redirects only the TE cache —
+                # latents still resolve under cache_dir. Lets colorization read
+                # re-encoded color-only captions without re-caching latents.
                 te_out_npz = caching_strategy.get_outputs_npz_path(
                     info.absolute_path,
-                    cache_dir=getattr(subset, "cache_dir", None),
+                    cache_dir=(
+                        getattr(subset, "text_cache_dir", None)
+                        or getattr(subset, "cache_dir", None)
+                    ),
                     image_dir=getattr(subset, "image_dir", None),
                 )
                 info.text_encoder_outputs_npz = te_out_npz

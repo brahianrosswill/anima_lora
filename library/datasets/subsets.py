@@ -327,6 +327,7 @@ class DreamBoothSubset(BaseSubset):
         mask_dir: Optional[str] = None,
         cache_dir: Optional[str] = None,
         cond_cache_dir: Optional[str] = None,
+        text_cache_dir: Optional[str] = None,
         recursive: bool = False,
         path_pattern: Optional[str] = None,
     ) -> None:
@@ -387,6 +388,10 @@ class DreamBoothSubset(BaseSubset):
         # colorization). Read-only at train time — do NOT makedirs it; the prep
         # step populates it. None → cond falls back to the target latent.
         self.cond_cache_dir = cond_cache_dir
+        # Optional redirect for the *text-encoder* cache only (latents stay in
+        # cache_dir). Read-only at train time; the prep step populates it with
+        # re-encoded captions. None → TE caches come from cache_dir.
+        self.text_cache_dir = text_cache_dir
 
     def __eq__(self, other) -> bool:
         if not isinstance(other, DreamBoothSubset):

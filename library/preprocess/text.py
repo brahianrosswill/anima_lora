@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -127,6 +128,7 @@ def cache_text_embeddings(
     batch_size: int = 16,
     caption_shuffle_variants: int = 0,
     caption_tag_dropout_rate: float = 0.0,
+    caption_transform: Callable[[str], str] | None = None,
     min_pixels: int = 500_000,
     verbose: bool = True,
     progress: ProgressFn | None = None,
@@ -138,6 +140,11 @@ def cache_text_embeddings(
     filter). With ``caption_shuffle_variants > 0`` each cache holds N variants
     (v0 pristine, v1..v{N-1} shuffled + optionally tag-dropped). Returns counts;
     pass ``progress`` for a per-image bar.
+
+    ``caption_transform`` (when given) is applied to each raw caption before
+    tokenization / variant generation — used by task-specific re-encodes such
+    as colorization's color-only caption filter. It runs *before* shuffle so
+    the kept tags are what gets shuffled/dropped.
     """
     candidates = walk_images(data_dir, recursive=recursive)
 
@@ -161,6 +168,8 @@ def cache_text_embeddings(
         # (unconditional / style-LoRA training) — encode "" rather than
         # dropping the image, so the cached set matches the training dataset.
         caption = caption_path.read_text(encoding="utf-8").strip().split("\n")[0]
+        if caption_transform is not None:
+            caption = caption_transform(caption)
         entries.append((p, caption))
 
     if skipped_small and verbose:

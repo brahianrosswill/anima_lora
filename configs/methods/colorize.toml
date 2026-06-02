@@ -5,9 +5,12 @@
 #   • cond ≠ target — the condition is a synthetic mangafied B&W latent (cached in
 #     a parallel cond_cache_dir; see configs/datasets/colorize.toml), the target
 #     is the original color image.
-#   • caption-free by default — high caption_dropout_rate so the model colorizes
-#     from manga structure alone and never needs a precise caption at inference
-#     (an optional short prompt still steers specific colors).
+#   • color-only captions — the TE cache (text_cache_dir in
+#     configs/datasets/colorize.toml) holds captions filtered to color tags
+#     only (hair/eye/clothing colors). The manga cond already encodes structure;
+#     text carries only the genuinely-ambiguous variable (hue), so a moderate
+#     caption_dropout still leaves a strong prompt→color binding. At inference an
+#     empty prompt auto-colorizes; a color prompt ("pink hair, blue eyes") steers.
 #
 # Run via:  make exp-easycontrol EASYADAPTER=colorize
 # Prep via: make exp-easycontrol-preprocess EASYADAPTER=colorize
@@ -16,11 +19,11 @@ dataset_config = "configs/datasets/colorize.toml"
 
 network_module = "networks.methods.easycontrol"
 
-network_dim = 32
-network_alpha = 32
+network_dim = 64
+network_alpha = 64
 
 network_args = [
-    "b_cond_init=-4.0",
+    "b_cond_init=-5.0",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
 ]
@@ -31,17 +34,27 @@ logging_dir = "output/logs"
 log_with = "tensorboard"
 
 learning_rate = 1e-4
-max_train_epochs = 1
-save_every_n_epochs = 1
-checkpointing_epochs = 1
+max_train_epochs = 2
+save_every_n_epochs = 2
+checkpointing_epochs = 2
 
 use_easycontrol = true
-easycontrol_drop_p = 0.1
+easycontrol_drop_p = 0.0
+masked_loss = false
 
-# Caption-free default: drop the caption ~80% of training steps (→ uncond T5("")
-# embedding) so colorization is driven by the manga STRUCTURE, not text. Inference
-# works with an empty prompt; an optional short prompt ("pink hair") still steers.
-caption_dropout_rate = 0.9
+# Balanced dropout: captions are now color-only (text_cache_dir), so a dropped
+# step (→ uncond T5("")) trains the auto-color mode while a kept step trains
+# prompt→color control. ~0.5 keeps both modes strong. (Was 0.9 with full
+# captions, which over-trained the unconditional path and gave weak, arbitrary
+# color steering — see image-compare diagnosis.)
+caption_dropout_rate = 0.1
+
+# The color-only TE cache is multi-variant (prep.py --text_shuffle_variants):
+# v0 = full color set, v1+ = shuffled with ~30% of color tags dropped. This
+# flag makes the loader sample them (20% v0 / 80% partial), training robustness
+# to partial color prompts ("pink hair" alone). Without it the loader would
+# always use v0 and the tag dropout would be inert.
+use_shuffled_caption_variants = true
 
 # The manga cond is already a lossy hint (lineart + screentone), so keep the
 # training-time cond perturbation small — high noise would erase the line

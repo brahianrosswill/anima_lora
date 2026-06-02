@@ -24,18 +24,36 @@ screentoned pages) far better than naive grayscale. EasyControl's extended
 self-attention cond stream does the conditioning; only the cond source changes
 (cond ≠ target), wired via the new `cond_cache_dir` subset knob.
 
-## Caption policy — caption-free by default
+## Caption policy — color-only captions
 
-Trained with **`caption_dropout_rate = 0.8`** so the model colorizes from manga
-*structure* alone most of the time and never becomes caption-dependent. At
-inference:
+The condition (mangafied lineart + screentone) already encodes *everything
+spatial*: composition, poses, objects, layout. The one variable B&W manga can't
+carry is **hue/chroma**. So the text channel for colorization is reduced to
+**color tags only** — hair/eye/skin color, `<color> <garment>`, background color
+(`color_caption.filter_to_colors`). Every surviving token is then a color fact
+the model can't get from structure, which gives a strong **prompt→color** binding
+instead of the weak, arbitrary steering you get when color tags are buried in a
+full caption.
 
-- **default: empty prompt** → auto-colorization, no typing, no tagger.
-- **optional steer**: a short prompt (`pink hair`) nudges specific colors.
+The color-only TE cache lives in its own `text_cache_dir`
+(`post_image_dataset/colorize_text`) — a TE-only redirect, so the **latents still
+come from the shared `lora/` cache** (nothing re-encoded there). Built by
+`prep.py`'s text stage as a multi-variant cache: v0 = the full color set,
+v1+ = shuffled with ~30% of color tags dropped (`--text_tag_dropout_rate`), so
+the model learns to colorize from a *partial* color spec, not just a complete
+palette. `caption_dropout_rate = 0.5` + `use_shuffled_caption_variants = true`
+then mix three regimes per step: ~50% empty (auto-color), ~10% full colors,
+~40% partial colors.
+
+At inference:
+
+- **empty prompt** → auto-colorization (guesses *modal* colors).
+- **color prompt** (`pink hair, blue eyes, white dress`) → reliably steers, and
+  partial specs work because of the tag dropout above.
 
 Note the information-theoretic floor: B&W manga doesn't contain hair/eye/costume
-color, so the caption-free default guesses *modal* colors — correct that with the
-optional prompt when it matters. This is expected, not a bug.
+color, so the empty-prompt default guesses — correct it with a color prompt when
+it matters. This is expected, not a bug.
 
 ## v0 scope (this build)
 
@@ -49,7 +67,8 @@ optional prompt when it matters. This is expected, not a bug.
 | File | Role |
 |------|------|
 | `mangafy.py` | color RGB → B&W manga (XDoG lineart + dot/line/cross screentone), per-stem jitter |
-| `prep.py` | mangafy `resized/` images → staging dir → VAE-encode into `colorize_cond/` |
+| `color_caption.py` | reduce a full Anima caption to color tags only (`filter_to_colors`) |
+| `prep.py` | mangafy `resized/` → VAE-encode into `colorize_cond/`; re-encode color-only captions into `colorize_text/` |
 
 Configs: `configs/datasets/colorize.toml`, `configs/methods/colorize.toml`.
 
@@ -71,8 +90,22 @@ make exp-easycontrol EASYADAPTER=colorize
 # 3. Inference — feed a real B&W manga page as the control image (empty prompt).
 REF_IMAGE=post_image_dataset/resized/takaman_\(gaffe\)/7645571.png \
     make exp-test-easycontrol EASYADAPTER=colorize
-#    Optional steer:  ... ARGS='--prompt "pink hair, red tie"'
+#    Color steer:  ... ARGS='--prompt "pink hair, blue eyes, white dress"'
 ```
+
+### Inference settings
+
+- `--easycontrol_image_match_size` — always on (the task sets it); picks the
+  token bucket matching the page aspect ratio so tall manga pages don't squash.
+- `--easycontrol_scale` (cond structure adherence) — **1.0** (trained default);
+  1.1–1.2 if color bleeds past lines, 0.7–0.8 for looser/creative coloring.
+- `--guidance_scale` (cfg) — **empty prompt → 1.0–1.5** (nothing for high cfg to
+  push toward → oversaturates); **color prompt → 3.0–4.5** (this is what makes a
+  color prompt bite).
+- `--infer_steps` 20–28, `--sampler euler` — colorization is "easy" (structure
+  given); more steps buy little.
+- Feed a **real screentoned B&W page** as the cond (it's VAE-encoded as-is, no
+  XDoG at inference). A flat grayscale photo / clean lineart is out-of-distribution.
 
 `EASYADAPTER=colorize` ⇒ `configs/methods/colorize.toml` (train),
 `easycontrol_adapters/colorization/prep.py` (preprocess), and the `anima_colorize`
