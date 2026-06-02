@@ -108,7 +108,6 @@ from .chimera import (  # noqa: E402 — see ordering note above
     _apply_chimera_dual_a_to_model,
     _attach_single_a_chimera_metadata,
     _finalize_dual_a_chimera,
-    _make_chimera_dual_a_hook,
     _make_chimera_hook,
     _make_chimera_pre_hook,
     _make_content_router_llm_adapter_hook,
@@ -304,6 +303,22 @@ def load_adapter(file_path: str) -> dict:
             "Independent-A stacked experts + a network-level GlobalRouter "
             "use a different application path than HydraLoRA's per-Linear "
             "shared-A router."
+        )
+
+    # Per-step-expert turbo also carries ``.lora_ups.{k}.weight`` keys (so
+    # ``_parse_hydra`` would treat it as a router-less Hydra and silently skip
+    # every module for "missing router"). The metadata stamp is authoritative —
+    # point users at the dedicated step-aware node.
+    if str(file_metadata.get("ss_turbo_per_step_expert", "")).strip() in (
+        "1",
+        "true",
+        "True",
+    ):
+        raise ValueError(
+            f"{file_path} is a per-step-expert turbo checkpoint — load it with "
+            "AnimaTurboPerStepExpertLoader, not AnimaAdapterLoader. Its K up-heads "
+            "are selected by the denoise-step counter (no router), which a plain "
+            "LoRA / Hydra loader can't drive."
         )
 
     hydra = _parse_hydra(weights_sd)

@@ -175,6 +175,46 @@ distillation hasn't reached a true 2-step map yet — train longer or raise
 `student_steps`. Always keep `--cfg 1.0` regardless of step count (CFG is baked;
 don't double-guide).
 
+## Per-step expert (`per_step_expert`, default off)
+
+One rank-`student_rank` LoRA normally absorbs two conflicting gradients: the
+**diversity** loss on step 0 (`div_loss = MSE(v_first, v_target)`, then a detach)
+and the **DMD** reverse-KL on steps 1..N. The detach already severs the two
+backward graphs, so `per_step_expert=true` splits the student into one **shared
+`lora_down`** plus **K = `student_steps` up-heads** (`StepExpertLoRAModule`),
+selecting head `k` for denoise step `k` by the step counter — no router (the step
+index is known at call time, unlike FeRA's FEI/σ case). Head 0 then sees only the
+diversity gradient, head k only step-k's DMD gradient; only the shared down-proj is
+trained by both. Per-step inference compute is unchanged (one head active per step).
+
+Turn it on in `[network]` (`per_step_expert = true`) or `--per_step_expert`. Treat
+it as a **hypothesis test vs the single-head student**, not a presumed win: if the
+shared LoRA was never capacity/interference-bound it buys a heavier checkpoint +
+inference plumbing for nothing. Promote only if it beats baseline on the CMMD val
+signal ([[project_cmmd_val_signal]]) with visibly preserved step-0 diversity.
+
+### What it costs — the plain-LoRA property is gone
+
+This is the load-bearing trade. The shipped single-head turbo is a **normal LoRA**:
+it merges into the DiT (`make merge`), loads through any stock LoRA path, and that
+simplicity *is* the headline. A per-step-expert student is **not**:
+
+- **`make merge` refuses it** — K per-step heads can't fold into one static DiT
+  weight (it would need K baked copies). It's caught by the `.lora_ups.` non-bakeable
+  marker, same as Hydra moe.
+- **Kept-live only.** Inference rebuilds a router-free `StepExpertLoRAModule` network
+  on the (fused-qkv) DiT and selects the head per step — CLI via
+  `set_step_index(i)` in the denoise loop (the loader keys off the
+  `ss_turbo_per_step_expert` metadata stamp), ComfyUI via the dedicated
+  `AnimaTurboPerStepExpertLoader` node (stock LoRA / `AnimaAdapterLoader` raise,
+  since they can't drive step-indexed head selection).
+- **`make test-turbo` pins `--infer_steps` to the trained head count K** (read from
+  metadata); head k binds to step k, so `infer_steps` must equal K. Overshoot repeats
+  the last (quality) head; undershoot skips it. Keep `--cfg 1.0`.
+
+Escape hatch if the shared down-proj becomes a compromise between the two
+objectives: per-head down (doubles params, removes sharing) — documented, not v0.
+
 ## Reading the metrics
 
 Trigger fake interventions on **`dm_rel_gap` ↑ / `dm_cos` ↓**, *not* on `fake_loss`

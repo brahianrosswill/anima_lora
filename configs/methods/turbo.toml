@@ -11,12 +11,12 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_J"
+output_name = "anima_turbo_K"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 12000
+iterations = 500
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -26,11 +26,18 @@ gradient_checkpointing = false
 unsloth_offload_checkpointing = false
 
 [network]
-student_rank = 96
-student_alpha = 96
-fake_rank = 128
-fake_alpha = 128
+student_rank = 64
+student_alpha = 64
+fake_rank = 64
+fake_alpha = 64
 attn_mode = "flash"
+# Per-step expert: split the student into K = student_steps up-heads off a
+# shared down-proj, head k serving denoise step k. Removes the diversity↔quality
+# tug-of-war (step 0 vs steps 1..N) in shared up-weights. Default off — the
+# single-head student stays the shipped path. NOTE: output is NOT a plain LoRA
+# (kept-live only; `make merge` refuses it, stock ComfyUI LoRA loaders can't
+# drive per-step head selection — use AnimaTurboPerStepExpertLoader).
+per_step_expert = true
 
 # DMD schedule.
 [dmd]
@@ -41,9 +48,9 @@ norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (late
 
 # Optimization.
 [optim]
-student_lr = 1e-5
-fake_lr = 1e-5
-fake_steps_per_student_step = 5
+student_lr = 2e-5
+fake_lr = 2e-5
+fake_steps_per_student_step = 4
 fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
                                 # against the student's (init ≈ teacher) x_pred before the
@@ -98,6 +105,6 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 2000
+save_every = 250
 log_interval = 5
 log_dir = "output/logs/turbo"

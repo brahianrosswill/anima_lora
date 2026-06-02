@@ -172,6 +172,7 @@ def main():
         student_alpha=cfg.student_alpha,
         fake_alpha=cfg.fake_alpha,
         use_custom_down_autograd=cfg.use_custom_down_autograd,
+        student_step_expert_K=cfg.step_expert_K,
     )
     turbo.freeze_dit()
     turbo.student.to(device=device, dtype=dtype)
@@ -474,8 +475,11 @@ def main():
         x = eps
         x.requires_grad_()  # grad-ckpt needs a grad-requiring forward input
         # Step 0: the diversity-supervised first step (grad → v_first).
+        # set_student_step routes to head 0 (no-op unless per-step-expert is on);
+        # with the detach below, head 0 sees ONLY this diversity gradient.
         s0, s0_next = student_sigmas[0], student_sigmas[1]
         t_b = torch.full((B,), s0, device=device, dtype=dtype)
+        turbo.set_student_step(0)
         v_first = _forward("student", x, t_b, crossattn_emb, no_grad=False).squeeze(2)
         x = x - (s0 - s0_next) * v_first
         div_loss_t = nn.functional.mse_loss(v_first.float(), v_target)
@@ -493,6 +497,9 @@ def main():
             s_i = student_sigmas[i]
             s_next = student_sigmas[i + 1]
             t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+            # Route to head i (no-op unless per-step-expert): each DMD step's
+            # gradient lands only on its own up-head + the shared down-proj.
+            turbo.set_student_step(i)
             v = _forward(
                 "student", x, t_b, crossattn_emb, no_grad=False
             ).squeeze(2)
@@ -629,12 +636,19 @@ def main():
             metadata = {
                 "ss_turbo_objective": "dpdmd",
                 "ss_turbo_student_rank": str(cfg.student_rank),
+                "ss_turbo_student_alpha": str(cfg.student_alpha),
                 "ss_turbo_student_steps": str(cfg.student_steps),
                 "ss_turbo_teacher_cfg": str(cfg.teacher_cfg),
                 "ss_turbo_step": str(n),
                 "ss_turbo_k_anchor": str(cfg.k_anchor),
                 "ss_turbo_div_weight": str(cfg.div_weight),
             }
+            if cfg.per_step_expert:
+                # Drives loader detection (CLI + ComfyUI build StepExpertLoRAModule
+                # and keep it live instead of merging). step_expert_K == the head
+                # count == student_steps.
+                metadata["ss_turbo_per_step_expert"] = "1"
+                metadata["ss_turbo_step_expert_K"] = str(cfg.step_expert_K)
             save_names = [f"{cfg.output_name}_{_step_tag(n)}"]
             if is_final:
                 save_names.append(cfg.output_name)  # canonical bare name

@@ -30,6 +30,7 @@ import folder_paths
 from .adapter import apply_adapter
 from .fera import apply_fera
 from .soft_tokens import apply_soft_tokens
+from .step_expert import apply_step_expert, parse_step_expert
 
 
 class AnimaAdapterLoader:
@@ -253,14 +254,90 @@ class AnimaSoftTokensLoader:
         return (new_model,)
 
 
+class AnimaTurboPerStepExpertLoader:
+    """Apply a per-step-expert turbo student to a MODEL.
+
+    The student carries K up-heads per Linear off one shared down-proj; head
+    ``k`` serves denoise step ``k`` (``per_step_expert=true`` turbo). Selection
+    is by the denoise-step counter — no router — so a stock LoRA loader silently
+    produces no adapter (every module skips for "missing router"). This node
+    installs a ``diffusion_model`` pre-hook that advances the head index once per
+    forward plus per-Linear hooks that add the active head's delta.
+
+    Drive at the matching step count and **cfg=1.0** (the turbo contract): with
+    cfg=1.0 ComfyUI runs one model forward per step, so forward i → head i.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = folder_paths.get_filename_list("loras")
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "adapter": (
+                    loras,
+                    {
+                        "tooltip": (
+                            "Per-step-expert turbo student "
+                            "(ss_turbo_per_step_expert=1). Use cfg=1.0 and "
+                            "infer_steps = trained head count K."
+                        )
+                    },
+                ),
+                "strength": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -2.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": "Strength multiplier for the step-head delta.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "loaders"
+    DESCRIPTION = (
+        "Anima per-step-expert turbo loader. Installs a diffusion_model "
+        "pre-hook that selects the up-head by denoise-step counter (head k → "
+        "step k) plus per-Linear forward hooks. Fused qkv/kv keys are split to "
+        "ComfyUI's q/k/v layout at load. Requires cfg=1.0 and one model forward "
+        "per step (the turbo contract); set infer_steps to the trained K."
+    )
+
+    def apply(self, model, adapter, strength):
+        from safetensors import safe_open
+        from safetensors.torch import load_file
+
+        file_path = folder_paths.get_full_path("loras", adapter)
+        weights_sd = load_file(file_path)
+        with safe_open(file_path, framework="pt") as f:
+            metadata = dict(f.metadata() or {})
+        data = parse_step_expert(weights_sd, metadata)
+        if data is None:
+            raise ValueError(
+                f"{adapter} is not a per-step-expert turbo checkpoint "
+                "(missing ss_turbo_per_step_expert=1). Use AnimaAdapterLoader "
+                "for plain LoRA / HydraLoRA / ReFT."
+            )
+        new_model = model.clone()
+        apply_step_expert(new_model, data, strength)
+        return (new_model,)
+
+
 NODE_CLASS_MAPPINGS = {
     "AnimaAdapterLoader": AnimaAdapterLoader,
     "AnimaFeraLoader": AnimaFeraLoader,
     "AnimaSoftTokensLoader": AnimaSoftTokensLoader,
+    "AnimaTurboPerStepExpertLoader": AnimaTurboPerStepExpertLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AnimaAdapterLoader": "Anima Adapter Loader",
     "AnimaFeraLoader": "Anima FeRA Loader",
     "AnimaSoftTokensLoader": "Anima Soft Tokens Loader",
+    "AnimaTurboPerStepExpertLoader": "Anima Turbo Per-Step Expert Loader",
 }

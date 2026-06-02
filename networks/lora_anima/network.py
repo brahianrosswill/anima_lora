@@ -28,6 +28,7 @@ from networks.lora_modules import (
     OrthoLoRAModule,
     ReFTModule,
     StackedExpertsLoRAModule,
+    StepExpertLoRAModule,
     _sigma_sinusoidal_features,
 )
 from networks.lora_modules.router_state import _fei_temperature
@@ -407,7 +408,12 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                             effective_module_class = OrthoLoRAModule
 
                 extra_kwargs = {}
-                if effective_module_class == OrthoLoRAModule:
+                if effective_module_class == StepExpertLoRAModule:
+                    # Shared down-proj + K step-indexed up-heads. K is the only
+                    # extra constructor arg; head selection is set per forward
+                    # via LoRANetwork.set_step_index / the turbo coordinator.
+                    extra_kwargs["step_expert_K"] = cfg.step_expert_K
+                elif effective_module_class == OrthoLoRAModule:
                     pass  # no extra kwargs — SVD init reads from org_module directly
                 elif effective_module_class == ChimeraHydraLoRAModule:
                     # Pool split is the chimera's only constructor surface;
@@ -983,6 +989,21 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
     def set_enabled(self, is_enabled):
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.enabled = is_enabled
+
+    def set_step_index(self, step: int) -> None:
+        """Select the active step-expert up-head on every adapted module.
+
+        No-op on non-step-expert modules (they have no ``set_step``). The
+        diffusion step index is known at call time (training rollout step /
+        inference denoise step), so selection is a deterministic per-module
+        attribute write — the same O(num_modules) loop shape as ``set_enabled``,
+        fired once per step (not per forward). Mirror of the turbo coordinator's
+        ``set_student_step``; both reach the same ``StepExpertLoRAModule._step``.
+        """
+        for lora in self.text_encoder_loras + self.unet_loras:
+            set_step = getattr(lora, "set_step", None)
+            if callable(set_step):
+                set_step(step)
 
     def fuse_weights(self):
         """Merge all LoRA deltas into base model weights for zero-overhead inference."""

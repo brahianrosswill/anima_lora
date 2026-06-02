@@ -144,6 +144,23 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Sampler step count baked into the student",
     )
     parser.add_argument(
+        "--per_step_expert",
+        dest="per_step_expert",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Split the student into per-step up-heads (head k serves denoise "
+        "step k) off a shared down-proj, so the diversity (step 0) and DMD "
+        "(steps 1..N) gradients stop fighting over one set of up-weights. "
+        "K = student_steps. Output is NOT a plain LoRA (kept-live only; merge "
+        "refuses it). Default: TOML (network.per_step_expert, default false).",
+    )
+    parser.add_argument(
+        "--no_per_step_expert",
+        dest="per_step_expert",
+        action="store_false",
+    )
+    parser.add_argument(
         "--dm_x0_norm",
         dest="dm_x0_norm",
         action="store_const",
@@ -280,6 +297,10 @@ class TurboConfig:
     fake_alpha: float
     attn_mode: str
     use_custom_down_autograd: bool
+    # Per-step expert (dual-B-head student). When on, step_expert_K is derived
+    # = student_steps; head k serves denoise step k. Off → single-head student.
+    per_step_expert: bool
+    step_expert_K: int
 
     # Masked loss
     use_masked_loss: bool
@@ -370,6 +391,16 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     # (b) ≈ "drop the τ-weight, magnitude-normalize."
     dm_x0_norm = bool(_pick(args.dm_x0_norm, cfg, "dmd.dm_x0_norm", False))
     norm_floor = float(_pick(args.norm_floor, cfg, "dmd.norm_floor", 0.05))
+
+    # Per-step expert (dual-B-head student). step_expert_K is derived from
+    # student_steps so head k ↔ denoise step k by construction (the plan's
+    # K = student_steps invariant). K==1 (single step) would collapse to a
+    # plain LoRA, so the network factory ignores it there.
+    if args.per_step_expert is None:
+        per_step_expert = bool(_flatten(cfg, "network.per_step_expert", False))
+    else:
+        per_step_expert = bool(args.per_step_expert)
+    step_expert_K = student_steps if per_step_expert else 0
 
     # DP-DMD — diversity-anchor knobs.
     k_anchor = int(_pick(args.k_anchor, cfg, "dpdmd.k_anchor", 5))
@@ -495,6 +526,20 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         f"student N={student_steps} @ flow_shift={flow_shift}, "
         f"teacher_cfg={teacher_cfg}."
     )
+    if per_step_expert:
+        if not detach_after_first:
+            logger.warning(
+                "per_step_expert=True with detach_after_first=False: the step-0 "
+                "and DMD graphs stay entangled, so the diversity gradient reaches "
+                "the DMD heads (and vice versa) through the shared rollout — the "
+                "head split no longer cleanly separates the two objectives. Keep "
+                "detach_after_first=True with per_step_expert."
+            )
+        logger.info(
+            f"per-step-expert student ON: K={step_expert_K} up-heads / Linear "
+            f"(head k ↔ denoise step k) off a shared down-proj. Output is "
+            "kept-live only (not a plain LoRA; merge refuses it)."
+        )
 
     return TurboConfig(
         dit_path=dit_path,
@@ -516,6 +561,8 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         fake_alpha=fake_alpha,
         attn_mode=attn_mode,
         use_custom_down_autograd=use_custom_down_autograd,
+        per_step_expert=per_step_expert,
+        step_expert_K=step_expert_K,
         use_masked_loss=use_masked_loss,
         mask_dir=mask_dir,
         k_anchor=k_anchor,

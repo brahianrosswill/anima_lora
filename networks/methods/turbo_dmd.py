@@ -38,6 +38,75 @@ logger = logging.getLogger(__name__)
 View = Literal["teacher", "student", "fake"]
 
 
+def load_step_expert_student(
+    unet,
+    weights_sd: dict[str, torch.Tensor],
+    metadata: dict[str, str],
+    *,
+    multiplier: float = 1.0,
+) -> LoRANetwork:
+    """Rebuild a per-step-expert turbo student as a router-free, kept-live net.
+
+    Per-step-expert checkpoints can't go through ``merge_to_dit`` (K up-heads
+    don't fold into one DiT weight) nor the shared ``create_network_from_weights``
+    key-sniff (the ``.lora_ups.{k}.weight`` layout collides with Hydra's). The
+    file keeps the training-runtime fused-qkv key layout, so we build a fresh
+    ``StepExpertLoRAModule`` network on the same fused DiT (uniform rank from
+    metadata) and ``load_state_dict`` matches directly — no split→re-fuse.
+
+    Caller is responsible for ``apply_to``? No: this applies + loads + freezes,
+    returning a net ready for ``set_step_index`` per denoise step. Stash it on
+    the model so the sampler loop can find it.
+    """
+    K = int(metadata.get("ss_turbo_step_expert_K", "0") or "0")
+    if K <= 1:
+        raise RuntimeError(
+            "load_step_expert_student called on a checkpoint without "
+            "ss_turbo_step_expert_K > 1 — not a per-step-expert turbo file."
+        )
+    rank = int(metadata.get("ss_turbo_student_rank", "0") or "0")
+    if rank <= 0:
+        raise RuntimeError(
+            "per-step-expert turbo checkpoint missing ss_turbo_student_rank "
+            "metadata — cannot rebuild the student at the right rank."
+        )
+    # scale = alpha / rank is fixed at module construction (load_state_dict only
+    # overwrites the alpha buffer, not the cached scale), so build with the
+    # trained alpha. Shipped config uses alpha == rank (scale 1.0); fall back to
+    # rank when the stamp is absent on older checkpoints.
+    alpha = float(metadata.get("ss_turbo_student_alpha", str(rank)) or rank)
+
+    network = create_network(
+        multiplier=multiplier,
+        network_dim=rank,
+        network_alpha=alpha,
+        vae=None,
+        text_encoders=[],
+        unet=unet,
+        step_expert_K=K,
+    )
+    network.apply_to([], unet, apply_text_encoder=False, apply_unet=True)
+    info = network.load_state_dict(weights_sd, strict=False)
+    if info.unexpected_keys:
+        logger.warning(
+            f"step-expert turbo: unexpected keys in state dict: "
+            f"{info.unexpected_keys[:5]}..."
+        )
+    if info.missing_keys:
+        # Zero-init heads that never received a checkpoint tensor would silently
+        # contribute nothing; surface the count so a rank/target mismatch is loud.
+        logger.warning(
+            f"step-expert turbo: {len(info.missing_keys)} missing keys "
+            f"(first: {info.missing_keys[:5]})"
+        )
+    network.set_step_index(0)
+    logger.info(
+        f"step-expert turbo: router-free kept-live attached "
+        f"({len(network.unet_loras)} modules, K={K} heads, rank={rank})"
+    )
+    return network
+
+
 class TurboDMDNetwork:
     """Two LoRA stacks on one frozen DiT, view-toggleable per forward.
 
@@ -55,10 +124,17 @@ class TurboDMDNetwork:
         student_alpha: float | None = None,
         fake_alpha: float | None = None,
         use_custom_down_autograd: bool = False,
+        student_step_expert_K: int = 0,
     ) -> None:
         self.unet = unet
         self.student_rank = int(student_rank)
         self.fake_rank = int(fake_rank)
+        # Per-step expert: when > 1 the student's adapted Linears become
+        # StepExpertLoRAModule (shared down + K step-indexed up-heads); head k
+        # is trained only by step-k's gradient (see set_student_step + the
+        # detach in scripts/distill_turbo/distill.py). The fake/critic stays a
+        # plain single-head LoRA. 0/1 = the shipped single-head student.
+        self.student_step_expert_K = int(student_step_expert_K)
 
         # Plain LoRA on both — defaults from LoRANetworkCfg give us
         # use_moe_style=False / route_per_layer=False / router_source="none" /
@@ -72,6 +148,13 @@ class TurboDMDNetwork:
         # ``use_custom_down_autograd`` is forwarded as a ``**kwargs`` key because
         # ``create_network``'s positional surface doesn't include it — the factory
         # reads it out of ``kwargs`` and flips each module's flag post-construction.
+        # ``step_expert_K`` is forwarded as a ``**kwargs`` key (like
+        # ``use_custom_down_autograd``); >1 flips ``resolve_network_spec`` to the
+        # step_expert variant so the student uses ``StepExpertLoRAModule``. Only
+        # the student gets heads — the fake never sees it.
+        _student_kwargs: dict = {}
+        if self.student_step_expert_K > 1:
+            _student_kwargs["step_expert_K"] = self.student_step_expert_K
         self.student: LoRANetwork = create_network(
             multiplier=1.0,
             network_dim=self.student_rank,
@@ -80,6 +163,7 @@ class TurboDMDNetwork:
             text_encoders=[],
             unet=unet,
             use_custom_down_autograd=use_custom_down_autograd,
+            **_student_kwargs,
         )
         self.fake: LoRANetwork = create_network(
             multiplier=1.0,
@@ -170,6 +254,22 @@ class TurboDMDNetwork:
     def view(self) -> View:
         return self._view
 
+    # ----------------- per-step expert head selection -----------------
+
+    def set_student_step(self, i: int) -> None:
+        """Select the student's step-``i`` up-head before its forward.
+
+        No-op when per-step-expert is off (the plain student modules have no
+        ``set_step``). The detach between the diversity step-0 backward and the
+        DMD steps-1..N chain (distill.py) means head 0 only ever sees the
+        diversity gradient and head k only step-k's DMD gradient — the shared
+        ``lora_down`` is trained by both. Mirror of ``LoRANetwork.set_step_index``;
+        kept as a coordinator method so the training loop never reaches into the
+        student network directly.
+        """
+        if self.student_step_expert_K > 1:
+            self.student.set_step_index(i)
+
     # ----------------- param accessors -----------------
 
     def student_params(self):
@@ -216,8 +316,6 @@ class TurboDMDNetwork:
         Output is loadable by ``inference.py --lora_weight <file>`` — the
         fake network is training scaffolding and never shipped.
         """
-        from networks.lora_save import save_network_weights
-
         # Pull exactly the student's params, prefixed by LoRA-net key style
         # (this is what LoRANetwork.state_dict() returns — naturally so
         # because each LoRA was add_module'd onto the network).
@@ -226,6 +324,13 @@ class TurboDMDNetwork:
         # LoRA shouldn't have any, but the LoRANetwork instance itself may
         # carry buffers that aren't load-bearing for inference).
         sd = {k: v for k, v in sd.items() if ".lora_" in k or ".alpha" in k}
+
+        if self.student_step_expert_K > 1:
+            self._save_student_step_expert(sd, file, dtype, metadata)
+            return
+
+        from networks.lora_save import save_network_weights
+
         save_network_weights(
             sd,
             file=file,
@@ -234,3 +339,45 @@ class TurboDMDNetwork:
             save_variant="standard",
         )
         logger.info(f"saved student LoRA → {file}  ({len(sd)} keys)")
+
+    def _save_student_step_expert(
+        self,
+        sd: dict[str, torch.Tensor],
+        file: str,
+        dtype: torch.dtype,
+        metadata: dict[str, str] | None,
+    ) -> None:
+        """Write the per-step-expert student in its bespoke layout.
+
+        Multi-head keys (``…lora_ups.{k}.weight``) are NOT plain-LoRA loadable,
+        so the standard defuse-qkv save pipeline (which expects one
+        ``.lora_up.weight`` per ``.lora_down.weight``) can't run. We keep the
+        fused-qkv key layout the training-runtime DiT uses verbatim — the CLI /
+        ComfyUI step-expert loaders rebuild the network on the same fused DiT and
+        ``load_state_dict`` matches directly (no split→re-fuse round trip). The
+        ``ss_turbo_per_step_expert`` metadata stamp drives loader detection; the
+        keys deliberately reuse ``.lora_ups.`` so a stock loader fails loudly
+        rather than silently mis-merging only head 0.
+        """
+        from safetensors.torch import save_file
+        from library.training.hashing import precalculate_safetensors_hashes
+        from networks.lora_modules.lora import bake_inv_scale
+
+        # Fold any per-channel scaling into lora_down (no-op when absent) so the
+        # on-disk delta acts on raw inputs.
+        bake_inv_scale(sd)
+
+        if dtype is not None:
+            sd = {k: v.detach().clone().to("cpu").to(dtype) for k, v in sd.items()}
+
+        meta = dict(metadata or {})
+        model_hash, legacy_hash = precalculate_safetensors_hashes(sd, meta)
+        meta["sshs_model_hash"] = model_hash
+        meta["sshs_legacy_hash"] = legacy_hash
+
+        save_file(sd, file, meta)
+        n_heads = self.student_step_expert_K
+        logger.info(
+            f"saved step-expert student LoRA → {file}  ({len(sd)} keys, "
+            f"K={n_heads} up-heads/Linear; kept-live only — not plain-LoRA mergeable)"
+        )

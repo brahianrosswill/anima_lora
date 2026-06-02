@@ -132,7 +132,27 @@ def cmd_test_turbo(extra):
     # Replace defaults so `--infer_steps`/`--guidance_scale` reflect the turbo
     # contract (2 steps, cfg=1.0). User extra args still win since they come last.
     base = _override_arg(base, "--sampler", "euler")
-    base = _override_arg(base, "--infer_steps", "2")
+    # Per-step-expert checkpoints bind head k to denoise step k, so infer_steps
+    # MUST equal the trained head count K (= student_steps). Read it from the
+    # metadata and pin infer_steps to K; overshoot would repeat the last head
+    # (the inference helper clamps) and undershoot would skip the quality head.
+    infer_steps = "2"
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(weight), framework="pt") as f:
+            md = f.metadata() or {}
+        if str(md.get("ss_turbo_per_step_expert", "")).strip() in ("1", "true", "True"):
+            K = int(md.get("ss_turbo_step_expert_K", "2") or "2")
+            infer_steps = str(K)
+            print(
+                f"[test-turbo] per-step-expert checkpoint: pinning "
+                f"--infer_steps {K} (= trained head count). Override at your own "
+                "risk — heads beyond K repeat the last (quality) head."
+            )
+    except Exception:
+        pass
+    base = _override_arg(base, "--infer_steps", infer_steps)
     base = _override_arg(base, "--guidance_scale", "1.0")
     run(
         [

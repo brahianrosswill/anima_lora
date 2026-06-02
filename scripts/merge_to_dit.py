@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 _NON_BAKEABLE_MARKERS: dict[str, str] = {
     "reft_": "ReFT (block-level hook)",
     ".lora_up_weight": "HydraLoRA stacked (per-layer router)",
-    ".lora_ups.": "HydraLoRA split (per-layer router)",
+    ".lora_ups.": "HydraLoRA split (per-layer router) / step-expert turbo (per-step heads)",
     "postfix_": "postfix (cross-attn KV splice)",
     "prefix_": "prefix (cross-attn KV splice)",
 }

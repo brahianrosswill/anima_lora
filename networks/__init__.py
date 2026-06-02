@@ -32,6 +32,7 @@ from networks.lora_modules import (
     OrthoHydraLoRAModule,
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
+    StepExpertLoRAModule,
 )
 
 
@@ -192,6 +193,13 @@ _HYDRA_KWARG_FLAGS: Tuple[str, ...] = (
     "fei_sigma_low_div",
 )
 
+_STEP_EXPERT_KWARG_FLAGS: Tuple[str, ...] = (
+    # Number of step-indexed up-heads on the shared down-proj (= student_steps
+    # for the turbo DP-DMD student). Presence (>0) selects the step_expert spec
+    # in resolve_network_spec; see networks/lora_modules/step_expert.py.
+    "step_expert_K",
+)
+
 _CHIMERA_KWARG_FLAGS: Tuple[str, ...] = (
     "use_chimera_hydra",
     "num_experts_content",
@@ -268,6 +276,17 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         kwarg_flags=_HYDRA_KWARG_FLAGS + _CHIMERA_KWARG_FLAGS,
         post_init=_post_init_hydra,
     ),
+    # Step-expert: shared down-proj + K step-indexed up-heads, hard selection
+    # by diffusion step counter (no router). Turbo DP-DMD student only; the
+    # student LoRA is kept-live at inference (K heads can't fold into one DiT
+    # weight), so save_variant is bespoke (written by TurboDMDNetwork.save_student,
+    # not save_network_weights). Selected via the ``step_expert_K`` kwarg.
+    "step_expert": NetworkSpec(
+        name="step_expert",
+        module_class=StepExpertLoRAModule,
+        save_variant="step_expert",
+        kwarg_flags=_STEP_EXPERT_KWARG_FLAGS,
+    ),
     # FeRA paper-faithful: independent-A stacked experts, single network-level
     # router fed by FEI(z_t). See plan2.md §three-axis-config — selected via
     # ``use_moe_style="independent_A"``. Save handler stub: task #4 wires the
@@ -328,6 +347,13 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
     use_chimera = _parse_bool_flag(kwargs, "use_chimera_hydra")
     if use_chimera:
         return NETWORK_REGISTRY["chimera_hydra"]
+
+    # Step-expert (turbo per-step head split) short-circuits when step_expert_K
+    # is set and > 1. K==1 collapses to plain LoRA, so don't pay the ModuleList
+    # plumbing for it.
+    raw_step_K = kwargs.get("step_expert_K")
+    if raw_step_K is not None and int(raw_step_K) > 1:
+        return NETWORK_REGISTRY["step_expert"]
 
     raw_moe = kwargs.get("use_moe_style")
     if isinstance(raw_moe, str):

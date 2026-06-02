@@ -20,6 +20,7 @@ from library.inference.adapters import (
     set_hydra_content,
     set_hydra_crossattn,
     set_hydra_sigma,
+    set_step_expert_index,
 )
 from library.inference import sampling as inference_utils
 from library.inference.output import check_inputs
@@ -368,6 +369,7 @@ def generate_body_tiled(
 
                 t_expand = t.expand(latents.shape[0])
                 set_hydra_sigma(anima, t_expand)
+                set_step_expert_index(anima, i)
                 # FEI router input — computed on the full latent (pre-tile)
                 # so every tile in this step sees the same per-sample FEI.
                 # Drives both the per-Linear FEI router (FEI-on-Hydra) and
@@ -762,6 +764,7 @@ def generate_body(
 
                     t_expand = t.expand(latents.shape[0])
                     set_hydra_sigma(anima, t_expand)
+                    set_step_expert_index(anima, i)
                     compute_and_set_hydra_fei(anima, latents)
                     if dcw_calibrator is not None:
                         # Capture FEI on the pre-forward latent at warmup steps

@@ -388,6 +388,12 @@ class LoRANetworkCfg:
     # (centering with λ0=0 is a no-op).
     chimera_lambda_init: float = 1e-2
 
+    # Step-expert (turbo per-step head split). When > 1, each adapted Linear
+    # is a ``StepExpertLoRAModule``: one shared ``lora_down`` + K up-heads
+    # selected by the diffusion step index (no router). 0/1 = inactive. See
+    # ``networks/lora_modules/step_expert.py``.
+    step_expert_K: int = 0
+
     # SmoothQuant-style per-channel input pre-scaling
     channel_scales_dict: Optional[Dict[str, torch.Tensor]] = None
 
@@ -672,6 +678,9 @@ class LoRANetworkCfg:
                 "per-Linear variant."
             )
 
+        step_expert_K_raw = kwargs.get("step_expert_K")
+        step_expert_K = int(step_expert_K_raw) if step_expert_K_raw is not None else 0
+
         reg_dims_str = kwargs.get("network_reg_dims")
         reg_dims = _parse_kv_pairs(reg_dims_str, is_int=True) if reg_dims_str else None
         reg_lrs_str = kwargs.get("network_reg_lrs")
@@ -735,6 +744,7 @@ class LoRANetworkCfg:
             freq_router_lr_scale=freq_router_lr_scale,
             content_router_layer_norm=content_router_layer_norm,
             chimera_lambda_init=chimera_lambda_init,
+            step_expert_K=step_expert_K,
             channel_scales_dict=channel_scales_dict,
             verbose=verbose,
         )
@@ -779,6 +789,7 @@ class LoRANetworkCfg:
         freq_router_mode: str = "learned",
         freq_router_tau: float = 1.0,
         content_router_layer_norm: bool = True,
+        step_expert_K: int = 0,
     ) -> "LoRANetworkCfg":
         """Build cfg from a checkpoint key-sniff (warm-start / inference path).
 
@@ -886,4 +897,5 @@ class LoRANetworkCfg:
             ),
             freq_router_tau=float(freq_router_tau),
             content_router_layer_norm=bool(content_router_layer_norm),
+            step_expert_K=int(step_expert_K),
         )
