@@ -23,17 +23,17 @@ network_dim = 64
 network_alpha = 64
 
 network_args = [
-    "b_cond_init=-5.0",
+    "b_cond_init=-6.0",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
 ]
 
 output_name = "anima_colorize_sigmoid"
-sigmoid_bias=1
+sigmoid_bias=0
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-learning_rate = 1e-4
+learning_rate = 5e-5
 max_train_epochs = 2
 save_every_n_epochs = 2
 checkpointing_epochs = 2
@@ -47,7 +47,7 @@ masked_loss = false
 # prompt→color control. ~0.5 keeps both modes strong. (Was 0.9 with full
 # captions, which over-trained the unconditional path and gave weak, arbitrary
 # color steering — see image-compare diagnosis.)
-caption_dropout_rate = 0.1
+caption_dropout_rate = 0.05
 
 # The color-only TE cache is multi-variant (prep.py --text_shuffle_variants):
 # v0 = full color set, v1+ = shuffled with ~30% of color tags dropped. This
@@ -59,7 +59,7 @@ use_shuffled_caption_variants = true
 # The manga cond is already a lossy hint (lineart + screentone), so keep the
 # training-time cond perturbation small — high noise would erase the line
 # structure we want the model to follow.
-easycontrol_cond_noise_max = 0.05
+easycontrol_cond_noise_max = 0.02
 
 blocks_to_swap = 0
 gradient_checkpointing = true

@@ -32,11 +32,9 @@ from gui.i18n import (
     save_language,
     t,
 )
-from gui.tabs.adapter_tab import (
-    EasyControlTab,
-    IPAdapterTab,
-)
+from gui.tabs.adapter_tab import IPAdapterTab
 from gui.tabs.config_tab import ConfigTab
+from gui.tabs.easycontrol_tab import EasyControlTab
 from gui.tabs.image_tab import ImageViewerTab
 from gui.tabs.merge_tab import MergeTab
 from gui.tabs.methods_tab import MethodsTab

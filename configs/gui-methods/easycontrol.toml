@@ -43,6 +43,6 @@ use_cmmd = false
 
 [variant]
 family = "easycontrol"
-label = "EasyControl"
-description = "Extended self-attention image conditioning."
+label = "EasyControl (ref == target)"
+description = "Extended self-attention image conditioning (the condition is the reference image itself)."
 order = 10

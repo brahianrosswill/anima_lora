@@ -1,9 +1,12 @@
-"""IP-Adapter / EasyControl tabs.
+"""IP-Adapter dataset-launcher tab.
 
-Each tab is a slim launcher: it shows the dataset state (source image count,
-caption pairing, cache coverage), and gives the user one button to preprocess
-the dataset and one button to train the adapter. Heavy config editing still
-happens in the Config tab (these methods are listed there as variants).
+A slim launcher: it shows the dataset state (source image count, caption
+pairing, cache coverage), and gives the user one button to preprocess the
+dataset and one button to train the adapter. Heavy config editing still happens
+in the Config tab (this method is listed there as a variant).
+
+EasyControl used to share this layout but was promoted to a ConfigTab-based
+config editor — see gui/tabs/easycontrol_tab.py.
 """
 
 from __future__ import annotations
@@ -344,15 +347,12 @@ class IPAdapterTab(_AdapterTab):
     METHOD_LABEL = "IP-Adapter"
 
 
-class EasyControlTab(_AdapterTab):
-    SOURCE_DIR = "easycontrol-dataset"
-    CACHE_DIR = "post_image_dataset/easycontrol"
-    PREPROCESS_TASK = "exp-easycontrol-preprocess"
-    TRAIN_TASK = "exp-easycontrol"
-    TRAIN_METHOD = "easycontrol"
-    REQUIRE_PE = False
-    METHOD_LABEL = "EasyControl"
-
+# EasyControl used to be an _AdapterTab dataset-browser launcher here too, but
+# it was promoted to a ConfigTab-based config editor (form on the left,
+# field-explanation on the right — like the LoRA tab) so its rank / LR / routing
+# knobs are editable in-GUI, with a Colorize variant. Preprocess / Train still
+# route through the exp-easycontrol* tasks (EASYADAPTER per variant). See
+# gui/tabs/easycontrol_tab.py.
 
 # SPD and Turbo used to live here as _AdapterTab subclasses, but they have no
 # dataset of their own (they reuse the ordinary LoRA cache) and train via

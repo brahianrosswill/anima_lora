@@ -1,0 +1,67 @@
+# Colorize — EasyControl control task (B&W manga / lineart → color).
+# GUI-friendly self-contained variant — no toggle blocks.
+#
+# Same frozen-DiT EasyControl network as easycontrol.toml; the differences are
+# the condition (synthetic mangafied B&W, cached to a parallel cond_cache_dir)
+# and color-only captions (text_cache_dir). Both are wired through the dataset
+# blueprint below.
+#
+# The GUI's EasyControl tab trains this via:
+#   EASYADAPTER=colorize tasks.py exp-easycontrol --methods_subdir gui-methods
+# and preprocesses (mangafy + VAE-encode the cond) via:
+#   EASYADAPTER=colorize tasks.py exp-easycontrol-preprocess
+# See easycontrol_adapters/colorization/ and docs/experimental/easycontrol.md.
+
+dataset_config = "configs/datasets/colorize.toml"
+
+network_module = "networks.methods.easycontrol"
+
+network_dim = 64
+network_alpha = 64
+
+network_args = [
+    "b_cond_init=-6.0",
+    "cond_scale=1.0",
+    "apply_ffn_lora=1",
+]
+
+output_name = "anima_colorize_sigmoid"
+sigmoid_bias = 0
+
+logging_dir = "output/logs"
+log_with = "tensorboard"
+
+learning_rate = 5e-5
+max_train_epochs = 2
+save_every_n_epochs = 2
+checkpointing_epochs = 2
+
+use_easycontrol = true
+easycontrol_drop_p = 0.0
+masked_loss = false
+
+# Captions are color-only (text_cache_dir), so a dropped step trains the
+# auto-color mode and a kept step trains prompt→color control. A low rate keeps
+# a strong prompt→color binding while still seeing some empty prompts.
+caption_dropout_rate = 0.05
+
+# The color-only TE cache is multi-variant (prep.py text stage): v0 = full
+# color set, v1+ = shuffled with ~30% of color tags dropped. This makes the
+# loader sample them so the model handles partial color prompts.
+use_shuffled_caption_variants = true
+
+# The manga cond is already a lossy hint (lineart + screentone) — keep the
+# training-time cond perturbation small so line structure survives.
+easycontrol_cond_noise_max = 0.02
+
+blocks_to_swap = 0
+gradient_checkpointing = true
+unsloth_offload_checkpointing = true
+
+use_cmmd = false
+
+[variant]
+family = "easycontrol"
+label = "Colorize (B&W manga → color)"
+description = "Colorize a B&W screentoned manga page. Cond = synthetic mangafied B&W (XDoG + screentone); text = color-only captions (hue). Empty prompt auto-colorizes; a color prompt steers."
+order = 20

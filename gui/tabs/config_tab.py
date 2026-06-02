@@ -197,6 +197,10 @@ class ConfigTab(QWidget):
         self.stop_btn.setEnabled(False)
         top.addWidget(self.stop_btn)
 
+        # Expose the action-bar layout so subclasses (EasyControlTab) can splice
+        # in extra buttons (e.g. a Preprocess button) without re-templating the
+        # whole bar.
+        self._top_bar = top
         lay.addLayout(top)
 
         # Config-health banner: flags dataset-blueprint keys the trainer will
@@ -605,7 +609,11 @@ class ConfigTab(QWidget):
         method = (
             self.method_combo.currentText() if hasattr(self, "method_combo") else ""
         )
-        guide = method_guide(method)
+        # Prefer a variant-specific guide (e.g. easycontrol vs colorize, which
+        # share the "easycontrol" method) and fall back to the method-family
+        # guide when the picked variant has none registered.
+        variant = self._current_variant() if hasattr(self, "variant_combo") else ""
+        guide = method_guide(variant) or method_guide(method)
         if guide:
             self._explain.setHtml(guide)
             return

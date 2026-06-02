@@ -98,6 +98,8 @@ _KNOWN_METHODS = frozenset(
         "soft_tokens",
         "spd",
         "turbo",
+        "easycontrol",
+        "colorize",
     }
 )
 
