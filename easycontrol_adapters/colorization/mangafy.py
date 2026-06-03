@@ -40,8 +40,14 @@ _XDOG_K = 1.6  # second-Gaussian scale ratio
 _XDOG_SHARP = 18.0  # p — DoG sharpening; higher = thinner/harder lines
 _XDOG_EPS = 0.10  # soft-threshold midpoint
 _XDOG_PHI = 12.0  # soft-threshold slope
-_TONE_PERIOD = 2.3  # dot screen period (px) — fine manga screentone pitch at ~900px
-_HATCH_PERIOD = 3  # line/cross period (px) — a touch coarser than dots, fine hatch tone
+# Screen pitch (px @ ~900px short side; scales with image). Keep these comfortably
+# above the native Nyquist (~2px): a screen near 2px aliases against the pixel grid and,
+# once rotated, beats into wavy low-frequency moiré across smooth tone (skin gradients
+# especially) — the uniformize threshold then amplifies that beat into visible banding.
+# 3.5/5 render as a clean even halftone here; line/cross need the larger pitch because a
+# 1-bit stripe screen aliases worse than dots. Going finer needs a higher `_TONE_SS`.
+_TONE_PERIOD = 3.5  # dot screen period — fine manga screentone pitch, moiré-safe
+_HATCH_PERIOD = 5  # line/cross period — coarser than dots (stripes alias harder)
 # The screen is rendered at this supersample factor, hard-thresholded, then resolved by
 # an **area-average** downscale (cv2.INTER_AREA = exact ss×ss box mean, the correct
 # supersample resolve), so fine and rotated screens anti-alias into smooth gray instead
@@ -53,7 +59,7 @@ _HATCH_PERIOD = 3  # line/cross period (px) — a touch coarser than dots, fine 
 _TONE_SS = 4
 _TONE_ANGLE = 45.0  # screen rotation (deg)
 _TONE_WHITE_CUT = 0.90  # luminance ≥ this → pure white (highlights, no tone)
-_TONE_BLACK_CUT = 0.14  # luminance ≤ this → solid black (deep shadow)
+_TONE_BLACK_CUT = 0.10  # luminance ≤ this → solid black (deep shadow)
 # Screen patterns: real manga uses clustered dots, parallel-line ("sand"/hatch)
 # tone, and cross-hatch. We assign a *different* pattern to each luminance band (see
 # below), so the screen texture changes where the value (명암) changes — the manga
@@ -64,6 +70,20 @@ _TONE_KINDS = ("dot", "line", "cross")
 # mids, and lights carry distinct tones like a real page. 1 = single tone whole image.
 _TONE_BAND_COUNTS = (1, 2, 3, 4)
 _TONE_BAND_WEIGHTS = (0.10, 0.40, 0.35, 0.15)
+# Shadow-detail lift — a shadow-gated *unsharp mask* on the *tone-fill* luminance.
+# Dark fabric (jeans, dark clothing, hair, deep shadow) otherwise crushes to a flat
+# black mass: its seams / folds / weave are real luminance variation but sit below ~0.30,
+# where ink coverage saturates. An unsharp mask amplifies that *local contrast* around
+# the region's own mean, so the texture reads **without lifting the darkness** — the
+# navy stays navy, only the folds/seams gain relief. (CLAHE/equalization was tried first
+# but flattens the histogram → pulls darks toward mid-gray, washing out the value.) Gated
+# off above ``_DETAIL_GATE_HI`` so bright tones (skin, highlights) stay faithful — it
+# can't reintroduce the cow-print over-inking the uniformize fix removed. The XDoG lineart
+# still runs on the *raw* luminance, so edges stay clean. ``_DETAIL_AMOUNT = 0`` disables.
+_DETAIL_AMOUNT = 1.0  # unsharp strength on shadow local-contrast; 0 → no lift
+_DETAIL_SIGMA = 3.0  # high-pass blur radius (px @ ~900px short side; scales with image)
+_DETAIL_GATE_LO = 0.15  # luminance ≤ this → full lift
+_DETAIL_GATE_HI = 0.45  # luminance ≥ this → no lift (skin / highlights untouched)
 
 
 def _luminance(img_rgb: np.ndarray, weights: tuple[float, float, float]) -> np.ndarray:
@@ -72,6 +92,31 @@ def _luminance(img_rgb: np.ndarray, weights: tuple[float, float, float]) -> np.n
     w = np.asarray(weights, dtype=np.float32)
     w = w / w.sum()
     return np.clip(rgb @ w, 0.0, 1.0)
+
+
+def _enhance_shadow_detail(
+    gray: np.ndarray,
+    *,
+    amount: float,
+    sigma: float,
+    gate_lo: float,
+    gate_hi: float,
+) -> np.ndarray:
+    """Shadow-gated unsharp mask on luminance (ink = 0, paper = 1).
+
+    Adds local fabric/fold/weave detail to dark regions that would otherwise crush to a
+    flat black mass under the tone screen, **without lifting the darkness**: an unsharp
+    mask amplifies the high-frequency deviation ``gray - blur(gray)`` around the region's
+    own (low-frequency) mean, so the navy stays navy and only the relief grows. A smooth
+    gate fades the effect from full at/below ``gate_lo`` to off at/above ``gate_hi`` so
+    bright tones (skin, highlights) are untouched. Returns ``gray`` unchanged when
+    ``amount <= 0``. Used only for the *tone-fill* input; XDoG keeps the raw luminance."""
+    if amount <= 0:
+        return gray
+    lp = cv2.GaussianBlur(gray, (0, 0), float(sigma))
+    w = np.clip((gate_hi - gray) / max(gate_hi - gate_lo, 1e-6), 0.0, 1.0)
+    enhanced = gray + (w * amount) * (gray - lp)
+    return np.clip(enhanced, 0.0, 1.0).astype(np.float32)
 
 
 def _xdog(
@@ -93,6 +138,24 @@ def _xdog(
     return np.clip(out, 0.0, 1.0)
 
 
+def _uniformize(field: np.ndarray) -> np.ndarray:
+    """Rank-normalize a screen field to uniform (0, 1) — the ordered-dither fix.
+
+    Tone is laid down as ``ink = gray >= screen``, so ink coverage equals
+    ``1 - gray`` (tone tracks luminance) *only when the field is uniform on [0,1]*.
+    The raw sinusoid fields aren't: ``cross = max(sin, sin)`` has mean ~0.70, so it
+    over-inks mid/bright tones — when a seed lands ``cross`` on a bright skin band it
+    paints soft-shaded skin into solid black blotches (the "cow-print" failure).
+    Rank-normalizing remaps the field's values to a uniform CDF; it's **monotonic**,
+    so the dot/line/cross *texture* (which pixel inks first) is untouched — only the
+    coverage is corrected, and every pattern now reads at its true value."""
+    flat = field.reshape(-1)
+    ranks = np.empty(flat.shape[0], dtype=np.float32)
+    order = np.argsort(flat, kind="stable")
+    ranks[order] = (np.arange(flat.shape[0], dtype=np.float32) + 0.5) / flat.shape[0]
+    return ranks.reshape(field.shape)
+
+
 def _screen_field(
     h: int, w: int, *, period: float, angle: float, kind: str
 ) -> np.ndarray:
@@ -102,7 +165,9 @@ def _screen_field(
     ``line`` = a single rotated sinusoid → parallel-line / hatch tone; ``cross`` =
     two perpendicular line screens unioned → cross-hatch. In every case darker
     luminance falls below the field's peaks more often, so ink coverage grows with
-    darkness — only the *texture* of that ink changes."""
+    darkness — only the *texture* of that ink changes. The field is rank-normalized
+    to a uniform CDF (:func:`_uniformize`) so coverage equals ``1 - luminance`` for
+    every pattern — without it ``cross`` (mean ~0.70) over-inks bright tones."""
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
     a = np.deg2rad(angle)
     xr = xs * np.cos(a) - ys * np.sin(a)
@@ -110,11 +175,13 @@ def _screen_field(
     wx = 2.0 * np.pi * xr / period
     wy = 2.0 * np.pi * yr / period
     if kind == "line":
-        return (np.sin(wx) + 1.0) * 0.5
-    if kind == "cross":
+        field = (np.sin(wx) + 1.0) * 0.5
+    elif kind == "cross":
         # ink where *either* stripe set is dark → union of two orthogonal screens
-        return np.maximum((np.sin(wx) + 1.0) * 0.5, (np.sin(wy) + 1.0) * 0.5)
-    return (np.sin(wx) * np.sin(wy) + 1.0) * 0.5  # "dot" (default)
+        field = np.maximum((np.sin(wx) + 1.0) * 0.5, (np.sin(wy) + 1.0) * 0.5)
+    else:
+        field = (np.sin(wx) * np.sin(wy) + 1.0) * 0.5  # "dot" (default)
+    return _uniformize(field)
 
 
 def _pick_band_count(rng: np.random.Generator) -> int:
@@ -282,6 +349,11 @@ def resolve_params(
         tone_kind=overrides.get("tone_kind"),
         angle=overrides.get("angle"),
         n_bands=overrides.get("n_bands"),
+        # shadow-detail lift (deterministic — no rng draw, so seed→structure is unchanged)
+        detail_amount=float(overrides.get("detail_amount", _DETAIL_AMOUNT)),
+        detail_sigma=float(overrides.get("detail_sigma", _DETAIL_SIGMA * scale)),
+        detail_gate_lo=float(overrides.get("detail_gate_lo", _DETAIL_GATE_LO)),
+        detail_gate_hi=float(overrides.get("detail_gate_hi", _DETAIL_GATE_HI)),
     )
 
 
@@ -297,7 +369,8 @@ def mangafy_array(
     jitter of the XDoG/screen knobs. Any knob can be pinned via ``overrides``
     (``sigma``, ``k``, ``sharp``, ``eps``, ``phi``, ``period``, ``hatch_period``,
     ``ss``, ``angle``, ``white_cut``, ``black_cut``, ``tone_kind``, ``n_bands``,
-    ``luma_weights``).
+    ``luma_weights``, and the shadow-detail lift ``detail_amount`` [0 disables] /
+    ``detail_sigma`` / ``detail_gate_lo`` / ``detail_gate_hi``).
     Pinning ``tone_kind`` / ``angle`` / ``n_bands`` forces a single fixed screen
     (e.g. ``n_bands=1, tone_kind="line"`` for QA)."""
     if img_rgb.ndim == 2:
@@ -311,8 +384,15 @@ def mangafy_array(
     line = _xdog(
         gray, sigma=p["sigma"], k=p["k"], sharp=p["sharp"], eps=p["eps"], phi=p["phi"]
     )
-    tone = _render_tone(
+    tone_gray = _enhance_shadow_detail(
         gray,
+        amount=p["detail_amount"],
+        sigma=p["detail_sigma"],
+        gate_lo=p["detail_gate_lo"],
+        gate_hi=p["detail_gate_hi"],
+    )
+    tone = _render_tone(
+        tone_gray,
         rng=rng,
         period=p["period"],
         hatch_period=p["hatch_period"],

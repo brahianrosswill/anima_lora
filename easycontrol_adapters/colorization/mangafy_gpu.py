@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from mangafy import _band_plan, resolve_params
+from mangafy import _band_plan, _enhance_shadow_detail, resolve_params
 
 
 def _gaussian_blur_t(x: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -61,10 +61,26 @@ def _xdog_t(
     return torch.where(dog < eps, soft, out).clamp_(0.0, 1.0)
 
 
+def _uniformize_t(field: torch.Tensor) -> torch.Tensor:
+    """Rank-normalize a screen field to uniform (0, 1) — torch port of
+    :func:`mangafy._uniformize`. Makes ink coverage track luminance for every
+    pattern (``cross`` is mean ~0.70 raw and would over-ink bright skin into black
+    blotches). Monotonic, so the texture is preserved; only coverage is corrected."""
+    flat = field.reshape(-1)
+    n = flat.numel()
+    order = torch.argsort(flat)
+    ranks = torch.empty_like(flat)
+    ranks[order] = (torch.arange(n, device=field.device, dtype=field.dtype) + 0.5) / n
+    return ranks.reshape(field.shape)
+
+
 def _screen_field_t(
     h: int, w: int, *, period: float, angle: float, kind: str, device, dtype
 ) -> torch.Tensor:
-    """Periodic screen field in [0, 1] — torch port of :func:`mangafy._screen_field`."""
+    """Periodic screen field in [0, 1] — torch port of :func:`mangafy._screen_field`.
+
+    Rank-normalized to a uniform CDF (:func:`_uniformize_t`) so ink coverage equals
+    ``1 - luminance`` for every pattern, matching the NumPy backend."""
     ys, xs = torch.meshgrid(
         torch.arange(h, device=device, dtype=dtype),
         torch.arange(w, device=device, dtype=dtype),
@@ -75,11 +91,16 @@ def _screen_field_t(
     yr = xs * math.sin(a) + ys * math.cos(a)
     wx = (2.0 * math.pi / period) * xr
     if kind == "line":
-        return (torch.sin(wx) + 1.0) * 0.5
-    wy = (2.0 * math.pi / period) * yr
-    if kind == "cross":
-        return torch.maximum((torch.sin(wx) + 1.0) * 0.5, (torch.sin(wy) + 1.0) * 0.5)
-    return (torch.sin(wx) * torch.sin(wy) + 1.0) * 0.5  # "dot"
+        field = (torch.sin(wx) + 1.0) * 0.5
+    else:
+        wy = (2.0 * math.pi / period) * yr
+        if kind == "cross":
+            field = torch.maximum(
+                (torch.sin(wx) + 1.0) * 0.5, (torch.sin(wy) + 1.0) * 0.5
+            )
+        else:
+            field = (torch.sin(wx) * torch.sin(wy) + 1.0) * 0.5  # "dot"
+    return _uniformize_t(field)
 
 
 def _quantile_sorted(x: torch.Tensor, qs: torch.Tensor) -> torch.Tensor:
@@ -90,7 +111,7 @@ def _quantile_sorted(x: torch.Tensor, qs: torch.Tensor) -> torch.Tensor:
     pos = qs * (s.numel() - 1)
     lo = pos.floor().long()
     hi = pos.ceil().long()
-    frac = (pos - lo.to(pos.dtype))
+    frac = pos - lo.to(pos.dtype)
     return s[lo] * (1.0 - frac) + s[hi] * frac
 
 
@@ -193,8 +214,20 @@ def mangafy_array_gpu(
     line = _xdog_t(
         gray, sigma=p["sigma"], k=p["k"], sharp=p["sharp"], eps=p["eps"], phi=p["phi"]
     )
+    # Shadow-detail lift runs on the native-res luminance via the shared cv2 helper
+    # (cheap host-side op, not supersampled), so it's bit-identical to the CPU backend.
+    tone_gray = gray
+    if p["detail_amount"] > 0:
+        enhanced = _enhance_shadow_detail(
+            gray.detach().cpu().numpy(),
+            amount=p["detail_amount"],
+            sigma=p["detail_sigma"],
+            gate_lo=p["detail_gate_lo"],
+            gate_hi=p["detail_gate_hi"],
+        )
+        tone_gray = torch.from_numpy(enhanced).to(device=gray.device, dtype=gray.dtype)
     tone = _render_tone_t(
-        gray,
+        tone_gray,
         rng=rng,
         period=p["period"],
         hatch_period=p["hatch_period"],
