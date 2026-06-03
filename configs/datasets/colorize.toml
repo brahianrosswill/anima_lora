@@ -17,7 +17,7 @@ keep_tokens = 3
 
 [[datasets]]
 batch_size = 1
-validation_split = 0.025
+validation_split = 0.005
 validation_seed = 42
 
   [[datasets.subsets]]
