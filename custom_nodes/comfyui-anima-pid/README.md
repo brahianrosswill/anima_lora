@@ -26,7 +26,11 @@ PiD runs its own internal 4-step pixel diffusion. Output size = `latent_grid × 
 ## Install
 
 1. Copy/clone this folder into `ComfyUI/custom_nodes/`.
-2. Download the PiD Qwen checkpoint and place it under `ComfyUI/models/pid/`:
+2. **No manual download needed** — in **Anima PiD Loader**, pick the
+   `…distill_4step (auto-download)` entry and the official checkpoint is pulled
+   from the public `nvidia/PiD` repo into `ComfyUI/models/pid/` on first run
+   (one-time). To use your own checkpoint instead, drop a `.pth`/`.safetensors`
+   into `ComfyUI/models/pid/` and select it from the dropdown:
    ```bash
    hf download nvidia/PiD --local-dir /tmp/pid \
      --include "checkpoints/PiD_res2kto4k_sr4x_official_qwenimage_distill_4step/*"

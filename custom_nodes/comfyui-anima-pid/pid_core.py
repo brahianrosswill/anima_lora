@@ -85,31 +85,42 @@ def comfy_latent_to_lq(samples: torch.Tensor, device, dtype=torch.bfloat16) -> t
     return lq.to(device=device, dtype=dtype)
 
 
-# torch.compile cache: (id(net), H, W) -> compiled module. One graph per output
-# resolution; with tiling on, all tiles share one (H, W) so it compiles once.
-_COMPILE_CACHE: dict = {}
+# Nets whose transformer blocks have been compiled in place (idempotent guard).
+_COMPILED_NETS: set = set()
 
 
-def get_runner(net: PidNet, H: int, W: int, dtype, enable: bool):
-    """Return the net to call in the sample loop: a torch.compile-wrapped net
-    (built once per (H, W) and cached) when `enable`, else the eager net.
+def _compile_blocks_inplace(net: PidNet) -> None:
+    """Per-block `torch.compile`, mirroring anima_lora's `DiT.compile_blocks` and
+    the AnimaBlockCompile ComfyUI node: compile each transformer block as its own
+    small graph rather than tracing the whole net in one frame.
 
-    Mirrors PiD's official `_maybe_compile_net`: precompute all positional caches
-    for this fixed (H, W, text_length) FIRST so the compiled forward only hits
-    cache-return branches (no RoPE recompute / dict mutation -> no graph breaks)."""
-    if not enable:
-        return net
-    key = (id(net), int(H), int(W))
-    runner = _COMPILE_CACHE.get(key)
-    if runner is None:
-        device = next(net.parameters()).device
-        net.precompute_positional_caches(
-            image_height=int(H), image_width=int(W),
-            text_length=MODEL_MAX_LENGTH, device=device, pixel_dtype=dtype,
-        )
-        runner = torch.compile(net, mode="default", dynamic=False)
-        _COMPILE_CACHE[key] = runner
-    return runner
+    PiD's `patch_blocks` (14x, identical) and `pixel_blocks` (2x, identical) each
+    collapse to a single graph reused across the stack — far faster to compile and
+    far less likely to graph-break or silently fall back to eager than whole-net
+    compile. RoPE / positional info is passed INTO each block as args (computed at
+    net level), so the blocks compile cleanly without the `precompute_positional_
+    caches` dance the whole-net path needed, and the eager net-level forward keeps
+    building those caches as normal.
+
+    Idempotent (compiles once per net). Output-resolution changes are handled by
+    dynamo's own per-shape specialization — a new size recompiles automatically;
+    tiled decode keeps every tile the same size, so the blocks compile just once."""
+    if id(net) in _COMPILED_NETS:
+        return
+    for blocks in (net.patch_blocks, net.pixel_blocks):
+        for i in range(len(blocks)):
+            blocks[i] = torch.compile(blocks[i], mode="default", dynamic=False)
+    _COMPILED_NETS.add(id(net))
+
+
+def get_runner(net: PidNet, dtype, enable: bool) -> PidNet:
+    """Return the net to call in the sample loop. With `enable`, the net's
+    transformer blocks are torch.compiled in place, once, per-block (see
+    `_compile_blocks_inplace`) and the same (now-compiled) net is returned;
+    without it, the eager net is returned unchanged."""
+    if enable:
+        _compile_blocks_inplace(net)
+    return net
 
 
 def _t_list(num_steps: int, device) -> torch.Tensor:
@@ -123,17 +134,18 @@ def _t_list(num_steps: int, device) -> torch.Tensor:
 @torch.no_grad()
 def pid_decode_latent(net: PidNet, lq_latent: torch.Tensor, *, steps: int = 4,
                       sigma: float = 0.0, seed: int = 0, dtype=torch.bfloat16,
-                      compile: bool = False, _runner=None) -> torch.Tensor:
+                      compile: bool = False, _runner=None, step_cb=None) -> torch.Tensor:
     """Run the 4-step SDE student. lq_latent: (B,16,h,w) normalized.
     Returns pixels (B,3,H,W) in [-1,1] with H=h*8*4, W=w*8*4.
 
     `compile=True` torch.compiles the net (cached per output resolution; first
     call per (H,W) is slow). `_runner` lets callers (e.g. the tiled path) pass a
-    pre-built compiled net so all same-size tiles share one graph."""
+    pre-built compiled net so all same-size tiles share one graph. `step_cb`, if
+    given, is called once per completed SDE step (drives a host progress bar)."""
     device = lq_latent.device
     B, _, lh, lw = lq_latent.shape
     H, W = lh * VAE_DOWN * SR_SCALE, lw * VAE_DOWN * SR_SCALE
-    run = _runner if _runner is not None else get_runner(net, H, W, dtype, compile)
+    run = _runner if _runner is not None else get_runner(net, dtype, compile)
 
     cap = torch.zeros(B, MODEL_MAX_LENGTH, CAPTION_CHANNELS, device=device, dtype=dtype)
     deg = torch.full((B,), float(sigma), device=device, dtype=torch.float32)
@@ -155,6 +167,8 @@ def pid_decode_latent(net: PidNet, lq_latent: torch.Tensor, *, steps: int = 4,
                 x = ((1.0 - t_n) * x0 + t_n * eps).float()
             else:
                 x = x0.float()
+            if step_cb is not None:
+                step_cb()
     return x.clamp(-1, 1)
 
 
@@ -166,6 +180,16 @@ def _tile_positions(dim: int, tile: int, stride: int):
     if pos[-1] != dim - tile:
         pos.append(dim - tile)
     return pos, tile
+
+
+def count_tiles(lq_latent: torch.Tensor, tile: int, overlap: int) -> int:
+    """How many tiles `pid_decode_latent_tiled` will process for this latent —
+    lets the host size a progress bar (total = steps * count_tiles)."""
+    Hh, Ww = lq_latent.shape[-2], lq_latent.shape[-1]
+    stride = max(1, tile - overlap)
+    ys, _ = _tile_positions(Hh, tile, stride)
+    xs, _ = _tile_positions(Ww, tile, stride)
+    return len(ys) * len(xs)
 
 
 def _feather_1d(n: int, overlap_px: int, device) -> torch.Tensor:
@@ -184,10 +208,11 @@ def _feather_1d(n: int, overlap_px: int, device) -> torch.Tensor:
 def pid_decode_latent_tiled(net: PidNet, lq_latent: torch.Tensor, *, steps: int = 4,
                             sigma: float = 0.0, seed: int = 0, tile: int = 64,
                             overlap: int = 16, dtype=torch.bfloat16,
-                            compile: bool = False) -> torch.Tensor:
+                            compile: bool = False, step_cb=None) -> torch.Tensor:
     """Tiled SR decode for latents larger than `tile` (memory bound). Decodes
     overlapping latent tiles and feather-blends them in pixel space. Output
-    (B,3, h*32, w*32) in [-1,1]."""
+    (B,3, h*32, w*32) in [-1,1]. `step_cb` ticks once per SDE step across all
+    tiles (total ticks = steps * count_tiles())."""
     device = lq_latent.device
     B, _, Hh, Ww = lq_latent.shape
     up = VAE_DOWN * SR_SCALE  # 32
@@ -203,15 +228,15 @@ def pid_decode_latent_tiled(net: PidNet, lq_latent: torch.Tensor, *, steps: int 
     wx = _feather_1d(tw * up, ov_px, device)
     wmask = (wy[:, None] * wx[None, :])[None, None]  # (1,1,th*32,tw*32)
 
-    # All tiles share one fixed output size -> compile once, reuse for every tile.
-    runner = get_runner(net, th * up, tw * up, dtype, compile)
+    # All tiles share one fixed output size -> blocks compile once, reuse for every tile.
+    runner = get_runner(net, dtype, compile)
 
     n = 0
     for yi in ys:
         for xi in xs:
             tile_lq = lq_latent[..., yi:yi + th, xi:xi + tw]
             px = pid_decode_latent(net, tile_lq, steps=steps, sigma=sigma, seed=seed + n,
-                                   dtype=dtype, _runner=runner)
+                                   dtype=dtype, _runner=runner, step_cb=step_cb)
             py, px_ = yi * up, xi * up
             acc[..., py:py + th * up, px_:px_ + tw * up] += px.float() * wmask
             wsum[..., py:py + th * up, px_:px_ + tw * up] += wmask

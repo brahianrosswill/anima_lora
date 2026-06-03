@@ -13,23 +13,27 @@ text encoder is skipped entirely (zero caption embeddings — see pid_core), so 
                                       ├─► AnimaPiDDecode ─► IMAGE (4x) -> SaveImage
     AnimaPiDLoader (PiD .pth) ────────┘
 
-Place the PiD checkpoint (model_ema_bf16.pth, renamed e.g.
-pid_qwenimage_2kto4k_4step.pth) under ComfyUI/models/pid/. Weights are NVIDIA
-NSCLv1 (non-commercial).
+The official 2k->4k 4-step checkpoint auto-downloads from the public nvidia/PiD
+repo on first use (select the "(auto-download)" entry in AnimaPiDLoader) into
+ComfyUI/models/pid/. To use your own, drop a .pth/.safetensors there and pick it
+from the dropdown. Weights are NVIDIA NSCLv1 (non-commercial).
 """
 
 import os
+import shutil
 
 import torch
 
 import comfy.model_management as mm
 import folder_paths
+from comfy.utils import ProgressBar
 
 from .pid_core import (
     SR_SCALE,
     VAE_DOWN,
     build_pid_net,
     comfy_latent_to_lq,
+    count_tiles,
     load_pid_weights,
     pid_decode_latent,
     pid_decode_latent_tiled,
@@ -41,6 +45,36 @@ os.makedirs(_PID_DIR, exist_ok=True)
 folder_paths.add_model_folder_path("pid", _PID_DIR)
 
 _DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+
+# Official 4-step qwenimage 2k->4k checkpoint on the (ungated, public) nvidia/PiD
+# repo. Auto-fetched into models/pid/ on first use, flattened + renamed to a flat
+# filename so the dropdown contract stays uniform.
+_HF_PID_REPO = "nvidia/PiD"
+_HF_PID_FILE = "checkpoints/PiD_res2kto4k_sr4x_official_qwenimage_distill_4step/model_ema_bf16.pth"
+_OFFICIAL_CKPT = "PiD_res2kto4k_sr4x_official_qwenimage_distill_4step.pth"
+_AUTODL_SUFFIX = " (auto-download)"
+
+
+def _download_official_ckpt() -> str:
+    """Fetch the official PiD qwenimage checkpoint into models/pid/ (one-time).
+
+    Mirrors the tagger node's ``hf_hub_download`` + flatten pattern: the source
+    lives under ``checkpoints/.../model_ema_bf16.pth`` on the repo but is moved to
+    a flat, descriptive filename in ``models/pid/`` so the loader's dropdown lists
+    it like any hand-placed checkpoint. Returns the local path."""
+    dest = os.path.join(_PID_DIR, _OFFICIAL_CKPT)
+    if os.path.exists(dest):
+        return dest
+    from huggingface_hub import hf_hub_download
+
+    print(
+        f"[AnimaPiD] fetching {_HF_PID_REPO}/{_HF_PID_FILE} -> {dest} (one-time, ~public download).\n"
+        f"[AnimaPiD] NOTE: PiD weights are NVIDIA NSCLv1 — non-commercial (research/evaluation) use only."
+    )
+    downloaded = hf_hub_download(repo_id=_HF_PID_REPO, filename=_HF_PID_FILE, local_dir=_PID_DIR)
+    if os.path.realpath(downloaded) != os.path.realpath(dest):
+        shutil.move(downloaded, dest)
+    return dest
 
 
 class AnimaPiDModel:
@@ -54,7 +88,12 @@ class AnimaPiDModel:
 class AnimaPiDLoader:
     @classmethod
     def INPUT_TYPES(cls):
-        files = folder_paths.get_filename_list("pid")
+        files = list(folder_paths.get_filename_list("pid"))
+        # Surface the official checkpoint as a selectable entry even when the
+        # folder is empty, so a fresh install has something to pick (and trigger
+        # the one-time auto-download). Hand-placed files still list normally.
+        if _OFFICIAL_CKPT not in files:
+            files.insert(0, _OFFICIAL_CKPT + _AUTODL_SUFFIX)
         return {
             "required": {
                 "ckpt_name": (files,),
@@ -68,12 +107,18 @@ class AnimaPiDLoader:
     CATEGORY = "Anima/PiD"
 
     def load(self, ckpt_name, dtype):
-        path = folder_paths.get_full_path("pid", ckpt_name)
+        # The auto-download sentinel ("<official> (auto-download)") resolves to
+        # the official checkpoint, fetching it on first use.
+        if ckpt_name.endswith(_AUTODL_SUFFIX) or ckpt_name == _OFFICIAL_CKPT:
+            path = _download_official_ckpt()
+            ckpt_name = _OFFICIAL_CKPT
+        else:
+            path = folder_paths.get_full_path("pid", ckpt_name)
         if path is None:
             raise FileNotFoundError(
                 f"PiD checkpoint {ckpt_name!r} not found under {_PID_DIR}. "
                 f"Download nvidia/PiD checkpoints/PiD_res2kto4k_sr4x_official_qwenimage_distill_4step/"
-                f"model_ema_bf16.pth and place it there."
+                f"model_ema_bf16.pth and place it there, or select the auto-download entry."
             )
         dt = _DTYPES[dtype]
         device = mm.get_torch_device()
@@ -107,9 +152,11 @@ class AnimaPiDDecode:
                                          "tooltip": "Latent-space overlap between tiles (pixels = overlap*32). "
                                                     "Larger = fewer seams, slower."}),
                 "compile": ("BOOLEAN", {"default": False,
-                                        "tooltip": "torch.compile the PiD net (cached per output resolution; with "
-                                                   "tiling on, all tiles share one graph). First run per size is "
-                                                   "slow (compilation), then faster. Keep tile size fixed to reuse."}),
+                                        "tooltip": "Per-block torch.compile of the PiD net: each transformer block "
+                                                   "is compiled as its own small graph (faster compile, fewer graph "
+                                                   "breaks than whole-net — mirrors Anima Block Compile). First run "
+                                                   "per output size is slow (compilation), then fast; with tiling on "
+                                                   "all tiles share one size so the blocks compile once."}),
             }
         }
 
@@ -129,13 +176,21 @@ class AnimaPiDDecode:
               f"steps={steps} sigma={sigma} tile={tile_latent or 'off'} compile={compile}")
 
         use_tiling = bool(tile_latent) and (lh > tile_latent or lw > tile_latent)
+        # Drive ComfyUI's node progress bar: one tick per SDE step, summed over
+        # tiles. (PiD runs its own sampler loop, so without this the node shows
+        # no progress.)
+        n_tiles = count_tiles(lq, tile_latent, tile_overlap) if use_tiling else 1
+        pbar = ProgressBar(steps * n_tiles)
+        step_cb = lambda: pbar.update(1)  # noqa: E731
         if use_tiling:
             px = pid_decode_latent_tiled(
                 net, lq, steps=steps, sigma=sigma, seed=seed,
                 tile=tile_latent, overlap=tile_overlap, dtype=dt, compile=compile,
+                step_cb=step_cb,
             )
         else:
-            px = pid_decode_latent(net, lq, steps=steps, sigma=sigma, seed=seed, dtype=dt, compile=compile)
+            px = pid_decode_latent(net, lq, steps=steps, sigma=sigma, seed=seed,
+                                   dtype=dt, compile=compile, step_cb=step_cb)
 
         # (B,3,H,W) in [-1,1] -> ComfyUI IMAGE (B,H,W,3) in [0,1]
         img = ((px.float() + 1.0) / 2.0).clamp(0, 1).permute(0, 2, 3, 1).contiguous().cpu()
