@@ -351,7 +351,7 @@ class IPAdapterTab(_AdapterTab):
 # it was promoted to a ConfigTab-based config editor (form on the left,
 # field-explanation on the right — like the LoRA tab) so its rank / LR / routing
 # knobs are editable in-GUI, with a Colorize variant. Preprocess / Train still
-# route through the exp-easycontrol* tasks (EASYADAPTER per variant). See
+# route through the easycontrol* tasks (EASYADAPTER per variant). See
 # gui/tabs/easycontrol_tab.py.
 
 # SPD and Turbo used to live here as _AdapterTab subclasses, but they have no

@@ -9,7 +9,7 @@ Three idempotent stages:
    result to ``--staging`` mirroring the source subpath. Two engines via
    ``--engine``: ``sd`` (default, Phase B) runs the learned sketch2manga screening
    (:func:`screentone_sd.screentone_array`, on-manifold tones, needs
-   ``make exp-easycontrol-download EASYADAPTER=colorize``); ``cv2`` runs the fast
+   ``make easycontrol-download EASYADAPTER=colorize``); ``cv2`` runs the fast
    XDoG + algorithmic-screentone fallback (:func:`mangafy.mangafy_array`, no
    downloads). Skips already-staged PNGs unless ``--overwrite``.
 
@@ -18,8 +18,9 @@ Three idempotent stages:
    format as the target latent cache), at the image's **native size** so each
    cond latent shape matches its target latent exactly. Skips cached resolutions.
 
-3. **Text** — re-encode the *target* captions filtered to **color tags only**
-   (:func:`color_caption.filter_to_colors`) into ``--text_cache_dir``, mirroring
+3. **Text** — re-encode the *target* captions filtered to **color tags** (plus
+   the **copyright/series tag** by default, ``--text_keep_copyright``;
+   :func:`color_caption.filter_to_colors_and_copyright`) into ``--text_cache_dir``, mirroring
    the source subpath. Reads ``.txt`` from ``--caption_src`` (the caption master,
    nested identically to the resized tree), so the TE caches key-match the
    colorize loader's ``image_dir=post_image_dataset/resized`` lookup. The colorize
@@ -33,7 +34,7 @@ The cond cache is paired with the color target at train time by the loader's
 
     python easycontrol_adapters/colorization/prep.py            # full dataset
     python easycontrol_adapters/colorization/prep.py --limit 8  # quick QA batch
-    make exp-easycontrol-preprocess EASYADAPTER=colorize        # via task runner
+    make easycontrol-preprocess EASYADAPTER=colorize        # via task runner
 """
 
 from __future__ import annotations
@@ -306,8 +307,14 @@ def stage_mangafy(
     text_mask_dilate: int,
     sd_match: list[str],
     sd_max_aspect: float,
+    exclude_stems: frozenset[str] = frozenset(),
 ) -> tuple[int, int]:
     images = walk_images(src, recursive=recursive)
+    if exclude_stems:
+        pre = len(images)
+        images = [p for p in images if p.stem not in exclude_stems]
+        if len(images) != pre:
+            print(f"Excluding {pre - len(images)} monochrome-tagged images")
     if limit:
         images = images[:limit]
     # Selective routing: primary engine isn't sd, but ``sd_match`` paths get SD anyway.
@@ -444,6 +451,8 @@ def stage_text(
     recursive: bool,
     shuffle_variants: int,
     tag_dropout_rate: float,
+    keep_copyright: bool = True,
+    caption_index: str | None = None,
 ):
     """Cache color-only TE embeddings for the color targets into ``text_cache_dir``.
 
@@ -459,8 +468,20 @@ def stage_text(
     no ``@artist`` prefix, so every color tag is drop-eligible — this teaches the
     model to colorize from a *partial* color spec ("pink hair" alone) rather than
     expecting a complete palette every time.
+
+    With ``keep_copyright`` (default) the copyright/series tag is kept too and
+    placed *first*, then protected from tag-dropout via ``caption_protect_fn`` —
+    so "genshin impact" survives in every partial-color variant while the colors
+    around it still drop. The manga cond can't encode which series a page is from,
+    so copyright is genuinely-ambiguous text worth binding. Copyright names are
+    matched against ``caption_index`` (defaults to the corpus typed-tag index).
     """
-    from color_caption import filter_to_colors
+    from color_caption import (
+        filter_to_colors,
+        filter_to_colors_and_copyright,
+        is_copyright_tag,
+        load_copyright_tags,
+    )
 
     from library.anima import weights as anima_utils
     from library.anima.strategy import AnimaTextEncodingStrategy, AnimaTokenizeStrategy
@@ -502,6 +523,31 @@ def stage_text(
         overwrite=False,
     )
 
+    # Resolve the color-only vs color+copyright caption transform. When keeping
+    # copyright, also build a protect_fn so the copyright tag survives dropout in
+    # the partial-color variants (the colors around it still drop).
+    caption_protect_fn = None
+    if keep_copyright:
+        copyright_tags = (
+            load_copyright_tags(caption_index)
+            if caption_index
+            else load_copyright_tags()
+        )
+        if not copyright_tags:
+            print(
+                "Warning: no copyright tags found in caption index "
+                f"({caption_index or 'default'}); copyright will not be kept. "
+                "Run `make caption-index` or pass --caption_index."
+            )
+
+        def caption_transform(caption: str) -> str:
+            return filter_to_colors_and_copyright(caption, copyright_tags)
+
+        def caption_protect_fn(tag: str) -> bool:
+            return is_copyright_tag(tag, copyright_tags)
+    else:
+        caption_transform = filter_to_colors
+
     # Note: --limit applies to the mangafy/encode stages only; the text stage
     # encodes the whole caption_src tree (cache_text_embeddings walks it itself
     # and skips already-cached files, so re-runs are cheap).
@@ -515,7 +561,8 @@ def stage_text(
         cache_dir=text_cache_dir,
         recursive=recursive,
         batch_size=batch_size,
-        caption_transform=filter_to_colors,
+        caption_transform=caption_transform,
+        caption_protect_fn=caption_protect_fn,
         caption_shuffle_variants=shuffle_variants,
         caption_tag_dropout_rate=tag_dropout_rate,
         progress=tqdm_progress("Caching color-only text"),
@@ -531,15 +578,19 @@ def stage_text(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--src", default="post_image_dataset/resized")
-    parser.add_argument("--staging", default="post_image_dataset/colorize_staging")
-    parser.add_argument("--cond_cache_dir", default="post_image_dataset/colorize_cond")
+    parser.add_argument(
+        "--staging", default="post_image_dataset/easycontrol/colorize/staging"
+    )
+    parser.add_argument(
+        "--cond_cache_dir", default="post_image_dataset/easycontrol/colorize/cond"
+    )
     parser.add_argument("--vae", default="models/vae/qwen_image_vae.safetensors")
     parser.add_argument(
         "--engine",
         choices=["sd", "cv2", "gpu"],
         default="gpu",
         help="condition synthesizer: sd = learned sketch2manga screening (Phase B, "
-        "needs `make exp-easycontrol-download EASYADAPTER=colorize`); "
+        "needs `make easycontrol-download EASYADAPTER=colorize`); "
         "cv2 = XDoG+halftone fallback (no downloads, CPU ProcessPool); "
         "gpu = same XDoG+halftone math on CUDA (no downloads, fast, serial)",
     )
@@ -622,7 +673,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--text_cache_dir",
-        default="post_image_dataset/colorize_text",
+        default="post_image_dataset/easycontrol/colorize/text",
         help="where color-only TE caches go; the colorize dataset's text_cache_dir",
     )
     parser.add_argument(
@@ -640,16 +691,30 @@ def main() -> None:
     parser.add_argument(
         "--text_shuffle_variants",
         type=int,
-        default=2,
+        default=3,
         help="color-caption variants per image (v0=full colors, v1+=shuffled "
         "+ tag-dropped). 0 = single full-color caption.",
     )
     parser.add_argument(
         "--text_tag_dropout_rate",
         type=float,
-        default=0.5,
+        default=0.8,
         help="per-color-tag dropout in v1+ variants — trains robustness to "
         "partial color prompts. Ignored when --text_shuffle_variants <= 0.",
+    )
+    parser.add_argument(
+        "--text_keep_copyright",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="keep the copyright/series tag alongside the color tags (placed "
+        "first and protected from tag-dropout). --no-text_keep_copyright "
+        "reverts to color-only captions.",
+    )
+    parser.add_argument(
+        "--caption_index",
+        default=None,
+        help="caption index JSON with a groups.copyright vocab, used to identify "
+        "copyright tags. Defaults to post_image_dataset/captions/caption_index.json.",
     )
     args = parser.parse_args()
 
@@ -657,6 +722,13 @@ def main() -> None:
     staging = Path(args.staging)
     cond_cache_dir = Path(args.cond_cache_dir)
     sd_match = [s.strip() for s in args.sd_match.split(",") if s.strip()] if args.sd_match else []
+
+    # Drop pure-B&W pages from the colorize set — they have no color to learn and
+    # would teach "B&W in → B&W out". Stems are matched against the caption master
+    # (--caption_src); the train-time loader applies the same exclusion by stem.
+    from library.datasets.dreambooth import monochrome_stems
+
+    exclude_stems = monochrome_stems(args.caption_src)
 
     if not args.skip_mangafy:
         sd_kwargs = dict(
@@ -679,6 +751,7 @@ def main() -> None:
             text_mask_dilate=args.text_mask_dilate,
             sd_match=sd_match,
             sd_max_aspect=args.sd_max_aspect,
+            exclude_stems=exclude_stems,
         )
         print(
             f"\nMangafy ({args.engine}{', sd:' + ','.join(sd_match) if sd_match else ''}): "
@@ -716,6 +789,8 @@ def main() -> None:
             recursive=args.recursive,
             shuffle_variants=args.text_shuffle_variants,
             tag_dropout_rate=args.text_tag_dropout_rate,
+            keep_copyright=args.text_keep_copyright,
+            caption_index=args.caption_index,
         )
         print(
             f"\nColor-only text caching complete: {tstats.written} cached, "

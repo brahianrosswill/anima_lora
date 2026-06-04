@@ -12,15 +12,15 @@
 #     caption_dropout still leaves a strong prompt→color binding. At inference an
 #     empty prompt auto-colorizes; a color prompt ("pink hair, blue eyes") steers.
 #
-# Run via:  make exp-easycontrol EASYADAPTER=colorize
-# Prep via: make exp-easycontrol-preprocess EASYADAPTER=colorize
+# Run via:  make easycontrol EASYADAPTER=colorize
+# Prep via: make easycontrol-preprocess EASYADAPTER=colorize
 
 dataset_config = "configs/datasets/colorize.toml"
 
 network_module = "networks.methods.easycontrol"
 
-network_dim = 32
-network_alpha = 32
+network_dim = 48
+network_alpha = 48
 
 network_args = [
     "b_cond_init=-6.0",
@@ -34,39 +34,23 @@ logging_dir = "output/logs"
 log_with = "tensorboard"
 
 learning_rate = 2e-5
-max_train_epochs = 3
-save_every_n_epochs = 3
-checkpointing_epochs = 3
+max_train_epochs = 1
+save_every_n_epochs = 1
+checkpointing_epochs = 1
 
 use_easycontrol = true
 easycontrol_drop_p = 0.0
 masked_loss = false
 
-# Caption dropout only sets the auto-color floor: captions are color-only
-# (text_cache_dir), so a dropped step (→ uncond T5("")) trains the auto-color
-# mode. Keep it LOW — at 0.05 ~5% of steps go empty, just enough to anchor the
-# empty-prompt default without starving prompt→color control. (Was 0.9 with
-# full captions, which over-trained the unconditional path and gave weak,
-# arbitrary color steering — see image-compare diagnosis.) The full-vs-partial
-# color balance is NOT this knob; it's the tag-dropout variant cache below.
-caption_dropout_rate = 0.05
-
-# The full-vs-partial color balance lives here, not in caption_dropout. The
-# color-only TE cache is multi-variant (built by prep.py's text stage with its
-# defaults: --text_shuffle_variants 2, --text_tag_dropout_rate 0.5): v0 = full
-# color set, v1 = smart-shuffled with each color tag independently dropped at
-# p≈0.5. This flag makes the loader draw a variant per step — 20% v0 / 80% v1+
-# (strategy.py) — so the model learns to colorize from a *partial* color spec
-# ("pink hair" alone), not just a complete palette. Without it the loader pins
-# v0 and the tag dropout is inert. Net per-step regime: ~5% empty / ~19% full /
-# ~76% partial.
+caption_dropout_rate = 0.3
 use_shuffled_caption_variants = true
+use_shuffled_caption_variants_only = true
 
 # The manga cond is already a lossy hint (lineart + screentone), so keep the
 # training-time cond perturbation small — high noise would erase the line
 # structure we want the model to follow.
-easycontrol_cond_noise_max = 0.02
+easycontrol_cond_noise_max = 0.0
 
 blocks_to_swap = 0
 gradient_checkpointing = true
-unsloth_offload_checkpointing = true
+unsloth_offload_checkpointing = false

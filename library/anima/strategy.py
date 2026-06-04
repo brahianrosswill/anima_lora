@@ -222,12 +222,17 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         is_partial: bool = False,
         cache_llm_adapter_outputs: bool = False,
         use_shuffled_caption_variants: bool = False,
+        use_shuffled_caption_variants_only: bool = False,
     ) -> None:
         super().__init__(
             cache_to_disk, batch_size, skip_disk_cache_validity_check, is_partial
         )
         self.cache_llm_adapter_outputs = cache_llm_adapter_outputs
-        self.use_shuffled_caption_variants = use_shuffled_caption_variants
+        # "only" implies the base flag (it just changes which variants are eligible).
+        self.use_shuffled_caption_variants = (
+            use_shuffled_caption_variants or use_shuffled_caption_variants_only
+        )
+        self.use_shuffled_caption_variants_only = use_shuffled_caption_variants_only
 
     def get_outputs_npz_path(
         self,
@@ -296,7 +301,14 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
             if has_variants and self.use_shuffled_caption_variants:
                 num_variants = int(f.get_tensor("num_variants"))
                 v0_intact = "v0_intact" in keys
-                if not v0_intact:
+                if num_variants <= 1:
+                    vi = 0
+                elif self.use_shuffled_caption_variants_only:
+                    # Exclude the pristine v0 entirely — uniform over the
+                    # shuffled+tag-dropped v1..v{N-1}. (Legacy caches have no
+                    # pristine v0 anyway, so v1.. is still the shuffled set.)
+                    vi = random.randint(1, num_variants - 1)
+                elif not v0_intact:
                     # Legacy cache: every variant is shuffled (no pristine v0).
                     # Fall back to uniform sampling and warn once so the user
                     # knows to re-cache for the 20%/80% weighted behavior.
@@ -313,8 +325,6 @@ class AnimaTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
                         )
                         _warned_legacy_variants_cache = True
                     vi = random.randint(0, num_variants - 1)
-                elif num_variants <= 1:
-                    vi = 0
                 else:
                     # 20% pristine v0, 80% uniform over v1..v{N-1}.
                     vi = (

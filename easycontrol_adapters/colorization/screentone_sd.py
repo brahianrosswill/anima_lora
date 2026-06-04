@@ -33,7 +33,7 @@ target-latent shape per stem. Stages 1–2 run at ``long_side`` and the result i
 resized back to native resolution before returning.
 
 SD weights live under ``models/sketch2manga/``
-(``make exp-easycontrol-download EASYADAPTER=colorize``). The lineart annotator
+(``make easycontrol-download EASYADAPTER=colorize``). The lineart annotator
 (``lllyasviel/Annotators``) is fetched lazily by ``controlnet_aux`` on first use.
 """
 

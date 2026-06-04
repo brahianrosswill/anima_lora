@@ -416,6 +416,15 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "the variants first.",
     )
     parser.add_argument(
+        "--use_shuffled_caption_variants_only",
+        action="store_true",
+        help="Like --use_shuffled_caption_variants but never draw the pristine v0 "
+        "variant — sample uniformly over the shuffled+tag-dropped v1..v{N-1} only. "
+        "Use when v0 (the full, unshuffled caption) should be excluded from training, "
+        "e.g. colorize wants every step to see a partial color spec. Implies "
+        "--use_shuffled_caption_variants; no-op on single-variant caches.",
+    )
+    parser.add_argument(
         "--artist_filter",
         type=str,
         default=None,

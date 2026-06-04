@@ -23,7 +23,7 @@ Per-block cond LoRA on self-attn + FFN with a logit-bias gate. DiT frozen; train
 **There is already one shipped control task to copy: colorize** (`easycontrol_adapters/colorization/`). It's the worked template for everything below — a per-task project that builds its own *condition* (mangafied B&W → color) while reusing the shipped network unchanged. A new control type follows the same mold rather than inventing structure:
 
 - a **project dir** under `easycontrol_adapters/<task>/` (the condition builder + `prep.py` + a README), exactly like `easycontrol_adapters/colorization/`;
-- a **method config** `configs/methods/<task>.toml` (+ a `configs/gui-methods/<task>.toml` GUI variant), selected at runtime by the **`EASYADAPTER=<task>`** env var — *not* a `make easycontrol-<task>` target. The existing `make exp-easycontrol[-preprocess] EASYADAPTER=<task>` and `make exp-test-easycontrol EASYADAPTER=<task>` targets already dispatch on it;
+- a **method config** `configs/methods/<task>.toml` (+ a `configs/gui-methods/<task>.toml` GUI variant), selected at runtime by the **`EASYADAPTER=<task>`** env var — *not* a `make easycontrol-<task>` target. The existing `make easycontrol[-preprocess] EASYADAPTER=<task>` and `make test-easycontrol EASYADAPTER=<task>` targets already dispatch on it;
 - a **dataset blueprint** `configs/datasets/<task>.toml` wiring the `cond_cache_dir` (and `text_cache_dir` if the task reshapes the text channel, as colorize does).
 
 Read colorize's [README](easycontrol_adapters/colorization/README.md) before starting a new one — its caption policy, cond-noise, and inference-settings notes generalize. Concretely, the zoo still needs:

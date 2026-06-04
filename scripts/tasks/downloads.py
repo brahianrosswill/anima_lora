@@ -177,7 +177,7 @@ def cmd_download_sketch2manga(_extra):
     ``easycontrol_adapters/colorization/screentone_sd.py`` — finetuned SD1.5
     ``mangatone.ckpt`` + no-LPIPS VAE + the SD1.5 lineart ControlNet. Optional /
     experimental, so it's NOT in ``download-models``; fetch on demand via
-    ``make exp-easycontrol-download EASYADAPTER=colorize``. ~5.7GB total.
+    ``make easycontrol-download EASYADAPTER=colorize``. ~5.7GB total.
     """
     dst = ROOT / "models" / "sketch2manga"
     finals = [

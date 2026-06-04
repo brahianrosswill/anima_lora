@@ -85,7 +85,7 @@ Each has its own method TOML and `make` entrypoint:
 | ChimeraHydra (dual-pool MoE) | `methods/chimera.toml` | `make exp-chimera` |
 | Postfix (free + cond+ortho) | `methods/postfix.toml` | `make exp-postfix` |
 | IP-Adapter | `methods/ip_adapter.toml` | `make exp-ip-adapter` |
-| EasyControl | `methods/easycontrol.toml` | `make exp-easycontrol` |
+| EasyControl | `methods/easycontrol.toml` | `make easycontrol` |
 | Soft Tokens (SoftREPA) | `methods/soft_tokens.toml` | `make exp-soft-tokens` |
 
 Deep dives in `docs/methods/` (shipped) and `docs/experimental/`.

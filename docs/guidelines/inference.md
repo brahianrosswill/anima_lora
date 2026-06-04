@@ -41,7 +41,7 @@ representative starting point.
 | `make test-dcw-v4-spectrum` | Spectrum + DCW v4 |
 | `make exp-test-postfix` | Postfix tuning (also `-exp`, `-func` variants) |
 | `make exp-test-ip REF_IMAGE=...` | IP-Adapter (image-conditioned) |
-| `make exp-test-easycontrol REF_IMAGE=...` | EasyControl |
+| `make test-easycontrol REF_IMAGE=...` | EasyControl |
 | `make exp-test-directedit PROMPT='...'` | DirectEdit on a random source image |
 | `make exp-test-directedit-dry` | DirectEdit reconstruction sanity check |
 

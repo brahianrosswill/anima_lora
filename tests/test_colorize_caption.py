@@ -16,7 +16,12 @@ COLORIZE_DIR = REPO_ROOT / "easycontrol_adapters" / "colorization"
 if str(COLORIZE_DIR) not in sys.path:
     sys.path.insert(0, str(COLORIZE_DIR))
 
-from color_caption import filter_to_colors, is_color_tag  # noqa: E402
+from color_caption import (  # noqa: E402
+    filter_to_colors,
+    filter_to_colors_and_copyright,
+    is_color_tag,
+    is_copyright_tag,
+)
 
 
 def test_keeps_hair_eye_skin_colors():
@@ -70,3 +75,54 @@ def test_filter_empty_when_no_color():
 def test_long_hair_not_kept_but_blue_hair_is():
     # 'long hair' shares the 'hair' suffix but has no color word → dropped.
     assert filter_to_colors("long hair, blue hair") == "blue hair"
+
+
+# ----- color + copyright variant ------------------------------------------
+
+_COPYRIGHT = frozenset({"genshin impact", "fate/grand order"})
+
+
+def test_is_copyright_tag_case_insensitive():
+    assert is_copyright_tag("genshin impact", _COPYRIGHT)
+    assert is_copyright_tag("Genshin Impact", _COPYRIGHT)
+    assert not is_copyright_tag("1girl", _COPYRIGHT)
+    assert not is_copyright_tag("blue hair", _COPYRIGHT)
+
+
+def test_copyright_kept_first_then_colors():
+    caption = (
+        "1girl, nilou (genshin impact), genshin impact, @sincos, blue hair, "
+        "looking at viewer, red dress"
+    )
+    out = filter_to_colors_and_copyright(caption, _COPYRIGHT)
+    # copyright leads, color tags follow in original order; non-color dropped.
+    assert out == "genshin impact, blue hair, red dress"
+
+
+def test_copyright_absent_falls_back_to_colors():
+    caption = "1girl, solo, blue hair, yellow shirt"
+    out = filter_to_colors_and_copyright(caption, _COPYRIGHT)
+    assert out == "blue hair, yellow shirt"
+
+
+def test_copyright_protected_from_dropout():
+    # The copyright tag must survive even at dropout_rate=1.0, color tags drop.
+    import random
+
+    from library.preprocess import generate_caption_variants
+
+    random.seed(0)
+    caption = filter_to_colors_and_copyright(
+        "genshin impact, blue hair, red dress, green eyes", _COPYRIGHT
+    )
+    variants = generate_caption_variants(
+        caption,
+        num_variants=4,
+        tag_dropout_rate=1.0,
+        protect_fn=lambda t: is_copyright_tag(t, _COPYRIGHT),
+    )
+    # v0 pristine keeps everything; v1+ drop all color tags but keep copyright.
+    assert variants[0] == caption
+    for v in variants[1:]:
+        assert "genshin impact" in v
+        assert "blue hair" not in v and "red dress" not in v and "green eyes" not in v

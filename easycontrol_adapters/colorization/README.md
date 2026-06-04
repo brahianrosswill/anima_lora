@@ -28,35 +28,41 @@ self-attention cond stream does the conditioning; only the cond source changes
 
 The condition (mangafied lineart + screentone) already encodes *everything
 spatial*: composition, poses, objects, layout. The one variable B&W manga can't
-carry is **hue/chroma**. So the text channel for colorization is reduced to
-**color tags only** — hair/eye/skin color, `<color> <garment>`, background color
-(`color_caption.filter_to_colors`). Every surviving token is then a color fact
-the model can't get from structure, which gives a strong **prompt→color** binding
-instead of the weak, arbitrary steering you get when color tags are buried in a
-full caption.
+carry is **hue/chroma** (and **which series** the page is from). So the text
+channel for colorization is reduced to **color tags + the copyright/series tag** —
+hair/eye/skin color, `<color> <garment>`, background color, plus the bare
+copyright tag (`color_caption.filter_to_colors_and_copyright`; pass
+`--no-text_keep_copyright` for the color-only `filter_to_colors`). Every surviving
+token is then a fact the model can't get from structure, which gives a strong
+**prompt→color** binding instead of the weak, arbitrary steering you get when
+color tags are buried in a full caption. Copyright tags are recognized against
+`groups.copyright` in `post_image_dataset/captions/caption_index.json`.
 
-The color-only TE cache lives in its own `text_cache_dir`
-(`post_image_dataset/colorize_text`) — a TE-only redirect, so the **latents still
+The TE cache lives in its own `text_cache_dir`
+(`post_image_dataset/easycontrol/colorize/text`) — a TE-only redirect, so the **latents still
 come from the shared `lora/` cache** (nothing re-encoded there). Built by
 `prep.py`'s text stage as a multi-variant cache (shipped defaults:
 `--text_shuffle_variants 2`, `--text_tag_dropout_rate 0.5`): v0 = the full color
 set, v1 = smart-shuffled with each color tag independently dropped at p≈0.5, so
 the model learns to colorize from a *partial* color spec, not just a complete
-palette.
+palette. The **copyright tag is protected from tag-dropout** — it rides every
+variant. With `use_shuffled_caption_variants_only=true` (colorize default) the
+loader never draws v0, so every non-empty step trains a partial spec.
 
 Two independent knobs shape the per-step caption, and it's worth not conflating
 them:
 
-- **`caption_dropout_rate = 0.05`** — the *auto-color floor*. ~5% of steps drop
-  the caption entirely (→ uncond `T5("")`), training the empty-prompt default.
-  Keep it low: this knob does **not** balance full-vs-partial color, and a high
-  rate (the old `0.9`) over-trains the unconditional path into weak, arbitrary
-  steering.
+- **`caption_dropout_rate`** — the *auto-color floor*. That fraction of steps
+  drop the caption entirely (→ uncond `T5("")`), training the empty-prompt
+  default. This knob does **not** balance full-vs-partial color, and a high rate
+  (the old `0.9`) over-trains the unconditional path into weak, arbitrary steering.
 - **`use_shuffled_caption_variants = true`** — the *full-vs-partial balance*. On
   the captioned steps, the loader draws **20% v0 (full colors) / 80% v1+
   (partial)** (`strategy.py`), so partial prompts ("pink hair" alone) work.
-
-Composed, the per-step regime is **~5% empty / ~19% full / ~76% partial**.
+- **`use_shuffled_caption_variants_only = true`** (colorize default) — drop v0
+  from the pool entirely: captioned steps draw **only** the partial v1+ variants
+  (uniform). Every non-empty step then trains a partial spec; the copyright tag
+  still rides every variant (it's dropout-protected, not a color tag).
 
 At inference:
 
@@ -81,28 +87,28 @@ it matters. This is expected, not a bug.
 |------|------|
 | `mangafy.py` | color RGB → B&W manga (XDoG lineart + dot/line/cross screentone), per-stem jitter |
 | `color_caption.py` | reduce a full Anima caption to color tags only (`filter_to_colors`) |
-| `prep.py` | mangafy `resized/` → VAE-encode into `colorize_cond/`; re-encode color-only captions into `colorize_text/` |
+| `prep.py` | mangafy `resized/` → VAE-encode into `easycontrol/colorize/cond/`; re-encode color-only captions into `easycontrol/colorize/text/` |
 
 Configs: `configs/datasets/colorize.toml`, `configs/methods/colorize.toml`.
 
 ## Run
 
-The colorization project rides the existing `exp-easycontrol*` targets via the
+The colorization project rides the existing `easycontrol*` targets via the
 `EASYADAPTER=colorize` selector (no separate targets):
 
 ```bash
 # 1. Build the condition latents (mangafy + VAE-encode). Idempotent.
-make exp-easycontrol-preprocess EASYADAPTER=colorize
+make easycontrol-preprocess EASYADAPTER=colorize
 #    or directly:  python easycontrol_adapters/colorization/prep.py
 #    QA a few first:  python easycontrol_adapters/colorization/prep.py --limit 8
-#    Inspect staged manga PNGs under post_image_dataset/colorize_staging/
+#    Inspect staged manga PNGs under post_image_dataset/easycontrol/colorize/staging/
 
 # 2. Train (frozen DiT, adapter-only, caption-free default).
-make exp-easycontrol EASYADAPTER=colorize
+make easycontrol EASYADAPTER=colorize
 
 # 3. Inference — feed a real B&W manga page as the control image (empty prompt).
 REF_IMAGE=post_image_dataset/resized/takaman_\(gaffe\)/7645571.png \
-    make exp-test-easycontrol EASYADAPTER=colorize
+    make test-easycontrol EASYADAPTER=colorize
 #    Color steer:  ... ARGS='--prompt "pink hair, blue eyes, white dress"'
 ```
 

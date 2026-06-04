@@ -172,22 +172,22 @@ the **target** is an existing color illustration (latents + captions reused from
 the shared `post_image_dataset/lora/` cache — nothing re-encoded) and the
 **condition** is a *synthetic* mangafied version of that same image (XDoG lineart
 + value-banded algorithmic screentone), cached to a parallel `cond_cache_dir`
-(`post_image_dataset/colorize_cond/`). The text channel is reduced to
+(`post_image_dataset/easycontrol/colorize/cond/`). The text channel is reduced to
 **color-only captions** (hair/eye/garment colors) in its own `text_cache_dir`
-(`post_image_dataset/colorize_text/`), so the prompt carries the one variable
+(`post_image_dataset/easycontrol/colorize/text/`), so the prompt carries the one variable
 B&W can't — hue — giving a strong prompt→color binding. At inference an empty
 prompt auto-colorizes; a color prompt (`pink hair, blue eyes`) steers.
 
 ```bash
-make exp-easycontrol-preprocess EASYADAPTER=colorize   # mangafy + VAE-encode cond
-make exp-easycontrol            EASYADAPTER=colorize   # train (frozen DiT, adapter-only)
-REF_IMAGE=page.png make exp-test-easycontrol EASYADAPTER=colorize   # inference
+make easycontrol-preprocess EASYADAPTER=colorize   # mangafy + VAE-encode cond
+make easycontrol            EASYADAPTER=colorize   # train (frozen DiT, adapter-only)
+REF_IMAGE=page.png make test-easycontrol EASYADAPTER=colorize   # inference
 ```
 
 In the GUI, the **EasyControl** experimental tab is a config editor (form on the
 left, field explanations on the right — like the LoRA tab) with a *Variant*
 dropdown. Pick *Colorize* and its Preprocess / Train buttons run the same
-`exp-easycontrol*` targets with `EASYADAPTER=colorize` set automatically; Train
+`easycontrol*` targets with `EASYADAPTER=colorize` set automatically; Train
 passes `--methods_subdir gui-methods` so the edited `gui-methods/colorize.toml`
 is what trains.
 
@@ -199,14 +199,14 @@ live in `easycontrol_adapters/colorization/README.md`.
 ### Training
 
 ```bash
-make exp-easycontrol                          # default preset
-python tasks.py exp-easycontrol               # cross-platform
-make exp-easycontrol PRESET=low_vram          # override hardware preset
+make easycontrol                          # default preset
+python tasks.py easycontrol               # cross-platform
+make easycontrol PRESET=low_vram          # override hardware preset
 ```
 
 Reuses the existing `cache_latents` output as the cond input — no separate
 sidecar cache. Run `make preprocess` once if VAE latents aren't already
-cached, then `make exp-easycontrol`.
+cached, then `make easycontrol`.
 
 CFG dropout for image conditioning (independent of text):
 - `easycontrol_drop_p = 0.1` (default) — per batch, drop the cond entirely.
@@ -216,14 +216,14 @@ CFG dropout for image conditioning (independent of text):
 ### Inference
 
 ```bash
-make exp-test-easycontrol REF_IMAGE=post_image_dataset/foo.png \
+make test-easycontrol REF_IMAGE=post_image_dataset/foo.png \
                           PROMPT="a girl drinking coffee at a cafe"
 ```
 
 Equivalents:
 
 ```bash
-python tasks.py exp-test-easycontrol post_image_dataset/foo.png \
+python tasks.py test-easycontrol post_image_dataset/foo.png \
                                      --prompt "a girl drinking coffee at a cafe"
 ```
 

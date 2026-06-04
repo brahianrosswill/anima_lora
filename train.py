@@ -697,6 +697,9 @@ class AnimaTrainer:
                 use_shuffled_caption_variants=getattr(
                     args, "use_shuffled_caption_variants", False
                 ),
+                use_shuffled_caption_variants_only=getattr(
+                    args, "use_shuffled_caption_variants_only", False
+                ),
             )
         return None
 

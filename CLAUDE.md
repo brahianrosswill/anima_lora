@@ -28,14 +28,16 @@ make lora                                # methods/lora.toml + presets.toml[defa
 make lora PRESET=low_vram|fast_16gb|half # override preset (half → sample_ratio=0.5)
 make lora-gui GUI_PRESETS=tlora          # clean per-variant configs/gui-methods/ (no toggle blocks)
                                          #   `ls configs/gui-methods/` for the live variant list
-make exp-ip-adapter | exp-easycontrol | exp-soft-tokens | exp-chimera | exp-turbo
+make easycontrol [EASYADAPTER=colorize]  # + easycontrol-preprocess / easycontrol-download
+make exp-ip-adapter | exp-soft-tokens | exp-chimera | exp-turbo
 
 # Inference (latest output) — SPECTRUM=1 / MOD=1 / NOLORA=1 compose into every test-* target
 make test [MOD=1] [NOLORA=1] [SPECTRUM=1]
 make test-hydra            # HydraLoRA / FeRA router-live checkpoints
 make test-merge            # merged/baked DiT (no adapter)
 make test-dcw | test-dcw-v4 | test-smc-cfg     # DCW scalar / v4 calibrator / SMC-CFG
-make exp-test-soft | exp-test-turbo | exp-test-ip REF_IMAGE=... | exp-test-easycontrol REF_IMAGE=...
+make test-easycontrol REF_IMAGE=...            # EasyControl (EASYADAPTER=colorize for colorize)
+make exp-test-soft | exp-test-turbo | exp-test-ip REF_IMAGE=...
 make exp-test-directedit PROMPT='...' | exp-test-directedit-dry
 
 # Modulation guidance distillation

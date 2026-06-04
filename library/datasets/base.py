@@ -1255,7 +1255,7 @@ class BaseDataset(torch.utils.data.Dataset):
             raise FileNotFoundError(
                 f"Condition latent cache missing for {image_info.absolute_path!r}: "
                 f"{npz_path}. Run the cond prep step first "
-                f"(e.g. `make exp-easycontrol-preprocess EASYADAPTER=colorize`)."
+                f"(e.g. `make easycontrol-preprocess EASYADAPTER=colorize`)."
             )
         cond, _, _, cond_flipped, _ = self.latents_caching_strategy.load_latents_from_disk(
             npz_path, image_info.bucket_reso

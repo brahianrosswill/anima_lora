@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 
 def generate_caption_variants(
-    caption: str, num_variants: int, tag_dropout_rate: float
+    caption: str,
+    num_variants: int,
+    tag_dropout_rate: float,
+    protect_fn: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Generate ``num_variants`` caption variants for stochastic train-time sampling.
 
@@ -34,6 +37,11 @@ def generate_caption_variants(
     is independently dropped with probability ``tag_dropout_rate``. The
     ``@no-artist`` sentinel participates in the boundary but is stripped from
     every variant (including v0) before it is written.
+
+    ``protect_fn`` (when given) marks tags that must survive tag-dropout: a tag
+    for which it returns True is always kept even past the @artist prefix. It is
+    still subject to shuffling — only the dropout is suppressed. Used by the
+    colorize prep to keep copyright tags present in every partial-color variant.
     """
     from library.anima import training as anima_train_utils
 
@@ -55,7 +63,9 @@ def generate_caption_variants(
         if tag_dropout_rate > 0.0 and len(shuffled) > split_idx:
             kept = list(shuffled[:split_idx])
             for tag in shuffled[split_idx:]:
-                if random.random() >= tag_dropout_rate:
+                if (protect_fn is not None and protect_fn(tag)) or (
+                    random.random() >= tag_dropout_rate
+                ):
                     kept.append(tag)
             if not kept:
                 kept = shuffled[:1]
@@ -129,6 +139,7 @@ def cache_text_embeddings(
     caption_shuffle_variants: int = 0,
     caption_tag_dropout_rate: float = 0.0,
     caption_transform: Callable[[str], str] | None = None,
+    caption_protect_fn: Callable[[str], bool] | None = None,
     min_pixels: int = 500_000,
     verbose: bool = True,
     progress: ProgressFn | None = None,
@@ -145,6 +156,10 @@ def cache_text_embeddings(
     tokenization / variant generation — used by task-specific re-encodes such
     as colorization's color-only caption filter. It runs *before* shuffle so
     the kept tags are what gets shuffled/dropped.
+
+    ``caption_protect_fn`` (when given) is forwarded to
+    :func:`generate_caption_variants` to exempt matching tags from tag-dropout
+    (e.g. colorize copyright tags). No-op unless ``caption_shuffle_variants > 0``.
     """
     candidates = walk_images(data_dir, recursive=recursive)
 
@@ -236,7 +251,9 @@ def cache_text_embeddings(
             all_captions: list[str] = []
             for _, caption, _ in to_encode:
                 all_captions.extend(
-                    generate_caption_variants(caption, n_variants, tag_dropout_rate)
+                    generate_caption_variants(
+                        caption, n_variants, tag_dropout_rate, caption_protect_fn
+                    )
                 )
 
             prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask, crossattn_emb = (

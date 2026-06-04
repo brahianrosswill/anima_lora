@@ -1,9 +1,10 @@
 """Experimental inference entry-points (exp-test-* commands).
 
 Covers the unstable methods kept under ``make exp-*``: soft tokens, IP-Adapter,
-EasyControl, plus the DirectEdit + postfix-tail inversion probes. Reference-image
-variants (exp-test-ip / exp-test-easycontrol) accept REF_IMAGE env or first
-positional arg, copy the ref alongside the generated output.
+plus the DirectEdit + postfix-tail inversion probes. Reference-image variants
+(exp-test-ip) accept REF_IMAGE env or first positional arg, copy the ref
+alongside the generated output. (EasyControl graduated to the shipped
+``test-easycontrol`` — see ``scripts/tasks/inference.py``.)
 """
 
 from __future__ import annotations
@@ -17,11 +18,12 @@ from pathlib import Path
 from scripts.tasks._common import (
     INFERENCE_BASE,
     ROOT,
+    _random_ref_image,
+    _REF_IMAGE_EXTS,
     latest_output,
     run,
 )
 
-_REF_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 _TE_SUFFIX = "_anima_te.safetensors"
 
 
@@ -51,7 +53,11 @@ def _te_cache_candidates(ref_image: str | os.PathLike) -> list[Path]:
         )
     )
     # Deduplicate while preserving order (nested == flat when no subdir).
-    candidates = [nested, lora_root / f"{stem}{_TE_SUFFIX}", ref.parent / f"{stem}{_TE_SUFFIX}"]
+    candidates = [
+        nested,
+        lora_root / f"{stem}{_TE_SUFFIX}",
+        ref.parent / f"{stem}{_TE_SUFFIX}",
+    ]
     seen: set[Path] = set()
     return [p for p in candidates if not (p in seen or seen.add(p))]
 
@@ -84,19 +90,6 @@ def _resolve_ref_image(ref_image: str) -> str:
             if cand.is_file():
                 return str(cand)
     return ref_image
-
-
-def _random_ref_image(directory: Path) -> str | None:
-    if not directory.is_dir():
-        return None
-    # resized/ (and other source layouts) nest images under per-artist subdirs,
-    # so recurse rather than only scanning top-level files.
-    pool = [p for p in directory.rglob("*") if p.suffix.lower() in _REF_IMAGE_EXTS]
-    if not pool:
-        return None
-    pick = random.choice(pool)
-    print(f"  > Random ref: {pick}")
-    return str(pick)
 
 
 def cmd_test_soft(extra):
@@ -820,85 +813,3 @@ def cmd_test_byg(extra):
         "docs/proposal/byg_unpaired_editing.md. Training (exp-byg) is functional; "
         "the trained checkpoint is a plain LoRA loadable via --lora_weight."
     )
-
-
-def cmd_test_easycontrol(extra):
-    """Inference with latest EasyControl weight.
-
-    Reference image is taken from REF_IMAGE env or the first positional arg.
-    Falls back to a random image from ``easycontrol-dataset/`` (the EasyControl
-    source layout) when neither is supplied.
-    PROMPT, NEG, EC_SCALE env vars override defaults. Saves to
-    output/tests/easycontrol/ and copies the ref image alongside the generated
-    output as ``<name>_ref.png``.
-
-    ``EASYADAPTER=colorize`` targets the colorization checkpoint
-    (``anima_colorize``), saves to output/tests/colorize/, defaults the ref to a
-    random image under ``post_image_dataset/resized/`` (feed a real B&W manga page
-    via REF_IMAGE), and defaults to an EMPTY prompt (caption-free colorization).
-
-    Examples:
-      python tasks.py exp-test-easycontrol ref.png --prompt "a girl in a coffee shop"
-      REF_IMAGE=ref.png EC_SCALE=0.8 python tasks.py exp-test-easycontrol
-      python tasks.py exp-test-easycontrol         # random ref from easycontrol-dataset/
-      REF_IMAGE=manga.png EASYADAPTER=colorize python tasks.py exp-test-easycontrol
-    """
-    adapter = (os.environ.get("EASYADAPTER") or "").strip()
-    is_colorize = adapter == "colorize"
-    weight_name = "anima_colorize" if is_colorize else "anima_easycontrol"
-    out_sub = "colorize" if is_colorize else "easycontrol"
-    ref_fallback_dir = (
-        ROOT / "post_image_dataset" / "resized"
-        if is_colorize
-        else ROOT / "easycontrol-dataset"
-    )
-
-    ref_image = os.environ.get("REF_IMAGE", "").strip()
-    if not ref_image and extra and not extra[0].startswith("-"):
-        ref_image = extra[0]
-        extra = extra[1:]
-    if not ref_image:
-        ref_image = _random_ref_image(ref_fallback_dir) or ""
-    if not ref_image:
-        print(
-            "Usage: python tasks.py exp-test-easycontrol <ref_image> [extra...]\n"
-            "   or: REF_IMAGE=path/to/ref.png python tasks.py exp-test-easycontrol [extra...]\n"
-            f"   (no ref given and {ref_fallback_dir.name}/ is empty)",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    save_dir = ROOT / "output" / "tests" / out_sub
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    args = [
-        *INFERENCE_BASE,
-        "--save_path",
-        str(save_dir),
-        "--easycontrol_weight",
-        str(latest_output(weight_name)),
-        "--easycontrol_image",
-        ref_image,
-        "--easycontrol_image_match_size",
-    ]
-    if scale := os.environ.get("EC_SCALE"):
-        args += ["--easycontrol_scale", scale]
-    if prompt := os.environ.get("PROMPT"):
-        args += ["--prompt", prompt]
-    elif is_colorize and not any(a == "--prompt" for a in extra):
-        # caption-free default for colorization (empty prompt → uncond text path)
-        args += ["--prompt", ""]
-    if neg := os.environ.get("NEG"):
-        args += ["--negative_prompt", neg]
-    args += list(extra)
-    run(args)
-
-    pngs = sorted(
-        (p for p in save_dir.glob("*.png") if not p.name.endswith("_ref.png")),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if pngs:
-        ref_dst = pngs[0].with_name(pngs[0].stem + "_ref.png")
-        shutil.copy(ref_image, ref_dst)
-        print(f"  > Ref pasted: {ref_dst}")

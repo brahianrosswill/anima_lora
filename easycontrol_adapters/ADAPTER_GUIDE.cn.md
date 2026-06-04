@@ -36,7 +36,7 @@ colorize 的做法——你可以复用的思路：**真实的黑白漫画没有
 | 1 | `easycontrol_adapters/<task>/` 项目 | `colorization/`（`mangafy*.py`、`color_caption.py`、`prep.py`） | 构建并缓存参考图像（以及可选的较短文本缓存） |
 | 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | 通过 **cond_cache_dir** 将每个目标与参考配对的数据集 |
 | 3 | `configs/methods/<task>.toml`（+ `configs/gui-methods/<task>.toml`） | `configs/methods/colorize.toml` | config——指向数据集，设置 LR / epochs / `network_args` |
-| 4 | `scripts/experimental_tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + 分支 | 让 `EASYADAPTER=<task>` 在 `make exp-easycontrol*` 命令中正常工作 |
+| 4 | `scripts/tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + 分支 | 让 `EASYADAPTER=<task>` 在 `make easycontrol*` 命令中正常工作 |
 
 我们按顺序逐一讲解。这里没有任何内容需要改动 `networks/`。
 
@@ -121,8 +121,8 @@ validation_seed = 42
   [[datasets.subsets]]
   image_dir = 'post_image_dataset/resized'        # the COLOR targets
   cache_dir = 'post_image_dataset/lora'           # target latents + text — REUSED, not rebuilt
-  cond_cache_dir = 'post_image_dataset/colorize_cond'   # ← the reference latents (from prep.py)
-  text_cache_dir = 'post_image_dataset/colorize_text'   # ← color-only text cache (from prep.py)
+  cond_cache_dir = 'post_image_dataset/easycontrol/colorize/cond'   # ← the reference latents (from prep.py)
+  text_cache_dir = 'post_image_dataset/easycontrol/colorize/text'   # ← color-only text cache (from prep.py)
   recursive = true
   flip_aug = false        # latents can't be flipped after the fact, and there's no flipped reference
   num_repeats = 1
@@ -186,9 +186,9 @@ unsloth_offload_checkpointing = true
 
 ## 6. 第四件事——让 `EASYADAPTER=<task>` 工作
 
-`make exp-easycontrol*` 命令通过 `EASYADAPTER` 环境变量进行切换。三处小改动可以让 `EASYADAPTER=<task>` 使用你的 config、prep 和检查点。
+`make easycontrol*` 命令通过 `EASYADAPTER` 环境变量进行切换。三处小改动可以让 `EASYADAPTER=<task>` 使用你的 config、prep 和检查点。
 
-**在 `scripts/experimental_tasks/training.py` 中：**
+**在 `scripts/tasks/training.py` 中：**
 
 1. 将名称添加到允许列表：
    ```python
@@ -209,7 +209,7 @@ unsloth_offload_checkpointing = true
 
 4. （仅当你的构建器需要下载时）在 `cmd_easycontrol_download` 中为你的权重获取任务添加一个分支。
 
-**在 `scripts/experimental_tasks/inference.py`**（`cmd_test_easycontrol`）中：选择器目前硬编码了 colorize。将几个 colorize 专属的值针对你的任务进行泛化——检查点名称、输出文件夹、备用参考文件夹和空提示默认值：
+**在 `scripts/tasks/inference.py`**（`cmd_test_easycontrol`）中：选择器目前硬编码了 colorize。将几个 colorize 专属的值针对你的任务进行泛化——检查点名称、输出文件夹、备用参考文件夹和空提示默认值：
 
 ```python
 adapter = (os.environ.get("EASYADAPTER") or "").strip()
@@ -227,16 +227,16 @@ ref_fallback_dir = (ROOT/"post_image_dataset"/"resized") if is_colorize else (RO
 
 ```bash
 # 1. Build the reference cache (build + VAE-encode). Idempotent.
-make exp-easycontrol-preprocess EASYADAPTER=<task>
+make easycontrol-preprocess EASYADAPTER=<task>
 #    Check a few first:
 python easycontrol_adapters/<task>/prep.py --limit 8
 #    Eyeball the staged reference PNGs under post_image_dataset/<task>_staging/
 
 # 2. Train (DiT frozen, adapter only).
-make exp-easycontrol EASYADAPTER=<task>
+make easycontrol EASYADAPTER=<task>
 
 # 3. Inference — give it a real, in-distribution reference image.
-REF_IMAGE=path/to/condition.png make exp-test-easycontrol EASYADAPTER=<task>
+REF_IMAGE=path/to/condition.png make test-easycontrol EASYADAPTER=<task>
 #    Steer with text:  ... ARGS='--prompt "..."'
 ```
 

@@ -12,12 +12,18 @@ Centralizes:
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Reference-image extensions probed by the test-* commands that take a REF_IMAGE
+# (EasyControl / IP-Adapter / DirectEdit). Shared so the shipped and experimental
+# inference modules agree on what counts as an image.
+_REF_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 
 def _python_exe() -> str:
@@ -179,6 +185,24 @@ def latest_hydra() -> Path:
         )
         sys.exit(1)
     return outputs[0]
+
+
+def _random_ref_image(directory: Path) -> str | None:
+    """Pick a random image under ``directory`` (recursive), or ``None`` if empty.
+
+    Source layouts (``post_image_dataset/resized/``, ``easycontrol-dataset/``)
+    nest images under per-artist subdirs, so recurse rather than only scanning
+    top-level files. Shared by the EasyControl / IP-Adapter / DirectEdit test
+    commands as the fallback reference when no REF_IMAGE is supplied.
+    """
+    if not directory.is_dir():
+        return None
+    pool = [p for p in directory.rglob("*") if p.suffix.lower() in _REF_IMAGE_EXTS]
+    if not pool:
+        return None
+    pick = random.choice(pool)
+    print(f"  > Random ref: {pick}")
+    return str(pick)
 
 
 def _has_console() -> bool:

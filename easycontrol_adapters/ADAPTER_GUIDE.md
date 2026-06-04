@@ -58,7 +58,7 @@ To add an adapter named `<task>`, you create or edit exactly these four:
 | 1 | `easycontrol_adapters/<task>/` project | `colorization/` (`mangafy*.py`, `color_caption.py`, `prep.py`) | builds and caches the reference image (and maybe a shorter text cache) |
 | 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | a dataset that pairs each target with its reference via **cond_cache_dir** |
 | 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/methods/colorize.toml` | the config — points at the dataset, sets LR / epochs / `network_args` |
-| 4 | `scripts/experimental_tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + branches | makes `EASYADAPTER=<task>` work with the `make exp-easycontrol*` commands |
+| 4 | `scripts/tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + branches | makes `EASYADAPTER=<task>` work with the `make easycontrol*` commands |
 
 We go through them in order. None of this touches `networks/`.
 
@@ -213,8 +213,8 @@ validation_seed = 42
   [[datasets.subsets]]
   image_dir = 'post_image_dataset/resized'        # the COLOR targets
   cache_dir = 'post_image_dataset/lora'           # target latents + text — REUSED, not rebuilt
-  cond_cache_dir = 'post_image_dataset/colorize_cond'   # ← the reference latents (from prep.py)
-  text_cache_dir = 'post_image_dataset/colorize_text'   # ← color-only text cache (from prep.py)
+  cond_cache_dir = 'post_image_dataset/easycontrol/colorize/cond'   # ← the reference latents (from prep.py)
+  text_cache_dir = 'post_image_dataset/easycontrol/colorize/text'   # ← color-only text cache (from prep.py)
   recursive = true
   flip_aug = false        # latents can't be flipped after the fact, and there's no flipped reference
   num_repeats = 1
@@ -304,11 +304,11 @@ line.
 
 ## 6. Thing 4 — make `EASYADAPTER=<task>` work
 
-The `make exp-easycontrol*` commands switch on the `EASYADAPTER` environment
+The `make easycontrol*` commands switch on the `EASYADAPTER` environment
 variable. Three small edits make `EASYADAPTER=<task>` use your config, prep, and
 checkpoint.
 
-**In `scripts/experimental_tasks/training.py`:**
+**In `scripts/tasks/training.py`:**
 
 1. Add the name to the allowlist:
    ```python
@@ -332,7 +332,7 @@ checkpoint.
 4. (Only if your builder needs downloads) add a branch in
    `cmd_easycontrol_download` for your weight-fetch task.
 
-**In `scripts/experimental_tasks/inference.py`** (`cmd_test_easycontrol`): the
+**In `scripts/tasks/inference.py`** (`cmd_test_easycontrol`): the
 selector currently hard-codes colorize. Generalize the few colorize-specific
 values for your task — the checkpoint name, the output folder, the fallback
 reference folder, and the empty-prompt default:
@@ -356,16 +356,16 @@ branches further down too.
 
 ```bash
 # 1. Build the reference cache (build + VAE-encode). Idempotent.
-make exp-easycontrol-preprocess EASYADAPTER=<task>
+make easycontrol-preprocess EASYADAPTER=<task>
 #    Check a few first:
 python easycontrol_adapters/<task>/prep.py --limit 8
 #    Eyeball the staged reference PNGs under post_image_dataset/<task>_staging/
 
 # 2. Train (DiT frozen, adapter only).
-make exp-easycontrol EASYADAPTER=<task>
+make easycontrol EASYADAPTER=<task>
 
 # 3. Inference — give it a real, in-distribution reference image.
-REF_IMAGE=path/to/condition.png make exp-test-easycontrol EASYADAPTER=<task>
+REF_IMAGE=path/to/condition.png make test-easycontrol EASYADAPTER=<task>
 #    Steer with text:  ... ARGS='--prompt "..."'
 ```
 

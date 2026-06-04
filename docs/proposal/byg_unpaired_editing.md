@@ -369,7 +369,7 @@ cost, not a *memory* cost, relative to EasyControl.
 7. **Data script.** `scripts/byg/build_edit_tuples.py` (offline VLM → JSONL).
 8. **Inference / test target.** Output is a plain editing LoRA conditioned on a
    source image + instruction. `make exp-test-byg REF_IMAGE=... PROMPT=...`
-   mirroring `exp-test-easycontrol`.
+   mirroring `test-easycontrol`.
 9. **Bench.** `bench/byg/` with the standard `_common.py` envelope (Tier-2
    requirement). Metrics below.
 

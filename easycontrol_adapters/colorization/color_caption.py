@@ -23,9 +23,28 @@ empty-prompt colorization mode.
 Tag order is preserved (the slot order is irrelevant once non-color tags are
 gone). Pure stdlib so it stays importable from the preprocess path and unit
 tests without pulling torch.
+
+:func:`filter_to_colors_and_copyright` is the variant used by the colorize prep
+when copyright tags should ride along with the color tags ("genshin impact,
+pink hair, blue eyes"). The manga cond can't encode *which series* a page is
+from, so copyright is genuinely-ambiguous text the model can bind to — and
+unlike a hue it shouldn't be tag-dropped, so it's emitted as a protected prefix
+(see ``protect_fn`` in :func:`library.preprocess.generate_caption_variants`).
+Copyright tags are identified against the corpus copyright vocab in the caption
+index (``post_image_dataset/captions/caption_index.json`` ``groups.copyright``).
 """
 
 from __future__ import annotations
+
+import functools
+import json
+from pathlib import Path
+
+# Repo root: easycontrol_adapters/colorization/color_caption.py → ../../..
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CAPTION_INDEX = (
+    _REPO_ROOT / "post_image_dataset" / "captions" / "caption_index.json"
+)
 
 # Single color words that head a "<color> <noun>" tag or end a "<x> hair/eyes".
 # Booru's stable color vocab + a few common extended hues. Kept deliberately
@@ -99,3 +118,47 @@ def filter_to_colors(caption: str) -> str:
     tags = [t.strip() for t in caption.split(",") if t.strip()]
     kept = [t for t in tags if is_color_tag(t)]
     return ", ".join(kept)
+
+
+@functools.lru_cache(maxsize=4)
+def load_copyright_tags(index_path: str | Path = DEFAULT_CAPTION_INDEX) -> frozenset[str]:
+    """Lowercased set of every copyright tag name from the caption index.
+
+    Reads ``groups.copyright`` (a ``{copyright_name: [image_ids]}`` map) from the
+    method-agnostic typed-tag index. Returns an empty set if the index is missing
+    so callers degrade to "no copyright kept" rather than crashing. Cached because
+    the index is a couple-thousand-image JSON and this runs once per caption.
+    """
+    p = Path(index_path)
+    if not p.exists():
+        return frozenset()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    groups = data.get("groups", {})
+    copyright_group = groups.get("copyright", {})
+    return frozenset(name.strip().lower() for name in copyright_group if name.strip())
+
+
+def is_copyright_tag(tag: str, copyright_tags: frozenset[str]) -> bool:
+    """True if ``tag`` is a known copyright/series name (case-insensitive)."""
+    return tag.strip().lower() in copyright_tags
+
+
+def filter_to_colors_and_copyright(
+    caption: str, copyright_tags: frozenset[str] | None = None
+) -> str:
+    """Reduce a caption to its copyright tags (first) followed by its color tags.
+
+    Copyright tags are emitted *before* the color tags so they form a contiguous
+    leading run, mirroring the ``@artist``-prefix convention the variant
+    generator already protects. A color prompt then reads naturally — "genshin
+    impact, pink hair, blue eyes". Pass ``copyright_tags`` to avoid re-reading the
+    caption index per call; defaults to :func:`load_copyright_tags`. A tag that is
+    both a copyright name and color-shaped is kept once, in the copyright slot.
+    """
+    if copyright_tags is None:
+        copyright_tags = load_copyright_tags()
+    tags = [t.strip() for t in caption.split(",") if t.strip()]
+    copyrights = [t for t in tags if is_copyright_tag(t, copyright_tags)]
+    seen = {t.lower() for t in copyrights}
+    colors = [t for t in tags if t.lower() not in seen and is_color_tag(t)]
+    return ", ".join(copyrights + colors)

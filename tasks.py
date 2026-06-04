@@ -48,6 +48,21 @@ COMMANDS = {
         "Train from a self-contained configs/gui-methods/<variant>.toml "
         "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora, reft).",
     ),
+    "easycontrol": (
+        training.cmd_easycontrol,
+        "EasyControl training (extended self-attn KV with VAE-encoded reference). "
+        "EASYADAPTER=<task> (e.g. colorize) selects a control-task project.",
+    ),
+    "easycontrol-preprocess": (
+        training.cmd_easycontrol_preprocess,
+        "Full EasyControl preprocess: latents + text emb. "
+        "Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/.",
+    ),
+    "easycontrol-download": (
+        training.cmd_easycontrol_download,
+        "Download an EasyControl adapter's extra weights. "
+        "EASYADAPTER=colorize → Sketch2Manga screening weights (~5.7GB).",
+    ),
     # ── Training daemon ───────────────────────────────────────────────
     "daemon": (
         daemon.cmd_daemon,
@@ -113,6 +128,10 @@ COMMANDS = {
     "test-dcw-v4-spectrum": (
         inference.cmd_test_dcw_v4_spectrum,
         "Spectrum-accelerated inference + DCW v4 learnable calibrator (auto-resolves fusion_head.safetensors)",
+    ),
+    "test-easycontrol": (
+        inference.cmd_test_easycontrol,
+        "Inference with latest EasyControl weight. Usage: test-easycontrol <ref_image> [--prompt ... --easycontrol_scale ...]",
     ),
     # ── Preprocess ────────────────────────────────────────────────────
     "preprocess": (
@@ -263,20 +282,6 @@ COMMANDS = {
         "[experimental] Alias for `preprocess` + `preprocess-pe` (IP-Adapter "
         "reuses the LoRA pipeline's caches under post_image_dataset/lora/).",
     ),
-    "exp-easycontrol": (
-        exp_training.cmd_easycontrol,
-        "[experimental] EasyControl training (extended self-attn KV with VAE-encoded reference)",
-    ),
-    "exp-easycontrol-preprocess": (
-        exp_training.cmd_easycontrol_preprocess,
-        "[experimental] Full EasyControl preprocess: latents + text emb. "
-        "Source: easycontrol-dataset/  Cache: post_image_dataset/easycontrol/.",
-    ),
-    "exp-easycontrol-download": (
-        exp_training.cmd_easycontrol_download,
-        "[experimental] Download an EasyControl adapter's extra weights. "
-        "EASYADAPTER=colorize → Sketch2Manga screening weights (~5.7GB).",
-    ),
     "exp-byg": (
         exp_training.cmd_byg,
         "[experimental] BYG unpaired instruction-editing training (plain LoRA, "
@@ -307,10 +312,6 @@ COMMANDS = {
     "exp-test-ip": (
         exp_inference.cmd_test_ip,
         "[experimental] Inference with latest IP-Adapter weight. Usage: exp-test-ip <ref_image> [--prompt ... --ip_scale ...]",
-    ),
-    "exp-test-easycontrol": (
-        exp_inference.cmd_test_easycontrol,
-        "[experimental] Inference with latest EasyControl weight. Usage: exp-test-easycontrol <ref_image> [--prompt ... --easycontrol_scale ...]",
     ),
     "exp-test-byg": (
         exp_inference.cmd_test_byg,

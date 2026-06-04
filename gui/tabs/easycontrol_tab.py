@@ -5,7 +5,7 @@ reads like the LoRA / Methods tabs — config on the left, explanation on the
 right). Training rides ConfigTab's daemon path (the variant stem *is* the
 train.py method — ``EASYADAPTER`` is only read at task dispatch, never deeper —
 so it survives the GUI closing). Preprocess stays a bespoke QProcess
-(``exp-easycontrol-preprocess``, mangafy for colorize). The selected variant
+(``easycontrol-preprocess``, mangafy for colorize). The selected variant
 implies an ``EASYADAPTER`` value for the preprocess route:
 
   • EasyControl (ref == target) — EASYADAPTER unset → configs trained from
@@ -14,7 +14,7 @@ implies an ``EASYADAPTER`` value for the preprocess route:
     (easycontrol_adapters/colorization/prep.py) + gui-methods/colorize.toml.
 
 Variants are the ``[variant] family = "easycontrol"`` gui-methods files. Custom
-variants don't map onto the exp-easycontrol method selection, so the "+ New"
+variants don't map onto the easycontrol method selection, so the "+ New"
 button and custom entries are suppressed here.
 """
 
@@ -42,21 +42,21 @@ class EasyControlTab(ConfigTab):
     # variant stem → EASYADAPTER value (absent → default ref==target EasyControl).
     _VARIANT_ENV = {"colorize": "colorize"}
     # variant stem → cache dir the preprocess-reuse prompt inspects. Colorize's
-    # condition latents land in colorize_cond/; default EasyControl in its own
-    # cache. (text/cond split for colorize is covered well enough by the cond dir.)
+    # condition latents land in easycontrol/colorize/cond/; default EasyControl in
+    # its own cache. (text/cond split for colorize is covered well enough by cond.)
     _CACHE_DIRS = {
         "easycontrol": "post_image_dataset/easycontrol",
-        "colorize": "post_image_dataset/colorize_cond",
+        "colorize": "post_image_dataset/easycontrol/colorize/cond",
     }
 
     def __init__(self):
         super().__init__(methods=["easycontrol"])
 
-        # The exp-easycontrol route trains exactly the shipped family variants
+        # The easycontrol route trains exactly the shipped family variants
         # (EASYADAPTER picks the method name), so custom variants can't map onto
         # it — hide the "+ New" button. _refresh_variant_row also drops customs.
         self.new_variant_btn.setVisible(False)
-        # exp-test-easycontrol needs a REF_IMAGE the plain Test button can't
+        # test-easycontrol needs a REF_IMAGE the plain Test button can't
         # supply, so hide Test on this tab.
         self.test_btn.setVisible(False)
 
@@ -75,7 +75,7 @@ class EasyControlTab(ConfigTab):
         )
 
         # ConfigTab has no Preprocess button (it auto-chains a daemon preprocess).
-        # EasyControl preprocessing is the bespoke exp-easycontrol-preprocess
+        # EasyControl preprocessing is the bespoke easycontrol-preprocess
         # (mangafy for colorize), so it gets an explicit button before Train.
         self.preprocess_btn = QPushButton(t("preprocess"))
         self.preprocess_btn.setStyleSheet(
@@ -164,7 +164,7 @@ class EasyControlTab(ConfigTab):
     def _ec_start_preprocess(self) -> None:
         if not confirm_existing_caches(self, self._ec_cache_dir()):
             return
-        self._ec_launch(["tasks.py", "exp-easycontrol-preprocess"], "ec_preprocess")
+        self._ec_launch(["tasks.py", "easycontrol-preprocess"], "ec_preprocess")
 
     def _ec_start_train(self) -> None:
         # Flush form edits so train.py reads the same gui-methods/<variant>.toml.
