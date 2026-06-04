@@ -55,7 +55,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from library.log import setup_logging
 from library.training.method_adapter import ComputeLossCtx, MethodAdapter, SetupCtx
-from library.training.ste import ste_clean_blend
+from library.training.forward.ste import ste_clean_blend
 from networks.methods.easycontrol import _extended_target_attention
 
 setup_logging()

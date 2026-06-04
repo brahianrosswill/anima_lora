@@ -17,7 +17,7 @@ import torch
 from accelerate import Accelerator
 
 from library.models import sai_spec as sai_model_spec
-from library.training import get_sanitized_config_or_none
+from library.config.cli_args import get_sanitized_config_or_none
 from library.log import setup_logging
 
 # Convenience re-export: the canonical home is library.config.io, but

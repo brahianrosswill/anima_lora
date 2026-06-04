@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from library.training.ste import ste_clean_blend
+from library.training.forward.ste import ste_clean_blend
 
 
 def _latent(b=2, c=4, h=3, w=5, **kw):

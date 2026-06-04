@@ -31,7 +31,7 @@ from library.datasets import (
     glob_images,
 )
 from library.datasets.subsets import filter_paths_by_glob
-from library.training import (
+from library.config.cli_args import (
     add_dataset_arguments,
     add_training_arguments,
 )

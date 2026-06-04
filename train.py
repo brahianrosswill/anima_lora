@@ -76,17 +76,8 @@ from library.training import (
     SamplerContext,
     TrainCtx,
     add_custom_train_arguments,
-    add_dataset_arguments,
     add_dataset_metadata,
-    add_dit_training_arguments,
-    add_masked_loss_arguments,
     add_model_hash_metadata,
-    add_network_arguments,
-    add_optimizer_arguments,
-    add_sd_models_arguments,
-    add_train_misc_arguments,
-    add_training_arguments,
-    add_validation_arguments,
     build_loss_composer,
     build_training_metadata,
     finalize_metadata,
@@ -95,17 +86,30 @@ from library.training import (
     get_optimizer_train_eval_fn,
     get_scheduler_fix,
     save_state_on_train_end,
+)
+from library.config.cli_args import (
+    add_dataset_arguments,
+    add_dit_training_arguments,
+    add_masked_loss_arguments,
+    add_network_arguments,
+    add_optimizer_arguments,
+    add_sd_models_arguments,
+    add_train_misc_arguments,
+    add_training_arguments,
+    add_validation_arguments,
     verify_command_line_training_args,
     verify_training_args,
 )
 from library.training.loop import build_loop_state, run_training_loop
 from library.training.log_dispatch import dispatch_logs
 from library.training.progress import ProgressSink, run_scope
-from library.training.router_conditioning import apply_router_conditioning
-from library.training.text_conds import prepare_text_conds
-from library.training.forward_kwargs import build_forward_kwargs
-from library.training.inversion_forward import compute_inversion_func_loss
-from library.training.vr_forward import run_vr_reference_forward
+from library.training.forward import (
+    apply_router_conditioning,
+    build_forward_kwargs,
+    compute_inversion_func_loss,
+    prepare_text_conds,
+    run_vr_reference_forward,
+)
 from library.log import setup_logging, add_logging_arguments
 
 setup_logging()
