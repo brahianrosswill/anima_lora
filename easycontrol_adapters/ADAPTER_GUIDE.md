@@ -1,84 +1,82 @@
 # Building your own EasyControl adapter
 
-A step-by-step guide to adding a **new EasyControl control task** to Anima for
-your own use — not as a git contribution, just a local adapter living under
-`easycontrol_adapters/<your_task>/`. We walk the canonical example, **colorize**
-(`easycontrol_adapters/colorization/`), in detail and call out exactly what you
-change for your own task.
+This guide shows you how to add a **new EasyControl control task** to Anima for
+your own use. It's a local adapter — it lives under
+`easycontrol_adapters/<your_task>/`, not in git. We follow the one worked
+example, **colorize** (`easycontrol_adapters/colorization/`), step by step, and
+point out exactly what to change for your own task.
 
-If you only read one thing: an EasyControl adapter is **not new model code**. The
-network (`networks/methods/easycontrol.py`), the two-stream forward, the
-`b_cond` logit-bias, the inference KV cache — all shipped and shared. A control
-task differs from every other control task in *one* dimension only:
+The one thing to take away:
 
-> **how the condition image is built.**
-
-Everything below is plumbing around that single idea.
+> **You are not writing model code.** The network, the forward pass, the
+> `b_cond` gate, the inference cache — all of that already ships and is shared by
+> every control task. The *only* thing your task changes is **how the condition
+> image is built.** Everything else in this guide is wiring around that.
 
 ---
 
-## 0. Mental model — what an EasyControl adapter actually is
+## 0. The idea — what an EasyControl adapter is
 
-EasyControl conditions generation on a reference image. The reference is
-VAE-encoded into *cond tokens* that flow through every DiT block alongside the
-target stream; target self-attention attends to an extended key set
-`[target_k; cond_k]`. (Full architecture: `docs/experimental/easycontrol.md`.)
+EasyControl guides generation using a **reference image**. That reference is run
+through the VAE into *cond tokens*, which flow alongside the image you're
+generating. At each step, the model gets to look at both. (Full architecture:
+`docs/experimental/easycontrol.md`.)
 
-The **default** EasyControl uses `cond == target` (reference *is* the image being
-reconstructed). A **control-task adapter** breaks that: it pairs each color
-target with a *different* condition image, so the model learns
-`condition → target` instead of identity.
+Plain EasyControl uses the **same image** as both the reference and the target —
+so it just learns to copy. A *control task* breaks that: it pairs each target
+with a **different** reference, so the model learns `reference → target` instead
+of `copy`.
 
-| | default EasyControl | a control-task adapter (e.g. colorize) |
+| | plain EasyControl | a control task (e.g. colorize) |
 |---|---|---|
-| target | image X | color image X |
-| condition | image X (same latent) | a *transform* of X (B&W manga of X) |
-| what it learns | reconstruct | manga → color |
-| text channel | full caption | (optional) reduced caption |
+| target (what you want) | image X | the color image X |
+| reference (the hint) | image X (identical) | a *changed* version of X (B&W manga of X) |
+| what it learns | copy | manga → color |
+| text | full caption | (optional) shorter caption |
 
-The colorize insight, which you can reuse: **real B&W manga has no color ground
-truth**, so you can't make `(B&W, color)` pairs by collecting them. You *invert*
-the direction — take color images you already have as the target, and
-**synthesize** the B&W condition from each one (XDoG lineart + algorithmic
-screentone). Synthesizing the condition to match the inference distribution is
-the whole game. If you're building, say, `depth → image` or `pose → image`, your
-"mangafy" step is a depth estimator or a pose extractor run over the existing
-training images.
+Here's the colorize trick, which you can reuse: **real B&W manga has no color
+version to learn from**, so you can't just collect `(B&W, color)` pairs. So you
+flip it around — start with color images you already have (those are the
+targets) and **make** the B&W reference from each one (line art + screentone, by
+algorithm). The key is that the B&W you generate has to look like the real B&W
+you'll feed in at inference time. If you were building `depth → image` or
+`pose → image` instead, your "make the reference" step would be a depth estimator
+or a pose detector run over your training images.
 
-So your job is: **write a function `color_image → condition_image`, cache its
-output as a parallel latent set, point a dataset blueprint at it, and add a
-config + a one-line selector entry.**
+So your whole job is: **write a function `target_image → reference_image`, cache
+its output, point a dataset at it, and add a config plus a one-line name
+registration.**
 
 ---
 
-## 1. The four surfaces you touch
+## 1. The four things you touch
 
-Adding an adapter named `<task>` means creating/editing exactly these:
+To add an adapter named `<task>`, you create or edit exactly these four:
 
-| # | Surface | colorize instance | what it does |
+| # | Thing | colorize version | what it's for |
 |---|---------|-------------------|--------------|
-| 1 | `easycontrol_adapters/<task>/` project | `colorization/` (`mangafy*.py`, `color_caption.py`, `prep.py`) | builds + caches the condition (and optionally a reduced text cache) |
-| 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | dataset blueprint pairing target latents with the **cond_cache_dir** |
-| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/methods/colorize.toml` | method config — points at the dataset, sets LR/epochs/`network_args` |
-| 4 | `scripts/experimental_tasks/{training,inference}.py` selector | `_EASYADAPTERS = {"colorize"}` + branches | wires `EASYADAPTER=<task>` into the `make exp-easycontrol*` targets |
+| 1 | `easycontrol_adapters/<task>/` project | `colorization/` (`mangafy*.py`, `color_caption.py`, `prep.py`) | builds and caches the reference image (and maybe a shorter text cache) |
+| 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | a dataset that pairs each target with its reference via **cond_cache_dir** |
+| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/methods/colorize.toml` | the config — points at the dataset, sets LR / epochs / `network_args` |
+| 4 | `scripts/experimental_tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + branches | makes `EASYADAPTER=<task>` work with the `make exp-easycontrol*` commands |
 
-We take them in order. Nothing here needs `networks/` edits.
+We go through them in order. None of this touches `networks/`.
 
 ---
 
-## 2. Surface 1 — the adapter project (`easycontrol_adapters/<task>/`)
+## 2. Thing 1 — the adapter project (`easycontrol_adapters/<task>/`)
 
-This is where the real work is. It has two jobs: **synthesize the condition** and
-**cache it** (plus, optionally, build a task-specific text cache).
+This is where the real work is. It does two jobs: **make the reference image**
+and **cache it**. (Optionally, a third: build a task-specific text cache.)
 
-### 2a. The condition synthesizer
+### 2a. The function that builds the reference
 
-A pure function: color RGB `uint8 (H,W,3)` + a per-stem seed → condition RGB
-`uint8 (H,W,3)` of the **same size**. (Same size matters — see §3 on token-count
-matching.) It must be deterministic given the seed so re-runs and parallel
-workers are bit-identical.
+It's a plain function: take a color image as RGB `uint8 (H,W,3)` plus a seed,
+return a reference image as RGB `uint8 (H,W,3)` of the **same size**. (Same size
+matters — see §3.) It must give the same output for the same seed, so re-runs and
+parallel workers all agree.
 
-In colorize this is `mangafy.py::mangafy_array` (and its CUDA twin
+In colorize this is `mangafy.py::mangafy_array` (with a GPU twin
 `mangafy_gpu.py::mangafy_array_gpu`):
 
 ```python
@@ -86,116 +84,121 @@ In colorize this is `mangafy.py::mangafy_array` (and its CUDA twin
 Screener = Callable[[np.ndarray, int], np.ndarray]  # (img_rgb, seed) → cond_rgb
 ```
 
-Key design points worth copying:
+Four things worth copying:
 
-- **Per-stem deterministic seed.** colorize uses `zlib.crc32(stem)` —
-  *not* Python's `hash()`, which is salted per-process and would make workers
-  disagree. Seed jitter (per-page tone angle/period in colorize) gives variety
-  without nondeterminism.
-- **Deferred heavy imports.** colorize has three engines (`cv2` / `gpu` / `sd`)
-  and imports the 3.5 GB SD stack only if a page actually routes to it. If your
-  synthesizer needs a model (depth net, line extractor), import it lazily so a
-  no-download fallback stays cheap.
-- **A no-model fallback is gold.** colorize's `cv2`/`gpu` engines need zero
-  downloads. If your task has one, you can prep + train on a fresh checkout with
-  no `make exp-easycontrol-download` step.
-- **Atomic writes.** colorize's `_save_png_atomic` writes to a temp file +
-  `os.replace`, so an interrupted run never leaves a truncated PNG that the
-  `out.exists()` skip-check would then trust forever. Copy this; it's a real bug
-  you'll hit otherwise.
+- **Seed each image from its name, deterministically.** colorize uses
+  `zlib.crc32(stem)` — **not** Python's `hash()`, which changes per process and
+  would make parallel workers disagree. You can still add variety (colorize
+  jitters the screentone angle per page) — just derive it from the seed, so it
+  stays reproducible.
+- **Import heavy stuff lazily.** colorize has three engines (`cv2` / `gpu` /
+  `sd`) and only loads the 3.5 GB SD model if a page actually needs it. If your
+  builder needs a model (depth net, line extractor), import it only when used.
+- **A no-download fallback is great to have.** colorize's `cv2`/`gpu` engines
+  need zero downloads, so you can prep and train on a fresh checkout with no
+  extra download step. Give yours one if you can.
+- **Write files atomically.** colorize's `_save_png_atomic` writes to a temp file
+  then renames it. Without this, an interrupted run can leave a half-written PNG
+  that the "skip if it exists" check will trust forever. This is a real bug —
+  copy the pattern.
 
-If your condition is a *real* artifact (you already have depth maps / sketches on
-disk), you can skip synthesis entirely and just point the encode stage at them.
-Synthesis is only needed when you must derive the condition from the targets.
+If your reference is something you **already have on disk** (real depth maps,
+real sketches), you can skip the build step entirely and just cache those
+directly. You only need to build the reference when you have to derive it from
+the targets.
 
-### 2b. (Optional) a reduced text cache
+### 2b. (Optional) a shorter text cache
 
-colorize doesn't just change the condition — it also **reduces the caption to
-color tags only** (`color_caption.py::filter_to_colors`). The reasoning is
-task-specific and instructive: the condition (lineart + screentone) already
-encodes *everything spatial*, so the only thing left for text to carry is the one
-variable B&W can't — **hue**. Filtering the caption to color tags makes every
-surviving token a fact the model can't get from structure, giving a strong
-`prompt → color` binding instead of weak steering with color tags buried in a
-full caption.
+colorize doesn't only change the reference — it also **trims the caption down to
+color words** (`color_caption.py::filter_to_colors`). The reason is worth
+understanding: the reference (line art + screentone) already encodes *everything
+about shape and layout*, so the only thing text still needs to say is the one
+thing B&W can't — **color**. Trimming the caption to color words makes every
+remaining word something the model genuinely can't get from the reference. That
+gives a strong `prompt → color` link instead of weak nudging by a few color
+words buried in a long caption.
 
-Ask the same question for your task: **what does the condition already determine,
-and what's left ambiguous for text to carry?** A `pose → image` condition fixes
-pose but not appearance/clothing/setting — so you'd probably keep the *full*
-caption. A `depth → image` condition fixes layout but not identity or palette.
-The colorize "filter the caption to the residual ambiguity" move is a *pattern*,
-not a requirement; many adapters keep captions as-is and skip the text cache
-entirely (just omit `text_cache_dir` from the dataset blueprint — §4).
+Ask the same question for your task: **what does the reference already lock down,
+and what's left for text to decide?** A `pose → image` reference fixes the pose
+but not the clothing or setting — so you'd probably keep the *full* caption. A
+`depth → image` reference fixes layout but not identity or color. colorize's
+"trim the caption to whatever's still ambiguous" is a *pattern* to consider, not
+a rule — many adapters keep captions as-is and skip the text cache completely
+(just leave `text_cache_dir` out of the dataset — see §4).
 
-If you do reduce captions, note colorize's two independent knobs (don't conflate
-them — the README spends real ink on this):
+If you do trim captions, note colorize's two separate knobs (don't mix them up):
 
-- **`caption_dropout_rate`** — the auto-color *floor*. ~5% of steps drop the
-  caption entirely (→ uncond), training the empty-prompt default. Keep it **low**
-  (`0.05`); a high rate over-trains the unconditional path into weak steering.
+- **`caption_dropout_rate`** — the auto-color *floor*. About 5% of training steps
+  drop the caption entirely, which teaches the model what to do when you give it
+  no prompt. Keep this **low** (`0.05`); a high value over-trains the no-prompt
+  path and makes prompts weak.
 - **`use_shuffled_caption_variants`** — the full-vs-partial *balance*. The text
-  cache is multi-variant (v0 = full color set, v1+ = shuffled with each tag
-  dropped at p≈0.5), and the loader draws 20% v0 / 80% v1+, so partial prompts
-  ("pink hair" alone) work.
+  cache holds several versions (v0 = the full color set, v1+ = shuffled with each
+  word dropped about half the time), and the loader picks v0 20% of the time and
+  v1+ 80% of the time. This is what makes partial prompts like "pink hair" on
+  their own still work.
 
 ### 2c. `prep.py` — the cache builder
 
-Three **idempotent** stages (skip already-done work; safe to re-run):
+Three stages, each **idempotent** (it skips work that's already done, so it's
+safe to re-run):
 
-1. **Synthesize** — walk every color image under `--src`
-   (`post_image_dataset/resized`), run the synthesizer, write the condition PNG
-   to a `--staging` dir mirroring the source subpath.
-2. **Encode** — VAE-encode the staged condition images into `--cond_cache_dir`
-   via `library.preprocess.cache_latents`, at each image's **native size** so the
-   cond latent shape matches its target latent exactly. Same `{stem}_{WxH}_anima.npz`
-   format as the target cache.
+1. **Build** — walk every color image under `--src`
+   (`post_image_dataset/resized`), run your builder function, and write the
+   reference PNG to a `--staging` folder that mirrors the source layout.
+2. **Encode** — VAE-encode those staged references into `--cond_cache_dir` using
+   `library.preprocess.cache_latents`, at each image's **native size** so the
+   reference latent ends up the same shape as its target latent. Same
+   `{stem}_{WxH}_anima.npz` format as the normal cache.
 3. **(Optional) Text** — re-encode captions through your filter into a
-   `--text_cache_dir`, via `library.preprocess.cache_text_embeddings` with a
-   `caption_transform=` (and `caption_shuffle_variants` / `caption_tag_dropout_rate`).
+   `--text_cache_dir`, using `library.preprocess.cache_text_embeddings` with a
+   `caption_transform=` (and `caption_shuffle_variants` /
+   `caption_tag_dropout_rate`).
 
-Reuse the library primitives — `library.preprocess.{cache_latents,
-cache_text_embeddings, tqdm_progress}` and `library.preprocess._dataset.walk_images`.
-Don't hand-roll the encode loop; `prep.py` is a thin orchestration shell over
-them, exactly like `scripts/preprocess/*.py`.
+Use the existing library helpers — `library.preprocess.{cache_latents,
+cache_text_embeddings, tqdm_progress}` and
+`library.preprocess._dataset.walk_images`. Don't write your own encode loop;
+`prep.py` is just a thin shell over these, exactly like the scripts in
+`scripts/preprocess/`.
 
-Two correctness gotchas colorize handles, that you inherit for free by copying its
-structure:
+Two correctness traps colorize handles for you, that you get for free by copying
+its structure:
 
-- **Stem key-matching.** The text stage reads `.txt` from the caption master
-  (`image_dataset/`, nested identically to `resized/`) so the resulting TE cache
-  paths key-match the loader's `image_dir=post_image_dataset/resized` lookup. If
-  your caches don't key-match the target stems, the loader silently won't pair
-  them.
-- **Uncond sidecar.** colorize's text stage re-stages the shared `T5("")` uncond
-  sidecar idempotently, in case the colorize run is the first to touch it. If you
-  build a text cache and use caption dropout, do the same
+- **Stems must match.** The text stage reads `.txt` captions from the caption
+  master (`image_dataset/`, laid out the same as `resized/`) so the resulting
+  text cache file names line up with what the loader looks for (it keys off
+  `image_dir=post_image_dataset/resized`). If your cache file names don't match
+  the target stems, the loader just won't pair them — silently.
+- **The uncond sidecar.** colorize's text stage re-creates the shared `T5("")`
+  empty-prompt sidecar if it's missing. If you build a text cache and use caption
+  dropout, do the same
   (`library.inference.uncond.stage_uncond_sidecar_with_models`).
 
 ---
 
-## 3. Critical invariant — cond token count must match the target's
+## 3. The one rule you can't break — reference and target must have the same token count
 
-The DiT operates on Anima's **native-shape bucketing** (two token-count families,
-4032 / 4200; see CLAUDE.md and `docs/experimental/easycontrol.md` §"Cond token
-count"). There is **no static-pad knob** — the cond stream runs at the cond
-latent's native token count.
+The DiT runs on Anima's **native-shape bucketing** (two token-count families,
+4032 and 4200; see CLAUDE.md and `docs/experimental/easycontrol.md` under "Cond
+token count"). There's **no padding knob** — the reference runs at whatever token
+count its latent actually has.
 
-This is why §2a insists the synthesizer output is the **same size** as the input,
-and §2c encodes at **native size**: the condition latent then lands on the same
-bucket family as its target latent automatically, and `_extended_target_attention`
-just works. If you downsample the condition (legit — smaller cond = less memory /
-faster), do it *upstream* at the image level so the encoded latent still lands on
-a real bucket; don't try to cap the token count in the network.
+This is exactly why §2a says the reference must be the **same size** as the input
+and §2c says to encode at **native size**: do both and the reference latent lands
+in the same bucket as its target automatically, and everything just works. If you
+want a smaller reference (totally fine — smaller = less memory, faster), shrink it
+at the **image** level, before encoding, so the latent still lands on a real
+bucket. Don't try to cap the token count inside the network.
 
 ---
 
-## 4. Surface 2 — the dataset blueprint (`configs/datasets/<task>.toml`)
+## 4. Thing 2 — the dataset (`configs/datasets/<task>.toml`)
 
-This is what makes `cond ≠ target`. It's a normal dataset blueprint (`[general]`
-+ `[[datasets]]` + `[[datasets.subsets]]`) with **one extra subset knob**:
-`cond_cache_dir` (and optionally `text_cache_dir`).
+This file is what makes the reference different from the target. It's an ordinary
+dataset (`[general]` + `[[datasets]]` + `[[datasets.subsets]]`) with **one extra
+knob**: `cond_cache_dir` (and optionally `text_cache_dir`).
 
-colorize (`configs/datasets/colorize.toml`), annotated:
+colorize's (`configs/datasets/colorize.toml`), with notes:
 
 ```toml
 [general]
@@ -209,61 +212,62 @@ validation_seed = 42
 
   [[datasets.subsets]]
   image_dir = 'post_image_dataset/resized'        # the COLOR targets
-  cache_dir = 'post_image_dataset/lora'           # target latents+TE — REUSED, not re-encoded
-  cond_cache_dir = 'post_image_dataset/colorize_cond'   # ← the synthetic condition latents (prep.py)
-  text_cache_dir = 'post_image_dataset/colorize_text'   # ← color-only TE cache (prep.py); TE-only redirect
+  cache_dir = 'post_image_dataset/lora'           # target latents + text — REUSED, not rebuilt
+  cond_cache_dir = 'post_image_dataset/colorize_cond'   # ← the reference latents (from prep.py)
+  text_cache_dir = 'post_image_dataset/colorize_text'   # ← color-only text cache (from prep.py)
   recursive = true
-  flip_aug = false        # latents can't be flipped post-hoc, and the cond cache has no flipped variant
+  flip_aug = false        # latents can't be flipped after the fact, and there's no flipped reference
   num_repeats = 1
 ```
 
-What each redirect does:
+What the redirects do:
 
-- **`cond_cache_dir`** — the only knob that distinguishes a control-task adapter.
-  The loader stem-matches each target to a condition latent here. This is what
-  EasyControl's two-stream forward consumes as the reference.
-- **`text_cache_dir`** — a **TE-only** redirect (latents still come from
-  `cache_dir`). Omit it entirely if you keep full captions — then the loader
-  reads the shared TE cache and you skip `prep.py`'s text stage.
+- **`cond_cache_dir`** — the one knob that makes this a control task. The loader
+  matches each target to a reference latent in here by stem. This is the
+  reference EasyControl feeds into its two-stream forward.
+- **`text_cache_dir`** — redirects **only** the text cache (latents still come
+  from `cache_dir`). Leave it out entirely if you keep full captions — then the
+  loader uses the shared text cache and you can skip `prep.py`'s text stage.
 - **`flip_aug = false`** — required. A flipped target would need a flipped
-  condition latent, which you didn't cache. Leave flip off.
+  reference latent, which you never cached. Keep flipping off.
 
-Note colorize reuses the **shared** `post_image_dataset/lora` cache for the target
-latents and TE — `make preprocess` already built those, nothing is re-encoded.
-Your adapter only adds the *condition* cache (and maybe a reduced text cache).
+Note that colorize **reuses** the shared `post_image_dataset/lora` cache for the
+target latents and text — `make preprocess` already built those, so nothing is
+re-encoded. Your adapter only adds the *reference* cache (and maybe a shorter
+text cache).
 
 ---
 
-## 5. Surface 3 — the method config (`configs/methods/<task>.toml`)
+## 5. Thing 3 — the method config (`configs/methods/<task>.toml`)
 
-A near-clone of `configs/methods/easycontrol.toml`. The only structural change is
-`dataset_config` pointing at your blueprint; the rest is hyperparameters.
+This is almost a copy of `configs/methods/easycontrol.toml`. The only structural
+change is `dataset_config`, pointing at your dataset; the rest is just
+hyperparameters.
 
-colorize (`configs/methods/colorize.toml`), the load-bearing lines:
+colorize's (`configs/methods/colorize.toml`), the lines that matter:
 
 ```toml
-dataset_config = "configs/datasets/colorize.toml"   # ← your blueprint from §4
+dataset_config = "configs/datasets/colorize.toml"   # ← your dataset from §4
 
-network_module = "networks.methods.easycontrol"     # SHARED — same network as default
+network_module = "networks.methods.easycontrol"     # SHARED — same network as plain EasyControl
 
 network_dim = 32
 network_alpha = 32
 network_args = [
-    "b_cond_init=-6.0",     # logit-bias init (see below)
+    "b_cond_init=-6.0",     # how strongly the reference starts out (see below)
     "cond_scale=1.0",
-    "apply_ffn_lora=1",     # 0 → drop FFN LoRA, ~halves trainable params
+    "apply_ffn_lora=1",     # 0 → drop the FFN LoRA, about half the trainable params
 ]
 
-output_name = "anima_colorize_full"   # ← checkpoint name; the inference selector greps this
+output_name = "anima_colorize_full"   # ← checkpoint name; the inference selector looks for this
 
 use_easycontrol = true
-easycontrol_drop_p = 0.0              # image-CFG dropout; 0.1 default, colorize wants 0
+easycontrol_drop_p = 0.0              # reference dropout for image-CFG; default 0.1, colorize wants 0
 masked_loss = false
 
 caption_dropout_rate = 0.05           # auto-color floor (§2b)
 use_shuffled_caption_variants = true  # full-vs-partial balance (§2b)
-easycontrol_cond_noise_max = 0.02     # small — high noise erases the lineart structure
-
+easycontrol_cond_noise_max = 0.02     # small — too much noise erases the line art
 learning_rate = 2e-5
 max_train_epochs = 3
 blocks_to_swap = 0                    # recommended for EasyControl
@@ -271,44 +275,48 @@ gradient_checkpointing = true
 unsloth_offload_checkpointing = true
 ```
 
-Knobs to think about for your task:
+Knobs to think about for your own task:
 
-- **`b_cond_init`** — the step-0 baseline-equivalence init. `-10` makes the cond
-  contribute ~`e⁻¹⁰` of the softmax mass at step 0 (= baseline DiT, then learns
-  up); the bench in `docs/experimental/easycontrol.md` §"Step-0 baseline
-  equivalence" derives this. colorize loosens it to `-6` so the cond bites
-  sooner — a stronger-condition task can afford that. It's learnable either way.
-- **`easycontrol_cond_noise_max`** — per-step training noise on the cond latent
-  (σ ~ U(0, max), applied as `cond + σ·ε`). `0` = cond is a perfect blueprint;
-  a positive value degrades it to a "lossy hint", forcing text to carry residual
-  detail. colorize uses `0.02` (tiny — the lineart *is* the signal). The default
-  easycontrol.toml uses `0.3`.
-- **`easycontrol_drop_p`** — per-batch full-cond dropout for image-CFG. colorize
-  sets `0` (the condition is always wanted); default is `0.1`.
-- **`output_name`** — must be a unique stem; the inference selector resolves the
-  latest checkpoint by this name (§6).
+- **`b_cond_init`** — how much the reference matters at the very start of
+  training. `-10` means the reference barely contributes at step 0 (so the model
+  starts out like the plain DiT, then learns to lean on the reference); the bench
+  in `docs/experimental/easycontrol.md` ("Step-0 baseline equivalence") explains
+  why. colorize loosens it to `-6` so the reference kicks in sooner — fine for a
+  task with a strong reference. It's learnable either way.
+- **`easycontrol_cond_noise_max`** — how much noise is added to the reference
+  during training (σ drawn from `U(0, max)`, applied as `cond + σ·ε`). `0` means
+  the reference is treated as a perfect blueprint; a higher value degrades it into
+  a rough "hint," forcing text to carry the missing detail. colorize uses `0.02`
+  (tiny — the line art *is* the signal). The default easycontrol.toml uses `0.3`.
+- **`easycontrol_drop_p`** — how often the whole reference is dropped during
+  training, for image-CFG. colorize uses `0` (it always wants the reference);
+  default is `0.1`.
+- **`output_name`** — must be unique; the inference step finds your latest
+  checkpoint by this name (§6).
 
-Optionally also add `configs/gui-methods/<task>.toml` — a self-contained variant
-(no toggle blocks) with a `[variant]` block (`family = "easycontrol"`, `label`,
-`description`, `order`) so it shows up in the GUI's EasyControl tab dropdown. See
-`configs/gui-methods/colorize.toml`. Skip this if you only run from the CLI.
+You can also add `configs/gui-methods/<task>.toml` — a standalone version (no
+toggle blocks) with a `[variant]` block (`family = "easycontrol"`, `label`,
+`description`, `order`) so it shows up in the GUI's EasyControl dropdown. See
+`configs/gui-methods/colorize.toml`. Skip this if you only run from the command
+line.
 
 ---
 
-## 6. Surface 4 — wire `EASYADAPTER=<task>` into the task runner
+## 6. Thing 4 — make `EASYADAPTER=<task>` work
 
-The `make exp-easycontrol*` targets dispatch on the `EASYADAPTER` env var. Three
-small edits make `EASYADAPTER=<task>` route to your config + prep + checkpoint.
+The `make exp-easycontrol*` commands switch on the `EASYADAPTER` environment
+variable. Three small edits make `EASYADAPTER=<task>` use your config, prep, and
+checkpoint.
 
-**`scripts/experimental_tasks/training.py`:**
+**In `scripts/experimental_tasks/training.py`:**
 
-1. Register the name in the allowlist:
+1. Add the name to the allowlist:
    ```python
    _EASYADAPTERS = {"colorize", "<task>"}   # was {"colorize"}
    ```
-   (`_easyadapter()` validates against this set and errors on a typo.)
+   (`_easyadapter()` checks against this set and errors on a typo.)
 
-2. Route preprocess to your `prep.py` in `cmd_easycontrol_preprocess`:
+2. Route preprocessing to your `prep.py` in `cmd_easycontrol_preprocess`:
    ```python
    adapter = _easyadapter()
    if adapter == "colorize":
@@ -317,17 +325,17 @@ small edits make `EASYADAPTER=<task>` route to your config + prep + checkpoint.
        run([PY, "easycontrol_adapters/<task>/prep.py", *extra]); return
    ```
 
-3. Training itself needs **no** edit — `cmd_easycontrol` already does
-   `train(_easyadapter() or "easycontrol", extra)`, so `EASYADAPTER=<task>` runs
-   `configs/methods/<task>.toml` automatically once the name is in the allowlist.
+3. Training itself needs **no** edit — `cmd_easycontrol` already calls
+   `train(_easyadapter() or "easycontrol", extra)`, so once your name is in the
+   allowlist, `EASYADAPTER=<task>` runs `configs/methods/<task>.toml` on its own.
 
-4. (Only if your synthesizer needs downloads) add a branch in
-   `cmd_easycontrol_download` pointing at your weight-fetch task.
+4. (Only if your builder needs downloads) add a branch in
+   `cmd_easycontrol_download` for your weight-fetch task.
 
-**`scripts/experimental_tasks/inference.py`** (`cmd_test_easycontrol`): the
-selector currently hard-codes colorize. Generalize the three colorize-specific
-values for your task — checkpoint name, output subdir, ref fallback dir, and the
-empty-prompt default:
+**In `scripts/experimental_tasks/inference.py`** (`cmd_test_easycontrol`): the
+selector currently hard-codes colorize. Generalize the few colorize-specific
+values for your task — the checkpoint name, the output folder, the fallback
+reference folder, and the empty-prompt default:
 
 ```python
 adapter = (os.environ.get("EASYADAPTER") or "").strip()
@@ -337,78 +345,79 @@ out_sub     = "colorize"       if is_colorize else "easycontrol"
 ref_fallback_dir = (ROOT/"post_image_dataset"/"resized") if is_colorize else (ROOT/"easycontrol-dataset")
 ```
 
-Add your `adapter == "<task>"` cases alongside (weight name must match your
-config's `output_name`, modulo the `latest_output` stem match). If your task,
-like colorize, wants an empty-prompt default and a real conditioning image from a
-specific fallback dir, mirror the `is_colorize` branches further down.
+Add your own `adapter == "<task>"` cases next to these (the weight name must match
+your config's `output_name`). If your task wants an empty-prompt default and a
+reference pulled from a specific folder — like colorize — copy the `is_colorize`
+branches further down too.
 
 ---
 
 ## 7. Run it
 
 ```bash
-# 1. Build the condition cache (synthesize + VAE-encode). Idempotent.
+# 1. Build the reference cache (build + VAE-encode). Idempotent.
 make exp-easycontrol-preprocess EASYADAPTER=<task>
-#    QA a handful first:
+#    Check a few first:
 python easycontrol_adapters/<task>/prep.py --limit 8
-#    Inspect the staged condition PNGs under post_image_dataset/<task>_staging/
+#    Eyeball the staged reference PNGs under post_image_dataset/<task>_staging/
 
-# 2. Train (frozen DiT, adapter-only).
+# 2. Train (DiT frozen, adapter only).
 make exp-easycontrol EASYADAPTER=<task>
 
-# 3. Inference — feed a real in-distribution condition image as the reference.
+# 3. Inference — give it a real, in-distribution reference image.
 REF_IMAGE=path/to/condition.png make exp-test-easycontrol EASYADAPTER=<task>
 #    Steer with text:  ... ARGS='--prompt "..."'
 ```
 
-Prereq: `make preprocess` once, so the shared target latents + TE exist in
-`post_image_dataset/lora` (your adapter reuses them).
+First-time setup: run `make preprocess` once so the shared target latents and
+text cache exist in `post_image_dataset/lora` (your adapter reuses them).
 
-### Inference settings worth knowing (from colorize's experience)
+### Inference tips (learned from colorize)
 
-- **Feed a real in-distribution condition.** The reference is VAE-encoded *as-is*
-  at inference — no synthesis. colorize feeds a real screentoned B&W page; a flat
-  grayscale photo is out-of-distribution and degrades. Whatever your synthesizer
-  *imitated* is what inference expects to receive.
-- **`--easycontrol_image_match_size`** — picks the token bucket matching the
-  reference aspect ratio so tall pages don't squash. colorize forces it on.
-- **`--easycontrol_scale`** (`EC_SCALE=`, structure adherence) — `1.0` trained
-  default; raise (1.1–1.2) if the condition bleeds, lower (0.7–0.8) for looser
-  output.
-- **`--guidance_scale`** — interacts with your text policy. colorize: empty
-  prompt → low cfg (1.0–1.5, nothing to push toward); text prompt → higher
-  (3.0–4.5, that's what makes the prompt bite).
+- **Give it a real, in-distribution reference.** At inference the reference is
+  VAE-encoded as-is — there's no building step. colorize feeds a real screentoned
+  B&W page; a plain grayscale photo is out of distribution and looks worse.
+  Whatever your builder was *imitating* is what inference expects to receive.
+- **`--easycontrol_image_match_size`** — picks the token bucket that matches the
+  reference's aspect ratio, so tall pages don't get squashed. colorize forces
+  this on.
+- **`--easycontrol_scale`** (`EC_SCALE=`, how closely to follow the reference) —
+  `1.0` is the trained default; raise it (1.1–1.2) if the reference bleeds
+  through too much, lower it (0.7–0.8) for looser output.
+- **`--guidance_scale`** — works together with your text setup. colorize: empty
+  prompt → low CFG (1.0–1.5, nothing to push toward); text prompt → higher
+  (3.0–4.5, which is what makes the prompt actually take effect).
 
 ---
 
 ## 8. Checklist
 
-- [ ] `easycontrol_adapters/<task>/` with a deterministic, atomic-writing
-      synthesizer (`(img, seed) → cond` same-size) and an idempotent `prep.py`
-      (synthesize → encode → optional text).
-- [ ] Condition encoded at **native size** so token count matches the target
-      bucket family (§3).
+- [ ] `easycontrol_adapters/<task>/` with a deterministic, atomic-writing builder
+      (`(img, seed) → reference`, same size) and an idempotent `prep.py`
+      (build → encode → optional text).
+- [ ] Reference encoded at **native size** so its token count matches the
+      target's bucket (§3).
 - [ ] `configs/datasets/<task>.toml` with `cond_cache_dir` (+ optional
       `text_cache_dir`), `flip_aug = false`, reusing the shared target cache.
-- [ ] `configs/methods/<task>.toml` → points at the blueprint, unique
+- [ ] `configs/methods/<task>.toml` → points at the dataset, unique
       `output_name`, `network_module = "networks.methods.easycontrol"`,
       `use_easycontrol = true`. (Optional GUI variant.)
-- [ ] `EASYADAPTER=<task>` registered in `_EASYADAPTERS` + a preprocess branch
-      (training.py) + generalized checkpoint/output/fallback in inference.py.
-- [ ] QA'd a `--limit 8` staging batch by eye before the full run.
+- [ ] `EASYADAPTER=<task>` added to `_EASYADAPTERS` + a preprocess branch
+      (training.py) + generalized checkpoint/output/fallback (inference.py).
+- [ ] Eyeballed a `--limit 8` staging batch before the full run.
 
 ---
 
 ## 9. Where to read more
 
-- **`easycontrol_adapters/colorization/README.md`** — the colorize design notes
-  in full (caption policy, screentone bands, Phase B roadmap). The reference
+- **`easycontrol_adapters/colorization/README.md`** — the full colorize design
+  notes (caption policy, screentone bands, Phase B roadmap). The reference
   implementation of everything above.
-- **`docs/experimental/easycontrol.md`** — the network architecture: two-stream
-  forward, `b_cond` step-0 equivalence bench, inference KV cache, memory
-  envelope, limitations. Read this before touching `network_args`.
-- **`networks/methods/easycontrol.py`** — `EasyControlNetwork` + the patched
-  `Block.forward` closure. You should *not* need to edit this for a new adapter;
-  if you think you do, reconsider whether the difference really lives in the
-  condition.
-- **`networks/CLAUDE.md`** — the per-module map and dispatch invariants.
+- **`docs/experimental/easycontrol.md`** — the network itself: the two-stream
+  forward, the `b_cond` step-0 bench, the inference cache, memory use, limits.
+  Read this before touching `network_args`.
+- **`networks/methods/easycontrol.py`** — `EasyControlNetwork` and the patched
+  `Block.forward`. You should **not** need to edit this for a new adapter; if you
+  think you do, double-check whether your task's real difference is actually in
+  the reference image.
+- **`networks/CLAUDE.md`** — the per-module map and dispatch rules.
