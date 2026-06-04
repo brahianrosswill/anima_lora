@@ -388,9 +388,20 @@ class AnimaTrainer:
             )
             for dataset in train_dataset_group.datasets:
                 dataset.byg_text_dir = byg_text_dir
+                kept, dropped = dataset.restrict_to_byg_tuples()
+                if dropped:
+                    logger.info(
+                        f"BYG: kept {kept} images with edit-tuple sidecars, "
+                        f"dropped {dropped} without (no swappable tag in caption)."
+                    )
+            # restrict_to_byg_tuples re-buckets each member, shrinking its length;
+            # refresh the ConcatDataset cumulative_sizes or global indices overflow.
+            train_dataset_group.refresh_concat_state()
             if val_dataset_group is not None:
                 for dataset in val_dataset_group.datasets:
                     dataset.byg_text_dir = byg_text_dir
+                    dataset.restrict_to_byg_tuples()
+                val_dataset_group.refresh_concat_state()
 
         # Propagate IP-Adapter feature-cache flag so datasets load
         # {stem}_anima_{encoder}.safetensors sidecars into batch["ip_features"].

@@ -451,6 +451,10 @@ class BaseDataset(torch.utils.data.Dataset):
 
         logger.info("make buckets")
 
+        # Remember the mode so a later rebuild (e.g. restrict_to_byg_tuples)
+        # re-buckets identically.
+        self._constant_token_buckets = constant_token_buckets
+
         if self.bucket_manager is None:
             self.bucket_manager = BucketManager()
             self.bucket_manager.make_buckets(
@@ -1416,6 +1420,42 @@ class BaseDataset(torch.utils.data.Dataset):
                 return None
             runs.append(t.float())
         return torch.stack(runs, dim=0)  # [N_runs, S, D]
+
+    def restrict_to_byg_tuples(self) -> tuple[int, int]:
+        """Drop images lacking a BYG edit-tuple sidecar, then rebuild buckets.
+
+        ``build_edit_tuples`` only emits a ``<stem>_byg.safetensors`` for captions
+        containing a swappable tag (v1: a color word); images without one carry no
+        BYG training signal. Collation silently omits ``byg_*_emb`` whenever *any*
+        sample in a bucket-batch lacks a tuple (see ``__getitem__``), so the
+        adapter raises mid-epoch the first time such a batch is drawn. Filtering
+        the registry up front guarantees every batch is fully-tupled.
+
+        Returns ``(kept, dropped)`` image counts.
+        """
+        if not self.byg_text_dir:
+            return (0, 0)
+        kept: Dict[str, ImageInfo] = {}
+        dropped = 0
+        for key, info in self.image_data.items():
+            stem = os.path.splitext(os.path.basename(info.absolute_path))[0]
+            p = os.path.join(self.byg_text_dir, f"{stem}_byg.safetensors")
+            if os.path.exists(p):
+                kept[key] = info
+            else:
+                dropped += 1
+        if dropped == 0:
+            return (len(kept), 0)
+        self.image_data = kept
+        # Keep the repeat-weighted train-image count in sync (matches the
+        # num_repeats * num_images definition in DreamBoothDataset).
+        self.num_train_images = sum(info.num_repeats for info in kept.values())
+        # bucket_manager.add_image accumulates, so reset before re-bucketing.
+        self.bucket_manager = None
+        self.make_buckets(
+            constant_token_buckets=getattr(self, "_constant_token_buckets", True)
+        )
+        return (len(kept), dropped)
 
     def _try_load_byg_tuple(self, image_abs_path: str) -> Optional[dict]:
         """Load <stem>_byg.safetensors from self.byg_text_dir.

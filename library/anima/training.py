@@ -387,7 +387,8 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "--byg_prior_symmetric",
         action="store_true",
         help="Apply the prior loss to the reverse pass as well (L_prior^fwd + L_prior^rev, "
-        "paper Eq. 5). Off in v1 (fwd-only prior) to save two frozen-base forwards.",
+        "paper Eq. 5). On by default (v2); the byg.toml sets it. Disable for the v1 "
+        "fwd-only prior to save two frozen-base forwards per step.",
     )
     parser.add_argument(
         "--use_shuffled_caption_variants",

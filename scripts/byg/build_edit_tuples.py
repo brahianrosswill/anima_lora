@@ -35,6 +35,7 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
+from tqdm import tqdm
 
 # Small color vocabulary for tag-swap. Multi-word colors first so the regex
 # prefers the longest match.
@@ -148,7 +149,9 @@ def main() -> None:
 
     roles = ("src_caption", "tgt_caption", "instruction", "reverse_instruction")
     written = skipped = no_color = 0
-    for stem, caption in _iter_caption_files(src, args.recursive):
+    captions = list(_iter_caption_files(src, args.recursive))
+    pbar = tqdm(captions, desc="BYG tuples", unit="img")
+    for stem, caption in pbar:
         if args.limit and written >= args.limit:
             break
         out_path = cache_dir / f"{stem}_byg.safetensors"
@@ -184,8 +187,7 @@ def main() -> None:
             metadata={"edit_type": edit_type, "instruction": instruction},
         )
         written += 1
-        if written % 50 == 0:
-            print(f"  ... {written} written")
+        pbar.set_postfix(written=written, skipped=skipped, no_color=no_color)
 
     print(
         f"\nBYG tuples done: {written} written, {skipped} skipped (existed), "

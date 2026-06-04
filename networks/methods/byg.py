@@ -38,10 +38,11 @@ Objective (paper Alg. 1), per step with ``t~U(0,1)``, ``ε~N(0,I)``, source ``x`
   5. Identity (grad, concat=x, instr=c̄): ``L_id=‖G(x_t,t,c̄,x)−(ε−x)‖²`` —
      staged on an independent graph (anti-collapse anchor + VRAM win).
 
-v1 deviations from the paper (see proposal "Decisions locked"): snapshot
-bootstrap instead of EMA (``byg_ema_decay`` toggles EMA); fwd-only prior
-(``byg_prior_symmetric`` toggles the reverse prior); t discretized to the
-rollout grid for exact ``ỹ_t`` capture.
+Deviations from the paper (see proposal "Decisions locked"): snapshot
+bootstrap instead of EMA (``byg_ema_decay`` toggles EMA); t discretized to the
+rollout grid for exact ``ỹ_t`` capture. The symmetric prior (paper Eq. 5,
+``L_prior^fwd + L_prior^rev``) is on by default (v2); ``byg_prior_symmetric =
+false`` reverts to the v1 fwd-only prior (two fewer frozen-base forwards/step).
 """
 
 from __future__ import annotations
@@ -460,8 +461,9 @@ class BYGMethodAdapter(MethodAdapter):
         # params are guaranteed on-device) — cloning here would capture CPU
         # tensors before accelerate's device move and corrupt the rollout swap.
         self._shadow = {}
-        logger.info("BYG adapter ready (snapshot bootstrap, fwd-only prior=%s)",
-                    not bool(getattr(args, "byg_prior_symmetric", False)))
+        logger.info("BYG adapter ready (snapshot bootstrap, prior=%s)",
+                    "symmetric" if bool(getattr(args, "byg_prior_symmetric", False))
+                    else "fwd-only")
 
     # -- snapshot / EMA of the trainable LoRA -------------------------------
 
@@ -641,7 +643,7 @@ class BYGMethodAdapter(MethodAdapter):
                     v_tgt = self._dit_velocity(y_t, t, tp_emb, tp_mask, padding_mask)
                 l_prior_fwd = directional_prior_loss(v_fwd, v_src, v_tgt, alpha)
                 l_prior = l_prior_fwd
-                self._metrics["byg/L_prior"] = float(l_prior_fwd.detach())
+                self._metrics["byg/L_prior_fwd"] = float(l_prior_fwd.detach())
 
             # ---- Cycle loss (grad, source=ŷ_hyb, instr=c̄) -----------------
             l_cycle = x.new_zeros(())
@@ -653,18 +655,25 @@ class BYGMethodAdapter(MethodAdapter):
                 self._metrics["byg/L_cycle"] = float(l_cycle.detach())
 
                 if getattr(args, "byg_prior_symmetric", False) and lam_prior > 0.0:
-                    # Reverse prior: edited (p_tgt) → source (p_src) direction.
+                    # Reverse prior (paper Eq. 5): anchor the reverse-instruction
+                    # edit velocity v_rev (computed at x_t above) to the frozen
+                    # base's edited→source direction — i.e. the DDS prior with the
+                    # captions swapped (p_tgt is the reverse edit's "source",
+                    # p_src its "target").
                     sp_emb, sp_mask = self._get_cond(ctx, "src_caption")
                     tp_emb, tp_mask = self._get_cond(ctx, "tgt_caption")
                     with torch.no_grad(), self._BaseMode(self):
                         v_rsrc = self._dit_velocity(x_t, t, tp_emb, tp_mask, padding_mask)
                         v_rtgt = self._dit_velocity(x_t, t, sp_emb, sp_mask, padding_mask)
-                    l_prior = l_prior + directional_prior_loss(
-                        v_rev, v_rsrc, v_rtgt, alpha
-                    )
+                    l_prior_rev = directional_prior_loss(v_rev, v_rsrc, v_rtgt, alpha)
+                    l_prior = l_prior + l_prior_rev
+                    self._metrics["byg/L_prior_rev"] = float(l_prior_rev.detach())
 
         self._cond.clear_source()
         self._update_shadow()
+
+        if lam_prior > 0.0:
+            self._metrics["byg/L_prior"] = float(l_prior.detach())  # fwd (+ rev if symmetric)
 
         loss = lam_cycle * l_cycle + lam_prior * l_prior
         return loss

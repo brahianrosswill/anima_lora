@@ -31,7 +31,7 @@ log_with = "tensorboard"
 # epochs); ~30k steps in the paper at bs 8.
 learning_rate = 3e-4
 optimizer_args = ["weight_decay=1e-2"]
-max_train_epochs = 8
+max_train_epochs = 2
 save_every_n_epochs = 2
 checkpointing_epochs = 2
 
@@ -46,7 +46,7 @@ byg_snapshot_every = 200      # v1 snapshot bootstrap (EMA-free)
 byg_ema_decay = 0.0           # > 0 enables paper-faithful per-step EMA
 byg_identity_warmup_steps = 200
 byg_identity_prob = 0.15
-byg_prior_symmetric = false   # v1: fwd-only prior (symmetric = paper Eq. 5)
+byg_prior_symmetric = true    # v2 default: symmetric prior (paper Eq. 5); false = v1 fwd-only
 byg_text_dir = "post_image_dataset/byg"
 
 # BYG drives many DiT forwards per step; the block-swap offloader desyncs on a
@@ -56,7 +56,7 @@ gradient_checkpointing = true
 # Plain torch checkpoint (NOT unsloth CPU-offload): BYG runs many forwards per
 # step and the offloader desyncs on a second forward
 # (project_blockswap_extra_forwards_gradcache).
-unsloth_offload_checkpointing = false
+unsloth_offload_checkpointing = true
 
 # No caption dropout — the instruction/captions are the supervision signal.
 caption_dropout_rate = 0.0
