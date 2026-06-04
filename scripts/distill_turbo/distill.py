@@ -426,7 +426,15 @@ def main():
     )
 
     # ---------------- Training loop ----------------
-    logger.info(f"starting DP-DMD training: {cfg.iterations} iterations")
+    # base_loss='dpdmd' runs the first-step teacher anchor (diversity); 'dmd' is
+    # plain DMD2 with no anchor (student_steps may be 1). GAD (cfg.gad_weight>0)
+    # composes with either — it rides the DMD2 surrogate below, not the anchor.
+    use_anchor = cfg.base_loss == "dpdmd"
+    logger.info(
+        f"starting turbo training ({cfg.base_loss}"
+        + ("+GAD" if cfg.gad_weight > 0 else "")
+        + f"): {cfg.iterations} iterations"
+    )
     progress = tqdm(range(cfg.iterations), desc="turbo")
     metrics = TurboMetrics(device)
 
@@ -461,19 +469,23 @@ def main():
         # (diversity) and detached, then DMD refines x_θ over steps 2..N
         # (quality). See dpdmd.md §3.2.
         eps = torch.randn_like(latents)  # shared start for anchor + student
-
-        # --- teacher K-step CFG anchor (no grad) → v_target ---
+        # c_null is needed by BOTH the anchor (when on) and the DMD eval below,
+        # so it's computed unconditionally.
         c_null = uncond_for_batch(uncond_base, crossattn_emb)
-        z = eps
-        for i in range(cfg.k_anchor):
-            s_i = teacher_anchor_sigmas[i]
-            s_next = teacher_anchor_sigmas[i + 1]
-            t_b = torch.full((B,), s_i, device=device, dtype=dtype)
-            v = _teacher_cfg_velocity(z, t_b, crossattn_emb, c_null)
-            z = (z.float() - (s_i - s_next) * v).to(dtype)
-        # Average velocity ε→z_tk over [t_k, 1]; this is exactly the target
-        # for the student's t=1 first step (Euler x_next = x − dt·v_first).
-        v_target = ((eps.float() - z.float()) / (1.0 - t_k_anchor)).detach()
+
+        # --- teacher K-step CFG anchor (no grad) → v_target (DP-DMD only) ---
+        v_target = None
+        if use_anchor:
+            z = eps
+            for i in range(cfg.k_anchor):
+                s_i = teacher_anchor_sigmas[i]
+                s_next = teacher_anchor_sigmas[i + 1]
+                t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+                v = _teacher_cfg_velocity(z, t_b, crossattn_emb, c_null)
+                z = (z.float() - (s_i - s_next) * v).to(dtype)
+            # Average velocity ε→z_tk over [t_k, 1]; this is exactly the target
+            # for the student's t=1 first step (Euler x_next = x − dt·v_first).
+            v_target = ((eps.float() - z.float()) / (1.0 - t_k_anchor)).detach()
 
         # --- student N-step rollout; step-0 div-supervised + (optionally) detached ---
         # Split forward/backward: under `detach_after_first` the step-0 forward
@@ -487,29 +499,56 @@ def main():
         # steps deep on the DMD chain, NOT the (now-freed) step-0 graph. With the
         # detach OFF (A/B), the graphs are entangled and we MUST keep one combined
         # backward (the diversity term is folded in at assembly below).
-        split_bwd = cfg.detach_after_first
+        # Diversity supervision + the load-bearing detach exist for DP-DMD only;
+        # plain DMD2 ('dmd') rolls all N steps with grad and carries no anchor term.
+        split_bwd = use_anchor and cfg.detach_after_first
+        # dmd_grad_last_only: roll every step before the last under no_grad and
+        # differentiate ONLY the final denoise step into x_pred — the student
+        # backward then holds ONE forward graph at any N (memory-flat multi-step,
+        # standard DMD2; full rollout BPTT is rarely needed). The DP-DMD step-0
+        # diversity step is exempt — it keeps its own grad+detach regardless.
+        glo = cfg.dmd_grad_last_only
+        last_step = cfg.student_steps - 1
 
         x = eps
         x.requires_grad_()  # grad-ckpt needs a grad-requiring forward input
-        # Step 0: the diversity-supervised first step (grad → v_first).
+        # Step 0: under DP-DMD the diversity-supervised first step (grad → v_first).
         # set_student_step routes to head 0 (no-op unless per-step-expert is on);
         # with the detach below, head 0 sees ONLY this diversity gradient.
         s0, s0_next = student_sigmas[0], student_sigmas[1]
         t_b = torch.full((B,), s0, device=device, dtype=dtype)
         turbo.set_student_step(0)
-        v_first = _forward("student", x, t_b, crossattn_emb, no_grad=False).squeeze(2)
-        x = x - (s0 - s0_next) * v_first
-        div_loss_t = nn.functional.mse_loss(v_first.float(), v_target)
-        if split_bwd:
-            # Load-bearing stop-grad: the DMD reverse-KL from steps 2..N must NOT
-            # flow back into the diversity mapping (their Fig 5). Backward the
-            # diversity term against the step-0 graph now (accumulates into the
-            # student .grad buffers), then re-leaf so the DMD chain gets a fresh
-            # grad-ckpt root. The optimizer step waits for the DMD backward below.
-            (cfg.div_weight * div_loss_t).backward()
-            x = x.detach().requires_grad_()
+        if use_anchor:
+            # Diversity step always carries grad (the anchor MSE needs it).
+            v_first = _forward(
+                "student", x, t_b, crossattn_emb, no_grad=False
+            ).squeeze(2)
+            x = x - (s0 - s0_next) * v_first
+            div_loss_t = nn.functional.mse_loss(v_first.float(), v_target)
+            if split_bwd:
+                # Load-bearing stop-grad: the DMD reverse-KL from steps 2..N must
+                # NOT flow back into the diversity mapping (their Fig 5). Backward
+                # the diversity term against the step-0 graph now (accumulates into
+                # the student .grad buffers), then re-leaf so the DMD chain gets a
+                # fresh grad-ckpt root. The optimizer step waits for the DMD
+                # backward below.
+                (cfg.div_weight * div_loss_t).backward()
+                x = x.detach().requires_grad_()
+        else:
+            # No anchor: zero placeholder keeps the metrics/logging path uniform.
+            div_loss_t = torch.zeros((), device=device)
+            # Step 0 carries grad only if it's the final step (N==1) or full-rollout
+            # BPTT is on; otherwise it's a no_grad rollout step.
+            s0_no_grad = glo and last_step != 0
+            v_first = _forward(
+                "student", x, t_b, crossattn_emb, no_grad=s0_no_grad
+            ).squeeze(2)
+            x = x - (s0 - s0_next) * v_first
+            if s0_no_grad:
+                x = x.detach()  # drop the no_grad step's stray subtraction graph
 
-        # Steps 2..N: the DMD-refined rollout (grad flows to x_pred).
+        # Steps 2..N: the DMD-refined rollout. Each carries grad unless
+        # dmd_grad_last_only defers it to the final step.
         for i in range(1, cfg.student_steps):
             s_i = student_sigmas[i]
             s_next = student_sigmas[i + 1]
@@ -517,8 +556,17 @@ def main():
             # Route to head i (no-op unless per-step-expert): each DMD step's
             # gradient lands only on its own up-head + the shared down-proj.
             turbo.set_student_step(i)
-            v = _forward("student", x, t_b, crossattn_emb, no_grad=False).squeeze(2)
+            step_no_grad = glo and i != last_step
+            if glo and i == last_step:
+                # Fresh grad-ckpt leaf so the final (only grad-bearing) step has a
+                # grad-requiring input after the no_grad prefix.
+                x = x.detach().requires_grad_()
+            v = _forward(
+                "student", x, t_b, crossattn_emb, no_grad=step_no_grad
+            ).squeeze(2)
             x = x - (s_i - s_next) * v
+            if step_no_grad:
+                x = x.detach()
         x_pred = x  # = x_θ (B,16,H,W); v_student aliases v_first for metrics
         v_student = v_first
 
@@ -552,6 +600,33 @@ def main():
             grad_dm = grad_dm / denom
         grad_signal = grad_dm.detach()
 
+        # --- GAD: geometric (JVP) response matching on the score fields ---
+        # Restore initial-noise sensitivity (arXiv 2606.01651 Eq.9) by matching the
+        # student's local directional response to the teacher's. Perturb the
+        # (detached) renoised latent by h·v and take the finite-difference response
+        # of each score field. The GAD signal is the geometric twin of the DMD
+        # signal: same operand order (real − fake), so it inherits the verified DMD
+        # sign convention, and it folds into the SAME DMD2 surrogate (a detached
+        # latent-space vector dotted against x_pred). The renoise jacobian
+        # ∂x_t/∂x_pred = (1−τ) is the correct per-sample weight here (NOT the DMD
+        # τ-damping heuristic); h is absorbed into gad_weight. Both perturbed
+        # forwards are no_grad — GAD adds ~2 forwards and zero backward graph.
+        # NOTE: a hard-routed fake/critic can route-flip across x_pert, making
+        # Δv_fake discontinuous — keep gad_h small there (the teacher view is the
+        # frozen base DiT, so Δv_real is always smooth).
+        if cfg.gad_weight > 0.0:
+            vv = torch.randn_like(x_renoised_dm)
+            x_pert = x_renoised_dm + cfg.gad_h * vv
+            v_real_pert = _teacher_cfg_velocity(x_pert, tau_dm, crossattn_emb, c_null)
+            v_fake_pert = _forward(
+                "fake", x_pert, tau_dm, crossattn_emb, no_grad=True
+            ).squeeze(2)
+            delta_resp = (v_real_pert - v_real_cond_dm) - (
+                v_fake_pert - v_fake_cond_dm
+            )
+            gad_signal = cfg.gad_weight * (1.0 - tau_dm_e) * delta_resp.float()
+            grad_signal = grad_signal + gad_signal.detach()
+
         # --- assemble: DMD surrogate on x_θ (+ optional mean-var) ---
         # The diversity term was already backwarded above when split_bwd; otherwise
         # it rides this combined backward (graphs still entangled). grad_clip below
@@ -568,7 +643,7 @@ def main():
             mv_loss = mean_var_kl(x_pred.float(), mv_tgt_mu, mv_tgt_var)
             loss_student = loss_student + cfg.mean_var_weight * mv_loss
 
-        if not split_bwd:
+        if use_anchor and not split_bwd:
             loss_student = loss_student + cfg.div_weight * div_loss_t
 
         loss_student.backward()
@@ -654,7 +729,7 @@ def main():
             n = step + 1
             is_final = n == cfg.iterations
             metadata = {
-                "ss_turbo_objective": "dpdmd",
+                "ss_turbo_objective": cfg.base_loss,
                 "ss_turbo_student_rank": str(cfg.student_rank),
                 "ss_turbo_student_alpha": str(cfg.student_alpha),
                 "ss_turbo_student_steps": str(cfg.student_steps),
@@ -662,6 +737,8 @@ def main():
                 "ss_turbo_step": str(n),
                 "ss_turbo_k_anchor": str(cfg.k_anchor),
                 "ss_turbo_div_weight": str(cfg.div_weight),
+                "ss_turbo_gad_weight": str(cfg.gad_weight),
+                "ss_turbo_gad_h": str(cfg.gad_h),
             }
             if cfg.per_step_expert:
                 # Drives loader detection (CLI + ComfyUI build StepExpertLoRAModule

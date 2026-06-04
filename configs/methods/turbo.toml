@@ -11,12 +11,12 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_K"
+output_name = "anima_turbo_L2"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 4000
+iterations = 500
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -25,11 +25,17 @@ use_masked_loss = true
 gradient_checkpointing = false
 unsloth_offload_checkpointing = false
 
+# Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
+# "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
+# student, which dpdmd structurally can't produce). Pair "dmd" with [gad] to
+# restore initial-noise sensitivity geometrically instead of via the anchor.
+base_loss = "dmd"
+
 [network]
-student_rank = 96
-student_alpha = 96
-fake_rank = 96
-fake_alpha = 96
+student_rank = 64
+student_alpha = 64
+fake_rank = 64
+fake_alpha = 64
 attn_mode = "flash"
 # Per-step expert: split the student into K = student_steps up-heads off a
 # shared down-proj, head k serving denoise step k. Removes the diversity↔quality
@@ -37,7 +43,7 @@ attn_mode = "flash"
 # single-head student stays the shipped path. NOTE: output is NOT a plain LoRA
 # (kept-live only; `make merge` refuses it, stock ComfyUI LoRA loaders can't
 # drive per-step head selection — use AnimaTurboPerStepExpertLoader).
-per_step_expert = true
+per_step_expert = false
 
 # DMD schedule.
 [dmd]
@@ -45,6 +51,9 @@ student_steps = 2               # N — student rolls N Euler steps; inference m
 teacher_cfg = 4                 # CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4)
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
+grad_last_only = true          # roll all but the final step under no_grad → memory-flat
+                                # multi-step (lets base_loss='dmd' run student_steps>=2 on 16GB
+                                # without grad_ckpt). Incompatible with per_step_expert. See gad.md.
 
 # Optimization.
 [optim]
@@ -76,6 +85,25 @@ teacher_anchor_steps = 12        # teacher σ-grid the K is counted against
 div_weight = 0.05               # λ on the first-step diversity MSE
 detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 
+# Geometry-Aware Distillation (GAD; Huang et al., arXiv:2606.01651).
+#
+# An orthogonal Jacobian-vector-product regularizer that restores the distilled
+# student's *sensitivity to the initial noise* — the property standard pointwise
+# distillation flattens (→ seed mode-collapse, dead noise-control). Each step we
+# perturb the renoised DMD latent x_t by h·v and match the student's local score
+# response Δε to the teacher's (Eq.9). It folds into the SAME DMD2 surrogate as
+# the DM gradient (a detached latent-space signal · x_pred) — ~2 extra no_grad
+# forwards, zero extra backward graph. Composes with EITHER base_loss.
+#
+# weight=0 disables (default — shipped behavior unchanged). It's the diversity
+# mechanism for the base_loss="dmd" + student_steps=1 replacement arm; it can
+# also stack on dpdmd as an extra local-geometry shield. Their fixed h=1e-2 was
+# best (Table 9). CAUTION: a hard-routed fake/critic can route-flip across the
+# perturbation, making Δε_fake discontinuous — keep h small there.
+[gad]
+weight = 1.0
+h = 0.01
+
 # τ sampling distribution for the fake/critic update (+ fake warmup).
 [sampling]
 t_distribution = "uniform"      # "uniform" or "sigmoid"
@@ -105,6 +133,6 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 1000
+save_every = 500
 log_interval = 5
 log_dir = "output/logs/turbo"

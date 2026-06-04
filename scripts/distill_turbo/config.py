@@ -180,6 +180,24 @@ def build_argparser() -> argparse.ArgumentParser:
         help="clamp_min for the x0-norm denominator (latent scale); only active "
         "with --dm_x0_norm.",
     )
+    parser.add_argument(
+        "--dmd_grad_last_only",
+        dest="dmd_grad_last_only",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Roll all but the FINAL denoise step under no_grad, so the student "
+        "backward holds only ONE forward graph regardless of student_steps "
+        "(memory-flat multi-step — standard DMD2 practice; full rollout BPTT is "
+        "rarely needed). Lets base_loss='dmd' run student_steps>=2 on 16GB without "
+        "grad_ckpt. Incompatible with per_step_expert (only the last head would "
+        "train). Default: TOML (dmd.grad_last_only, default false).",
+    )
+    parser.add_argument(
+        "--no_dmd_grad_last_only",
+        dest="dmd_grad_last_only",
+        action="store_false",
+    )
     # Mean-variance reg (lever B / paper Eq. 7; proposal §3.B / S2). Pulls each
     # generated image's (μ_i, σ²_i) toward the real-latent target — clamps the
     # variance inflation that is the over-bake's oversaturation.
@@ -263,6 +281,36 @@ def build_argparser() -> argparse.ArgumentParser:
         help="DP-DMD: σ-schedule shift for the student/teacher Euler grids "
         "(matches inference). Default: TOML (sampling.flow_shift, default 3.0).",
     )
+
+    # ---- Base objective + GAD (geometry-aware distillation; arXiv 2606.01651) ----
+    parser.add_argument(
+        "--base_loss",
+        type=str,
+        default=None,
+        choices=("dpdmd", "dmd"),
+        help="Diversity mechanism: 'dpdmd' (first-step teacher anchor, default) "
+        "or 'dmd' (plain DMD2 — no anchor, allows student_steps=1; pair with "
+        "--gad_weight to restore noise sensitivity geometrically). Default: TOML "
+        "(base_loss, default 'dpdmd').",
+    )
+    parser.add_argument(
+        "--gad_weight",
+        type=float,
+        default=-1.0,
+        help="λ on the GAD (Jacobian-vector-product) response-matching term, "
+        "folded into the DMD2 surrogate. 0 disables. Restores initial-noise "
+        "sensitivity by matching the student's local directional score response "
+        "to the teacher's (arXiv 2606.01651 Eq.9). Composes with either base_loss. "
+        "Default: TOML (gad.weight, default 0).",
+    )
+    parser.add_argument(
+        "--gad_h",
+        type=float,
+        default=-1.0,
+        help="Finite-difference perturbation scale for the GAD JVP (their fixed "
+        "h=1e-2). Only active with --gad_weight > 0. Default: TOML (gad.h, "
+        "default 0.01).",
+    )
     return parser
 
 
@@ -318,6 +366,12 @@ class TurboConfig:
     teacher_cfg: float
     dm_x0_norm: bool
     norm_floor: float
+    dmd_grad_last_only: bool
+
+    # Base objective selector + GAD (geometry-aware distillation)
+    base_loss: str
+    gad_weight: float
+    gad_h: float
 
     # Mean-variance reg (lever B / Eq. 7)
     mean_var_weight: float
@@ -391,6 +445,19 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     # (b) ≈ "drop the τ-weight, magnitude-normalize."
     dm_x0_norm = bool(_pick(args.dm_x0_norm, cfg, "dmd.dm_x0_norm", False))
     norm_floor = float(_pick(args.norm_floor, cfg, "dmd.norm_floor", 0.05))
+    if args.dmd_grad_last_only is None:
+        dmd_grad_last_only = bool(_flatten(cfg, "dmd.grad_last_only", False))
+    else:
+        dmd_grad_last_only = bool(args.dmd_grad_last_only)
+
+    # Base objective selector + GAD. 'dpdmd' keeps the first-step teacher anchor;
+    # 'dmd' is plain DMD2 (no anchor → student_steps >= 1 allowed). GAD (arXiv
+    # 2606.01651) is an orthogonal JVP regularizer — a detached latent-space
+    # signal folded into the SAME DMD2 surrogate as the DM gradient — so it
+    # composes with EITHER base.
+    base_loss = _pick(args.base_loss, cfg, "base_loss", "dpdmd")
+    gad_weight = float(_pick(args.gad_weight, cfg, "gad.weight", 0.0))
+    gad_h = float(_pick(args.gad_h, cfg, "gad.h", 1e-2))
 
     # Per-step expert (dual-B-head student). step_expert_K is derived from
     # student_steps so head k ↔ denoise step k by construction (the plan's
@@ -448,22 +515,61 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     sigmoid_scale = float(_flatten(cfg, "sampling.sigmoid_scale", 1.0))
 
     # ----- Validation -----
-    if student_steps < 2:
+    if base_loss not in ("dpdmd", "dmd"):
+        raise ValueError(f"base_loss={base_loss!r}: expected 'dpdmd' or 'dmd'")
+    use_anchor = base_loss == "dpdmd"
+    if use_anchor and student_steps < 2:
         raise ValueError(
             f"DP-DMD requires dmd.student_steps >= 2 (got {student_steps}): step 1 "
             "is diversity-supervised + detached, so at least one further step must "
-            "carry the DMD loss."
+            "carry the DMD loss. (Use base_loss='dmd' for a 1-step student.)"
         )
-    if not (1 <= k_anchor < teacher_anchor_steps):
+    if not use_anchor and student_steps < 1:
+        raise ValueError(
+            f"base_loss='dmd' requires dmd.student_steps >= 1 (got {student_steps})."
+        )
+    if use_anchor and not (1 <= k_anchor < teacher_anchor_steps):
         raise ValueError(
             f"dpdmd.k_anchor={k_anchor} must satisfy 1 <= k_anchor < "
             f"teacher_anchor_steps={teacher_anchor_steps}."
         )
     if div_weight < 0.0:
         raise ValueError(f"dpdmd.div_weight={div_weight}: must be >= 0")
+    if (
+        not use_anchor
+        and student_steps > 1
+        and not bool(args.grad_ckpt)
+        and not dmd_grad_last_only
+    ):
+        logger.warning(
+            "base_loss='dmd' with student_steps=%d, grad_ckpt OFF, "
+            "dmd_grad_last_only OFF: plain DMD2 has no first-step anchor to detach, "
+            "so the student backward holds the FULL %d-step rollout graph (≈%dx the "
+            "activation memory of dpdmd@%d). Use student_steps=1 (the replacement "
+            "arm), --dmd_grad_last_only (memory-flat), or --grad_ckpt.",
+            student_steps,
+            student_steps,
+            student_steps,
+            student_steps,
+        )
+    if dmd_grad_last_only and per_step_expert:
+        logger.warning(
+            "dmd_grad_last_only=True with per_step_expert=True: only the final "
+            "step's head receives gradient, so heads 0..N-2 never train. Disable "
+            "one of them (grad_last_only suits a single-head student)."
+        )
+    if dmd_grad_last_only:
+        logger.info(
+            "dmd_grad_last_only ON: rollout steps 0..N-2 run no_grad; only the "
+            "final step backprops to x_pred (memory-flat at any student_steps)."
+        )
+    if gad_weight < 0.0:
+        raise ValueError(f"gad.weight={gad_weight}: must be >= 0")
+    if gad_weight > 0.0 and gad_h <= 0.0:
+        raise ValueError(f"gad.h={gad_h}: must be > 0 when gad.weight > 0")
     if flow_shift <= 0.0:
         raise ValueError(f"sampling.flow_shift={flow_shift}: must be > 0")
-    if not detach_after_first:
+    if use_anchor and not detach_after_first:
         logger.warning(
             "detach_after_first=False: the mode-seeking DMD gradient can override "
             "the diversity mapping (their Fig 5). A/B only — keep True for "
@@ -519,13 +625,25 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             else "(a) τ-damping [default]"
         )
     )
-    logger.info(
-        "DP-DMD: first-step diversity anchor "
-        f"k_anchor={k_anchor}/{teacher_anchor_steps} teacher steps, "
-        f"div_weight={div_weight}, detach_after_first={detach_after_first}, "
-        f"student N={student_steps} @ flow_shift={flow_shift}, "
-        f"teacher_cfg={teacher_cfg}."
-    )
+    if use_anchor:
+        logger.info(
+            "DP-DMD: first-step diversity anchor "
+            f"k_anchor={k_anchor}/{teacher_anchor_steps} teacher steps, "
+            f"div_weight={div_weight}, detach_after_first={detach_after_first}, "
+            f"student N={student_steps} @ flow_shift={flow_shift}, "
+            f"teacher_cfg={teacher_cfg}."
+        )
+    else:
+        logger.info(
+            f"plain DMD2 (no diversity anchor): student N={student_steps} @ "
+            f"flow_shift={flow_shift}, teacher_cfg={teacher_cfg}."
+        )
+    if gad_weight > 0.0:
+        logger.info(
+            f"GAD (geometry-aware distillation, arXiv 2606.01651) ON: "
+            f"weight={gad_weight}, h={gad_h} — JVP score-response matching folded "
+            "into the DMD2 surrogate."
+        )
     if per_step_expert:
         if not detach_after_first:
             logger.warning(
@@ -574,6 +692,10 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         teacher_cfg=teacher_cfg,
         dm_x0_norm=dm_x0_norm,
         norm_floor=norm_floor,
+        dmd_grad_last_only=dmd_grad_last_only,
+        base_loss=base_loss,
+        gad_weight=gad_weight,
+        gad_h=gad_h,
         mean_var_weight=mean_var_weight,
         mv_mu_t=mv_mu_t,
         mv_sigma2_t=mv_sigma2_t,
@@ -623,6 +745,9 @@ def snapshot_toml_text(c: TurboConfig, *, source_config: str | None = None) -> s
 def tb_config_text(c: TurboConfig) -> str:
     """Formatted TensorBoard config summary (same key set as v1)."""
     pairs = {
+        "base_loss": c.base_loss,
+        "gad_weight": c.gad_weight,
+        "gad_h": c.gad_h,
         "k_anchor": c.k_anchor,
         "teacher_anchor_steps": c.teacher_anchor_steps,
         "div_weight": c.div_weight,
