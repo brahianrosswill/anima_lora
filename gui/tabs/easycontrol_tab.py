@@ -2,8 +2,11 @@
 
 Reuses ConfigTab's grouped form + field-explanation panel + Save UI (so the tab
 reads like the LoRA / Methods tabs — config on the left, explanation on the
-right), but reroutes Preprocess / Train through the ``exp-easycontrol*`` tasks
-with the ``EASYADAPTER`` env the selected variant implies:
+right). Training rides ConfigTab's daemon path (the variant stem *is* the
+train.py method — ``EASYADAPTER`` is only read at task dispatch, never deeper —
+so it survives the GUI closing). Preprocess stays a bespoke QProcess
+(``exp-easycontrol-preprocess``, mangafy for colorize). The selected variant
+implies an ``EASYADAPTER`` value for the preprocess route:
 
   • EasyControl (ref == target) — EASYADAPTER unset → configs trained from
     gui-methods/easycontrol.toml.
@@ -30,6 +33,7 @@ from gui import (
     list_gui_variants,
     merged_gui_variant_preset,
 )
+from gui import daemon as gui_daemon
 from gui.i18n import t
 from gui.tabs.config_tab import ConfigTab
 
@@ -82,8 +86,11 @@ class EasyControlTab(ConfigTab):
             self._top_bar.indexOf(self.train_btn), self.preprocess_btn
         )
 
-        # Reroute Train off ConfigTab's daemon path onto the exp-easycontrol
-        # QProcess route. Stop already kills the QProcess when no daemon job runs.
+        # Train still rides ConfigTab's daemon path (so it survives the GUI
+        # closing), but through a slimmer handler: EasyControl has its own
+        # explicit Preprocess button + bespoke caches, so it skips ConfigTab's
+        # cache-existence check / auto-chain-preprocess logic and submits the
+        # variant straight to the daemon.
         self.train_btn.clicked.disconnect()
         self.train_btn.clicked.connect(self._ec_start_train)
 
@@ -167,12 +174,22 @@ class EasyControlTab(ConfigTab):
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         if not confirm_resumable_checkpoint(self, merged):
             return
-        # --methods_subdir gui-methods makes exp-easycontrol read the same
-        # gui-methods file the form edits (not configs/methods/<name>.toml).
-        self._ec_launch(
-            ["tasks.py", "exp-easycontrol", "--methods_subdir", "gui-methods"],
-            "ec_train",
-        )
+        # The variant stem ("easycontrol" / "colorize") IS the train.py method
+        # — EASYADAPTER is read only at task dispatch, never deeper — so submit
+        # it to the daemon exactly like the LoRA tab. ConfigTab._launch_training
+        # POSTs {method=variant, preset, methods_subdir="gui-methods"} and binds
+        # the bar/log to the detached job (which then survives the GUI closing).
+        self._launch_training(variant)
+
+    # Daemon training disables Train/Test/combos via ConfigTab; also gray out the
+    # EasyControl-only Preprocess button. Overriding _attach_to_job (not just the
+    # launch site) covers re-attach on GUI reopen too. _restore_idle_ui re-enables
+    # it on finish.
+    def _attach_to_job(
+        self, job_id: str, *, replay_log: bool, kind: str = "train"
+    ) -> None:
+        super()._attach_to_job(job_id, replay_log=replay_log, kind=kind)
+        self.preprocess_btn.setEnabled(False)
 
     # ── Busy / idle state ──────────────────────────────────────────
 
@@ -188,7 +205,28 @@ class EasyControlTab(ConfigTab):
         # ConfigTab's restore handles Train/Test/combos; re-enable Preprocess too.
         self.preprocess_btn.setEnabled(True)
 
-    # EasyControl trains via QProcess, not the daemon — don't hijack a running
-    # daemon job (e.g. a LoRA-tab training run) into this tab on construction.
     def _try_reattach(self) -> None:
-        return
+        """Re-bind to an easycontrol/colorize daemon training job still running
+        when this tab is constructed (close GUI mid-train → reopen → re-attach).
+
+        Discriminate by method so we don't hijack another tab's job (e.g. a
+        LoRA-tab training run): the daemon's single active job is shared across
+        the ConfigTab subclasses, and this tab only owns its own family's
+        variants. EasyControl preprocess runs as a QProcess (not a daemon
+        command job), so there's nothing of ours to re-attach but the train."""
+        try:
+            job_id = gui_daemon.active_job_id()
+        except Exception:  # noqa: BLE001 — daemon unreachable → nothing to attach
+            return
+        if not job_id or gui_daemon.read_job_kind(job_id) != "train":
+            return
+        family = {
+            v for v in list_gui_variants("easycontrol") if not v.startswith("custom/")
+        }
+        if gui_daemon.read_job_label(job_id) not in family:
+            return
+        self.log.clear()
+        self._reset_progress()
+        self._progress_tracker.mark_starting(t("starting"))
+        self._log(t("daemon_reattached", job_id=job_id))
+        self._attach_to_job(job_id, replay_log=True, kind="train")
