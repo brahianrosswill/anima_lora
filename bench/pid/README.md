@@ -6,8 +6,9 @@ into 4× super-resolved pixels — a drop-in replacement for VAE decode. Verifie
 end-to-end and shipped as a self-contained ComfyUI node.
 
 > **TL;DR** — Anima's latents are byte-compatible with PiD's `qwenimage` checkpoint.
-> A self-contained, gemma-free, hydra-free node lives at
-> `custom_nodes/comfyui-anima-pid/` and produces clean 4× upscales. Single-pass up
+> A self-contained, gemma-free, hydra-free node ships from its own repo
+> ([`sorryhyun/ComfyUI-Anima-PiD`](https://github.com/sorryhyun/ComfyUI-Anima-PiD))
+> and produces clean 4× upscales. Single-pass up
 > to ~3072px on 16 GB; tiling for 4K. Weights are NSCLv1 (non-commercial).
 
 ## Why it works (and why it's not L2P)
@@ -50,7 +51,7 @@ Full-frame **4K requires tiling** (`tile_latent=64` → 2048px tiles, feather-bl
 
 ## The ComfyUI node
 
-`custom_nodes/comfyui-anima-pid/` (symlinked into `comfy/custom_nodes/`):
+Ships from the standalone [`sorryhyun/ComfyUI-Anima-PiD`](https://github.com/sorryhyun/ComfyUI-Anima-PiD) repo (symlinked into `comfy/custom_nodes/comfyui-anima-pid`):
 - **Anima PiD Loader** — `models/pid/*.pth` → `ANIMA_PID`.
 - **Anima PiD Decode (4x SR)** — `ANIMA_PID` + `LATENT` → `IMAGE`; `steps`, `sigma`,
   `tile_latent`/`tile_overlap`, `compile`.
@@ -80,4 +81,4 @@ torch/numpy/pillow. Checkpoint: `models/pid/pid_qwenimage_2kto4k_4step.pth`.
 - `results/node_core_validate.png`, `results/node_full_validate.png` — node validation.
 - `results/notile_3072.png` — single-pass 3072px (seam-free).
 - `results/<ts>-qwen-feasibility/result.json` — structured envelope.
-- Self-contained core: `custom_nodes/comfyui-anima-pid/pid_core.py`.
+- Self-contained core: `pid_core.py` in the [`ComfyUI-Anima-PiD`](https://github.com/sorryhyun/ComfyUI-Anima-PiD) repo.
