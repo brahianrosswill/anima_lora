@@ -344,6 +344,7 @@ class BYGConditioning:
         self.source_state: Optional[dict] = None
         self._patched = False
         self._zero_b_cache: dict = {}
+        self._zero_emb_cache: dict = {}
 
     def zero_b(self, device) -> torch.Tensor:
         b = self._zero_b_cache.get(device)
@@ -351,6 +352,20 @@ class BYGConditioning:
             b = torch.zeros((), device=device, dtype=torch.float32)
             self._zero_b_cache[device] = b
         return b
+
+    def _zero_emb(self, B: int, device, dtype):
+        """Cached source timestep embedding (always the zeros-timestep, so it is
+        invariant per (B, device, dtype) — recomputing it on every ``set_source``
+        was pure waste)."""
+        key = (B, device, dtype)
+        cached = self._zero_emb_cache.get(key)
+        if cached is None:
+            zeros = torch.zeros(B, 1, device=device, dtype=dtype)
+            src_emb, src_adaln = self._dit.t_embedder(zeros)
+            src_emb = self._dit.t_embedding_norm(src_emb)
+            cached = (src_emb, src_adaln)
+            self._zero_emb_cache[key] = cached
+        return cached
 
     def apply(self):
         if self._patched:
@@ -383,7 +398,11 @@ class BYGConditioning:
             source_latent = source_latent.unsqueeze(2)  # [B, C, 1, H, W]
         B, _, _, H, W = source_latent.shape
         if self._dit.concat_padding_mask and padding_mask is None:
-            padding_mask = torch.ones(
+            # zeros = "no padding / full real image" — matches the DiT's training
+            # distribution and the target-stream forwards (train.py builds a
+            # zeros padding_mask; ones would feed the source's concat'd pad
+            # channel an off-distribution constant the model never saw).
+            padding_mask = torch.zeros(
                 B, 1, H, W, device=source_latent.device, dtype=source_latent.dtype
             )
         src_x_5d, src_rope = self._dit.prepare_embedded_sequence(
@@ -399,10 +418,19 @@ class BYGConditioning:
             self.source_state = None
             return
         src_x, src_rope = self.encode_source(source_latent, padding_mask=padding_mask)
+        self.set_source_precomputed(src_x, src_rope)
+
+    def set_source_precomputed(
+        self, src_x: torch.Tensor, src_rope
+    ) -> None:
+        """Prime per-forward source state from an already-encoded source.
+
+        Lets callers patch-embed an invariant source latent once and re-prime it
+        across several DiT forwards in the same step (the frozen embedder makes
+        the encoding identical regardless of the shadow swap / LoRA state).
+        """
         B = src_x.shape[0]
-        zeros = torch.zeros(B, 1, device=src_x.device, dtype=src_x.dtype)
-        src_emb, src_adaln = self._dit.t_embedder(zeros)
-        src_emb = self._dit.t_embedding_norm(src_emb)
+        src_emb, src_adaln = self._zero_emb(B, src_x.device, src_x.dtype)
         self.source_state = {
             "src_emb": src_emb,
             "src_adaln_lora": src_adaln,
@@ -436,6 +464,7 @@ class BYGMethodAdapter(MethodAdapter):
         self._dit = None
         self._args = None
         self._shadow: Optional[dict] = None  # snapshot/EMA of LoRA params
+        self._lora_param_map: Optional[dict] = None  # cached trainable params
         self._step = 0
         self._metrics: dict = {}
 
@@ -468,12 +497,20 @@ class BYGMethodAdapter(MethodAdapter):
     # -- snapshot / EMA of the trainable LoRA -------------------------------
 
     def _lora_params(self):
-        """Trainable LoRA tensors keyed by name (frozen DiT excluded)."""
-        return {
-            n: p
-            for n, p in self._network.named_parameters()
-            if p.requires_grad
-        }
+        """Trainable LoRA tensors keyed by name (frozen DiT excluded).
+
+        The trainable set is fixed after the network is built, so it is cached
+        on first use (lazily — after accelerate's device move, the same Parameter
+        objects are reused, only their ``.data`` is migrated) instead of
+        re-scanning the whole network on every snapshot / shadow-swap call.
+        """
+        if self._lora_param_map is None:
+            self._lora_param_map = {
+                n: p
+                for n, p in self._network.named_parameters()
+                if p.requires_grad
+            }
+        return self._lora_param_map
 
     def _update_shadow(self) -> None:
         decay = float(getattr(self._args, "byg_ema_decay", 0.0) or 0.0)
@@ -499,7 +536,7 @@ class BYGMethodAdapter(MethodAdapter):
             self._backup = None
 
         def __enter__(self):
-            self._backup = {}
+            self._backup = []
             if not self.a._shadow:
                 # No snapshot yet (first full step) — roll out against the live
                 # weights; the shadow is populated at the end of this step.
@@ -508,14 +545,14 @@ class BYGMethodAdapter(MethodAdapter):
                 s = self.a._shadow.get(n)
                 if s is None:
                     continue
-                self._backup[n] = p.data
+                self._backup.append((p, p.data))
                 p.data = s.to(p.data.device)
             return self
 
         def __exit__(self, *exc):
-            params = dict(self.a._network.named_parameters())
-            for n, data in self._backup.items():
-                params[n].data = data
+            # Restore via the cached Parameter refs (no full network re-scan).
+            for p, data in self._backup:
+                p.data = data
             self._backup = None
 
     class _BaseMode:
@@ -584,12 +621,19 @@ class BYGMethodAdapter(MethodAdapter):
         lam_cycle = float(getattr(args, "byg_lambda_cycle", 1.0) or 0.0)
         alpha = float(getattr(args, "byg_alpha", 0.1) or 0.0)
 
+        # Source = x is patch-embedded once and reused across the identity,
+        # bootstrap, and forward passes — the frozen embedder makes the encoding
+        # invariant to the shadow swap / LoRA state. (The cycle pass encodes the
+        # differentiable ŷ_hyb separately.)
+        with ctx.accelerator.autocast():
+            src_x_cached, src_rope_cached = self._cond.encode_source(x)
+
         # ---- Identity loss (independent graph → staged backward) -----------
         # x_t = (1-t)x + t·eps ; G(x_t, t, c̄, source=x) must predict (eps - x).
         x_t = (1.0 - t_5) * x + t_5 * eps
         target_src = eps - x
         with ctx.accelerator.autocast():
-            self._cond.set_source(x)
+            self._cond.set_source_precomputed(src_x_cached, src_rope_cached)
             v_id = self._dit_velocity(x_t, t, rc_emb, rc_mask, padding_mask)
             l_id = (v_id.float() - target_src.float()).pow(2).mean()
         self._metrics["byg/L_id"] = float(l_id.detach())
@@ -607,7 +651,7 @@ class BYGMethodAdapter(MethodAdapter):
 
         # ---- Bootstrap rollout (no_grad, snapshot weights, source=x) -------
         with torch.no_grad(), self._SwapShadow(self), ctx.accelerator.autocast():
-            self._cond.set_source(x)
+            self._cond.set_source_precomputed(src_x_cached, src_rope_cached)
             y = eps.clone()
             y_t = torch.empty_like(eps)
             captured = torch.zeros(B, dtype=torch.bool, device=device)
@@ -629,7 +673,7 @@ class BYGMethodAdapter(MethodAdapter):
 
         with ctx.accelerator.autocast():
             # ---- Forward pass (grad, source=x, instr=c) --------------------
-            self._cond.set_source(x)
+            self._cond.set_source_precomputed(src_x_cached, src_rope_cached)
             v_fwd = self._dit_velocity(y_t, t, c_emb, c_mask, padding_mask)
             y_hat = y_t - t_5 * v_fwd  # one-step clean-edit prediction
 
@@ -659,9 +703,8 @@ class BYGMethodAdapter(MethodAdapter):
                     # edit velocity v_rev (computed at x_t above) to the frozen
                     # base's edited→source direction — i.e. the DDS prior with the
                     # captions swapped (p_tgt is the reverse edit's "source",
-                    # p_src its "target").
-                    sp_emb, sp_mask = self._get_cond(ctx, "src_caption")
-                    tp_emb, tp_mask = self._get_cond(ctx, "tgt_caption")
+                    # p_src its "target"). sp_*/tp_* were already fetched in the
+                    # forward-prior block above (symmetric ⇒ lam_prior > 0).
                     with torch.no_grad(), self._BaseMode(self):
                         v_rsrc = self._dit_velocity(x_t, t, tp_emb, tp_mask, padding_mask)
                         v_rtgt = self._dit_velocity(x_t, t, sp_emb, sp_mask, padding_mask)

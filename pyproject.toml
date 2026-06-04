@@ -113,6 +113,16 @@ reportIncompatibleVariableOverride = "none"
 reportInvalidStringEscapeSequence = "none"
 reportUnsupportedDunderAll = "none"
 
+[tool.ruff.lint.per-file-ignores]
+# `train.py` / `inference.py` call `install_no_window_default()` at module scope
+# *before* `import torch` (Windows: suppress per-kernel ptxas/cl console flashes
+# from torch.compile + Triton — must run before any subprocess spawn). That lone
+# pre-import statement makes every following import trip E402; the ordering is
+# deliberate, so silence E402 for these two entry points rather than scattering
+# ~36 per-line `# noqa: E402` comments.
+"train.py" = ["E402"]
+"inference.py" = ["E402"]
+
 # Expose the importable package trees so `pip install` / `uv sync` makes
 # `import anima_lora` (the programmatic front door) + `import library` /
 # `networks` resolve without the repo root on sys.path. The tooling trees

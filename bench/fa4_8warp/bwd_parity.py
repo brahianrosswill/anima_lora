@@ -9,12 +9,11 @@ debugging the sm120 bwd launch — single JIT, not the 7-shape bench sweep.
 
 import torch
 import torch.nn.functional as F
+from flash_attn.cute import flash_attn_func
 
 torch.manual_seed(0)
 DEV = "cuda"
 B, S, H, D = 2, 512, 16, 128  # small seq for fast JIT; real Anima is S=4096
-
-from flash_attn.cute import flash_attn_func
 
 q = torch.randn(B, S, H, D, device=DEV, dtype=torch.bfloat16, requires_grad=True)
 k = torch.randn(B, S, H, D, device=DEV, dtype=torch.bfloat16, requires_grad=True)
