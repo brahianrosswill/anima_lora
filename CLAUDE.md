@@ -49,6 +49,7 @@ make dcw-train             # train-only on existing pool (~30s)
 # Training daemon (local FIFO job queue). Auto-starts on first submit.
 make daemon | daemon-attach [JOB=<id>] | daemon-kill [JOB=<id>] | daemon-terminate
 make lora --queue                        # enqueue instead of run inline (overnight sweep)
+make exp-turbo --queue                   # bespoke distill loops queue too (command-job, label exp-turbo)
 # GUI Train button + ComfyUI trainer node + preprocessing all submit to the daemon.
 
 make gui                   # PySide6 GUI (config editing, preprocess+train tabs, dataset browser)
@@ -135,7 +136,7 @@ Each method has a deep-dive doc; the prose below is one-line orientation plus th
 | **EasyControl** | Extended self-attn image conditioning; frozen DiT, per-block cond LoRA + scalar `b_cond` gate. Source `easycontrol-dataset/`. | `docs/experimental/easycontrol.md` |
 | **Soft Tokens** | SoftREPA per-layer × per-t soft text tokens (~1M params); frozen DiT, per-block `Block.forward` splice into `crossattn_emb`. | InfoNCE objective intentionally skipped. `configs/methods/soft_tokens.toml` |
 | **ChimeraHydra** | Dual-pool additive MoE: content pool (network ContentRouter on pooled `crossattn_emb`) + freq pool (network FreqRouter on FEI+σ), two A's per Linear off disjoint SVD subspaces. Both pools always centered-gate; the per-Linear `lx_c` content router + non-centered path were removed. | T-LoRA mask hits content branch only. `docs/experimental/chimera-hydra.md`, `networks/lora_modules/chimera.py` |
-| **Turbo** | DP-DMD (diversity-preserved DMD) distillation; output is a normal LoRA. | Bespoke schema read by `scripts/distill_turbo/` — don't `print-config`. `docs/experimental/dpdmd.md` (ops), `docs/structure/dpdmd.md` (structure); CA-era history in `docs/proposal/dmd2_decoupled_improvements.md`. |
+| **Turbo** | DP-DMD (diversity-preserved DMD) distillation; output is a normal LoRA. | Bespoke schema read by `scripts/distill_turbo/` — don't `print-config`. Bespoke two-optimizer loop (student + fake/critic) kept out of `train.py`; converges only the leaves — honors `--queue` (daemon command-job) + writes a canonical `output/ckpt/<name>.snapshot.toml`. `docs/experimental/dpdmd.md` (ops), `docs/structure/dpdmd.md` (structure); CA-era history in `docs/proposal/dmd2_decoupled_improvements.md`. |
 | **Postfix-tail inversion** | Per-image inversion *probe* (training method archived 2026-05-20). | Observation tool, not a deployable adapter. `library/inference/postfix_inversion.py` |
 
 ## Preprocessing & scripts

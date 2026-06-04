@@ -12,7 +12,14 @@ from __future__ import annotations
 import os
 
 from scripts.tasks import preprocess as _preprocess
-from scripts.tasks._common import PY, _preset, bespoke_preset_flags, run, train
+from scripts.tasks._common import (
+    PY,
+    _preset,
+    bespoke_preset_flags,
+    queue_command,
+    run,
+    train,
+)
 
 # EasyControl control-task projects under easycontrol_adapters/. Each maps to a
 # configs/methods/<name>.toml that swaps the cond source / caption policy and an
@@ -42,15 +49,29 @@ def cmd_turbo(extra):
         make exp-turbo                                  # defaults: rank=64, 2-step
         make exp-turbo ARGS="--student_rank 64 --iterations 5000"
         make exp-turbo ARGS="--single_prompt_idx 0"     # Phase 0 single-prompt overfit
+        make exp-turbo --queue                          # enqueue on the daemon
 
     Honors ``PRESET`` (default ``default``) — translates ``blocks_to_swap`` and
     ``gradient_checkpointing`` from ``configs/presets.toml`` into CLI flags so
     ``make exp-turbo PRESET=low_vram`` enables grad ckpt + unsloth offload, and
     ``PRESET=half/quarter/tenth`` shrinks the dataset via ``--sample_ratio``.
     ``extra`` is appended last, so user CLI overrides win.
+
+    ``--queue`` anywhere in ``extra`` enqueues the distillation as a daemon
+    command-job (run serially behind any other queued work) and returns
+    immediately, instead of running it inline — the bespoke-loop analogue of
+    ``make lora --queue``. The job is labeled ``exp-turbo`` so the GUI's Turbo
+    tab can re-attach to it. Preset flags are baked into the queued argv since the
+    daemon's command path does no config merging.
     """
+    extra = list(extra or [])
     preset_flags = bespoke_preset_flags(_preset())
-    run([PY, "-m", "scripts.distill_turbo.distill", *preset_flags, *extra])
+    argv = ["-m", "scripts.distill_turbo.distill", *preset_flags, *extra]
+    if "--queue" in argv:
+        argv.remove("--queue")
+        queue_command("exp-turbo", argv)
+        return
+    run([PY, *argv])
 
 
 def cmd_spd(extra):

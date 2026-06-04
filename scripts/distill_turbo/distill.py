@@ -248,6 +248,22 @@ def main():
 
     # ---------------- Logging ----------------
     Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Canonical config snapshot beside the checkpoint, matching train.py's
+    # convention (library/config/io.py writes the canonical copy to output_dir
+    # and *mirrors* it into the run log dir). This is the provenance record
+    # `inference` / `merge` / tooling looks for next to `{output_name}.safetensors`,
+    # so write it unconditionally — independent of TB logging (--no_log).
+    canonical_snapshot = Path(cfg.output_dir) / f"{cfg.output_name}.snapshot.toml"
+    try:
+        canonical_snapshot.write_text(
+            snapshot_toml_text(cfg, source_config=args.config),
+            encoding="utf-8",
+        )
+        logger.info(f"Config snapshot written: {canonical_snapshot}")
+    except OSError as e:
+        logger.warning(f"Could not write config snapshot to {canonical_snapshot}: {e}")
+
     writer = None
     if not cfg.no_log:
         run_name = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -257,9 +273,9 @@ def main():
         writer.add_text("config", tb_config_text(cfg))
         logger.info(f"TB logs -> {run_log}")
 
-        # Mirror the resolved config into the run log dir so the timestamped
-        # run becomes a self-contained record of "this run + the config that
-        # produced it" — the turbo analogue of train.py's .snapshot.toml.
+        # Mirror the canonical snapshot into the run log dir too, so the
+        # timestamped run is a self-contained record of "this run + the config
+        # that produced it" (the canonical copy lives next to the checkpoint).
         snapshot_path = run_log / f"{cfg.output_name}.snapshot.toml"
         try:
             snapshot_path.write_text(
@@ -285,7 +301,9 @@ def main():
         f"loaded T5('') uncond sidecar: {uncond_path}  shape={tuple(uncond_base.shape)}"
     )
 
-    def _forward(view: str, x: torch.Tensor, t_b: torch.Tensor, c: torch.Tensor, *, no_grad: bool):
+    def _forward(
+        view: str, x: torch.Tensor, t_b: torch.Tensor, c: torch.Tensor, *, no_grad: bool
+    ):
         """Switch view, prepare block swap, run forward.
 
         ``x`` is (B, 16, H, W); we unsqueeze to (B, 16, 1, H, W) inside.
@@ -326,13 +344,12 @@ def main():
     # matching σ schedule), so build them once. Both span σ: 1 → 0; the student
     # has `student_steps + 1` points, the teacher anchor grid `teacher_anchor_steps
     # + 1`. `sigmas[i] - sigmas[i+1]` is the Euler dt for step i.
-    student_sigmas = (
-        get_timesteps_sigmas(cfg.student_steps, cfg.flow_shift, "cpu")[1].tolist()
-    )
-    teacher_anchor_sigmas = (
-        get_timesteps_sigmas(cfg.teacher_anchor_steps, cfg.flow_shift, "cpu")[1]
-        .tolist()
-    )
+    student_sigmas = get_timesteps_sigmas(cfg.student_steps, cfg.flow_shift, "cpu")[
+        1
+    ].tolist()
+    teacher_anchor_sigmas = get_timesteps_sigmas(
+        cfg.teacher_anchor_steps, cfg.flow_shift, "cpu"
+    )[1].tolist()
     # Continuous time at the anchor (incoming σ after k_anchor teacher steps).
     # `v_target = (ε − z_tk)/(1 − t_k)` — a σ mismatch here silently mis-scales
     # the diversity target (proposal §6.3), so it's read from the teacher grid,
@@ -500,9 +517,7 @@ def main():
             # Route to head i (no-op unless per-step-expert): each DMD step's
             # gradient lands only on its own up-head + the shared down-proj.
             turbo.set_student_step(i)
-            v = _forward(
-                "student", x, t_b, crossattn_emb, no_grad=False
-            ).squeeze(2)
+            v = _forward("student", x, t_b, crossattn_emb, no_grad=False).squeeze(2)
             x = x - (s_i - s_next) * v
         x_pred = x  # = x_θ (B,16,H,W); v_student aliases v_first for metrics
         v_student = v_first
@@ -575,8 +590,11 @@ def main():
         fake_loss_sum = torch.zeros((), device=device)
         for _ in range(cfg.fake_steps_per_student_step):
             tau_fake = sample_t(
-                B, distribution=cfg.t_distribution,
-                sigmoid_scale=cfg.sigmoid_scale, device=device, dtype=dtype,
+                B,
+                distribution=cfg.t_distribution,
+                sigmoid_scale=cfg.sigmoid_scale,
+                device=device,
+                dtype=dtype,
             )
             eps_fake = torch.randn_like(x_pred_d)
             x_t_fake = renoise(x_pred_d, tau_fake, eps_fake).requires_grad_()
@@ -618,7 +636,9 @@ def main():
                 writer.add_scalar(
                     "train/student_lr", student_sched.get_last_lr()[0], step + 1
                 )
-                writer.add_scalar("train/fake_lr", fake_sched.get_last_lr()[0], step + 1)
+                writer.add_scalar(
+                    "train/fake_lr", fake_sched.get_last_lr()[0], step + 1
+                )
             # tqdm postfix at log_interval cadence (per-step would re-introduce
             # the syncs we just eliminated). First log_interval steps show no
             # postfix — harmless.
