@@ -35,9 +35,9 @@ import cv2
 import numpy as np
 
 # ── Default knobs (overridable; jittered per-stem when ``seed`` is given) ─────
-_XDOG_SIGMA = 0.8  # base blur scale (px); lines thicken with the image size below
+_XDOG_SIGMA = 0.5  # base blur scale (px) — sets stroke width (∝ sigma); lines thicken with image size below
 _XDOG_K = 1.6  # second-Gaussian scale ratio
-_XDOG_SHARP = 18.0  # p — DoG sharpening; higher = thinner/harder lines
+_XDOG_SHARP = 12.0  # p — DoG sharpening; higher = thinner/harder lines
 _XDOG_EPS = 0.10  # soft-threshold midpoint
 _XDOG_PHI = 12.0  # soft-threshold slope
 # Screen pitch (px @ ~900px short side; scales with image). Keep these comfortably
@@ -46,8 +46,10 @@ _XDOG_PHI = 12.0  # soft-threshold slope
 # especially) — the uniformize threshold then amplifies that beat into visible banding.
 # 3.5/5 render as a clean even halftone here; line/cross need the larger pitch because a
 # 1-bit stripe screen aliases worse than dots. Going finer needs a higher `_TONE_SS`.
-_TONE_PERIOD = 3.5  # dot screen period — fine manga screentone pitch, moiré-safe
-_HATCH_PERIOD = 5  # line/cross period — coarser than dots (stripes alias harder)
+_TONE_PERIOD = 2  # dot screen period — fine manga screentone pitch, moiré-safe
+_HATCH_PERIOD = 1  # line/cross period — only slightly coarser than dots now; a 1-bit stripe
+# at 4px still resolves cleanly under the ss=4 supersample (rendered at 16px). Was 5, which
+# read as thick black bands once the linear size-scale widened it on large images.
 # The screen is rendered at this supersample factor, hard-thresholded, then resolved by
 # an **area-average** downscale (cv2.INTER_AREA = exact ss×ss box mean, the correct
 # supersample resolve), so fine and rotated screens anti-alias into smooth gray instead
@@ -56,7 +58,7 @@ _HATCH_PERIOD = 5  # line/cross period — coarser than dots (stripes alias hard
 # number of gray coverage levels (ss² → here 16), so it's the tone-smoothness knob; area
 # beats Gaussian/Lanczos/soft-threshold resolves, which wash the texture or ring. Output
 # tone is anti-aliased gray in [0,1], not 1-bit — also closer to a real scan.
-_TONE_SS = 4
+_TONE_SS = 8
 _TONE_ANGLE = 45.0  # screen rotation (deg)
 _TONE_WHITE_CUT = 0.90  # luminance ≥ this → pure white (highlights, no tone)
 _TONE_BLACK_CUT = 0.10  # luminance ≤ this → solid black (deep shadow)
@@ -65,6 +67,14 @@ _TONE_BLACK_CUT = 0.10  # luminance ≤ this → solid black (deep shadow)
 # below), so the screen texture changes where the value (명암) changes — the manga
 # convention — and the colorizer keys on tonal structure, not one fixed dot operator.
 _TONE_KINDS = ("dot", "line", "cross")
+# Per-band pattern is drawn *weighted* from ``_TONE_KINDS``. For this anime-illustration
+# data (smooth shaded skin/cloth) clustered-dot halftone is the only fill that reads
+# cleanly: a line/cross hatch laid over a large smooth region (hair, a thigh, a coat)
+# turns into dense awkward diagonal stripes — see the 12917017 zoom where the same area
+# is grainy under ``line`` but a clean gradient under ``dot``. So line/cross are disabled
+# (weight 0) but kept in the table to revive easily. The draw still consumes one rng
+# value per band, so band-plan order / backend parity is unchanged. Order = ``_TONE_KINDS``.
+_TONE_KIND_WEIGHTS = (0.8, 0.2, 0.0)  # P(dot, line, cross) — dot-only
 # Per-image the toned range (between the white/black cuts) is split into this many
 # luminance bands by value; each band gets its own pattern/angle/period so darks,
 # mids, and lights carry distinct tones like a real page. 1 = single tone whole image.
@@ -190,13 +200,15 @@ def _pick_band_count(rng: np.random.Generator) -> int:
 
 
 def _band_kinds(n: int, rng: np.random.Generator) -> list[str]:
-    """``n`` screen patterns, one per luminance band, distinct between neighbours.
+    """``n`` screen patterns, one per luminance band, ``dot``-weighted.
 
-    A shuffled cycle of ``_TONE_KINDS`` so adjacent value bands never share a pattern
-    (the value→tone change stays legible); *which* pattern lands on which band is
-    random per image, but it's fixed within the image."""
-    perm = list(rng.permutation(_TONE_KINDS))
-    return [str(perm[i % len(perm)]) for i in range(n)]
+    Each band independently draws a pattern from ``_TONE_KINDS`` weighted by
+    ``_TONE_KIND_WEIGHTS`` (dots dominate; line/cross are rare accents), so a large
+    dark band like hair or a coat no longer keeps landing on coarse hatch. Bands still
+    differ by ink *coverage* (darker band → more ink), so two adjacent dot bands read as
+    distinct tones — the pattern no longer has to change every band. One draw per band,
+    in order, so any backend handed the same ``rng`` picks the same structure."""
+    return [str(rng.choice(_TONE_KINDS, p=_TONE_KIND_WEIGHTS)) for _ in range(n)]
 
 
 def _luma_band_labels(
@@ -316,13 +328,25 @@ def resolve_params(
     this verbatim and only swaps out the pixel math. Returns the scalars plus the
     raw ``overrides`` passthrough for ``ss`` / ``tone_kind`` / ``angle`` /
     ``n_bands`` (consumed later by the band plan)."""
-    # Scale the line/dot size with the image's short side so a fixed period
-    # doesn't turn into mush on small images or vanish on large ones.
+    # Three resolution curves, all keyed on the short side:
+    #   • ``scale`` (linear) — the dot screen pitch tracks image size 1:1 so a fixed
+    #     dot period doesn't turn to mush on small images or vanish on large ones.
+    #   • ``hatch_scale`` (ratio**0.6) — line/cross stripes balloon into thick black
+    #     bands when scaled 1:1 on a large image (the coarse-hair failure). A gentler
+    #     curve keeps the hatch fine without letting it vanish on small inputs.
+    #   • ``line_scale`` (sqrt) — XDoG stroke width is ∝ sigma, but a contour wants
+    #     roughly *constant pixel width* regardless of resolution, not to fatten 1:1
+    #     with the image. Decoupling it onto a gentler sqrt curve keeps lines fine on
+    #     large inputs (3600px → sigma·2 instead of ·4) while still nudging up enough
+    #     that tiny inputs don't fragment. Floors keep all three off zero.
     short = float(min(img_rgb.shape[:2]))
-    scale = max(0.5, short / 900.0)
+    ratio = short / 900.0
+    scale = max(0.5, ratio)
+    hatch_scale = max(0.6, ratio**0.6)
+    line_scale = max(0.6, ratio**0.5)
     return dict(
         sigma=overrides.get(
-            "sigma", _XDOG_SIGMA * scale * float(rng.uniform(0.8, 1.25))
+            "sigma", _XDOG_SIGMA * line_scale * float(rng.uniform(0.8, 1.25))
         ),
         k=overrides.get("k", _XDOG_K),
         sharp=overrides.get("sharp", _XDOG_SHARP * float(rng.uniform(0.8, 1.2))),
@@ -332,7 +356,7 @@ def resolve_params(
             "period", _TONE_PERIOD * scale * float(rng.uniform(0.9, 1.2))
         ),
         hatch_period=overrides.get(
-            "hatch_period", _HATCH_PERIOD * scale * float(rng.uniform(0.9, 1.2))
+            "hatch_period", _HATCH_PERIOD * hatch_scale * float(rng.uniform(0.9, 1.2))
         ),
         white_cut=overrides.get("white_cut", _TONE_WHITE_CUT),
         black_cut=overrides.get("black_cut", _TONE_BLACK_CUT),

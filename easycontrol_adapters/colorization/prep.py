@@ -40,8 +40,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 import zlib
-from concurrent.futures import ProcessPoolExecutor
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 from typing import Callable
@@ -60,6 +62,89 @@ Screener = Callable[[np.ndarray, int], np.ndarray]
 def _stable_seed(name: str) -> int:
     """Process-stable per-stem seed (Python's hash() is salted; crc32 isn't)."""
     return zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF
+
+
+def _save_png_atomic(arr: np.ndarray, out: Path) -> None:
+    """Write ``arr`` to ``out`` atomically — temp file in the same dir + os.replace.
+
+    A direct ``Image.save(out)`` that's interrupted (Ctrl-C, OOM, crash) mid-write
+    leaves a *truncated* PNG at the final path; the mangafy skip-check
+    (``out.exists()``) then keeps that corrupt file forever, and it only blows up
+    later at VAE-encode decode time. Writing to a unique temp in the same directory
+    and ``os.replace``-ing it in means the final name only ever appears fully
+    written (replace is atomic on one filesystem). On any failure the temp is
+    removed so no partial file or stray ``.tmp`` survives."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=out.parent, suffix=".tmp.png")
+    os.close(fd)
+    try:
+        Image.fromarray(arr).save(tmp)
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _text_mask_path(mask_dir: Path | None, rel: Path) -> Path | None:
+    """Locate the ``{stem}_mask.png`` text mask mirroring ``rel`` under ``mask_dir``.
+
+    Returns ``None`` when masking is off or the page has no mask (most pages don't —
+    only ~1886/2419 carry text), so the caller leaves the screened result untouched."""
+    if mask_dir is None:
+        return None
+    p = mask_dir / rel.parent / f"{rel.stem}_mask.png"
+    return p if p.exists() else None
+
+
+def _apply_text_mask(
+    manga: np.ndarray, img_rgb: np.ndarray, mask_path: Path | None, *, dilate: int
+) -> np.ndarray:
+    """Paste the source's own grayscale back into the text/speech-bubble regions.
+
+    The ``sd`` screening engine *redraws* the image, so overlaid text and logos come
+    out as garbled pseudo-glyphs. The MIT text masks (black = text) localize exactly
+    those regions; replacing them with a deterministic grayscale of the source keeps the
+    text pixel-exact while SD still handles the smooth-region tone. No-op when there's no
+    mask for this stem or masking is disabled. The algorithmic (cv2/gpu) engines already
+    preserve structure, but the paste only sharpens their screened text, so it's applied
+    uniformly. ``dilate`` grows the mask a few px to catch anti-aliased glyph fringes."""
+    if mask_path is None:
+        return manga
+    h, w = manga.shape[:2]
+    mask = np.asarray(
+        Image.open(mask_path).convert("L").resize((w, h), Image.Resampling.NEAREST)
+    )
+    text = mask < 128  # black = text (merge_masks union polarity)
+    if dilate > 0:
+        import cv2
+
+        k = np.ones((dilate * 2 + 1, dilate * 2 + 1), np.uint8)
+        text = cv2.dilate(text.astype(np.uint8), k).astype(bool)
+    if not text.any():
+        return manga
+    gray = np.asarray(Image.fromarray(img_rgb).convert("L"))
+    out = manga.copy()
+    out[text] = np.stack([gray] * 3, axis=-1)[text]
+    return out
+
+
+def _route_to_sd(
+    rel: Path, h: int, w: int, sd_match: list[str], sd_max_aspect: float
+) -> bool:
+    """Whether this page should use the SD screener instead of the primary engine.
+
+    SD (screentone_sd) gives the cleanest on-manifold tone but is ~10× slower and
+    *distorts at extreme aspect ratios* — SD1.5 was trained near-square, so a 1:4 page
+    folded to long-side 1024 tiles/warps. So SD is opt-in by path: a page runs SD only
+    when its rel path matches one of ``sd_match`` AND its aspect (long/short) is within
+    ``sd_max_aspect``. Everything else stays on the fast algorithmic primary engine."""
+    if not sd_match or not any(m in str(rel) for m in sd_match):
+        return False
+    aspect = max(h, w) / max(1, min(h, w))
+    return aspect <= sd_max_aspect
 
 
 def _make_screener(engine: str, sd_kwargs: dict) -> Screener:
@@ -101,13 +186,21 @@ _WORKER: dict = {}
 
 
 def _worker_init(
-    engine: str, sd_kwargs: dict, src: Path, staging: Path, overwrite: bool
+    engine: str,
+    sd_kwargs: dict,
+    src: Path,
+    staging: Path,
+    overwrite: bool,
+    mask_dir: Path | None,
+    text_mask_dilate: int,
 ):
     _WORKER.update(
         screener=_make_screener(engine, sd_kwargs),
         src=src,
         staging=staging,
         overwrite=overwrite,
+        mask_dir=mask_dir,
+        text_mask_dilate=text_mask_dilate,
     )
 
 
@@ -120,8 +213,83 @@ def _worker_process(path_str: str) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     img = np.array(Image.open(p).convert("RGB"))
     manga = _WORKER["screener"](img, _stable_seed(rel.stem))
-    Image.fromarray(manga).save(out)
+    manga = _apply_text_mask(
+        manga,
+        img,
+        _text_mask_path(_WORKER["mask_dir"], rel),
+        dilate=_WORKER["text_mask_dilate"],
+    )
+    _save_png_atomic(manga, out)
     return 1
+
+
+def _mangafy_gpu_overlap(
+    images: list[Path],
+    src: Path,
+    staging: Path,
+    *,
+    sd_kwargs: dict,
+    overwrite: bool,
+    mask_dir: Path | None,
+    text_mask_dilate: int,
+    io_workers: int,
+    progress: Callable,
+) -> tuple[int, int]:
+    """GPU mangafy with CPU/IO overlapped against the GPU.
+
+    The screener holds a single GPU stream, so it stays serial on this (main) thread;
+    the surrounding disk decode and the text-mask + PNG encode + write are pure CPU/IO,
+    so they're farmed to thread pools and overlap the GPU work. ``mangafy_array_gpu``
+    returns a host numpy array, so nothing GPU-bound crosses a thread boundary. The
+    seed is per-stem, so decoding ahead of order is safe — output is identical."""
+    screener = _make_screener("gpu", sd_kwargs)
+
+    def _decode(p: Path):
+        rel = p.relative_to(src)
+        out = (staging / rel).with_suffix(".png")
+        if out.exists() and not overwrite:
+            return rel, out, None  # img=None → skip
+        return rel, out, np.array(Image.open(p).convert("RGB"))
+
+    def _finish(manga: np.ndarray, img: np.ndarray, out: Path, rel: Path) -> None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        manga = _apply_text_mask(
+            manga, img, _text_mask_path(mask_dir, rel), dilate=text_mask_dilate
+        )
+        _save_png_atomic(manga, out)
+
+    written = 0
+    depth = max(4, io_workers)  # decode look-ahead window (bounds held-decoded memory)
+    max_saves = 2 * io_workers  # cap in-flight saves (bounds held manga+img memory)
+    it = iter(images)
+    decode_q: deque = deque()
+    save_q: deque = deque()
+    with (
+        ThreadPoolExecutor(max_workers=io_workers) as decode_ex,
+        ThreadPoolExecutor(max_workers=io_workers) as save_ex,
+    ):
+        for _ in range(depth):  # prime the decode window
+            p = next(it, None)
+            if p is None:
+                break
+            decode_q.append(decode_ex.submit(_decode, p))
+        while decode_q:
+            rel, out, img = decode_q.popleft().result()
+            p = next(it, None)  # refill so a decode is always in flight
+            if p is not None:
+                decode_q.append(decode_ex.submit(_decode, p))
+            if img is None:
+                progress(1, detail=f"skip {out.name}")
+                continue
+            manga = screener(img, _stable_seed(rel.stem))  # GPU, serial on this thread
+            save_q.append(save_ex.submit(_finish, manga, img, out, rel))
+            written += 1
+            progress(1, detail=rel.name)
+            while len(save_q) >= max_saves:  # backpressure on the save side
+                save_q.popleft().result()
+        for f in save_q:  # drain remaining writes
+            f.result()
+    return len(images), written
 
 
 def stage_mangafy(
@@ -134,21 +302,43 @@ def stage_mangafy(
     overwrite: bool,
     limit: int | None,
     workers: int,
+    mask_dir: Path | None,
+    text_mask_dilate: int,
+    sd_match: list[str],
+    sd_max_aspect: float,
 ) -> tuple[int, int]:
     images = walk_images(src, recursive=recursive)
     if limit:
         images = images[:limit]
+    # Selective routing: primary engine isn't sd, but ``sd_match`` paths get SD anyway.
+    selective = bool(sd_match) and engine != "sd"
+    if engine == "sd" or selective:
+        # Group same-resolution pages together so the SD pipeline's per-shape cudnn
+        # autotune (enabled in _build_pipe) amortizes across each run and the GPU clocks
+        # stay warm — the dominant cost when resolutions vary image-to-image. Reordering
+        # is safe: the seed is per-stem, so output is identical regardless of order.
+        # PIL .size is lazy (header only), so this doesn't decode the pixels.
+        images = sorted(images, key=lambda p: Image.open(p).size)
     progress = tqdm_progress("Mangafy")
     progress(0, total=len(images))
 
     # The sd engine holds a single GPU pipeline, so it stays serial; the cv2 engine
-    # fans out across processes (``--workers``) when there's more than one to use.
-    if engine == "cv2" and workers > 1 and len(images) > 1:
+    # fans out across processes (``--workers``) when there's more than one to use. The
+    # parallel path can't host the serial SD pipeline, so selective routing goes serial.
+    if engine == "cv2" and workers > 1 and len(images) > 1 and not selective:
         written = 0
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_worker_init,
-            initargs=(engine, sd_kwargs, src, staging, overwrite),
+            initargs=(
+                engine,
+                sd_kwargs,
+                src,
+                staging,
+                overwrite,
+                mask_dir,
+                text_mask_dilate,
+            ),
         ) as ex:
             # small chunks: each image is ~seconds of cv2 work, so IPC overhead is
             # negligible and fine-grained chunks load-balance variable image sizes well.
@@ -157,7 +347,25 @@ def stage_mangafy(
                 progress(1)
         return len(images), written
 
-    screener = _make_screener(engine, sd_kwargs)
+    # The gpu engine runs one serial GPU stream, but its disk decode + text-mask + PNG
+    # write are CPU/IO — overlap them across thread pools so the GPU isn't starved
+    # between images (the 0→100 utilization sawtooth). Selective sd routing stays on the
+    # plain serial loop below (it swaps screeners per page).
+    if engine == "gpu" and len(images) > 1 and not selective:
+        return _mangafy_gpu_overlap(
+            images,
+            src,
+            staging,
+            sd_kwargs=sd_kwargs,
+            overwrite=overwrite,
+            mask_dir=mask_dir,
+            text_mask_dilate=text_mask_dilate,
+            io_workers=max(2, workers),
+            progress=progress,
+        )
+
+    primary = _make_screener(engine, sd_kwargs)
+    sd_screener = None  # lazy — only built (3.5GB) if a page actually routes to SD
     written = 0
     for p in images:
         rel = p.relative_to(src)
@@ -167,8 +375,19 @@ def stage_mangafy(
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         img = np.array(Image.open(p).convert("RGB"))
+        if selective and _route_to_sd(
+            rel, img.shape[0], img.shape[1], sd_match, sd_max_aspect
+        ):
+            if sd_screener is None:
+                sd_screener = _make_screener("sd", sd_kwargs)
+            screener = sd_screener
+        else:
+            screener = primary
         manga = screener(img, _stable_seed(rel.stem))
-        Image.fromarray(manga).save(out)
+        manga = _apply_text_mask(
+            manga, img, _text_mask_path(mask_dir, rel), dilate=text_mask_dilate
+        )
+        _save_png_atomic(manga, out)
         written += 1
         progress(1, detail=p.name)
     return len(images), written
@@ -361,6 +580,37 @@ def main() -> None:
         "--overwrite", action="store_true", help="re-mangafy staged PNGs that exist"
     )
     parser.add_argument("--limit", type=int, default=None, help="cap #images (QA)")
+    parser.add_argument(
+        "--mask_dir",
+        default="post_image_dataset/masks",
+        help="text/speech-bubble masks (black=text); the source grayscale is pasted "
+        "back over these regions so the sd engine's redrawn text stays pixel-exact",
+    )
+    parser.add_argument(
+        "--skip_text_mask",
+        action="store_true",
+        help="don't paste source text back (screen the whole page, garbled text and all)",
+    )
+    parser.add_argument(
+        "--text_mask_dilate",
+        type=int,
+        default=2,
+        help="px to grow the text mask before pasting (catches anti-aliased glyph fringes)",
+    )
+    parser.add_argument(
+        "--sd_match",
+        default="",
+        help="comma-separated rel-path substrings routed to the SD screener while the "
+        "rest use --engine (e.g. ''). Empty = --engine for everything. "
+        "Ignored when --engine is already sd.",
+    )
+    parser.add_argument(
+        "--sd_max_aspect",
+        type=float,
+        default=2.6,
+        help="sd_match pages whose aspect (long/short) exceeds this fall back to "
+        "--engine — screentone_sd distorts at extreme aspect (e.g. 1:4).",
+    )
     parser.add_argument("--skip_mangafy", action="store_true")
     parser.add_argument("--skip_encode", action="store_true")
     parser.add_argument("--skip_text", action="store_true", help="skip color-only TE stage")
@@ -406,6 +656,7 @@ def main() -> None:
     src = Path(args.src)
     staging = Path(args.staging)
     cond_cache_dir = Path(args.cond_cache_dir)
+    sd_match = [s.strip() for s in args.sd_match.split(",") if s.strip()] if args.sd_match else []
 
     if not args.skip_mangafy:
         sd_kwargs = dict(
@@ -424,13 +675,18 @@ def main() -> None:
             overwrite=args.overwrite,
             limit=args.limit,
             workers=args.workers,
+            mask_dir=None if args.skip_text_mask else Path(args.mask_dir),
+            text_mask_dilate=args.text_mask_dilate,
+            sd_match=sd_match,
+            sd_max_aspect=args.sd_max_aspect,
         )
         print(
-            f"\nMangafy ({args.engine}): {written} written, "
-            f"{seen - written} skipped/seen={seen}"
+            f"\nMangafy ({args.engine}{', sd:' + ','.join(sd_match) if sd_match else ''}): "
+            f"{written} written, {seen - written} skipped/seen={seen}"
         )
-        if args.engine == "sd":
-            # Free the SD pipeline's VRAM before the encode stage loads the Qwen VAE.
+        if args.engine == "sd" or sd_match:
+            # Free the SD pipeline's VRAM before the encode stage loads the Qwen VAE
+            # (the SD screener may have been built for the sd_match subset too).
             from screentone_sd import unload
 
             unload()
