@@ -298,6 +298,9 @@ STRINGS: dict[str, str] = {
     "guidebook_missing": "Guide not found at {path}",
     "guidebook_open_external": "Open in system viewer",
     "guidebook_close": "Close",
+    # EasyControl adapter guide (build-your-own control task)
+    "adapter_guide": "📘 Adapter Guide",
+    "adapter_guide_tooltip": "How to build your own EasyControl adapter (easycontrol_adapters/ADAPTER_GUIDE.md)",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "Models",
     "models_btn_tooltip": "Download or re-download model checkpoints (Anima base, SAM3, MIT, IP-Adapter encoders)",

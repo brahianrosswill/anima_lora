@@ -287,6 +287,9 @@ STRINGS: dict[str, str] = {
     "guidebook_missing": "가이드를 찾을 수 없습니다: {path}",
     "guidebook_open_external": "시스템 뷰어로 열기",
     "guidebook_close": "닫기",
+    # EasyControl 어댑터 가이드 (직접 컨트롤 태스크 만들기)
+    "adapter_guide": "📘 어댑터 가이드",
+    "adapter_guide_tooltip": "나만의 EasyControl 어댑터 만들기 (easycontrol_adapters/ADAPTER_GUIDE.md)",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "모델",
     "models_btn_tooltip": "모델 체크포인트 다운로드 / 재다운로드 (Anima 베이스, SAM3, MIT, IP-Adapter 인코더)",

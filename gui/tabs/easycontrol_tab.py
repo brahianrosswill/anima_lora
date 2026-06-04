@@ -56,6 +56,20 @@ class EasyControlTab(ConfigTab):
         # supply, so hide Test on this tab.
         self.test_btn.setVisible(False)
 
+        # "How to build your own EasyControl adapter" — opens ADAPTER_GUIDE.md in
+        # the in-app markdown viewer (same dialog as the top-bar Guidebook). The
+        # guide is the build-your-own-control-task reference (colorize worked
+        # through in detail).
+        self.adapter_guide_btn = QPushButton(t("adapter_guide"))
+        self.adapter_guide_btn.setToolTip(t("adapter_guide_tooltip"))
+        self.adapter_guide_btn.setStyleSheet(
+            "background:#16a085;color:white;font-weight:bold;padding:4px 12px;"
+        )
+        self.adapter_guide_btn.clicked.connect(self._open_adapter_guide)
+        self._top_bar.insertWidget(
+            self._top_bar.indexOf(self.train_btn), self.adapter_guide_btn
+        )
+
         # ConfigTab has no Preprocess button (it auto-chains a daemon preprocess).
         # EasyControl preprocessing is the bespoke exp-easycontrol-preprocess
         # (mangafy for colorize), so it gets an explicit button before Train.
@@ -72,6 +86,22 @@ class EasyControlTab(ConfigTab):
         # QProcess route. Stop already kills the QProcess when no daemon job runs.
         self.train_btn.clicked.disconnect()
         self.train_btn.clicked.connect(self._ec_start_train)
+
+    # ── Adapter guide ──────────────────────────────────────────────
+
+    def _open_adapter_guide(self) -> None:
+        # Lazy import: gui.app imports this tab, so a top-level import would be
+        # circular. The dialog is a generic markdown viewer (takes any path).
+        from gui.app import GuidebookDialog
+        from gui.i18n import current_language
+
+        # Localized guide: ADAPTER_GUIDE.<lang>.md, English (ADAPTER_GUIDE.md) as
+        # the fallback for `en` and any language whose translation is missing.
+        base = ROOT / "easycontrol_adapters"
+        path = base / f"ADAPTER_GUIDE.{current_language()}.md"
+        if not path.exists():
+            path = base / "ADAPTER_GUIDE.md"
+        GuidebookDialog(path, self).exec()
 
     # ── Variant list: family built-ins only (no customs) ───────────
 

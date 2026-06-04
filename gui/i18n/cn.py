@@ -286,6 +286,9 @@ STRINGS: dict[str, str] = {
     "guidebook_missing": "在 {path} 找不到指南",
     "guidebook_open_external": "用系统查看器打开",
     "guidebook_close": "关闭",
+    # EasyControl 适配器指南（自建控制任务）
+    "adapter_guide": "📘 适配器指南",
+    "adapter_guide_tooltip": "如何构建你自己的 EasyControl 适配器 (easycontrol_adapters/ADAPTER_GUIDE.md)",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "模型",
     "models_btn_tooltip": "下载或重新下载模型检查点 (Anima 基础、SAM3、MIT、IP-Adapter 编码器)",
