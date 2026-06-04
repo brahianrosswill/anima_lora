@@ -191,3 +191,41 @@ def cmd_easycontrol_preprocess(extra):
             "0.1",
         ]
     )
+
+
+def cmd_byg(extra):
+    """BYG — Bootstrap Your Generator unpaired instruction editing.
+
+    Plain rank-64 LoRA trained with a multi-forward unpaired objective (bootstrap
+    rollout + DDS prior + cycle + identity), conditioned on a parameter-free
+    token-concat source latent. Reads ``configs/methods/byg.toml``.
+
+    Run ``exp-byg-data`` first to build the per-image edit-tuple sidecars under
+    ``post_image_dataset/byg/``. The image VAE/TE caches are the standard
+    ``preprocess`` ones (the source image IS the training image).
+    """
+    train("byg", extra)
+
+
+def cmd_byg_data(extra):
+    """Build BYG edit-tuple sidecars (tag-swap) into ``post_image_dataset/byg/``.
+
+    One offline pass over the captioned corpus emitting
+    ``<stem>_byg.safetensors`` (4 encoded role conditionings) per image. Pass
+    ``--limit N`` for a quick smoke subset, ``--overwrite`` to rebuild.
+    """
+    run(
+        [
+            PY,
+            "scripts/byg/build_edit_tuples.py",
+            "--dir",
+            "image_dataset",
+            "--cache_dir",
+            "post_image_dataset/byg",
+            "--qwen3",
+            "models/text_encoders/qwen_3_06b_base.safetensors",
+            "--dit",
+            "models/diffusion_models/anima-base-v1.0.safetensors",
+            *extra,
+        ]
+    )
