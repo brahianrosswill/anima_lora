@@ -43,6 +43,7 @@ from library.config.loader import (
     BlueprintGenerator,
 )
 from library.training.method_adapter import (
+    ComputeLossCtx,
     ForwardArtifacts,
     MethodAdapter,
     SetupCtx,
@@ -83,7 +84,9 @@ from library.training import (
     add_network_arguments,
     add_optimizer_arguments,
     add_sd_models_arguments,
+    add_train_misc_arguments,
     add_training_arguments,
+    add_validation_arguments,
     build_loss_composer,
     build_training_metadata,
     finalize_metadata,
@@ -378,6 +381,29 @@ class AnimaTrainer:
                 for dataset in val_dataset_group.datasets:
                     dataset.inversion_dir = inversion_dir
                     dataset.inversion_num_runs = num_runs
+
+        # Propagate BYG per-image edit-tuple cache dir so datasets load
+        # {stem}_byg.safetensors into batch["byg_{role}_emb"]/["byg_{role}_mask"].
+        if getattr(args, "use_byg", False):
+            byg_text_dir = getattr(args, "byg_text_dir", None) or os.path.join(
+                "post_image_dataset", "byg"
+            )
+            for dataset in train_dataset_group.datasets:
+                dataset.byg_text_dir = byg_text_dir
+                kept, dropped = dataset.restrict_to_byg_tuples()
+                if dropped:
+                    logger.info(
+                        f"BYG: kept {kept} images with edit-tuple sidecars, "
+                        f"dropped {dropped} without (no swappable tag in caption)."
+                    )
+            # restrict_to_byg_tuples re-buckets each member, shrinking its length;
+            # refresh the ConcatDataset cumulative_sizes or global indices overflow.
+            train_dataset_group.refresh_concat_state()
+            if val_dataset_group is not None:
+                for dataset in val_dataset_group.datasets:
+                    dataset.byg_text_dir = byg_text_dir
+                    dataset.restrict_to_byg_tuples()
+                val_dataset_group.refresh_concat_state()
 
         # Propagate IP-Adapter feature-cache flag so datasets load
         # {stem}_anima_{encoder}.safetensors sidecars into batch["ip_features"].
@@ -1190,6 +1216,30 @@ class AnimaTrainer:
                 for i in range(len(encoded_text_encoder_conds)):
                     if encoded_text_encoder_conds[i] is not None:
                         text_encoder_conds[i] = encoded_text_encoder_conds[i]
+
+        # Step-owning adapter override: a method with no `target = noise -
+        # latents` and its own multi-forward objective (BYG) computes the whole
+        # scalar loss here, bypassing get_noise_pred_and_target + LossComposer.
+        owners = [a for a in self._adapters if a.owns_training_step(args)]
+        if owners:
+            assert len(owners) == 1, (
+                f"at most one adapter may own the training step; got {len(owners)}: "
+                f"{[a.name for a in owners]}"
+            )
+            return owners[0].compute_loss(
+                ComputeLossCtx(
+                    args=args,
+                    accelerator=accelerator,
+                    network=getattr(self, "_network", network),
+                    unet=ctx.unet,
+                    noise_scheduler=noise_scheduler,
+                    weight_dtype=weight_dtype,
+                    batch=batch,
+                    latents=latents,
+                    text_encoder_conds=text_encoder_conds,
+                    is_train=is_train,
+                )
+            )
 
         # sample noise, call unet, get target
         noise_pred, target, timesteps, weighting = self.get_noise_pred_and_target(
@@ -2466,170 +2516,9 @@ def setup_parser() -> argparse.ArgumentParser:
     add_dit_training_arguments(parser)
     anima_train_utils.add_anima_training_arguments(parser)
 
-    parser.add_argument(
-        "--cpu_offload_checkpointing",
-        action="store_true",
-        help="[EXPERIMENTAL] enable offloading of tensors to CPU during checkpointing for U-Net or DiT, if supported"
-        "",
-    )
-    parser.add_argument(
-        "--no_metadata",
-        action="store_true",
-        help="do not save metadata in output model",
-    )
-    parser.add_argument(
-        "--save_model_as",
-        type=str,
-        default="safetensors",
-        choices=[None, "ckpt", "pt", "safetensors"],
-        help="format to save the model (default is .safetensors)",
-    )
-
-    parser.add_argument(
-        "--unet_lr",
-        type=float,
-        default=None,
-        help="learning rate for U-Net",
-    )
-    parser.add_argument(
-        "--text_encoder_lr",
-        type=float,
-        default=None,
-        nargs="*",
-        help="learning rate for Text Encoder, can be multiple",
-    )
-
     add_network_arguments(parser)
-    parser.add_argument(
-        "--no_half_vae",
-        action="store_true",
-        help="do not use fp16",
-    )
-    parser.add_argument(
-        "--skip_until_initial_step",
-        action="store_true",
-        help="skip training until initial_step is reached",
-    )
-    parser.add_argument(
-        "--initial_epoch",
-        type=int,
-        default=None,
-        help="initial epoch number, 1 means first epoch (same as not specifying). NOTE: initial_epoch/step doesn't affect to lr scheduler. Which means lr scheduler will start from 0 without `--resume`."
-        + "",
-    )
-    parser.add_argument(
-        "--initial_step",
-        type=int,
-        default=None,
-        help="initial step number including all epochs, 0 means first step (same as not specifying). overwrites initial_epoch."
-        + "",
-    )
-    parser.add_argument(
-        "--validation_seed",
-        type=int,
-        default=None,
-        help="Validation seed for shuffling validation dataset, training `--seed` used otherwise",
-    )
-    parser.add_argument(
-        "--validation_split",
-        type=float,
-        default=0.0,
-        help="Split for validation images out of the training dataset",
-    )
-    parser.add_argument(
-        "--validation_split_num",
-        type=int,
-        default=0,
-        help=(
-            "Count-based validation split (number of held-out images). When "
-            "set (>0), wins over the fractional `--validation_split`. Also "
-            "determines how many samples CMMD evaluation generates per pass."
-        ),
-    )
-    parser.add_argument(
-        "--validate_every_n_steps",
-        type=int,
-        default=None,
-        help="Run validation on validation dataset every N steps. By default, validation will only occur every epoch if a validation dataset is available",
-    )
-    parser.add_argument(
-        "--validate_every_n_epochs",
-        type=int,
-        default=None,
-        help="Run validation dataset every N epochs. By default, validation will run every epoch if a validation dataset is available",
-    )
-    parser.add_argument(
-        "--max_validation_steps",
-        type=int,
-        default=None,
-        help="Max number of validation dataset items processed. By default, validation will run the entire validation dataset",
-    )
-    parser.add_argument(
-        "--validation_sigmas",
-        type=float,
-        nargs="+",
-        default=None,
-        help="Sigma values for validation loss (0.0~1.0). Low values = fine detail. Default: 0.1 0.4 0.7. (Legacy FM-val path — unused under the CMMD val replacement.)",
-    )
-    parser.add_argument(
-        "--validation_sample_steps",
-        type=int,
-        default=20,
-        help="Denoising steps used by CMMD validation when sampling each held-out item. Default 20.",
-    )
-    parser.add_argument(
-        "--validation_cfg_scale",
-        type=float,
-        default=1.0,
-        help="CFG scale used by CMMD validation. Default 1.0 (no CFG, fastest). Bump to 4.0 to match production sampling but generation cost ~2×.",
-    )
-    parser.add_argument(
-        "--use_cmmd",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use CMMD (PE-Core MMD²) as the validation signal. Set "
-        "`use_cmmd = false` in the method TOML (or pass `--no-use_cmmd`) to "
-        "skip CMMD and run only the legacy per-σ FM-MSE val pass — useful "
-        "on tight VRAM where the PE encoder + sampling path doesn't fit.",
-    )
-    parser.add_argument(
-        "--validation_baselines",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run each method adapter's validation baselines (e.g. IP-Adapter "
-        "no_ip / shuffled_ref) as FM-MSE delta diagnostics during validation. "
-        "Set `validation_baselines = false` in the method TOML (or pass "
-        "`--no-validation_baselines`) to skip them — each baseline adds a full "
-        "extra val forward per (batch, σ), so this roughly halves IP-Adapter "
-        "validation time when you don't need the deltas.",
-    )
-    parser.add_argument(
-        "--unsloth_offload_checkpointing",
-        action="store_true",
-        help="offload activations to CPU RAM using async non-blocking transfers (faster than --cpu_offload_checkpointing). "
-        "Cannot be used with --cpu_offload_checkpointing or --blocks_to_swap.",
-    )
-    parser.add_argument(
-        "--print-config",
-        dest="print_config",
-        action="store_true",
-        help="Dump the fully merged config (base → preset → method → CLI) as TOML "
-        "with provenance comments, then exit 0. Does not start training.",
-    )
-    parser.add_argument(
-        "--config-snapshot",
-        dest="config_snapshot",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Write output/<output_name>.snapshot.toml next to the checkpoint on every real "
-        "run (provenance + git SHA). Pass --no-config-snapshot to disable.",
-    )
-    parser.add_argument(
-        "--config-strict",
-        dest="config_strict",
-        action="store_true",
-        help="Treat config-schema warnings (unknown keys, off-list choices) as errors.",
-    )
+    add_validation_arguments(parser)
+    add_train_misc_arguments(parser)
     return parser
 
 

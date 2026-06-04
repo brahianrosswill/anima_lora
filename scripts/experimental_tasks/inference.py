@@ -802,6 +802,26 @@ def _filter_inference_base_for_edit(args: list[str]) -> list[str]:
     return out
 
 
+def cmd_test_byg(extra):
+    """Inference with the latest BYG editing LoRA (source image + instruction).
+
+    NOTE (v1): BYG ships as a *plain LoRA*, so the trained weights load via the
+    standard ``--lora_weight`` path; the only missing inference piece is the
+    parameter-free source-concat conditioning patch (``BYGConditioning`` in
+    ``networks/methods/byg.py``) being installed at generation time and primed
+    with the VAE-encoded reference. That wiring into ``library/inference/`` is
+    the next phase (mirrors the EasyControl KV-prefill node). Until then this
+    command is a placeholder so the collapse-watch validation can be run once
+    inference is wired.
+    """
+    raise SystemExit(
+        "exp-test-byg: BYG inference (source-concat patch install + ref encode) "
+        "is not wired yet — see the P2 inference step in "
+        "docs/proposal/byg_unpaired_editing.md. Training (exp-byg) is functional; "
+        "the trained checkpoint is a plain LoRA loadable via --lora_weight."
+    )
+
+
 def cmd_test_easycontrol(extra):
     """Inference with latest EasyControl weight.
 

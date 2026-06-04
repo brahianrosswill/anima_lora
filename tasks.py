@@ -277,6 +277,17 @@ COMMANDS = {
         "[experimental] Download an EasyControl adapter's extra weights. "
         "EASYADAPTER=colorize → Sketch2Manga screening weights (~5.7GB).",
     ),
+    "exp-byg": (
+        exp_training.cmd_byg,
+        "[experimental] BYG unpaired instruction-editing training (plain LoRA, "
+        "bootstrap + DDS prior + cycle + identity; configs/methods/byg.toml). "
+        "Run exp-byg-data first.",
+    ),
+    "exp-byg-data": (
+        exp_training.cmd_byg_data,
+        "[experimental] Build BYG edit-tuple sidecars (tag-swap) into "
+        "post_image_dataset/byg/. Usage: exp-byg-data [--limit N --overwrite].",
+    ),
     "exp-test-soft": (
         exp_inference.cmd_test_soft,
         "[experimental] Inference with latest soft_tokens weight "
@@ -300,6 +311,10 @@ COMMANDS = {
     "exp-test-easycontrol": (
         exp_inference.cmd_test_easycontrol,
         "[experimental] Inference with latest EasyControl weight. Usage: exp-test-easycontrol <ref_image> [--prompt ... --easycontrol_scale ...]",
+    ),
+    "exp-test-byg": (
+        exp_inference.cmd_test_byg,
+        "[experimental] Inference with latest BYG editing LoRA. Usage: exp-test-byg <ref_image> --prompt 'change background to a forest'",
     ),
     "exp-test-directedit": (
         exp_inference.cmd_test_directedit,

@@ -300,6 +300,96 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "dominance and force text to carry the high-frequency residual; sigma=0 "
         "stays in the training distribution so clean-cond inference still works.",
     )
+    # --- BYG (Bootstrap Your Generator) unpaired editing ----------------------
+    # An owning-step method: a plain rank-64 LoRA trained with a multi-forward
+    # objective (bootstrap rollout + DDS prior + cycle + identity), conditioned
+    # on a token-concat source latent. No edited target ever exists. See
+    # docs/proposal/byg_unpaired_editing.md and networks/methods/byg.py.
+    parser.add_argument(
+        "--use_byg",
+        action="store_true",
+        help="Enable BYG unpaired-editing training (BYGMethodAdapter owns the "
+        "whole step). Requires a BYG dataset providing the source latent "
+        "(cond_cache_dir) plus four cached text conditionings per image "
+        "(src_caption / tgt_caption / instruction / reverse_instruction).",
+    )
+    parser.add_argument(
+        "--byg_lambda_prior",
+        type=float,
+        default=1.0,
+        help="Weight of the DDS-style prior loss L_prior (paper Eq. 5, default 1.0).",
+    )
+    parser.add_argument(
+        "--byg_lambda_id",
+        type=float,
+        default=0.2,
+        help="Weight of the anti-collapse identity loss L_id (paper Eq. 5, default 0.2). "
+        "Backwarded on an independent graph to keep peak VRAM down.",
+    )
+    parser.add_argument(
+        "--byg_lambda_cycle",
+        type=float,
+        default=1.0,
+        help="Weight of the cycle-consistency loss L_cycle (paper Eq. 5, default 1.0).",
+    )
+    parser.add_argument(
+        "--byg_alpha",
+        type=float,
+        default=0.1,
+        help="MSE magnitude-anchor weight inside the prior: L_prior = L_dir + alpha*L_MSE "
+        "(paper §4.2). Anchors edit velocity magnitude against the frozen base.",
+    )
+    parser.add_argument(
+        "--byg_rollout_steps",
+        type=int,
+        default=10,
+        help="Number of Euler integration steps n for the bootstrap rollout that "
+        "fabricates the pseudo-noisy-target y~_t and clean y~_0 (paper App. B.1 = 10). "
+        "Shorter = cheaper, lower-quality pseudo-targets.",
+    )
+    parser.add_argument(
+        "--byg_snapshot_every",
+        type=int,
+        default=200,
+        help="Hard-refresh the frozen weight snapshot used for the bootstrap rollout "
+        "every N optimizer steps (v1 EMA-free path). Ignored when byg_ema_decay > 0.",
+    )
+    parser.add_argument(
+        "--byg_ema_decay",
+        type=float,
+        default=0.0,
+        help="EMA decay for the bootstrap copy of the trainable LoRA weights. 0.0 (default) "
+        "uses periodic hard snapshots (byg_snapshot_every) instead; >0 enables the "
+        "paper-faithful per-step EMA moving average (paper Alg. 1 line 36).",
+    )
+    parser.add_argument(
+        "--byg_identity_warmup_steps",
+        type=int,
+        default=200,
+        help="Train identity-only for the first N steps so the model learns to use the "
+        "condition before editing (paper App. B.1 = 200). Anti-collapse, load-bearing.",
+    )
+    parser.add_argument(
+        "--byg_identity_prob",
+        type=float,
+        default=0.15,
+        help="Probability that a post-warmup step is a random identity step (paper "
+        "App. B.1 = 0.15 for images). Regularizer against identity collapse.",
+    )
+    parser.add_argument(
+        "--byg_text_dir",
+        type=str,
+        default=None,
+        help="Directory of per-image BYG edit-tuple sidecars "
+        "(<stem>_byg.safetensors). Default: post_image_dataset/byg.",
+    )
+    parser.add_argument(
+        "--byg_prior_symmetric",
+        action="store_true",
+        help="Apply the prior loss to the reverse pass as well (L_prior^fwd + L_prior^rev, "
+        "paper Eq. 5). On by default (v2); the byg.toml sets it. Disable for the v1 "
+        "fwd-only prior to save two frozen-base forwards per step.",
+    )
     parser.add_argument(
         "--use_shuffled_caption_variants",
         action="store_true",

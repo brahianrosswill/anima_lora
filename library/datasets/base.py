@@ -116,6 +116,18 @@ class BaseDataset(torch.utils.data.Dataset):
         self.inversion_dir: Optional[str] = None
         self.inversion_num_runs: int = 3
 
+        # BYG unpaired-editing per-image text conditionings. Set via
+        # `dataset.byg_text_dir = ...` after construction; None disables. Loads
+        # <stem>_byg.safetensors holding the 4 role embeddings + masks (built by
+        # scripts/byg/build_edit_tuples.py).
+        self.byg_text_dir: Optional[str] = None
+        self._byg_roles = (
+            "src_caption",
+            "tgt_caption",
+            "instruction",
+            "reverse_instruction",
+        )
+
         # IP-Adapter cached PE/vision features (sibling sidecars). Set via
         # `dataset.ip_features_cache_to_disk = True; dataset.ip_features_encoder = "pe"`
         # after construction. When enabled, __getitem__ loads
@@ -438,6 +450,10 @@ class BaseDataset(torch.utils.data.Dataset):
                 info.image_size = self.get_image_size(info.absolute_path)
 
         logger.info("make buckets")
+
+        # Remember the mode so a later rebuild (e.g. restrict_to_byg_tuples)
+        # re-buckets identically.
+        self._constant_token_buckets = constant_token_buckets
 
         if self.bucket_manager is None:
             self.bucket_manager = BucketManager()
@@ -1405,6 +1421,69 @@ class BaseDataset(torch.utils.data.Dataset):
             runs.append(t.float())
         return torch.stack(runs, dim=0)  # [N_runs, S, D]
 
+    def restrict_to_byg_tuples(self) -> tuple[int, int]:
+        """Drop images lacking a BYG edit-tuple sidecar, then rebuild buckets.
+
+        ``build_edit_tuples`` only emits a ``<stem>_byg.safetensors`` for captions
+        containing a swappable tag (v1: a color word); images without one carry no
+        BYG training signal. Collation silently omits ``byg_*_emb`` whenever *any*
+        sample in a bucket-batch lacks a tuple (see ``__getitem__``), so the
+        adapter raises mid-epoch the first time such a batch is drawn. Filtering
+        the registry up front guarantees every batch is fully-tupled.
+
+        Returns ``(kept, dropped)`` image counts.
+        """
+        if not self.byg_text_dir:
+            return (0, 0)
+        kept: Dict[str, ImageInfo] = {}
+        dropped = 0
+        for key, info in self.image_data.items():
+            stem = os.path.splitext(os.path.basename(info.absolute_path))[0]
+            p = os.path.join(self.byg_text_dir, f"{stem}_byg.safetensors")
+            if os.path.exists(p):
+                kept[key] = info
+            else:
+                dropped += 1
+        if dropped == 0:
+            return (len(kept), 0)
+        self.image_data = kept
+        # Keep the repeat-weighted train-image count in sync (matches the
+        # num_repeats * num_images definition in DreamBoothDataset).
+        self.num_train_images = sum(info.num_repeats for info in kept.values())
+        # bucket_manager.add_image accumulates, so reset before re-bucketing.
+        self.bucket_manager = None
+        self.make_buckets(
+            constant_token_buckets=getattr(self, "_constant_token_buckets", True)
+        )
+        return (len(kept), dropped)
+
+    def _try_load_byg_tuple(self, image_abs_path: str) -> Optional[dict]:
+        """Load <stem>_byg.safetensors from self.byg_text_dir.
+
+        Returns ``{f"{role}_emb": Tensor[S,D], f"{role}_mask": Tensor[S]}`` for
+        the four edit-tuple roles, or None if the sidecar is missing / malformed
+        (the BYG adapter raises a clear error if a sample lacks its tuple).
+        """
+        if not self.byg_text_dir:
+            return None
+        stem = os.path.splitext(os.path.basename(image_abs_path))[0]
+        from safetensors.torch import load_file
+
+        p = os.path.join(self.byg_text_dir, f"{stem}_byg.safetensors")
+        if not os.path.exists(p):
+            return None
+        sd = load_file(p)
+        out = {}
+        for role in self._byg_roles:
+            emb = sd.get(f"{role}_emb")
+            if emb is None:
+                return None
+            out[f"{role}_emb"] = emb.float()
+            mask = sd.get(f"{role}_mask")
+            if mask is not None:
+                out[f"{role}_mask"] = mask
+        return out
+
     def _load_image_at_bucket(self, subset, image_info, flipped: bool) -> torch.Tensor:
         """Reload the source image at bucket resolution for IP-Adapter live
         PE encoding alongside cached latents.
@@ -1465,6 +1544,8 @@ class BaseDataset(torch.utils.data.Dataset):
         neg_crossattn_list: List[Optional[torch.Tensor]] = []
         # Per-image (k,) tag-overlap weights for jaccard mode; None otherwise.
         neg_jaccard_list: List[Optional[torch.Tensor]] = []
+        # BYG per-image edit-tuple dicts (role embeddings + masks), or None.
+        byg_tuple_list: List[Optional[dict]] = []
 
         for image_key in bucket[image_index : image_index + bucket_batch_size]:
             image_info = self.image_data[image_key]
@@ -1688,6 +1769,13 @@ class BaseDataset(torch.utils.data.Dataset):
 
             input_ids_list.append(input_ids)
             captions.append(caption)
+
+            if self.byg_text_dir:
+                byg_tuple_list.append(
+                    self._try_load_byg_tuple(image_info.absolute_path)
+                )
+            else:
+                byg_tuple_list.append(None)
 
             if self.inversion_dir:
                 inversion_runs_list.append(
@@ -1933,6 +2021,20 @@ class BaseDataset(torch.utils.data.Dataset):
             example["neg_jaccard"] = torch.stack(neg_jaccard_list, dim=0)
         else:
             example["neg_jaccard"] = None
+
+        # BYG edit-tuple text conditionings. All samples in a bucket share the
+        # padded TE sequence length, so a plain stack works. Keys absent when no
+        # byg_text_dir is set; the BYG adapter raises if any sample's tuple is
+        # missing (None placeholder → stack fails loudly, which is intended).
+        if byg_tuple_list and all(t is not None for t in byg_tuple_list):
+            for role in self._byg_roles:
+                example[f"byg_{role}_emb"] = torch.stack(
+                    [t[f"{role}_emb"] for t in byg_tuple_list], dim=0
+                )
+                if all(f"{role}_mask" in t for t in byg_tuple_list):
+                    example[f"byg_{role}_mask"] = torch.stack(
+                        [t[f"{role}_mask"] for t in byg_tuple_list], dim=0
+                    )
 
         if self.debug_dataset:
             example["image_keys"] = bucket[image_index : image_index + self.batch_size]
