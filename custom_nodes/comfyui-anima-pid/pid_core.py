@@ -5,9 +5,16 @@ nv-tlabs PiD `qwenimage` 2kto4k checkpoint config (captured by introspection):
 
   * NET_KWARGS         — exact PidNet constructor args
   * STUDENT_T_LIST etc — the distilled 4-step SDE schedule
-  * gemma is replaced by ZERO caption embeddings: the distill path uses no CFG
-    and the net's y_embedder is RMSNorm-fronted, so zeros are safe and the
-    ~5GB gemma download is skipped entirely.
+  * gemma is not loaded at decode time. The distill student uses no CFG, so there
+    is no negative branch to encode — the net just needs a *fixed* null caption.
+    The faithful null is `gemma(chi_prompt + "")` (== the model's
+    `_encode_text_raw([""])`): the qwenimage checkpoint was distilled with a long
+    `chi_prompt` instruction prefixed to every caption, so an all-zero y is
+    off-distribution. That null is pre-baked and bundled with the node (~1.4MB;
+    regen recipe in README "Provenance"), so gemma is never downloaded. The decode
+    fns take a `caption_embs` arg; passing None falls back to a zero caption
+    (NaN-safe — the y_embedder is `Linear(2304→D, bias=True)` then RMSNorm — but
+    off-distribution; the node always passes the faithful null).
 
 The PiD net consumes a *normalized* Qwen latent (LQ_latent) and emits RGB pixels
 directly — there is NO VAE decode at the end, and the Qwen VAE is not needed at
@@ -40,6 +47,12 @@ SR_SCALE = 4
 VAE_DOWN = 8           # latent grid -> vae-native pixels
 MODEL_MAX_LENGTH = 300
 CAPTION_CHANNELS = 2304
+
+# Cached faithful null (gemma(chi_prompt + "")) — bundled blob; regen recipe in README.
+# A (1, MODEL_MAX_LENGTH, CAPTION_CHANNELS) tensor — the same y the official student
+# sees for an empty user prompt. Lives alongside the ckpt in models/pid/.
+NULL_CAPTION_FILENAME = "pid_null_caption_gemma.safetensors"
+NULL_CAPTION_KEY = "null_caption_embs"
 FM_TIMESCALE = 1000.0
 STUDENT_T_LIST = [0.999, 0.866, 0.634, 0.342, 0.0]  # 4-step SDE schedule
 STUDENT_SAMPLE_STEPS = 4
@@ -58,10 +71,17 @@ def build_pid_net(device="cuda", dtype=torch.bfloat16) -> PidNet:
     return net
 
 
-def load_pid_weights(net: PidNet, ckpt_path: str) -> None:
+def load_pid_weights(net: PidNet, ckpt_path: str):
     """Load consolidated PiD checkpoint. The official `model_ema_bf16.pth` stores
     keys under a `net.` prefix (PixelDiTModel.state_dict(prefix='net.')); strip it.
-    Also tolerates a bare-key state dict and a {'state_dict'/'model': ...} wrapper."""
+    Also tolerates a bare-key state dict and a {'state_dict'/'model': ...} wrapper.
+
+    Returns (missing, unexpected) where `missing` is split-categorized by the caller.
+    The load is necessarily `strict=False` (the official student legitimately omits
+    `lq_proj` keys — see PidDistillModel.load_state_dict), but that also means a wrong
+    NET_KWARGS would load silently. `categorize_load_keys` lets the loader surface a
+    real arch/kwargs mismatch (any non-`lq_proj` missing, or *any* unexpected key)
+    loudly instead of hiding it behind the expected lq_proj omissions."""
     sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
         sd = sd["state_dict"]
@@ -71,6 +91,40 @@ def load_pid_weights(net: PidNet, ckpt_path: str) -> None:
         sd = {k[len("net."):]: v for k, v in sd.items() if k.startswith("net.")}
     missing, unexpected = net.load_state_dict(sd, strict=False)
     return missing, unexpected
+
+
+def categorize_load_keys(missing, unexpected):
+    """Split load_state_dict results into (expected_missing, suspect_missing, unexpected).
+
+    `lq_proj` keys are EXPECTED to be missing for the distilled student. Anything else
+    missing — or any unexpected key at all — signals NET_KWARGS doesn't match the
+    checkpoint architecture and should be treated as an error, not a note."""
+    expected_missing = [k for k in missing if "lq_proj" in k]
+    suspect_missing = [k for k in missing if "lq_proj" not in k]
+    return expected_missing, suspect_missing, list(unexpected)
+
+
+def load_null_caption_embs(path: str, device, dtype=torch.bfloat16) -> torch.Tensor:
+    """Load the bundled `gemma(chi_prompt + "")` null caption (regen recipe in
+    README "Provenance"). Returns (1, MODEL_MAX_LENGTH, CAPTION_CHANNELS)."""
+    from safetensors.torch import load_file
+
+    sd = load_file(path)
+    if NULL_CAPTION_KEY not in sd:
+        raise KeyError(
+            f"{path} has no '{NULL_CAPTION_KEY}' tensor (keys: {list(sd)}). "
+            f"Regenerate per README 'Provenance'."
+        )
+    emb = sd[NULL_CAPTION_KEY]
+    if emb.ndim == 2:
+        emb = emb.unsqueeze(0)
+    exp = (MODEL_MAX_LENGTH, CAPTION_CHANNELS)
+    if tuple(emb.shape[-2:]) != exp:
+        raise ValueError(
+            f"null caption shape {tuple(emb.shape)} != expected (*, {exp[0]}, {exp[1]}). "
+            f"Regenerate per README 'Provenance'."
+        )
+    return emb.to(device=device, dtype=dtype)
 
 
 def comfy_latent_to_lq(samples: torch.Tensor, device, dtype=torch.bfloat16) -> torch.Tensor:
@@ -134,10 +188,14 @@ def _t_list(num_steps: int, device) -> torch.Tensor:
 @torch.no_grad()
 def pid_decode_latent(net: PidNet, lq_latent: torch.Tensor, *, steps: int = 4,
                       sigma: float = 0.0, seed: int = 0, dtype=torch.bfloat16,
-                      compile: bool = False, _runner=None, step_cb=None) -> torch.Tensor:
+                      compile: bool = False, caption_embs: torch.Tensor = None,
+                      _runner=None, step_cb=None) -> torch.Tensor:
     """Run the 4-step SDE student. lq_latent: (B,16,h,w) normalized.
     Returns pixels (B,3,H,W) in [-1,1] with H=h*8*4, W=w*8*4.
 
+    `caption_embs` is the fixed null caption y the net conditions on. Pass None for
+    the zeros null (off-distribution but NaN-safe); pass a (1 or B, 300, 2304) tensor
+    (e.g. from `load_null_caption_embs`) for the faithful gemma(chi_prompt + "") null.
     `compile=True` torch.compiles the net (cached per output resolution; first
     call per (H,W) is slow). `_runner` lets callers (e.g. the tiled path) pass a
     pre-built compiled net so all same-size tiles share one graph. `step_cb`, if
@@ -147,7 +205,12 @@ def pid_decode_latent(net: PidNet, lq_latent: torch.Tensor, *, steps: int = 4,
     H, W = lh * VAE_DOWN * SR_SCALE, lw * VAE_DOWN * SR_SCALE
     run = _runner if _runner is not None else get_runner(net, dtype, compile)
 
-    cap = torch.zeros(B, MODEL_MAX_LENGTH, CAPTION_CHANNELS, device=device, dtype=dtype)
+    if caption_embs is None:
+        cap = torch.zeros(B, MODEL_MAX_LENGTH, CAPTION_CHANNELS, device=device, dtype=dtype)
+    else:
+        cap = caption_embs.to(device=device, dtype=dtype)
+        if cap.shape[0] == 1 and B > 1:
+            cap = cap.expand(B, -1, -1)
     deg = torch.full((B,), float(sigma), device=device, dtype=torch.float32)
     gen = torch.Generator(device=device).manual_seed(int(seed))
     x = torch.randn(B, 3, H, W, device=device, dtype=torch.float32, generator=gen)
@@ -208,7 +271,8 @@ def _feather_1d(n: int, overlap_px: int, device) -> torch.Tensor:
 def pid_decode_latent_tiled(net: PidNet, lq_latent: torch.Tensor, *, steps: int = 4,
                             sigma: float = 0.0, seed: int = 0, tile: int = 64,
                             overlap: int = 16, dtype=torch.bfloat16,
-                            compile: bool = False, step_cb=None) -> torch.Tensor:
+                            compile: bool = False, caption_embs: torch.Tensor = None,
+                            step_cb=None) -> torch.Tensor:
     """Tiled SR decode for latents larger than `tile` (memory bound). Decodes
     overlapping latent tiles and feather-blends them in pixel space. Output
     (B,3, h*32, w*32) in [-1,1]. `step_cb` ticks once per SDE step across all
@@ -236,7 +300,8 @@ def pid_decode_latent_tiled(net: PidNet, lq_latent: torch.Tensor, *, steps: int 
         for xi in xs:
             tile_lq = lq_latent[..., yi:yi + th, xi:xi + tw]
             px = pid_decode_latent(net, tile_lq, steps=steps, sigma=sigma, seed=seed + n,
-                                   dtype=dtype, _runner=runner, step_cb=step_cb)
+                                   dtype=dtype, caption_embs=caption_embs,
+                                   _runner=runner, step_cb=step_cb)
             py, px_ = yi * up, xi * up
             acc[..., py:py + th * up, px_:px_ + tw * up] += px.float() * wmask
             wsum[..., py:py + th * up, px_:px_ + tw * up] += wmask

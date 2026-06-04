@@ -2,8 +2,10 @@
 
 NVIDIA PiD (Pixel Diffusion Decoder) as a drop-in replacement for VAE Decode on
 Anima / Qwen-Image latents: consumes a LATENT and emits a 4x super-resolved
-IMAGE in one 4-step pass. The gemma text encoder is skipped (zero caption
-embeddings), so there is no multi-GB text-encoder download and no prompt input.
+IMAGE in one 4-step pass. The gemma text encoder is never loaded — the distilled
+path has no CFG and conditions on a fixed null caption gemma(chi_prompt+"") that
+ships pre-baked with the node (~1.4 MB), so there is no multi-GB text-encoder
+download and no prompt input.
 
 * ``AnimaPiDLoader`` - load a PiD qwenimage checkpoint -> ``ANIMA_PID`` socket.
 * ``AnimaPiDDecode`` - ``ANIMA_PID`` + ``LATENT`` -> ``IMAGE`` (4x), with optional

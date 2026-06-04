@@ -4,10 +4,21 @@ NVIDIA **PiD** (Pixel Diffusion Decoder) as a drop-in replacement for **VAE Deco
 on Anima / Qwen-Image latents. It takes a `LATENT` and emits a **4× super-resolved
 `IMAGE`** in a single 4-step pass — decode *and* upscale fused into one node.
 
-The gemma text encoder is **skipped entirely** (zero caption embeddings): the
-distilled 4-step path uses no classifier-free guidance and the net's caption
-embedder is RMSNorm-fronted, so null text is numerically safe. → no ~5 GB
-text-encoder download, and no prompt input.
+The gemma text encoder is **never loaded** — no ~5 GB download and no prompt
+input. The distilled 4-step path uses no classifier-free guidance, so the net
+just needs a *fixed* null caption. We use the faithful one: `gemma(chi_prompt +
+"")` — the model's own no-user-prompt null (`_encode_text_raw([""])`), pre-baked
+once and **bundled with the node** (`pid_null_caption_gemma.safetensors`, ~1.4 MB,
+derived data). See **Provenance** below for how it's generated.
+
+Why the faithful null and not just zeros? The qwenimage student was distilled
+with a long `chi_prompt` instruction prefixed to *every* caption, so an all-zero
+`y` is off-distribution. An A/B (four 2048px decodes, same seed/latent, zeros vs
+faithful null) gave **~29 dB PSNR**: structurally identical, differing only in
+fine screentone/line-edge detail — small enough that zeros also "works", but the
+bundled null is the in-distribution choice and costs nothing extra. (The
+checkpoint architecture is exactly reproduced — a clean load shows zero
+unexpected / zero non-`lq_proj` missing keys.)
 
 ## Flow
 
@@ -38,8 +49,8 @@ PiD runs its own internal 4-step pixel diffusion. Output size = `latent_grid × 
    cp /tmp/pid/checkpoints/PiD_res2kto4k_sr4x_official_qwenimage_distill_4step/model_ema_bf16.pth \
       ComfyUI/models/pid/pid_qwenimage_2kto4k_4step.pth
    ```
-   (The Qwen VAE and gemma are **not** needed — PiD emits pixels directly and we
-   null the caption.)
+   (The Qwen VAE and gemma are **not** needed at decode time — PiD emits pixels
+   directly and uses the bundled fixed null caption.)
 
 ## Nodes
 
@@ -76,6 +87,10 @@ format uses a non-1.0 `scale_factor`, update `pid_core.QWEN_LATENTS_*`.
   re-applying the local-import rewrites in `pid_net/`.
 - **PiD weights**: NVIDIA **NSCLv1 — non-commercial only**. Not redistributed
   here; you download them yourself. Do not ship them in a commercial product.
+- **Bundled null caption** (`pid_null_caption_gemma.safetensors`): a fixed
+  embedding derived from `gemma-2-2b-it`, subject to Google's
+  [Gemma Terms of Use](https://ai.google.dev/gemma/terms). It is derived data
+  (not gemma weights); regeneration recipe in **Provenance** below.
 
 ## Provenance
 
@@ -83,3 +98,17 @@ Net constructor config + the 4-step SDE schedule (`t_list=[0.999, 0.866, 0.634,
 0.342, 0.0]`, velocity prediction, timescale 1000) were captured from the live
 `qwenimage` 2kto4k checkpoint and baked into `pid_core.py` so no hydra config
 resolution is needed at runtime.
+
+**Bundled null caption** (`pid_null_caption_gemma.safetensors`) reproduces the
+qwenimage student's `PixelDiTModel._encode_text_raw([""])`, i.e. its no-user-prompt
+null. To regenerate (only needed if upstream changes the chi_prompt):
+
+1. Load `gemma-2-2b-it` from `Efficient-Large-Model/gemma-2-2b-it`
+   (`AutoModelForCausalLM(...).get_decoder()`, bf16); tokenizer `padding_side="right"`.
+2. `chi_prompt_str = "\n".join(CHI_PROMPT)` — the prompt list is in upstream
+   `pid/_src/configs/pid/experiment/shared_config.py` (`_CHI_PROMPT`).
+3. Tokenize `[chi_prompt_str + ""]` with `padding="max_length"`, `truncation=True`,
+   `max_length = len(tok.encode(chi_prompt_str)) + 300 - 2`.
+4. `embs = text_encoder(input_ids, attention_mask)[0]`, then select
+   `[0] + list(range(-299, 0))` → `(1, 300, 2304)`; save bf16 under key
+   `null_caption_embs`.

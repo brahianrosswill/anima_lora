@@ -6,8 +6,9 @@ Two nodes:
 
 PiD REPLACES VAE Decode: it consumes the (normalized) Qwen latent and emits RGB
 pixels directly, upscaling 4x in the same pass (latent_grid*8 -> *4). The gemma
-text encoder is skipped entirely (zero caption embeddings — see pid_core), so no
-~5GB download and no prompt input. Drop AnimaPiDDecode where VAEDecode was:
+text encoder is not loaded at decode time — the net conditions on a fixed,
+pre-baked null caption gemma(chi_prompt+"") bundled with the node (~1.4 MB), so
+no ~5GB download and no prompt input. Drop AnimaPiDDecode where VAEDecode was:
 
     checkpoint -> KSampler -> LATENT ─┐
                                       ├─► AnimaPiDDecode ─► IMAGE (4x) -> SaveImage
@@ -29,11 +30,14 @@ import folder_paths
 from comfy.utils import ProgressBar
 
 from .pid_core import (
+    NULL_CAPTION_FILENAME,
     SR_SCALE,
     VAE_DOWN,
     build_pid_net,
+    categorize_load_keys,
     comfy_latent_to_lq,
     count_tiles,
+    load_null_caption_embs,
     load_pid_weights,
     pid_decode_latent,
     pid_decode_latent_tiled,
@@ -43,6 +47,10 @@ from .pid_core import (
 _PID_DIR = os.path.join(folder_paths.models_dir, "pid")
 os.makedirs(_PID_DIR, exist_ok=True)
 folder_paths.add_model_folder_path("pid", _PID_DIR)
+
+# Faithful null caption gemma(chi_prompt + "") — bundled with the node (~1.4 MB,
+# derived data), so gemma is never needed. Regen recipe in README "Provenance".
+_NULL_CAPTION_PATH = os.path.join(os.path.dirname(__file__), NULL_CAPTION_FILENAME)
 
 _DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
@@ -124,10 +132,19 @@ class AnimaPiDLoader:
         device = mm.get_torch_device()
         net = build_pid_net(device, dt)
         missing, unexpected = load_pid_weights(net, path)
-        if missing:
-            print(f"[AnimaPiD] WARNING: {len(missing)} missing keys (e.g. {missing[:3]})")
-        if unexpected:
-            print(f"[AnimaPiD] note: {len(unexpected)} unexpected keys ignored (e.g. {unexpected[:3]})")
+        expected_missing, suspect_missing, unexpected = categorize_load_keys(missing, unexpected)
+        if expected_missing:
+            print(f"[AnimaPiD] note: {len(expected_missing)} expected lq_proj keys absent (distilled student).")
+        # Non-lq missing keys or ANY unexpected key mean NET_KWARGS in pid_core.py
+        # doesn't match this checkpoint's architecture — the strict=False load hid it.
+        if suspect_missing or unexpected:
+            print(
+                f"[AnimaPiD] WARNING: checkpoint/architecture mismatch — NET_KWARGS in pid_core.py "
+                f"may be wrong for this checkpoint.\n"
+                f"  {len(suspect_missing)} unexpected MISSING keys (e.g. {suspect_missing[:3]})\n"
+                f"  {len(unexpected)} UNEXPECTED keys (e.g. {unexpected[:3]})\n"
+                f"  Decode may produce garbage. Verify NET_KWARGS against the checkpoint."
+            )
         print(f"[AnimaPiD] loaded {ckpt_name} as {dtype} on {device}")
         return (AnimaPiDModel(net, dt),)
 
@@ -164,10 +181,34 @@ class AnimaPiDDecode:
     FUNCTION = "decode"
     CATEGORY = "Anima/PiD"
 
-    def decode(self, pid_model, latent, steps, sigma, seed, tile_latent, tile_overlap, compile=False):
+    _null_cache: dict = {}  # device-str -> cached null caption tensor
+
+    def _null_caption(self, device, dtype):
+        """The faithful gemma(chi_prompt+'') null the net conditions on (the distill
+        path has no CFG, so it's a single fixed null). Bundled with the node and
+        loaded once per device."""
+        key = str(device)
+        cached = type(self)._null_cache.get(key)
+        if cached is not None:
+            return cached.to(dtype=dtype)
+        if not os.path.exists(_NULL_CAPTION_PATH):
+            raise FileNotFoundError(
+                f"Bundled null caption missing: {_NULL_CAPTION_PATH}\n"
+                f"It ships with the node; if it was deleted, regenerate it per the "
+                f"'Provenance' section of the node README."
+            )
+        cap = load_null_caption_embs(_NULL_CAPTION_PATH, device, dtype)
+        type(self)._null_cache[key] = cap
+        print(f"[AnimaPiD] loaded null caption {tuple(cap.shape)} from bundled file")
+        return cap
+
+    def decode(self, pid_model, latent, steps, sigma, seed, tile_latent, tile_overlap,
+               compile=False):
         net = pid_model.net
         dt = pid_model.dtype
         device = mm.get_torch_device()
+
+        cap = self._null_caption(device, dt)
 
         lq = comfy_latent_to_lq(latent["samples"], device, dt)  # (B,16,h,w) normalized
         lh, lw = lq.shape[-2], lq.shape[-1]
@@ -186,11 +227,11 @@ class AnimaPiDDecode:
             px = pid_decode_latent_tiled(
                 net, lq, steps=steps, sigma=sigma, seed=seed,
                 tile=tile_latent, overlap=tile_overlap, dtype=dt, compile=compile,
-                step_cb=step_cb,
+                caption_embs=cap, step_cb=step_cb,
             )
         else:
             px = pid_decode_latent(net, lq, steps=steps, sigma=sigma, seed=seed,
-                                   dtype=dt, compile=compile, step_cb=step_cb)
+                                   dtype=dt, compile=compile, caption_embs=cap, step_cb=step_cb)
 
         # (B,3,H,W) in [-1,1] -> ComfyUI IMAGE (B,H,W,3) in [0,1]
         img = ((px.float() + 1.0) / 2.0).clamp(0, 1).permute(0, 2, 3, 1).contiguous().cpu()
