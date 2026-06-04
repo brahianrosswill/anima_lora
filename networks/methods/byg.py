@@ -453,6 +453,40 @@ def _crossattn_seqlens(mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return mask.sum(dim=-1).to(torch.int32)
 
 
+def _resolve_rollout_sigmas(args) -> Optional[list]:
+    """Parse ``byg_rollout_sigmas`` into a validated descending node list, or None.
+
+    Accepts a Python list/tuple (TOML array) or a comma-separated string (CLI),
+    and returns ``[1.0, ..., 0.0]`` (n+1 nodes → n Euler steps). None ⇒ caller
+    falls back to the uniform ``byg_rollout_steps`` grid (bit-identical path).
+    The grid must start at 1.0, end at 0.0, and be strictly descending so every
+    step has a positive dsigma and every interior node is a valid training t∈(0,1).
+    """
+    raw = getattr(args, "byg_rollout_sigmas", None)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        vals = [float(x) for x in raw.replace(" ", "").split(",") if x]
+    else:
+        vals = [float(x) for x in raw]
+    if len(vals) < 3:
+        raise ValueError(
+            f"byg_rollout_sigmas needs >=3 nodes (>=2 steps); got {vals}"
+        )
+    if abs(vals[0] - 1.0) > 1e-6 or abs(vals[-1]) > 1e-6:
+        raise ValueError(
+            f"byg_rollout_sigmas must start at 1.0 and end at 0.0; got {vals}"
+        )
+    if any(a <= b for a, b in zip(vals, vals[1:])):
+        raise ValueError(
+            f"byg_rollout_sigmas must be strictly descending; got {vals}"
+        )
+    return vals
+
+
 class BYGMethodAdapter(MethodAdapter):
     """Owns the BYG training step (paper Alg. 1)."""
 
@@ -465,6 +499,7 @@ class BYGMethodAdapter(MethodAdapter):
         self._args = None
         self._shadow: Optional[dict] = None  # snapshot/EMA of LoRA params
         self._lora_param_map: Optional[dict] = None  # cached trainable params
+        self._rollout_sigmas: Optional[list] = None  # explicit grid, or None=uniform
         self._step = 0
         self._metrics: dict = {}
 
@@ -486,6 +521,14 @@ class BYGMethodAdapter(MethodAdapter):
         self._dit = ctx.unet
         self._cond = BYGConditioning(ctx.unet)
         self._cond.apply()
+        self._rollout_sigmas = _resolve_rollout_sigmas(args)
+        if self._rollout_sigmas is not None:
+            logger.info(
+                "BYG rollout: explicit %d-step sigma grid %s (non-uniform; t sampled "
+                "from interior nodes)",
+                len(self._rollout_sigmas) - 1,
+                [round(s, 3) for s in self._rollout_sigmas],
+            )
         # Shadow is populated lazily on the first _update_shadow (when the LoRA
         # params are guaranteed on-device) — cloning here would capture CPU
         # tensors before accelerate's device move and corrupt the rollout swap.
@@ -606,9 +649,18 @@ class BYGMethodAdapter(MethodAdapter):
         eps = torch.randn_like(x)
 
         # --- t discretized to the rollout grid (exact ỹ_t capture) ----------
-        n = int(getattr(args, "byg_rollout_steps", 10) or 10)
-        k = torch.randint(1, n, (B,), device=device)  # node index in [1, n-1]
-        t = (1.0 - k.float() / n).to(x.dtype)  # sigma per sample, in (0,1)
+        # sigmas[j] is the σ at rollout node j (sigmas[0]=1.0 .. sigmas[n]=0.0).
+        # Uniform path reproduces the legacy 1/n grid bit-for-bit; an explicit
+        # byg_rollout_sigmas grid warps the nodes (Anima-aware NFE allocation).
+        if self._rollout_sigmas is not None:
+            sigmas = self._rollout_sigmas
+            n = len(sigmas) - 1
+        else:
+            n = int(getattr(args, "byg_rollout_steps", 10) or 10)
+            sigmas = [1.0 - j / n for j in range(n + 1)]
+        sig_t = torch.tensor(sigmas, device=device, dtype=x.dtype)  # [n+1]
+        k = torch.randint(1, n, (B,), device=device)  # interior node in [1, n-1]
+        t = sig_t[k]  # σ per sample at node k, in (0,1)
         t_5 = t.view(B, 1, 1, 1)
 
         # --- identity-only schedule (warmup + random identity steps) --------
@@ -661,10 +713,11 @@ class BYGMethodAdapter(MethodAdapter):
                     y_t[sel] = y[sel]
                     captured |= sel
                 if j < n:
-                    s = 1.0 - j / n
+                    s = sigmas[j]
+                    dsigma = sigmas[j] - sigmas[j + 1]  # >0; =1/n on the uniform grid
                     s_B = torch.full((B,), s, device=device, dtype=x.dtype)
                     v = self._dit_velocity(y, s_B, c_emb, c_mask, padding_mask)
-                    y = y - (1.0 / n) * v
+                    y = y - dsigma * v
             if not bool(captured.all()):
                 raise RuntimeError("BYG rollout failed to capture ỹ_t for all samples")
             y0 = y  # clean multi-step estimate

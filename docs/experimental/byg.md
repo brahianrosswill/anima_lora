@@ -220,8 +220,15 @@ escape hatch for methods whose objective isn't a single FM regression.
 - **`blocks_to_swap = 0` is enforced** — BYG runs many DiT forwards per step and
   the block-swap offloader desyncs on a second forward
   (`project_blockswap_extra_forwards_gradcache`). The adapter raises on nonzero.
-  Use plain `gradient_checkpointing`, **not** `unsloth_offload_checkpointing`
-  (same offloader-desync reason).
+- **`unsloth_offload_checkpointing` MUST stay `false`** — *not* for the
+  offloader-desync reason (that's a separate, block-swap-only issue); the unsloth
+  path is a **reentrant** checkpointer that only builds an autograd node when an
+  explicit *input* requires grad. BYG's Forward (`L_prior`) and Identity
+  (`L_id`) passes feed detached latents + a frozen source, so the only
+  grad-requiring tensors are the closed-over LoRA params — which the reentrant
+  path silently drops, leaving `L_prior` pinned at chance and only `L_cycle`
+  training. Use plain `gradient_checkpointing` (`use_reentrant=False`). Proof &
+  regression guard: `bench/byg/grad_parity.py`.
 - **No caption dropout** — the instruction/captions *are* the supervision signal
   (`caption_dropout_rate = 0.0`).
 - **5D dim-2 boundary** — `_dit_velocity` does `unsqueeze(2)` in / `squeeze(2)`

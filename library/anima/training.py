@@ -345,7 +345,22 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         default=10,
         help="Number of Euler integration steps n for the bootstrap rollout that "
         "fabricates the pseudo-noisy-target y~_t and clean y~_0 (paper App. B.1 = 10). "
-        "Shorter = cheaper, lower-quality pseudo-targets.",
+        "Shorter = cheaper, lower-quality pseudo-targets. Ignored when "
+        "byg_rollout_sigmas is set (the explicit grid defines n).",
+    )
+    parser.add_argument(
+        "--byg_rollout_sigmas",
+        type=str,
+        default=None,
+        help="Explicit non-uniform rollout sigma grid, overriding the uniform "
+        "byg_rollout_steps schedule. A strictly-descending list from 1.0 to 0.0 "
+        "inclusive (n+1 nodes -> n Euler steps); the variable step size dsigma_j = "
+        "sigma_j - sigma_{j+1} is used and the training timestep t is sampled from the "
+        "interior nodes. Anima resolves x0 by sigma~=0.45 (project_sigma_signal_resolves"
+        "_by_045), so concentrating nodes in the forming band [0.4, 0.9] and taking one "
+        "coarse step through the resolved tail keeps y~_0 sharp at low NFE. TOML: a "
+        "float array (e.g. [1.0, 0.85, 0.70, 0.55, 0.40, 0.0]); CLI: comma-separated. "
+        "Default None = uniform (bit-identical to the byg_rollout_steps path).",
     )
     parser.add_argument(
         "--byg_snapshot_every",
