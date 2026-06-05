@@ -28,15 +28,15 @@ network_args = [
     "apply_ffn_lora=1",
 ]
 
-output_name = "anima_colorize_full"
+output_name = "anima_colorize"
 sigmoid_bias=0
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
 learning_rate = 2e-5
-max_train_epochs = 1
-save_every_n_epochs = 1
-checkpointing_epochs = 1
+max_train_epochs = 4
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 
 use_easycontrol = true
 easycontrol_drop_p = 0.0
@@ -53,4 +53,4 @@ easycontrol_cond_noise_max = 0.0
 
 blocks_to_swap = 0
 gradient_checkpointing = true
-unsloth_offload_checkpointing = false
+unsloth_offload_checkpointing = true

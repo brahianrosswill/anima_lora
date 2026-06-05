@@ -645,7 +645,7 @@ def main() -> None:
     parser.add_argument(
         "--text_mask_dilate",
         type=int,
-        default=2,
+        default=0,
         help="px to grow the text mask before pasting (catches anti-aliased glyph fringes)",
     )
     parser.add_argument(

@@ -17,10 +17,12 @@ if str(COLORIZE_DIR) not in sys.path:
     sys.path.insert(0, str(COLORIZE_DIR))
 
 from color_caption import (  # noqa: E402
+    _NON_SERIES_COPYRIGHT,
     filter_to_colors,
     filter_to_colors_and_copyright,
     is_color_tag,
     is_copyright_tag,
+    load_copyright_tags,
 )
 
 
@@ -126,3 +128,22 @@ def test_copyright_protected_from_dropout():
     for v in variants[1:]:
         assert "genshin impact" in v
         assert "blue hair" not in v and "red dress" not in v and "green eyes" not in v
+
+
+def test_original_excluded_from_loaded_copyright_vocab():
+    # "original" is Danbooru's "no franchise" copyright tag — it must NOT be
+    # loaded as a copyright tag, so it's neither kept nor dropout-protected.
+    vocab = load_copyright_tags()  # default corpus index
+    assert "original" not in vocab
+    assert _NON_SERIES_COPYRIGHT.isdisjoint(vocab)
+    # A real series tag from the same group still loads.
+    assert "genshin impact" in vocab
+
+
+def test_original_not_kept_as_copyright_prefix():
+    # With "original" excluded, an original-tagged caption collapses to colors.
+    vocab = load_copyright_tags()
+    out = filter_to_colors_and_copyright(
+        "original, 1girl, pink hair, blue eyes", vocab
+    )
+    assert out == "pink hair, blue eyes"

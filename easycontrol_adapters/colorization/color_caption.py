@@ -120,6 +120,16 @@ def filter_to_colors(caption: str) -> str:
     return ", ".join(kept)
 
 
+# Copyright-group entries that name "no series" rather than a real franchise.
+# ``original`` is Danbooru's copyright tag for non-derivative works — it's the
+# single most common copyright tag in the corpus, but it carries no series
+# identity the manga cond can't already encode. Keeping it would inject a
+# constant, dropout-protected leading token on ~a quarter of the captions and
+# dilute the color→text coupling the filter exists to sharpen. So it's stripped
+# from the copyright vocab (keep + protect paths both read this set).
+_NON_SERIES_COPYRIGHT: frozenset[str] = frozenset({"original", "original character"})
+
+
 @functools.lru_cache(maxsize=4)
 def load_copyright_tags(index_path: str | Path = DEFAULT_CAPTION_INDEX) -> frozenset[str]:
     """Lowercased set of every copyright tag name from the caption index.
@@ -128,6 +138,10 @@ def load_copyright_tags(index_path: str | Path = DEFAULT_CAPTION_INDEX) -> froze
     method-agnostic typed-tag index. Returns an empty set if the index is missing
     so callers degrade to "no copyright kept" rather than crashing. Cached because
     the index is a couple-thousand-image JSON and this runs once per caption.
+
+    Non-series meta-copyright tags (``_NON_SERIES_COPYRIGHT``, e.g. ``original``)
+    are excluded — they name "no franchise", so they're not worth riding along as
+    a protected caption prefix.
     """
     p = Path(index_path)
     if not p.exists():
@@ -135,7 +149,11 @@ def load_copyright_tags(index_path: str | Path = DEFAULT_CAPTION_INDEX) -> froze
     data = json.loads(p.read_text(encoding="utf-8"))
     groups = data.get("groups", {})
     copyright_group = groups.get("copyright", {})
-    return frozenset(name.strip().lower() for name in copyright_group if name.strip())
+    return frozenset(
+        name.strip().lower()
+        for name in copyright_group
+        if name.strip() and name.strip().lower() not in _NON_SERIES_COPYRIGHT
+    )
 
 
 def is_copyright_tag(tag: str, copyright_tags: frozenset[str]) -> bool:
