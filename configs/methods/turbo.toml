@@ -11,7 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_L2"
+output_name = "anima_turbo_L3"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -72,7 +72,7 @@ grad_step = "random"            # which rollout step carries gradient (BOTH base
 [optim]
 student_lr = 2e-5
 fake_lr = 2e-5
-fake_steps_per_student_step = 4
+fake_steps_per_student_step = 3
 fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
                                 # against the student's (init ≈ teacher) x_pred before the

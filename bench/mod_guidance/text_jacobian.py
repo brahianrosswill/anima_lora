@@ -51,6 +51,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 
+from bench._anima import DEFAULT_DIT
 from bench._common import make_run_dir, write_result
 from library.anima import weights as anima_utils
 from library.anima.models import Anima
@@ -63,7 +64,9 @@ from library.inference.uncond import (
 )
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
 def _dc_ac(x4: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, float, float]:
@@ -91,37 +94,81 @@ def _dc_ac(x4: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, float, float]:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Text-Jacobian alignment probe for mod-guidance")
-    p.add_argument("--pooled_text_proj", required=True,
-                   help="Trained pooled_text_proj.safetensors to probe.")
-    p.add_argument("--data_dir", default="post_image_dataset/lora",
-                   help="Cached latents + TE sidecars (same as distill --data_dir).")
-    p.add_argument("--synth_data_dir", default=None,
-                   help="Teacher-synthetic latent dir (distill Phase 2). MUST match the "
-                        "head's training distribution — a synth-trained head probed on real "
-                        "latents is off-distribution (err_a inflated, cos collapses).")
-    p.add_argument("--uncond_te_path", default=None,
-                   help='T5("") sidecar; defaults to the canonical distill-prep path.')
-    p.add_argument("--dit_path", default="models/diffusion_models/anima-base-v1.0.safetensors")
+    p = argparse.ArgumentParser(
+        description="Text-Jacobian alignment probe for mod-guidance"
+    )
+    p.add_argument(
+        "--pooled_text_proj",
+        required=True,
+        help="Trained pooled_text_proj.safetensors to probe.",
+    )
+    p.add_argument(
+        "--data_dir",
+        default="post_image_dataset/lora",
+        help="Cached latents + TE sidecars (same as distill --data_dir).",
+    )
+    p.add_argument(
+        "--synth_data_dir",
+        default=None,
+        help="Teacher-synthetic latent dir (distill Phase 2). MUST match the "
+        "head's training distribution — a synth-trained head probed on real "
+        "latents is off-distribution (err_a inflated, cos collapses).",
+    )
+    p.add_argument(
+        "--uncond_te_path",
+        default=None,
+        help='T5("") sidecar; defaults to the canonical distill-prep path.',
+    )
+    p.add_argument("--dit_path", default=DEFAULT_DIT)
     p.add_argument("--attn_mode", default="flash")
-    p.add_argument("--sigmas", type=float, nargs="+", default=[0.1, 0.4, 0.7, 0.9],
-                   help="Fixed noise levels to probe (text response is σ-dependent).")
-    p.add_argument("--n_pairs", type=int, default=96,
-                   help="Number of (latent, textA, textB) trials per σ.")
-    p.add_argument("--h", type=float, default=1.0,
-                   help="Text perturbation scale. 1.0 = full A→B prompt swap; "
-                        "small (e.g. 0.1) = local Jacobian (GAD-faithful) variant.")
-    p.add_argument("--validation_split", type=float, default=0.05,
-                   help="Held-out fraction; probe runs on split='val' so it never "
-                        "touches data the head trained on.")
-    p.add_argument("--validation_seed", type=int, default=42,
-                   help="Must match the distill run's --validation_seed for a true holdout.")
-    p.add_argument("--max_samples", type=int, default=None,
-                   help="Cap val samples loaded into memory (per bucket).")
+    p.add_argument(
+        "--sigmas",
+        type=float,
+        nargs="+",
+        default=[0.1, 0.4, 0.7, 0.9],
+        help="Fixed noise levels to probe (text response is σ-dependent).",
+    )
+    p.add_argument(
+        "--n_pairs",
+        type=int,
+        default=96,
+        help="Number of (latent, textA, textB) trials per σ.",
+    )
+    p.add_argument(
+        "--h",
+        type=float,
+        default=1.0,
+        help="Text perturbation scale. 1.0 = full A→B prompt swap; "
+        "small (e.g. 0.1) = local Jacobian (GAD-faithful) variant.",
+    )
+    p.add_argument(
+        "--validation_split",
+        type=float,
+        default=0.05,
+        help="Held-out fraction; probe runs on split='val' so it never "
+        "touches data the head trained on.",
+    )
+    p.add_argument(
+        "--validation_seed",
+        type=int,
+        default=42,
+        help="Must match the distill run's --validation_seed for a true holdout.",
+    )
+    p.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Cap val samples loaded into memory (per bucket).",
+    )
     p.add_argument("--seed", type=int, default=0, help="Trial-sampling / noise seed.")
-    p.add_argument("--compile", dest="compile", action="store_true", default=True,
-                   help="torch.compile each Block._forward (native-shape; one graph "
-                        "per token count). On by default — amortises the 384 forwards.")
+    p.add_argument(
+        "--compile",
+        dest="compile",
+        action="store_true",
+        default=True,
+        help="torch.compile each Block._forward (native-shape; one graph "
+        "per token count). On by default — amortises the 384 forwards.",
+    )
     p.add_argument("--no_compile", dest="compile", action="store_false")
     p.add_argument("--label", default=None)
     return p.parse_args()
@@ -129,8 +176,11 @@ def parse_args():
 
 def load_model(args, device, dtype) -> Anima:
     model: Anima = anima_utils.load_anima_model(
-        device, args.dit_path, attn_mode=args.attn_mode,
-        loading_device=device, dit_weight_dtype=dtype,
+        device,
+        args.dit_path,
+        attn_mode=args.attn_mode,
+        loading_device=device,
+        dit_weight_dtype=dtype,
     )
     # pooled_text_proj is not in the base checkpoint — materialize then load trained weights.
     model.pooled_text_proj.to_empty(device="cpu")
@@ -183,8 +233,11 @@ def main():
 
     # --- Collect held-out samples into memory (val split is small) ---
     val = CachedDataset(
-        args.data_dir, batch_size=1, split="val",
-        validation_split=args.validation_split, validation_seed=args.validation_seed,
+        args.data_dir,
+        batch_size=1,
+        split="val",
+        validation_split=args.validation_split,
+        validation_seed=args.validation_seed,
         synth_data_dir=args.synth_data_dir,
     )
     n = len(val)
@@ -198,9 +251,9 @@ def main():
     latents, crossattns, pooleds = [], [], []
     for k in range(n):
         _idx, lat, cross, pooled = val[k]
-        latents.append(lat)            # (16, H, W)
-        crossattns.append(cross)       # (seq, 1024) — max-padded, uniform seq
-        pooleds.append(pooled)         # (1024,)
+        latents.append(lat)  # (16, H, W)
+        crossattns.append(cross)  # (seq, 1024) — max-padded, uniform seq
+        pooleds.append(pooled)  # (1024,)
     logger.info(f"Loaded {n} held-out samples.")
 
     def fwd(noisy, sigma, crossattn_emb, *, skip_pooled, pooled_override=None):
@@ -211,8 +264,12 @@ def main():
         ts = torch.full((B,), float(sigma), device=device, dtype=dtype)
         with torch.no_grad(), torch.autocast("cuda", dtype=dtype):
             out = model.forward_mini_train_dit(
-                noisy, ts, crossattn_emb, padding_mask=pad,
-                skip_pooled_text_proj=skip_pooled, pooled_text_override=pooled_override,
+                noisy,
+                ts,
+                crossattn_emb,
+                padding_mask=pad,
+                skip_pooled_text_proj=skip_pooled,
+                pooled_text_override=pooled_override,
             )
         return out.float()
 
@@ -227,15 +284,15 @@ def main():
             if j == i:
                 j = (j + 1) % n
 
-            lat = latents[i].to(device, dtype=dtype).unsqueeze(0)            # (1,16,H,W)
-            cross_a = crossattns[i].to(device, dtype=dtype).unsqueeze(0)     # (1,seq,1024)
+            lat = latents[i].to(device, dtype=dtype).unsqueeze(0)  # (1,16,H,W)
+            cross_a = crossattns[i].to(device, dtype=dtype).unsqueeze(0)  # (1,seq,1024)
             cross_b = crossattns[j].to(device, dtype=dtype).unsqueeze(0)
-            pool_a = pooleds[i].to(device, dtype=dtype).unsqueeze(0)         # (1,1024)
+            pool_a = pooleds[i].to(device, dtype=dtype).unsqueeze(0)  # (1,1024)
             pool_b = pooleds[j].to(device, dtype=dtype).unsqueeze(0)
 
             # Fixed (latent, noise, σ); vary only text. Deterministic per trial.
             noise = torch.randn(lat.shape, generator=gen).to(device, dtype=dtype)
-            noisy = ((1.0 - sigma) * lat + sigma * noise).unsqueeze(2)       # (1,16,1,H,W)
+            noisy = ((1.0 - sigma) * lat + sigma * noise).unsqueeze(2)  # (1,16,1,H,W)
 
             # Perturb text from A toward B by h (h=1 → full swap to B).
             cross_p = cross_a + args.h * (cross_b - cross_a)
@@ -250,8 +307,12 @@ def main():
 
             # Student (text via modulation MLP; crossattn pinned at uncond).
             uncond = uncond_for_batch(uncond_te_1, cross_a)
-            s_a = fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_a).squeeze(2)
-            s_p = fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_p).squeeze(2)
+            s_a = fwd(
+                noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_a
+            ).squeeze(2)
+            s_p = fwd(
+                noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_p
+            ).squeeze(2)
             dS4 = s_p - s_a
             dS = dS4.flatten()
 
@@ -264,8 +325,12 @@ def main():
             # --- DAVE DC/AC decomposition of the two response deltas ---
             dT_dc, dT_ac, dT_dce, dT_ace = _dc_ac(dT4)
             dS_dc, dS_ac, dS_dce, dS_ace = _dc_ac(dS4)
-            cos_dc = F.cosine_similarity(dS_dc, dT_dc, dim=0).item()  # within-DC aim (σ-FiLM owns this)
-            cos_ac = F.cosine_similarity(dS_ac, dT_ac, dim=0).item()  # gain-rescaling reach
+            cos_dc = F.cosine_similarity(
+                dS_dc, dT_dc, dim=0
+            ).item()  # within-DC aim (σ-FiLM owns this)
+            cos_ac = F.cosine_similarity(
+                dS_ac, dT_ac, dim=0
+            ).item()  # gain-rescaling reach
             dT_tot = dT_dce + dT_ace
             dS_tot = dS_dce + dS_ace
             dT_ac_frac = dT_ace / (dT_tot + eps)  # teacher response: AC share
@@ -284,14 +349,30 @@ def main():
             # cos≈0 is uninformative noise; if err_a ≪ ‖ΔT‖ then a low cos is a
             # genuine text-derivative misalignment (the GAD-relevant case).
             err_a = (s_a.flatten() - t_a.flatten()).norm().item()
-            rel_err_a = err_a / (t_a.flatten().norm().item() + eps)  # held-out distill residual, normalized
-            rows.append((
-                float(sigma), cos, ratio, dT_norm, err_a, rel_err_a,
-                cos_dc, cos_ac, dT_ac_frac, dS_ac_frac, cos_ceiling, dc_aligned_full,
-            ))
+            rel_err_a = err_a / (
+                t_a.flatten().norm().item() + eps
+            )  # held-out distill residual, normalized
+            rows.append(
+                (
+                    float(sigma),
+                    cos,
+                    ratio,
+                    dT_norm,
+                    err_a,
+                    rel_err_a,
+                    cos_dc,
+                    cos_ac,
+                    dT_ac_frac,
+                    dS_ac_frac,
+                    cos_ceiling,
+                    dc_aligned_full,
+                )
+            )
 
     if not rows:
-        raise SystemExit("No valid trials (all text deltas below eps). Check the dataset.")
+        raise SystemExit(
+            "No valid trials (all text deltas below eps). Check the dataset."
+        )
 
     # --- Aggregate per σ + overall ---
     def _col(rs_, sig, idx):
@@ -320,19 +401,30 @@ def main():
         dn_mean = _mean(dn)
         ea_mean = _mean(ea)
         per_sigma[f"{sigma:.2f}"] = {
-            "cos_mean": mean, "cos_std": std,
+            "cos_mean": mean,
+            "cos_std": std,
             "ratio_mean": _mean(rs),
             "dT_norm_mean": dn_mean,
             "err_a_mean": ea_mean,
             "rel_err_a_mean": _mean(re_),  # ‖s_a−t_a‖/‖t_a‖ — comparable to val MSE
             "delta_snr": dn_mean / (ea_mean + eps),  # ‖ΔT‖ vs head pointwise error
             # --- DAVE DC/AC decomposition ---
-            "cos_dc_mean": _mean(cdc),  # within-DC aim — the factor σ-FiLM/training owns
+            "cos_dc_mean": _mean(
+                cdc
+            ),  # within-DC aim — the factor σ-FiLM/training owns
             "cos_ac_mean": _mean(cac),  # within-AC aim — limited to gain-rescaling
-            "dT_ac_frac_mean": _mean(dtacf),  # teacher response: AC energy share (ceiling driver)
-            "dS_ac_frac_mean": _mean(dsacf),  # student response: AC energy share (gain reach)
-            "cos_ceiling_mean": _mean(ceil),  # √(dT DC frac): best full-cos for ANY pure-DC head
-            "dc_aligned_full_mean": _mean(dcaf),  # full-cos if DC aim perfected at current split
+            "dT_ac_frac_mean": _mean(
+                dtacf
+            ),  # teacher response: AC energy share (ceiling driver)
+            "dS_ac_frac_mean": _mean(
+                dsacf
+            ),  # student response: AC energy share (gain reach)
+            "cos_ceiling_mean": _mean(
+                ceil
+            ),  # √(dT DC frac): best full-cos for ANY pure-DC head
+            "dc_aligned_full_mean": _mean(
+                dcaf
+            ),  # full-cos if DC aim perfected at current split
             "n": len(cs),
         }
         logger.info(
@@ -356,15 +448,31 @@ def main():
     csv_path = run_dir / "per_trial.csv"
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow([
-            "sigma", "cos", "ratio", "dT_norm", "err_a", "rel_err_a",
-            "cos_dc", "cos_ac", "dT_ac_frac", "dS_ac_frac", "cos_ceiling", "dc_aligned_full",
-        ])
+        w.writerow(
+            [
+                "sigma",
+                "cos",
+                "ratio",
+                "dT_norm",
+                "err_a",
+                "rel_err_a",
+                "cos_dc",
+                "cos_ac",
+                "dT_ac_frac",
+                "dS_ac_frac",
+                "cos_ceiling",
+                "dc_aligned_full",
+            ]
+        )
         w.writerows(rows)
     write_result(
-        run_dir, script=__file__, args=args,
+        run_dir,
+        script=__file__,
+        args=args,
         metrics={"per_sigma": per_sigma, "overall": overall},
-        label=args.label or "text-jacobian", artifacts=["per_trial.csv"], device=device,
+        label=args.label or "text-jacobian",
+        artifacts=["per_trial.csv"],
+        device=device,
     )
     logger.info(f"Wrote {run_dir / 'result.json'}")
 

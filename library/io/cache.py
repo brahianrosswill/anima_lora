@@ -61,9 +61,7 @@ def resolve_cache_path(
         # surprising and the lookup-side scanners wouldn't see them anyway.
         if rel and rel != "." and not rel.startswith(".."):
             rel_dir = rel
-    target_dir = (
-        os.path.join(cache_dir_path, rel_dir) if rel_dir else cache_dir_path
-    )
+    target_dir = os.path.join(cache_dir_path, rel_dir) if rel_dir else cache_dir_path
     os.makedirs(target_dir, exist_ok=True)
     return os.path.join(target_dir, stem + suffix)
 
@@ -178,7 +176,11 @@ def load_cached_crossattn_emb(
 
     if "num_variants" in sd:
         n = int(sd["num_variants"])
-        vi = random.randint(0, n - 1) if variant == "random" else min(int(variant), n - 1)
+        vi = (
+            random.randint(0, n - 1)
+            if variant == "random"
+            else min(int(variant), n - 1)
+        )
         key = f"crossattn_emb_v{vi}"
         if key in sd:
             return sd[key].float()
@@ -211,7 +213,11 @@ def load_cached_text_features(
     vi = 0
     if "num_variants" in sd:
         n = int(sd["num_variants"])
-        vi = random.randint(0, n - 1) if variant == "random" else min(int(variant), n - 1)
+        vi = (
+            random.randint(0, n - 1)
+            if variant == "random"
+            else min(int(variant), n - 1)
+        )
 
     crossattn = None
     if f"crossattn_emb_v{vi}" in sd:
@@ -261,10 +267,69 @@ def stem_from_cache_path(path: str | os.PathLike) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Bucketed sample discovery (promoted from bench/_anima.py).
+# Bucketed-latent filename parsing + stem-grouped discovery.
 # ---------------------------------------------------------------------------
 
-_RES_RE = re.compile(r"_(\d{3,5})x(\d{3,5})_anima\.npz$")
+# `{stem}_{Wpix}x{Hpix}_anima.npz`. The `{3,5}` digit bound matches real image
+# dimensions and avoids swallowing a numeric stem suffix into the resolution.
+_LATENT_PIXEL_RE = re.compile(
+    r"^(?P<stem>.+)_(?P<w>\d{3,5})x(?P<h>\d{3,5})"
+    + re.escape(LATENT_CACHE_SUFFIX)
+    + r"$"
+)
+
+
+class LatentCacheFile(NamedTuple):
+    """A parsed bucketed-latent cache filename."""
+
+    path: Path
+    stem: str
+    width: int  # source pixels (the W in the `{W}x{H}` filename tag)
+    height: int
+
+
+def parse_latent_cache_name(path: str | os.PathLike) -> LatentCacheFile | None:
+    """Parse a ``{stem}_{W}x{H}_anima.npz`` path into its parts.
+
+    Returns ``(path, stem, W_px, H_px)`` or ``None`` if the basename doesn't
+    match the bucketed-latent convention. The single source of truth for the
+    pixel-dim filename pattern — bench probes should use this instead of
+    re-compiling their own ``_FNAME_RE`` / ``_RES_RE`` / ``_bucket_of``.
+    """
+    p = Path(path)
+    m = _LATENT_PIXEL_RE.match(p.name)
+    if m is None:
+        return None
+    return LatentCacheFile(p, m.group("stem"), int(m.group("w")), int(m.group("h")))
+
+
+def discover_latents_by_stem(
+    cache_dir: str | os.PathLike, *, recursive: bool = True
+) -> dict[str, list[LatentCacheFile]]:
+    """Group every cached latent NPZ under ``cache_dir`` by image stem.
+
+    Recursive by default — the lora cache is nested by artist. Each value is the
+    stem's bucket file(s), stable-sorted by path (a stem re-cached at multiple
+    aspect ratios has several). Non-matching files are skipped.
+
+    Sits next to :func:`discover_cached_pairs` but answers the "give me *all*
+    buckets per stem, TE or not" question (artist grouping, per-stem bucket
+    selection) where ``discover_cached_pairs`` is the TE-gated, first-bucket
+    variant.
+    """
+    root = Path(cache_dir)
+    pattern = "*" + LATENT_CACHE_SUFFIX
+    paths = root.rglob(pattern) if recursive else root.glob(pattern)
+    out: dict[str, list[LatentCacheFile]] = {}
+    for parsed in (parse_latent_cache_name(p) for p in sorted(paths)):
+        if parsed is not None:
+            out.setdefault(parsed.stem, []).append(parsed)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Bucketed sample discovery (promoted from bench/_anima.py).
+# ---------------------------------------------------------------------------
 
 
 def discover_bucketed_samples(
@@ -310,12 +375,11 @@ def discover_bucketed_samples(
 
     by_bucket: dict[str, list[tuple[str, str, str, str]]] = {}
     for p in npz_paths:
-        name = Path(p).name
-        m = _RES_RE.search(name)
-        if not m:
+        parsed = parse_latent_cache_name(p)
+        if parsed is None:
             continue
-        stem = name[: m.start()]
-        te = data_dir / f"{stem}_anima_te.safetensors"
+        stem = parsed.stem
+        te = data_dir / f"{stem}{TE_CACHE_SUFFIX}"
         if not te.exists():
             continue
         with np.load(p) as z:

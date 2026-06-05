@@ -30,15 +30,8 @@ from anima_lora import (  # noqa: E402
     prepare_text_inputs,
 )
 
-DEFAULT_PROMPT = (
-    "masterpiece, best quality, score_7, safe. An anime girl wearing a black tank-top"
-    " and denim shorts is standing outdoors. She's holding a rectangular sign out in"
-    ' front of her that reads "ANIMA". She\'s looking at the viewer with a smile. The'
-    " background features some trees and blue sky with clouds."
-)
-DEFAULT_NEGATIVE = (
-    "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia"
-)
+from bench._anima import DEFAULT_NEG as DEFAULT_NEGATIVE  # noqa: E402
+from bench._anima import DEFAULT_PROMPT  # noqa: E402
 
 # (label, dave-on, strength, block_lo, block_hi). block_hi=-1 → last block.
 CONFIGS = [
@@ -112,7 +105,9 @@ def main() -> None:
             args.dave_sigma_hi = 1.0
             print(f"[eyeball] seed={seed} {label}")
             latent = generate(
-                args, gen_settings, shared_models=shared,
+                args,
+                gen_settings,
+                shared_models=shared,
                 precomputed_text_data=text_data,
             )
             img = decode_to_pil(vae, latent, device)

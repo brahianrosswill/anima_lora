@@ -33,6 +33,7 @@ is to show the raw primitives. Either way each script keeps a `sys.path` shim so
 | [`02_generate_with_lora.py`](02_generate_with_lora.py) | Same, with one or more LoRA adapters attached at DiT load | + adapter `.safetensors` |
 | [`03_config_and_network.py`](03_config_and_network.py) | `load_method_preset` merge chain + `create_network` (three-axis routing) | config part: nothing; `--build-network`: DiT |
 | [`04_train_lora.py`](04_train_lora.py) | In-process training via `AnimaTrainer().train(args)` | preprocessed dataset cache |
+| [`08_generate_with_correction.py`](08_generate_with_correction.py) | Training-free sampler correction (DCW / Spectrum) via the `GenerationRequest.extra_argv` escape hatch for long-tail method flags | DiT + VAE + text encoder |
 
 **Building blocks** — the raw primitives for writing your own `scripts/` tool:
 
@@ -77,6 +78,7 @@ python examples/05_load_models.py --prompt "a lighthouse at dusk"
 python examples/06_vae_and_dataset.py                       # iterate the cache
 python examples/06_vae_and_dataset.py --image some/photo.png  # VAE round-trip
 python examples/07_frozen_dit_training_build.py             # build a trainable adapter
+python examples/08_generate_with_correction.py --correction dcw   # extra_argv method knobs
 ```
 
 ## Notes for embedders

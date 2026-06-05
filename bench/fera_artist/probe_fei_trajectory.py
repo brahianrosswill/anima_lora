@@ -106,6 +106,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from bench._anima import add_model_args, discover_latents_by_stem  # noqa: E402
 from bench._common import make_run_dir, write_result  # noqa: E402
 from library.runtime.fei import compute_fei_2band, fei_sigma_low  # noqa: E402
 
@@ -114,9 +115,6 @@ log = logging.getLogger("fera-trajectory-probe")
 
 
 _UNTAGGED = "__untagged__"
-# Cache filenames look like ``{stem}_{W}x{H}_anima.npz`` (W, H = pixels).
-# Mirrors ``probe_fei_artist.py``.
-_FNAME_RE = re.compile(r"^(?P<stem>.+)_(?P<w>\d{3,5})x(?P<h>\d{3,5})_anima\.npz$")
 
 
 def _scan_cache(cache_dir: Path) -> dict[str, tuple[int, int]]:
@@ -124,18 +122,13 @@ def _scan_cache(cache_dir: Path) -> dict[str, tuple[int, int]]:
 
     A stem can have multiple cache files if it was re-cached at different
     aspect ratios; we take the first stable-sorted hit (same convention
-    as the artist probe).
+    as the artist probe). Filename parsing lives in
+    :func:`discover_latents_by_stem`.
     """
-    out: dict[str, tuple[int, int]] = {}
-    for f in sorted(cache_dir.rglob("*_anima.npz")):
-        m = _FNAME_RE.match(f.name)
-        if m is None:
-            continue
-        stem = m.group("stem")
-        if stem in out:
-            continue
-        out[stem] = (int(m.group("w")), int(m.group("h")))
-    return out
+    return {
+        stem: (files[0].width, files[0].height)
+        for stem, files in discover_latents_by_stem(cache_dir).items()
+    }
 
 
 def _build_artist_groups(
@@ -267,7 +260,9 @@ def _install_fei_patch() -> None:
             _CAPTURE_STEP_COUNTER[id(model)] = step + 1
             row: dict = {
                 "step": step,
-                "t_sampler": _LAST_SIGMA_T if _LAST_SIGMA_T is not None else float("nan"),
+                "t_sampler": _LAST_SIGMA_T
+                if _LAST_SIGMA_T is not None
+                else float("nan"),
                 "h_lat": h_lat,
                 "w_lat": w_lat,
             }
@@ -299,7 +294,9 @@ def _install_fei_patch() -> None:
                     (t0, z0), (t1, z1) = _Z_HIST
                     h1, h2 = t1 - t0, cur[0] - t1
                     if abs(h1) > 1e-8 and abs(h2) > 1e-8 and z0.shape == cur[1].shape:
-                        accel = (2.0 / (h1 + h2)) * ((cur[1] - z1) / h2 - (z1 - z0) / h1)
+                        accel = (2.0 / (h1 + h2)) * (
+                            (cur[1] - z1) / h2 - (z1 - z0) / h1
+                        )
                         m = float(accel.pow(2).mean().sqrt().item())
                         _CAPTURE_TARGET[-2]["m_accel"] = m
                 _Z_HIST.append(cur)
@@ -447,8 +444,12 @@ def _per_step_population_stats(rows: list[dict]) -> list[dict]:
             "mean_e_high": float(mean(by_step_high[s])),
             "std_e_high": float(pstdev(by_step_high[s])),
             # CBS monitor: NaN at the trajectory endpoints (no second difference).
-            "m_accel_mean": float(mean(by_step_accel[s])) if by_step_accel[s] else float("nan"),
-            "m_accel_std": float(pstdev(by_step_accel[s])) if by_step_accel[s] else float("nan"),
+            "m_accel_mean": float(mean(by_step_accel[s]))
+            if by_step_accel[s]
+            else float("nan"),
+            "m_accel_std": float(pstdev(by_step_accel[s]))
+            if by_step_accel[s]
+            else float("nan"),
         }
         for s in sorted(by_step_low.keys())
     ]
@@ -490,8 +491,7 @@ def _cbs_analysis(per_step_stats: list[dict], n_segments=(2, 3)) -> dict:
     pts = [
         (s["t_sampler"], s["m_accel_mean"])
         for s in per_step_stats
-        if s["t_sampler"] == s["t_sampler"]
-        and s["m_accel_mean"] == s["m_accel_mean"]
+        if s["t_sampler"] == s["t_sampler"] and s["m_accel_mean"] == s["m_accel_mean"]
     ]
     pts.sort(key=lambda p: p[0])  # ascending t
     out: dict = {}
@@ -523,14 +523,21 @@ def _cbs_analysis(per_step_stats: list[dict], n_segments=(2, 3)) -> dict:
             if dt > 1e-8:
                 slope = abs(st[i]["mean_e_low"] - st[i - 1]["mean_e_low"]) / dt
                 if slope > best_slope:
-                    best_slope, best_t = slope, 0.5 * (st[i]["t_sampler"] + st[i - 1]["t_sampler"])
+                    best_slope, best_t = (
+                        slope,
+                        0.5 * (st[i]["t_sampler"] + st[i - 1]["t_sampler"]),
+                    )
         out["elow_slopemax_t"] = best_t
     return out
 
 
-def _write_trajectory_plot(out_dir: Path, rows: list[dict],
-                           per_step_stats: list[dict], args,
-                           cbs: dict | None = None) -> str:
+def _write_trajectory_plot(
+    out_dir: Path,
+    rows: list[dict],
+    per_step_stats: list[dict],
+    args,
+    cbs: dict | None = None,
+) -> str:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -554,7 +561,9 @@ def _write_trajectory_plot(out_dir: Path, rows: list[dict],
         steps_sorted,
         [m - s_ for m, s_ in zip(mu, sd)],
         [m + s_ for m, s_ in zip(mu, sd)],
-        color="C0", alpha=0.2, label="±1σ",
+        color="C0",
+        alpha=0.2,
+        label="±1σ",
     )
     ax_band.set_xlabel("denoising step (0 = noise, N−1 = clean)")
     ax_band.set_ylabel("e_low(z_t)")
@@ -578,7 +587,8 @@ def _write_trajectory_plot(out_dir: Path, rows: list[dict],
         [
             (s["t_sampler"], s["m_accel_mean"])
             for s in per_step_stats
-            if s["t_sampler"] == s["t_sampler"] and s["m_accel_mean"] == s["m_accel_mean"]
+            if s["t_sampler"] == s["t_sampler"]
+            and s["m_accel_mean"] == s["m_accel_mean"]
         ],
         key=lambda p: p[0],
     )
@@ -594,8 +604,12 @@ def _write_trajectory_plot(out_dir: Path, rows: list[dict],
             ax_cum = ax_mon.twinx()
             total = cbs["total_monitor"] or 1.0
             ax_cum.plot(
-                cbs["t_axis"], [c / total for c in cbs["cum"]],
-                color="C3", linestyle="--", alpha=0.7, label="∫m dt (norm)",
+                cbs["t_axis"],
+                [c / total for c in cbs["cum"]],
+                color="C3",
+                linestyle="--",
+                alpha=0.7,
+                label="∫m dt (norm)",
             )
             ax_cum.set_ylabel("cumulative ∫m dt (normalized)")
             ax_cum.set_ylim(0, 1)
@@ -603,15 +617,28 @@ def _write_trajectory_plot(out_dir: Path, rows: list[dict],
             for N, style, col in (("N2", "-", "C0"), ("N3", ":", "C4")):
                 for j, kt in enumerate(cbs.get("knots", {}).get(N, [])):
                     ax_mon.axvline(
-                        kt, color=col, linestyle=style, alpha=0.8,
+                        kt,
+                        color=col,
+                        linestyle=style,
+                        alpha=0.8,
                         label=f"CBS {N} knot" if j == 0 else None,
                     )
             if cbs.get("fei_std_peak_t") == cbs.get("fei_std_peak_t"):
-                ax_mon.axvline(cbs["fei_std_peak_t"], color="C1", linewidth=2,
-                               alpha=0.6, label="FEI std-peak")
+                ax_mon.axvline(
+                    cbs["fei_std_peak_t"],
+                    color="C1",
+                    linewidth=2,
+                    alpha=0.6,
+                    label="FEI std-peak",
+                )
             if cbs.get("elow_slopemax_t") == cbs.get("elow_slopemax_t"):
-                ax_mon.axvline(cbs["elow_slopemax_t"], color="gray", linewidth=2,
-                               alpha=0.6, label="e_low slope-max")
+                ax_mon.axvline(
+                    cbs["elow_slopemax_t"],
+                    color="gray",
+                    linewidth=2,
+                    alpha=0.6,
+                    label="e_low slope-max",
+                )
         ax_mon.legend(fontsize=7, loc="best")
 
     fig.tight_layout()
@@ -654,8 +681,10 @@ def _print_cbs_summary(cbs: dict) -> None:
     if knots.get("N2"):
         print(f"  CBS N=2 split (one boundary):  t = {knots['N2'][0]:.4f}")
     if knots.get("N3"):
-        print("  CBS N=3 splits (two boundaries): t = "
-              + ", ".join(f"{k:.4f}" for k in knots["N3"]))
+        print(
+            "  CBS N=3 splits (two boundaries): t = "
+            + ", ".join(f"{k:.4f}" for k in knots["N3"])
+        )
     fp, sl = cbs.get("fei_std_peak_t"), cbs.get("elow_slopemax_t")
     if fp == fp:
         print(f"  FEI std(e_low) peak (max routing signal): t = {fp:.4f}")
@@ -663,8 +692,11 @@ def _print_cbs_summary(cbs: dict) -> None:
         print(f"  e_low slope-max (FEI regime boundary):    t = {sl:.4f}")
     if knots.get("N2") and sl == sl:
         gap = abs(knots["N2"][0] - sl)
-        verdict = "AGREE — FEI already routes at the complexity boundary" if gap < 0.05 \
+        verdict = (
+            "AGREE — FEI already routes at the complexity boundary"
+            if gap < 0.05
             else "DIVERGE — complexity prior could re-place the boundary here"
+        )
         print(f"  → |CBS_N2 − slope-max| = {gap:.4f}  ({verdict})")
 
 
@@ -727,10 +759,12 @@ def _compute_paired_gap(
     paired_rows: list[dict] = []
     common = sorted(set(teacher_traces.keys()) & set(student_traces.keys()))
     if not common:
-        log.warning("no (seed, stem) pairs in common between teacher and student passes")
+        log.warning(
+            "no (seed, stem) pairs in common between teacher and student passes"
+        )
         return [], []
 
-    for (seed, stem) in common:
+    for seed, stem in common:
         t_rows = teacher_traces[(seed, stem)]
         s_rows = sorted(student_traces[(seed, stem)], key=lambda r: r["step"])
         if not t_rows or not s_rows:
@@ -785,11 +819,13 @@ def _compute_paired_gap(
         s_high = float(pstdev(d_high)) if len(d_high) > 1 else 0.0
         sign_low = (
             sum(1 for v in d_low if (v > 0) == (m_low > 0)) / len(d_low)
-            if d_low else 0.0
+            if d_low
+            else 0.0
         )
         sign_high = (
             sum(1 for v in d_high if (v > 0) == (m_high > 0)) / len(d_high)
-            if d_high else 0.0
+            if d_high
+            else 0.0
         )
         direction_low = "student_under_low" if m_low > 0 else "student_over_low"
         # Mean t_student inside the cell — useful when stages don't align across buckets.
@@ -837,11 +873,13 @@ def _print_paired_summary(aggregates: list[dict]) -> None:
         print(
             f"{a['stage']:>5} {int(a['div']):>5} {a['n']:>3} {a['t_student_mean']:>6.3f} "
             f"{a['mean_delta_low']:>+9.4f} {a['std_delta_low']:>7.4f} {snr_disp} "
-            f"{a['sign_consistency_low']*100:>5.1f}% {a['mean_e_low_T']:>6.4f} "
+            f"{a['sign_consistency_low'] * 100:>5.1f}% {a['mean_e_low_T']:>6.4f} "
             f"{a['mean_e_low_S']:>6.4f} {a['direction']:>20}"
         )
     # Phase 0 decision rules (mirrors item2_plan.md).
-    best = max(aggregates, key=lambda a: (a["snr_low"] if a["snr_low"] != float("inf") else 0.0))
+    best = max(
+        aggregates, key=lambda a: a["snr_low"] if a["snr_low"] != float("inf") else 0.0
+    )
     snr_disp = f"{best['snr_low']:.2f}" if best["snr_low"] != float("inf") else "inf"
     sig = best["sign_consistency_low"]
     if best["snr_low"] >= 1.0 and sig >= 0.75:
@@ -857,7 +895,7 @@ def _print_paired_summary(aggregates: list[dict]) -> None:
         verdict = "NO-GO (noisy)"
     print(
         f"\nbest cell: stage={best['stage']} div={int(best['div'])} "
-        f"SNR={snr_disp} sign={sig*100:.1f}% → verdict: {verdict}"
+        f"SNR={snr_disp} sign={sig * 100:.1f}% → verdict: {verdict}"
     )
 
 
@@ -880,12 +918,16 @@ def main() -> None:
         help="Root holding the .txt caption sidecars referenced by caption_index.",
     )
     p.add_argument(
-        "--k_per_artist", type=int, default=4,
+        "--k_per_artist",
+        type=int,
+        default=4,
         help="Captions drawn per artist (K=1 strict-balanced).",
     )
     p.add_argument("--include_untagged", action="store_true")
     p.add_argument(
-        "--max_artists", type=int, default=20,
+        "--max_artists",
+        type=int,
+        default=20,
         help="If >0, cap the number of artists run (useful for smoke).",
     )
     p.add_argument(
@@ -900,19 +942,25 @@ def main() -> None:
     p.add_argument("--flow_shift", type=float, default=3.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
-        "--fei_sigma_low_div", type=float, default=16.0,
+        "--fei_sigma_low_div",
+        type=float,
+        default=16.0,
         help="DoG divisor used for the captured FEI (matches live default). "
         "Ignored in paired (--adapter) mode; use --fei_sigma_low_divs instead.",
     )
     p.add_argument(
-        "--fei_sigma_low_divs", type=str, default="4,8,16",
+        "--fei_sigma_low_divs",
+        type=str,
+        default="4,8,16",
         help="Comma-separated DoG divisors for paired mode "
         "(--adapter). Default '4,8,16' sweeps FeRA-style D/4 down to "
         "D/16 (~DC) so Phase 0 can pick the SNR-best divisor for the "
         "band-deficit loss. See item2_plan.md.",
     )
     p.add_argument(
-        "--adapter", type=str, default=None,
+        "--adapter",
+        type=str,
+        default=None,
         help="Path to a turbo (or other) LoRA checkpoint. When set, "
         "runs paired teacher (CFG=4, --infer_steps) and student "
         "(CFG=--student_guidance, --student_infer_steps with this "
@@ -920,40 +968,38 @@ def main() -> None:
         "paired_gap.json. Item 2 Phase 0 go/no-go probe.",
     )
     p.add_argument(
-        "--adapter_multiplier", type=float, default=1.0,
+        "--adapter_multiplier",
+        type=float,
+        default=1.0,
         help="LoRA multiplier for --adapter (paired mode only).",
     )
     p.add_argument(
-        "--student_infer_steps", type=int, default=4,
+        "--student_infer_steps",
+        type=int,
+        default=4,
         help="Step count for the student pass (turbo target = 4).",
     )
     p.add_argument(
-        "--student_guidance", type=float, default=1.0,
+        "--student_guidance",
+        type=float,
+        default=1.0,
         help="CFG for the student pass (turbo bakes CFG=1).",
     )
     p.add_argument(
-        "--seeds", type=str, default=None,
+        "--seeds",
+        type=str,
+        default=None,
         help="Comma-separated seeds. Overrides --seed. Used in paired "
         "mode to get per-(stage, div) variance estimates "
         "(default 3 seeds: '1234,5678,9012'). When --adapter is unset "
         "and --seeds is unset, --seed is used (single trace).",
     )
     p.add_argument(
-        "--negative_prompt", type=str,
+        "--negative_prompt",
+        type=str,
         default="lowres, bad anatomy, jpeg artifacts, worst quality",
     )
-    p.add_argument(
-        "--dit",
-        default="models/diffusion_models/anima-base-v1.0.safetensors",
-    )
-    p.add_argument(
-        "--vae",
-        default="models/vae/qwen_image_vae.safetensors",
-    )
-    p.add_argument(
-        "--text_encoder",
-        default="models/text_encoders/qwen_3_06b_base.safetensors",
-    )
+    add_model_args(p)
     p.add_argument(
         "--no_compile",
         action="store_true",
@@ -992,12 +1038,12 @@ def main() -> None:
     picks = _sample_per_artist(groups, k=args.k_per_artist, seed=args.seed)
     if args.max_artists > 0:
         picks = picks[: args.max_artists]
-    log.info(
-        f"sampled {len(picks)} (artist, stem) pairs across {len(groups)} artists"
-    )
+    log.info(f"sampled {len(picks)} (artist, stem) pairs across {len(groups)} artists")
 
     # Resolve captions + native bucket before loading any model so misses fail fast.
-    prompts: list[tuple[str, str, str, int, int]] = []  # (artist, stem, caption, W_px, H_px)
+    prompts: list[
+        tuple[str, str, str, int, int]
+    ] = []  # (artist, stem, caption, W_px, H_px)
     for artist, stem in picks:
         meta = image_meta.get(stem)
         if meta is None:
@@ -1024,7 +1070,6 @@ def main() -> None:
     # Heavy imports go after the cheap sanity checks.
     from anima_lora import (  # noqa: E402
         GenerationRequest,
-        generate,
         get_generation_settings,
     )
     from library.inference.models import load_shared_models  # noqa: E402
@@ -1099,8 +1144,13 @@ def main() -> None:
 
     # ---- teacher (or trajectory-only) pass --------------------------------
     teacher_traces, bucket_counts = _run_capture_pass(
-        prompts, gen_args, gen_settings, shared,
-        teacher_divs, seeds, label="teacher",
+        prompts,
+        gen_args,
+        gen_settings,
+        shared,
+        teacher_divs,
+        seeds,
+        label="teacher",
     )
     teacher_rows = [r for trace in teacher_traces.values() for r in trace]
     if not teacher_rows:
@@ -1192,12 +1242,19 @@ def main() -> None:
         )
 
         student_traces, _ = _run_capture_pass(
-            prompts, student_gen_args, student_gen_settings, shared,
-            student_divs, seeds, label="student",
+            prompts,
+            student_gen_args,
+            student_gen_settings,
+            shared,
+            student_divs,
+            seeds,
+            label="student",
         )
         student_rows = [r for trace in student_traces.values() for r in trace]
         if not student_rows:
-            raise SystemExit("no captured rows from student pass — adapter load failed?")
+            raise SystemExit(
+                "no captured rows from student pass — adapter load failed?"
+            )
 
         student_csv = out_dir / "student_trajectory.csv"
         _write_trace_csv(student_csv, student_rows)
@@ -1205,7 +1262,9 @@ def main() -> None:
         log.info(f"wrote {student_csv} ({len(student_rows)} rows)")
 
         paired_rows, paired_aggregates = _compute_paired_gap(
-            teacher_traces, student_traces, student_divs,
+            teacher_traces,
+            student_traces,
+            student_divs,
         )
 
         paired_csv = out_dir / "paired_gap.csv"

@@ -62,15 +62,15 @@ import numpy as np
 import torch
 
 
-from bench._common import make_run_dir, write_result  # noqa: E402
-from library.anima import weights as anima_utils  # noqa: E402
-from library.datasets.distill import CachedDataset  # noqa: E402
-from networks.spd import dct_lowpass_init  # noqa: E402
+from bench._anima import DEFAULT_DIT
+from bench._common import make_run_dir, write_result
+from library.anima import weights as anima_utils
+from library.datasets.distill import CachedDataset
+from networks.spd import dct_lowpass_init
 
 log = logging.getLogger("bench.spd.probe_teacher")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-DEFAULT_DIT = "models/diffusion_models/anima-base-v1.0.safetensors"
 DEFAULT_DATA = "post_image_dataset/lora"
 
 

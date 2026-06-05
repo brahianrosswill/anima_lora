@@ -64,15 +64,8 @@ from bench._common import make_run_dir, write_result  # noqa: E402
 
 # Mirror the `make test` prompt (scripts/tasks/_common.py::INFERENCE_BASE) so the
 # probe reads on the same distribution we eyeball test images on.
-DEFAULT_PROMPT = (
-    "masterpiece, best quality, score_7, safe. An anime girl wearing a black tank-top"
-    " and denim shorts is standing outdoors. She's holding a rectangular sign out in"
-    ' front of her that reads "ANIMA". She\'s looking at the viewer with a smile. The'
-    " background features some trees and blue sky with clouds."
-)
-DEFAULT_NEGATIVE = (
-    "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia"
-)
+from bench._anima import DEFAULT_NEG as DEFAULT_NEGATIVE  # noqa: E402
+from bench._anima import DEFAULT_PROMPT  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -229,8 +222,11 @@ def _plot(run_dir: Path, dc_sim, ac_sim, pratio, heavy_blocks) -> list[str]:
 
     fig, ax = plt.subplots(figsize=(7, 4.2))
     im = ax.imshow(
-        pratio.t().numpy(), aspect="auto", origin="lower",
-        cmap="magma", interpolation="nearest",
+        pratio.t().numpy(),
+        aspect="auto",
+        origin="lower",
+        cmap="magma",
+        interpolation="nearest",
     )
     for bl in heavy_blocks:
         ax.axhline(bl, c="cyan", lw=0.4, alpha=0.5)
@@ -246,8 +242,15 @@ def _plot(run_dir: Path, dc_sim, ac_sim, pratio, heavy_blocks) -> list[str]:
     # DC−AC gap heatmap: where (block × step) is DC most ahead of AC?
     fig, ax = plt.subplots(figsize=(7, 4.2))
     gap = (dc_sim - ac_sim).t().numpy()
-    im = ax.imshow(gap, aspect="auto", origin="lower", cmap="coolwarm",
-                   vmin=-0.3, vmax=0.3, interpolation="nearest")
+    im = ax.imshow(
+        gap,
+        aspect="auto",
+        origin="lower",
+        cmap="coolwarm",
+        vmin=-0.3,
+        vmax=0.3,
+        interpolation="nearest",
+    )
     ax.set_xlabel("denoising step")
     ax.set_ylabel("block index")
     ax.set_title("DC sim − AC sim  (red = DC more cross-seed-locked than AC)")
@@ -264,18 +267,29 @@ def _plot(run_dir: Path, dc_sim, ac_sim, pratio, heavy_blocks) -> list[str]:
 # Main                                                                         #
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--prompt", default=DEFAULT_PROMPT)
     p.add_argument("--negative_prompt", default=DEFAULT_NEGATIVE)
     p.add_argument("--seeds", type=int, default=8, help="number of seeds (N)")
-    p.add_argument("--seed0", type=int, default=1000, help="first seed; uses seed0..seed0+N-1")
+    p.add_argument(
+        "--seed0", type=int, default=1000, help="first seed; uses seed0..seed0+N-1"
+    )
     p.add_argument("--steps", type=int, default=24)
     p.add_argument("--cfg", type=float, default=4.0)
-    p.add_argument("--size", type=int, nargs=2, default=[1024, 1024], metavar=("H", "W"))
-    p.add_argument("--ac_grid", type=int, default=4, help="GxG avg-pool grid for the AC residual")
-    p.add_argument("--heavy_ratio", type=float, default=0.30,
-                   help="block counts as DC-heavy if its early-step mean power ratio ≥ this")
+    p.add_argument(
+        "--size", type=int, nargs=2, default=[1024, 1024], metavar=("H", "W")
+    )
+    p.add_argument(
+        "--ac_grid", type=int, default=4, help="GxG avg-pool grid for the AC residual"
+    )
+    p.add_argument(
+        "--heavy_ratio",
+        type=float,
+        default=0.30,
+        help="block counts as DC-heavy if its early-step mean power ratio ≥ this",
+    )
     p.add_argument("--label", default=None)
     opts = p.parse_args()
 
@@ -306,12 +320,16 @@ def main() -> None:
     anima = load_dit_model(args, device, torch.bfloat16)
     num_blocks = len(anima.blocks)
     do_cfg = opts.cfg != 1.0
-    print(f"[dave-probe] {num_blocks} blocks, steps={opts.steps}, cfg={opts.cfg} "
-          f"(do_cfg={do_cfg}), seeds={opts.seeds}, ac_grid={opts.ac_grid}")
+    print(
+        f"[dave-probe] {num_blocks} blocks, steps={opts.steps}, cfg={opts.cfg} "
+        f"(do_cfg={do_cfg}), seeds={opts.seeds}, ac_grid={opts.ac_grid}"
+    )
 
     probe = DCProbe(num_blocks, opts.steps, do_cfg, opts.ac_grid)
-    handles = [blk.register_forward_hook(probe.make_hook(i))
-               for i, blk in enumerate(anima.blocks)]
+    handles = [
+        blk.register_forward_hook(probe.make_hook(i))
+        for i, blk in enumerate(anima.blocks)
+    ]
 
     # Encode text once (prompt identical across seeds) — reused via precomputed.
     print("[dave-probe] encoding text…")
@@ -325,8 +343,12 @@ def main() -> None:
             args.seed = seed
             probe.start_seed()
             print(f"[dave-probe] seed {k + 1}/{opts.seeds} (seed={seed})")
-            generate(args, gen_settings, shared_models=shared,
-                     precomputed_text_data=text_data)
+            generate(
+                args,
+                gen_settings,
+                shared_models=shared,
+                precomputed_text_data=text_data,
+            )
             probe.stop()
     finally:
         for h in handles:
@@ -340,7 +362,8 @@ def main() -> None:
     # These are the only blocks where attenuating the DC could matter.
     early_block_ratio = torch.nanmean(pratio[:early], dim=0)  # (L,)
     heavy_blocks = [
-        bl for bl in range(num_blocks)
+        bl
+        for bl in range(num_blocks)
         if float(early_block_ratio[bl]) >= opts.heavy_ratio
     ]
 
@@ -374,35 +397,46 @@ def main() -> None:
         # per-step block-averaged curves
         "dc_sim_per_step": [float(x) for x in torch.nanmean(dc_sim, dim=1).tolist()],
         "ac_sim_per_step": [float(x) for x in torch.nanmean(ac_sim, dim=1).tolist()],
-        "power_ratio_per_step": [float(x) for x in torch.nanmean(pratio, dim=1).tolist()],
+        "power_ratio_per_step": [
+            float(x) for x in torch.nanmean(pratio, dim=1).tolist()
+        ],
     }
 
     # Premise verdict (DC-heavy blocks only): the DC is highly cross-seed-locked
     # AND clearly more locked than the AC residual that carries seed structure.
-    holds = (
-        len(heavy_blocks) > 0
-        and dc_heavy > 0.85
-        and (dc_heavy - ac_heavy) > 0.05
-    )
+    holds = len(heavy_blocks) > 0 and dc_heavy > 0.85 and (dc_heavy - ac_heavy) > 0.05
     metrics["premise_holds"] = bool(holds)
 
     run_dir = make_run_dir("dave", label=opts.label)
     artifacts = _plot(run_dir, dc_sim, ac_sim, pratio, heavy_blocks)
     np.savez(
         run_dir / "per_block.npz",
-        dc_sim=dc_sim.numpy(), ac_sim=ac_sim.numpy(), power_ratio=pratio.numpy(),
+        dc_sim=dc_sim.numpy(),
+        ac_sim=ac_sim.numpy(),
+        power_ratio=pratio.numpy(),
         heavy_blocks=np.array(heavy_blocks),
     )
     artifacts.append("per_block.npz")
-    write_result(run_dir, script=__file__, args=opts, metrics=metrics,
-                 label=opts.label, artifacts=artifacts, device=device)
+    write_result(
+        run_dir,
+        script=__file__,
+        args=opts,
+        metrics=metrics,
+        label=opts.label,
+        artifacts=artifacts,
+        device=device,
+    )
 
     print("\n" + "=" * 66)
     print(f"  DC-heavy blocks (ratio≥{opts.heavy_ratio}): {heavy_blocks}")
-    print(f"  -- all blocks (early) --   DC {dc_all:.3f} | AC {ac_all:.3f} "
-          f"| gap {dc_all - ac_all:+.3f}")
-    print(f"  -- DC-heavy   (early) --   DC {dc_heavy:.3f} | AC {ac_heavy:.3f} "
-          f"| gap {dc_heavy - ac_heavy:+.3f}   <-- verdict-bearing")
+    print(
+        f"  -- all blocks (early) --   DC {dc_all:.3f} | AC {ac_all:.3f} "
+        f"| gap {dc_all - ac_all:+.3f}"
+    )
+    print(
+        f"  -- DC-heavy   (early) --   DC {dc_heavy:.3f} | AC {ac_heavy:.3f} "
+        f"| gap {dc_heavy - ac_heavy:+.3f}   <-- verdict-bearing"
+    )
     print(f"  DC power ratio (heavy, early): {metrics['power_ratio_heavy_early']:.3f}")
     print(f"  PREMISE HOLDS:                 {holds}")
     print("=" * 66)
