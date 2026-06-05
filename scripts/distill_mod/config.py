@@ -66,8 +66,8 @@ def build_argparser() -> argparse.ArgumentParser:
         default="output/ckpt/pooled_text_proj.safetensors",
         help="Where to save the trained projection weights",
     )
-    parser.add_argument("--iterations", type=int, default=1500)
-    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--iterations", type=int, default=3000)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(
         "--blocks_to_swap",
@@ -185,13 +185,13 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validate_every_n_steps",
         type=int,
-        default=750,
+        default=1000,
         help="Run validation every N optimizer steps (only if validation_split>0)",
     )
     parser.add_argument(
         "--save_every",
         type=int,
-        default=750,
+        default=1000,
         help="Save checkpoint every N iterations",
     )
     parser.add_argument(

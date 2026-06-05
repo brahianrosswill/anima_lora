@@ -7,7 +7,7 @@ This document is a comprehensive English guide for using the **Anima LoRA** trai
 ## Table of Contents
 
 1. [System Requirements](#1-system-requirements)
-2. [Installing CUDA 13.0.2](#2-installing-cuda-1302)
+2. [Installing CUDA 13.2](#2-installing-cuda-132)
 3. [Python Environment and Repository Setup](#3-python-environment-and-repository-setup)
 4. [Hugging Face Authentication and Model Download](#4-hugging-face-authentication-and-model-download)
 5. [Dataset Preparation](#5-dataset-preparation)

@@ -19,11 +19,11 @@ dataset_config = "configs/datasets/colorize.toml"
 
 network_module = "networks.methods.easycontrol"
 
-network_dim = 48
-network_alpha = 48
+network_dim = 32
+network_alpha = 32
 
 network_args = [
-    "b_cond_init=-6.0",
+    "b_cond_init=-3",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
 ]
@@ -34,9 +34,9 @@ logging_dir = "output/logs"
 log_with = "tensorboard"
 
 learning_rate = 2e-5
-max_train_epochs = 4
-save_every_n_epochs = 4
-checkpointing_epochs = 4
+max_train_epochs = 2
+save_every_n_epochs = 2
+checkpointing_epochs = 2
 
 use_easycontrol = true
 easycontrol_drop_p = 0.0

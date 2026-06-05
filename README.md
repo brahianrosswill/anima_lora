@@ -1,6 +1,6 @@
 # anima_lora
 
-[한국어](README.ko.md) · 📖 [가이드북 (Windows 초보자용 한국어 종합 가이드)](docs/guidelines/가이드북.md)
+📖 Guidebook: [English](docs/guidelines/guidebook.md) · [한국어](docs/guidelines/가이드북.md) · [日本語](docs/guidelines/ガイドブック.md) · [中文](docs/guidelines/指南书.md)
 
 LoRA / T-LoRA training and inference engine for the [Anima](https://huggingface.co/circlestone-labs/Anima) diffusion model (DiT-based, flow-matching).
 
@@ -16,6 +16,8 @@ Four things this repo aims to do well:
 ---
 
 ## How to start
+
+> **Requirements:** at least an Ampere GPU (RTX 3000-series / A100 or newer) · CUDA 13.2 · PyTorch 2.12
 
 One line — installs [uv](https://astral.sh/uv) if missing, fetches the latest release, and runs `uv sync` (no git required). The installer is published as a signed-by-checksum release asset:
 
