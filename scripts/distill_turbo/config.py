@@ -202,22 +202,18 @@ def build_argparser() -> argparse.ArgumentParser:
         "with --dm_x0_norm.",
     )
     parser.add_argument(
-        "--dmd_grad_last_only",
-        dest="dmd_grad_last_only",
-        action="store_const",
-        const=True,
+        "--dmd_grad_step",
+        type=str,
         default=None,
-        help="Roll all but the FINAL denoise step under no_grad, so the student "
-        "backward holds only ONE forward graph regardless of student_steps "
-        "(memory-flat multi-step — standard DMD2 practice; full rollout BPTT is "
-        "rarely needed). Lets base_loss='dmd' run student_steps>=2 on 16GB without "
-        "grad_ckpt. Incompatible with per_step_expert (only the last head would "
-        "train). Default: TOML (dmd.grad_last_only, default false).",
-    )
-    parser.add_argument(
-        "--no_dmd_grad_last_only",
-        dest="dmd_grad_last_only",
-        action="store_false",
+        choices=("all", "last", "random"),
+        help="Which rollout step(s) carry gradient in plain DMD2 (base_loss='dmd'); "
+        "the rest are backward-simulated under no_grad (DMD2's train/inference "
+        "input-match, Yin et al. 2024). 'all' = full-rollout BPTT (holds N forward "
+        "graphs). 'last' = only the final, cleanest-σ step (memory-flat, but the "
+        "noisy steps are never directly supervised). 'random' = canonical DMD2 "
+        "multistep: sample g~U{0..N-1}, grad ONLY step g, supervise its one-step "
+        "x0-prediction — memory-flat AND spreads supervision over every grid point. "
+        "Default: TOML (dmd.grad_step, default 'all').",
     )
     # Mean-variance reg (lever B / paper Eq. 7; proposal §3.B / S2). Pulls each
     # generated image's (μ_i, σ²_i) toward the real-latent target — clamps the
@@ -392,7 +388,7 @@ class TurboConfig:
     teacher_cfg: float
     dm_x0_norm: bool
     norm_floor: float
-    dmd_grad_last_only: bool
+    dmd_grad_step: str  # "all" | "last" | "random"
 
     # Base objective selector + GAD (geometry-aware distillation)
     base_loss: str
@@ -478,10 +474,10 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     # (b) ≈ "drop the τ-weight, magnitude-normalize."
     dm_x0_norm = bool(_pick(args.dm_x0_norm, cfg, "dmd.dm_x0_norm", False))
     norm_floor = float(_pick(args.norm_floor, cfg, "dmd.norm_floor", 0.05))
-    if args.dmd_grad_last_only is None:
-        dmd_grad_last_only = bool(_flatten(cfg, "dmd.grad_last_only", False))
-    else:
-        dmd_grad_last_only = bool(args.dmd_grad_last_only)
+    # Grad-step policy (all|last|random): which rollout step(s) carry gradient in
+    # plain DMD2. CLI --dmd_grad_step wins, else TOML dmd.grad_step, else 'all'
+    # (full-rollout BPTT).
+    dmd_grad_step = str(_pick(args.dmd_grad_step, cfg, "dmd.grad_step", "all"))
 
     # Base objective selector + GAD. 'dpdmd' keeps the first-step teacher anchor;
     # 'dmd' is plain DMD2 (no anchor → student_steps >= 1 allowed). GAD (arXiv
@@ -568,33 +564,55 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         )
     if div_weight < 0.0:
         raise ValueError(f"dpdmd.div_weight={div_weight}: must be >= 0")
+    if dmd_grad_step not in ("all", "last", "random"):
+        raise ValueError(
+            f"dmd.grad_step={dmd_grad_step!r}: expected 'all', 'last', or 'random'"
+        )
+    if use_anchor and dmd_grad_step == "random":
+        # 'random' is a plain-DMD2 multistep concept. The DP-DMD path keeps its
+        # structural step-0 diversity anchor and lands the DMD-refine grad on the
+        # last step; randomizing the supervised step there would fight the anchor.
+        logger.warning(
+            "dmd.grad_step='random' is ignored under base_loss='dpdmd' (the anchor "
+            "path keeps step-0 diversity + last-step DMD); treating as 'last'. Use "
+            "base_loss='dmd' for canonical random-step DMD2."
+        )
+        dmd_grad_step = "last"
     if (
         not use_anchor
         and student_steps > 1
         and not bool(args.grad_ckpt)
-        and not dmd_grad_last_only
+        and dmd_grad_step == "all"
     ):
         logger.warning(
             "base_loss='dmd' with student_steps=%d, grad_ckpt OFF, "
-            "dmd_grad_last_only OFF: plain DMD2 has no first-step anchor to detach, "
+            "dmd.grad_step='all': plain DMD2 has no first-step anchor to detach, "
             "so the student backward holds the FULL %d-step rollout graph (≈%dx the "
             "activation memory of dpdmd@%d). Use student_steps=1 (the replacement "
-            "arm), --dmd_grad_last_only (memory-flat), or --grad_ckpt.",
+            "arm), dmd.grad_step='random'/'last' (memory-flat), or --grad_ckpt.",
             student_steps,
             student_steps,
             student_steps,
             student_steps,
         )
-    if dmd_grad_last_only and per_step_expert:
+    if dmd_grad_step == "last" and per_step_expert:
         logger.warning(
-            "dmd_grad_last_only=True with per_step_expert=True: only the final "
-            "step's head receives gradient, so heads 0..N-2 never train. Disable "
-            "one of them (grad_last_only suits a single-head student)."
+            "dmd.grad_step='last' with per_step_expert=True: only the final step's "
+            "head receives gradient, so heads 0..N-2 never train. Use "
+            "dmd.grad_step='random' (each iteration trains the sampled step's head) "
+            "or 'all'."
         )
-    if dmd_grad_last_only:
+    if dmd_grad_step == "last":
         logger.info(
-            "dmd_grad_last_only ON: rollout steps 0..N-2 run no_grad; only the "
-            "final step backprops to x_pred (memory-flat at any student_steps)."
+            "dmd.grad_step='last': rollout steps 0..N-2 run no_grad; only the final "
+            "step backprops to x_pred (memory-flat at any student_steps)."
+        )
+    elif dmd_grad_step == "random" and not use_anchor:
+        logger.info(
+            "dmd.grad_step='random': canonical DMD2 multistep — each iteration "
+            "samples g~U{0..N-1}, backward-simulates to g under no_grad, and grads "
+            "only step g's one-step x0-prediction (memory-flat; supervises every "
+            "grid point, not just the clean tail)."
         )
     if gad_weight < 0.0:
         raise ValueError(f"gad.weight={gad_weight}: must be >= 0")
@@ -728,7 +746,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         teacher_cfg=teacher_cfg,
         dm_x0_norm=dm_x0_norm,
         norm_floor=norm_floor,
-        dmd_grad_last_only=dmd_grad_last_only,
+        dmd_grad_step=dmd_grad_step,
         base_loss=base_loss,
         gad_weight=gad_weight,
         gad_h=gad_h,

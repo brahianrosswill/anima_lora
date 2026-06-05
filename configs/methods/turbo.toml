@@ -51,9 +51,17 @@ student_steps = 4               # N — student rolls N Euler steps; inference m
 teacher_cfg = 4                 # CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4)
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
-grad_last_only = true          # roll all but the final step under no_grad → memory-flat
-                                # multi-step (lets base_loss='dmd' run student_steps>=2 on 16GB
-                                # without grad_ckpt). Incompatible with per_step_expert. See gad.md.
+grad_step = "random"            # which rollout step carries gradient (base_loss='dmd'):
+                                #   "random" — canonical DMD2 multistep: each iter samples
+                                #              g~U{0..N-1}, backward-simulates to g under
+                                #              no_grad, grads ONLY step g's one-step
+                                #              x0-prediction. Supervises EVERY grid point
+                                #              (not just the clean tail). Memory-flat.
+                                #   "last"   — only the final, cleanest-σ step (memory-flat,
+                                #              but the noisy steps train only indirectly).
+                                #   "all"    — full-rollout BPTT (holds N forward graphs).
+                                # "random"/"all" are per_step_expert-compatible; "last" is not
+                                # (only the final head would train). See gad.md.
 
 # Optimization.
 [optim]

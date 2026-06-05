@@ -90,42 +90,40 @@ The teacher view is the frozen base DiT (always smooth), so only the critic side
 is exposed. Plain-LoRA fake (the turbo default) is fine; keep `gad_h` small if you
 ever hard-route the critic.
 
-## `dmd_grad_last_only` — memory-flat multi-step DMD
+## `dmd.grad_step` — which rollout step carries gradient
 
-`base_loss="dmd"` has no first-step anchor to detach, so plain multi-step DMD
-backprops through the **full N-step rollout** — the student backward holds `N`
-forward graphs. At `student_steps=2` that's ≈2× the activation memory of
-DP-DMD@2 (which frees step-0 via `detach_after_first`), and it OOMs a 16 GB card.
-DP-DMD never hit this because its detach keeps the backward 1-forward-deep.
+`base_loss="dmd"` has no first-step anchor to detach, so the naive plain
+multi-step DMD backprops through the **full N-step rollout** — the student
+backward holds `N` forward graphs. At `student_steps=2` that's ≈2× the activation
+memory of DP-DMD@2 (which frees step-0 via `detach_after_first`), and it OOMs a
+16 GB card. `dmd.grad_step` selects which step(s) actually carry gradient; the
+rest are **backward-simulated** under `no_grad` (the generator trains on inputs
+from its *own* sampling trajectory — DMD2's train/inference input match, Yin et
+al. 2024 — not forward-noised real latents).
 
-Three ways to run `dmd` at `student_steps >= 2`:
-
-| Lever | Cost | Notes |
+| `grad_step` | Memory | What it supervises |
 |---|---|---|
-| `student_steps=1` | — | The replacement arm; 1-deep graph. **Prefer this** — it's the point of GAD-as-replacement, not a workaround. |
-| `--grad_ckpt` (`PRESET=low_vram`) | ~1.3–2× compute | Exact (full BPTT, activations recomputed). Zero method change. |
-| `--dmd_grad_last_only` | negligible | **Memory-flat at any N.** |
+| `"all"` | `N` forward graphs (OOM-prone) | Full-rollout BPTT — every step grads into the endpoint `x_pred`. |
+| `"last"` | **1 forward graph** | Only the final, cleanest-σ step. Memory-flat, but the noisy steps where the big denoise jumps live are never *directly* supervised — they improve only indirectly via the shared LoRA. |
+| `"random"` | **1 forward graph** | **Canonical DMD2 multistep.** Each iteration samples `g~U{0..N-1}`, backward-simulates to `g` under `no_grad`, then grads **only** step `g`'s one-step x0-prediction `x_g − σ_g·v_g`. Spreads supervision over *every* grid point while staying memory-flat. |
 
-`dmd_grad_last_only` rolls every step *before the last* under `no_grad` and
-differentiates **only the final denoise step** into `x_pred`. The student
-backward then holds **one** forward graph regardless of `student_steps`. This is
-standard DMD2 multi-step practice — full rollout BPTT is rarely necessary,
-because the DMD loss is a distributional signal on `x_pred` and the gradient
-lands on the shared student LoRA used at every step, so earlier steps improve
-indirectly.
+For `student_steps >= 2` on a 16 GB card, prefer `"random"` (faithful) or
+`"last"` (cheapest); `"all"` needs `--grad_ckpt` (~1.3–2× compute, activations
+recomputed) or `student_steps=1` (the 1-deep replacement arm).
 
 The DP-DMD step-0 diversity step is **exempt** — it keeps its own grad+detach
-regardless of this flag (so `dmd_grad_last_only` only ever defers the DMD-refined
-steps `1..N-2`). For `dpdmd@2` it's a no-op (the single DMD step is already the
-last); it mainly unlocks `dmd@2+`.
+regardless, so under `dpdmd` `grad_step` only governs the DMD-refined steps
+`1..N-1` and `"random"` is downgraded to `"last"` (randomizing would fight the
+structural anchor; config emits a warning). For `dpdmd@2` it's a no-op (the
+single DMD step is already the last).
 
-**Incompatible with `per_step_expert`** — only the final step's up-head would
-receive gradient, leaving heads `0..N-2` untrained (config emits a warning).
-`dmd_grad_last_only` suits a single-head student.
+**`per_step_expert`:** `"random"` and `"all"` train every up-head over time
+(`"random"` trains the sampled step's head each iteration); `"last"` trains only
+the final head and leaves heads `0..N-2` untouched (config emits a warning).
 
 ```toml
 [dmd]
-grad_last_only = false   # default; full-rollout BPTT
+grad_step = "random"   # canonical DMD2 multistep; "last" / "all" also available
 ```
 
 ## Running the A/B/C matrix
@@ -133,7 +131,7 @@ grad_last_only = false   # default; full-rollout BPTT
 ```bash
 make exp-turbo                                                              # A: DP-DMD@2 (baseline)
 make exp-turbo ARGS="--base_loss dmd --student_steps 1 --gad_weight 1.0"    # B: replacement — 1-step + GAD
-make exp-turbo ARGS="--base_loss dmd --student_steps 2 --gad_weight 1.0 --dmd_grad_last_only"  # C: GAD at matched depth (memory-flat)
+make exp-turbo ARGS="--base_loss dmd --student_steps 2 --gad_weight 1.0 --dmd_grad_step random"  # C: GAD at matched depth (memory-flat)
 make exp-turbo ARGS="--gad_weight 0.5"                                      # D: hybrid (dpdmd@2 + GAD)
 ```
 

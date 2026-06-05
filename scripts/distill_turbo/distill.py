@@ -490,15 +490,12 @@ def main():
         # the script switches to ``mode="reduce-overhead"``.
         torch.compiler.cudagraph_mark_step_begin()
 
-        # ============ DP-DMD student update ============
-        # No single t / x_t: the student rolls the full N-step Euler grid from
-        # pure noise ε. Step 1 is supervised toward a teacher K-step anchor
-        # (diversity) and detached, then DMD refines x_θ over steps 2..N
-        # (quality). See dpdmd.md §3.2.
+        # ============ student update ============
+        # No single t / x_t: the student rolls an N-step Euler grid from pure noise
+        # ε (dpdmd anchors step 1 to a teacher K-step target then refines; dmd is
+        # plain DMD2). See dpdmd.md §3.2.
         eps = torch.randn_like(latents)  # shared start for anchor + student
-        # c_null is needed by BOTH the anchor (when on) and the DMD eval below,
-        # so it's computed unconditionally.
-        c_null = uncond_for_batch(uncond_base, crossattn_emb)
+        c_null = uncond_for_batch(uncond_base, crossattn_emb)  # anchor + DMD eval
 
         # --- teacher K-step CFG anchor (no grad) → v_target (DP-DMD only) ---
         v_target = None
@@ -514,88 +511,99 @@ def main():
             # for the student's t=1 first step (Euler x_next = x − dt·v_first).
             v_target = ((eps.float() - z.float()) / (1.0 - t_k_anchor)).detach()
 
-        # --- student N-step rollout; step-0 div-supervised + (optionally) detached ---
-        # Split forward/backward: under `detach_after_first` the step-0 forward
-        # graph is severed from the steps 2..N DMD chain, so we backward the
-        # diversity term IMMEDIATELY and free step-0's activations BEFORE the DMD
-        # chain builds its own graph. Peak student-forward activations then stay at
-        # ONE forward (the longer of {step-0, the N-1 DMD chain}) instead of holding
-        # both concurrently — the two losses share no graph, so a single combined
-        # backward was only ever paying 2× activation memory for nothing. This is
-        # what lets grad-ckpt be optional at small N: the "unroll" it tames is N-1
-        # steps deep on the DMD chain, NOT the (now-freed) step-0 graph. With the
-        # detach OFF (A/B), the graphs are entangled and we MUST keep one combined
-        # backward (the diversity term is folded in at assembly below).
-        # Diversity supervision + the load-bearing detach exist for DP-DMD only;
-        # plain DMD2 ('dmd') rolls all N steps with grad and carries no anchor term.
+        # --- student rollout → x_pred (= x_θ, B,16,H,W) + v_student (metric) ---
+        # dpdmd: step-0 diversity anchor + DMD-refined steps 1..N-1.
+        # dmd:   plain DMD2; cfg.dmd_grad_step picks which step(s) grad.
         split_bwd = use_anchor and cfg.detach_after_first
-        # dmd_grad_last_only: roll every step before the last under no_grad and
-        # differentiate ONLY the final denoise step into x_pred — the student
-        # backward then holds ONE forward graph at any N (memory-flat multi-step,
-        # standard DMD2; full rollout BPTT is rarely needed). The DP-DMD step-0
-        # diversity step is exempt — it keeps its own grad+detach regardless.
-        glo = cfg.dmd_grad_last_only
         last_step = cfg.student_steps - 1
 
-        x = eps
-        x.requires_grad_()  # grad-ckpt needs a grad-requiring forward input
-        # Step 0: under DP-DMD the diversity-supervised first step (grad → v_first).
-        # set_student_step routes to head 0 (no-op unless per-step-expert is on);
-        # with the detach below, head 0 sees ONLY this diversity gradient.
-        s0, s0_next = student_sigmas[0], student_sigmas[1]
-        t_b = torch.full((B,), s0, device=device, dtype=dtype)
-        turbo.set_student_step(0)
         if use_anchor:
-            # Diversity step always carries grad (the anchor MSE needs it).
+            # grad_step != 'all' → only the final DMD step grads (memory-flat);
+            # 'all' → full BPTT over 1..N-1. ('random' downgraded to 'last' here.)
+            grad_dmd_last_only = cfg.dmd_grad_step != "all"
+            x = eps
+            x.requires_grad_()  # grad-ckpt needs a grad-requiring forward input
+            s0, s0_next = student_sigmas[0], student_sigmas[1]
+            t_b = torch.full((B,), s0, device=device, dtype=dtype)
+            turbo.set_student_step(0)  # head 0 (no-op unless per-step-expert)
             v_first = _forward(
                 "student", x, t_b, crossattn_emb, no_grad=False
             ).squeeze(2)
             x = x - (s0 - s0_next) * v_first
             div_loss_t = nn.functional.mse_loss(v_first.float(), v_target)
             if split_bwd:
-                # Load-bearing stop-grad: the DMD reverse-KL from steps 2..N must
-                # NOT flow back into the diversity mapping (their Fig 5). Backward
-                # the diversity term against the step-0 graph now (accumulates into
-                # the student .grad buffers), then re-leaf so the DMD chain gets a
-                # fresh grad-ckpt root. The optimizer step waits for the DMD
-                # backward below.
+                # Load-bearing stop-grad: the DMD reverse-KL from steps 1..N-1 must
+                # NOT flow into the diversity mapping (their Fig 5). Backward the
+                # diversity term now, then re-leaf for a fresh DMD-chain root.
                 (cfg.div_weight * div_loss_t).backward()
                 x = x.detach().requires_grad_()
+            for i in range(1, cfg.student_steps):
+                s_i = student_sigmas[i]
+                s_next = student_sigmas[i + 1]
+                t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+                turbo.set_student_step(i)
+                step_no_grad = grad_dmd_last_only and i != last_step
+                if grad_dmd_last_only and i == last_step:
+                    x = x.detach().requires_grad_()  # fresh leaf after no_grad prefix
+                v = _forward(
+                    "student", x, t_b, crossattn_emb, no_grad=step_no_grad
+                ).squeeze(2)
+                x = x - (s_i - s_next) * v
+                if step_no_grad:
+                    x = x.detach()
+            x_pred = x
+            v_student = v_first  # step-0 velocity for the runaway-student metric
         else:
-            # No anchor: zero placeholder keeps the metrics/logging path uniform.
-            div_loss_t = torch.zeros((), device=device)
-            # Step 0 carries grad only if it's the final step (N==1) or full-rollout
-            # BPTT is on; otherwise it's a no_grad rollout step.
-            s0_no_grad = glo and last_step != 0
-            v_first = _forward(
-                "student", x, t_b, crossattn_emb, no_grad=s0_no_grad
-            ).squeeze(2)
-            x = x - (s0 - s0_next) * v_first
-            if s0_no_grad:
-                x = x.detach()  # drop the no_grad step's stray subtraction graph
-
-        # Steps 2..N: the DMD-refined rollout. Each carries grad unless
-        # dmd_grad_last_only defers it to the final step.
-        for i in range(1, cfg.student_steps):
-            s_i = student_sigmas[i]
-            s_next = student_sigmas[i + 1]
-            t_b = torch.full((B,), s_i, device=device, dtype=dtype)
-            # Route to head i (no-op unless per-step-expert): each DMD step's
-            # gradient lands only on its own up-head + the shared down-proj.
-            turbo.set_student_step(i)
-            step_no_grad = glo and i != last_step
-            if glo and i == last_step:
-                # Fresh grad-ckpt leaf so the final (only grad-bearing) step has a
-                # grad-requiring input after the no_grad prefix.
-                x = x.detach().requires_grad_()
-            v = _forward(
-                "student", x, t_b, crossattn_emb, no_grad=step_no_grad
-            ).squeeze(2)
-            x = x - (s_i - s_next) * v
-            if step_no_grad:
-                x = x.detach()
-        x_pred = x  # = x_θ (B,16,H,W); v_student aliases v_first for metrics
-        v_student = v_first
+            # Plain DMD2. Non-grad steps are backward-SIMULATED under no_grad (the
+            # generator trains on its OWN trajectory — DMD2's train/inference input
+            # match, Yin et al. 2024 — not forward-noised real latents).
+            div_loss_t = torch.zeros((), device=device)  # uniform metrics path
+            if cfg.dmd_grad_step == "all":
+                # Full-rollout BPTT: every step grads into the endpoint x_pred.
+                x = eps
+                x.requires_grad_()
+                v_student = None
+                for i in range(cfg.student_steps):
+                    s_i = student_sigmas[i]
+                    s_next = student_sigmas[i + 1]
+                    t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+                    turbo.set_student_step(i)
+                    v = _forward(
+                        "student", x, t_b, crossattn_emb, no_grad=False
+                    ).squeeze(2)
+                    if v_student is None:
+                        v_student = v
+                    x = x - (s_i - s_next) * v
+                x_pred = x
+            else:
+                # Single grad-step: 'last' pins g=N-1; 'random' samples g~U{0..N-1}
+                # (canonical DMD2 — supervises every grid point, not just the clean
+                # tail). Roll to g under no_grad, grad ONLY step g, supervise its
+                # one-step x0-prediction x_g − σ_g·v_g. Memory-flat (1 forward graph).
+                if cfg.dmd_grad_step == "random":
+                    # CPU RNG → no per-step GPU sync (seeded by torch.manual_seed).
+                    g = int(torch.randint(0, cfg.student_steps, (1,)).item())
+                else:
+                    g = last_step
+                x = eps
+                for i in range(g):  # backward simulation (no_grad → no graph kept)
+                    s_i = student_sigmas[i]
+                    s_next = student_sigmas[i + 1]
+                    t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+                    turbo.set_student_step(i)
+                    v = _forward(
+                        "student", x, t_b, crossattn_emb, no_grad=True
+                    ).squeeze(2)
+                    x = x - (s_i - s_next) * v
+                x = x.detach().requires_grad_()  # fresh leaf; head g trains
+                s_g = student_sigmas[g]
+                t_b = torch.full((B,), s_g, device=device, dtype=dtype)
+                turbo.set_student_step(g)
+                v_g = _forward(
+                    "student", x, t_b, crossattn_emb, no_grad=False
+                ).squeeze(2)
+                x_pred = x - s_g * v_g  # one-step x0-prediction at step g
+                v_student = v_g
 
         # --- DMD on x_θ (steps 2..N), against teacher + fake ---
         # The real score is CFG-GUIDED (v_u + α·(v_c − v_u)), NOT cond-only.
