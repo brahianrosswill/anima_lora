@@ -29,7 +29,7 @@ unsloth_offload_checkpointing = false
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
 # student, which dpdmd structurally can't produce). Pair "dmd" with [gad] to
 # restore initial-noise sensitivity geometrically instead of via the anchor.
-base_loss = "dmd"
+base_loss = "dpdmd"
 
 [network]
 student_rank = 64
@@ -51,17 +51,22 @@ student_steps = 4               # N — student rolls N Euler steps; inference m
 teacher_cfg = 4                 # CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4)
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
-grad_step = "random"            # which rollout step carries gradient (base_loss='dmd'):
+grad_step = "random"            # which rollout step carries gradient (BOTH base_loss values):
                                 #   "random" — canonical DMD2 multistep: each iter samples
-                                #              g~U{0..N-1}, backward-simulates to g under
-                                #              no_grad, grads ONLY step g's one-step
-                                #              x0-prediction. Supervises EVERY grid point
-                                #              (not just the clean tail). Memory-flat.
+                                #              g~U{0..N-1} (dmd) or g~U{1..N-1} over the
+                                #              refinement steps (dpdmd — step 0 stays the
+                                #              detached diversity anchor), backward-simulates
+                                #              the prefix under no_grad, grads ONLY step g's
+                                #              one-step x0-prediction. Supervises EVERY grid
+                                #              point (not just the clean tail). Memory-flat.
                                 #   "last"   — only the final, cleanest-σ step (memory-flat,
                                 #              but the noisy steps train only indirectly).
                                 #   "all"    — full-rollout BPTT (holds N forward graphs).
                                 # "random"/"all" are per_step_expert-compatible; "last" is not
-                                # (only the final head would train). See gad.md.
+                                # (only the final head would train). Under dpdmd, "random"
+                                # spreads the mode-seeking DMD grad across all refinement σ
+                                # while "last" concentrates it at the tail — A/B for pose
+                                # diversity (CMMD is blind to it). See gad.md.
 
 # Optimization.
 [optim]

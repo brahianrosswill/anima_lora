@@ -26,7 +26,7 @@
   "network_train_unet_only": "Train only the DiT (U-Net). Text encoder weights are frozen. Recommended for most LoRA training.",
   "network_weights": "Path to a pre-trained adapter checkpoint to warm-start from. Leave empty for plain LoRA training.",
   "dim_from_weights": "Read network_dim from the warm-start checkpoint instead of the form value. Set together with network_weights so rank matches the warm-start LoRA.",
-  "learning_rate": "Base learning rate for the optimizer. Typical: 1e-5 to 1e-4.",
+  "learning_rate": "Base learning rate for the optimizer. Typical: 1e-5 to 1e-4 (1e-4 means 0.0001, 1e-5 means 0.00001).",
   "max_train_epochs": "Total training epochs. One epoch = one full pass through the dataset.",
   "save_every_n_epochs": "Save a checkpoint every N epochs. Set equal to max_train_epochs to save only the final model.",
   "checkpointing_epochs": "Save resumable training state every N epochs. State files are large; use a larger interval than save_every_n_epochs.",

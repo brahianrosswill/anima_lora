@@ -518,9 +518,9 @@ def main():
         last_step = cfg.student_steps - 1
 
         if use_anchor:
-            # grad_step != 'all' → only the final DMD step grads (memory-flat);
-            # 'all' → full BPTT over 1..N-1. ('random' downgraded to 'last' here.)
-            grad_dmd_last_only = cfg.dmd_grad_step != "all"
+            # Step 0 is the diversity anchor (supervised toward v_target, then
+            # detached under split_bwd); steps 1..N-1 carry the DMD-refine grad,
+            # routed by grad_step ('all' BPTT | 'last' tail-only | 'random' grid).
             x = eps
             x.requires_grad_()  # grad-ckpt needs a grad-requiring forward input
             s0, s0_next = student_sigmas[0], student_sigmas[1]
@@ -537,21 +537,54 @@ def main():
                 # diversity term now, then re-leaf for a fresh DMD-chain root.
                 (cfg.div_weight * div_loss_t).backward()
                 x = x.detach().requires_grad_()
-            for i in range(1, cfg.student_steps):
-                s_i = student_sigmas[i]
-                s_next = student_sigmas[i + 1]
-                t_b = torch.full((B,), s_i, device=device, dtype=dtype)
-                turbo.set_student_step(i)
-                step_no_grad = grad_dmd_last_only and i != last_step
-                if grad_dmd_last_only and i == last_step:
-                    x = x.detach().requires_grad_()  # fresh leaf after no_grad prefix
-                v = _forward(
-                    "student", x, t_b, crossattn_emb, no_grad=step_no_grad
+            if cfg.dmd_grad_step == "random":
+                # Memory-flat anchored DMD: sample ONE refinement step g~U{1..N-1},
+                # backward-simulate the 1..g-1 prefix under no_grad from the
+                # post-anchor latent, then grad only step g on its one-step
+                # x0-prediction (x_g − σ_g·v_g; the true endpoint would need BPTT
+                # through g+1..N-1). Unlike 'last' this supervises every refinement
+                # grid point over training and, under per_step_expert, trains head g
+                # (every head over time) instead of only head N-1. Step 0's diversity
+                # graph rides v_first and is untouched by the detach below, so
+                # div_loss_t still backprops correctly under either split_bwd.
+                g = int(torch.randint(1, cfg.student_steps, (1,)).item())
+                for i in range(1, g):  # backward simulation (no graph kept)
+                    s_i = student_sigmas[i]
+                    s_next = student_sigmas[i + 1]
+                    t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+                    turbo.set_student_step(i)
+                    v = _forward(
+                        "student", x, t_b, crossattn_emb, no_grad=True
+                    ).squeeze(2)
+                    x = x - (s_i - s_next) * v
+                x = x.detach().requires_grad_()  # fresh leaf; head g trains
+                s_g = student_sigmas[g]
+                t_b = torch.full((B,), s_g, device=device, dtype=dtype)
+                turbo.set_student_step(g)
+                v_g = _forward(
+                    "student", x, t_b, crossattn_emb, no_grad=False
                 ).squeeze(2)
-                x = x - (s_i - s_next) * v
-                if step_no_grad:
-                    x = x.detach()
-            x_pred = x
+                x_pred = x - s_g * v_g  # one-step x0-prediction at step g
+            else:
+                # 'all' → full BPTT over 1..N-1; else ('last') → only the final step
+                # grads (1..N-2 backward-simulated under no_grad). Both memory-flat
+                # except 'all', and land the DMD grad on the true rollout endpoint.
+                grad_dmd_last_only = cfg.dmd_grad_step != "all"
+                for i in range(1, cfg.student_steps):
+                    s_i = student_sigmas[i]
+                    s_next = student_sigmas[i + 1]
+                    t_b = torch.full((B,), s_i, device=device, dtype=dtype)
+                    turbo.set_student_step(i)
+                    step_no_grad = grad_dmd_last_only and i != last_step
+                    if grad_dmd_last_only and i == last_step:
+                        x = x.detach().requires_grad_()  # fresh leaf after no_grad prefix
+                    v = _forward(
+                        "student", x, t_b, crossattn_emb, no_grad=step_no_grad
+                    ).squeeze(2)
+                    x = x - (s_i - s_next) * v
+                    if step_no_grad:
+                        x = x.detach()
+                x_pred = x
             v_student = v_first  # step-0 velocity for the runaway-student metric
         else:
             # Plain DMD2. Non-grad steps are backward-SIMULATED under no_grad (the

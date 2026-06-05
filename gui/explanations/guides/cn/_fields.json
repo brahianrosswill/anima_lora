@@ -26,7 +26,7 @@
   "network_train_unet_only": "仅训练DiT（U-Net）。文本编码器权重冻结。推荐大多数LoRA训练使用。",
   "network_weights": "用于热启动的预训练适配器检查点路径。普通LoRA训练时留空。",
   "dim_from_weights": "从热启动检查点读取network_dim而非表单值。与network_weights一起设置以使秩与热启动LoRA匹配。",
-  "learning_rate": "优化器基础学习率。典型值：1e-5至1e-4。",
+  "learning_rate": "优化器基础学习率。典型值：1e-5至1e-4（1e-4即0.0001，1e-5即0.00001）。",
   "max_train_epochs": "总训练轮数。一轮 = 完整遍历一次数据集。",
   "save_every_n_epochs": "每N轮保存一次检查点。设为max_train_epochs则只保存最终模型。",
   "checkpointing_epochs": "每N轮保存一次可恢复的训练状态。状态文件较大；建议使用比save_every_n_epochs更大的间隔。",

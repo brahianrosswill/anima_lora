@@ -26,7 +26,7 @@
   "network_train_unet_only": "DiT (U-Net) のみを学習します。テキストエンコーダーの重みは凍結されます。ほとんどの LoRA 学習で推奨。",
   "network_weights": "ウォームスタートするための事前学習済みアダプターチェックポイントのパス。通常の LoRA 学習の場合は空白のままにします。",
   "dim_from_weights": "フォームの値ではなくウォームスタートチェックポイントから network_dim を読み込みます。network_weights と一緒に設定してランクをウォームスタート LoRA に合わせます。",
-  "learning_rate": "オプティマイザーのベース学習率。典型値: 1e-5 〜 1e-4。",
+  "learning_rate": "オプティマイザーのベース学習率。典型値: 1e-5 〜 1e-4（1e-4 は 0.0001、1e-5 は 0.00001）。",
   "max_train_epochs": "学習エポック数の合計。1 エポック = データセットを 1 周。",
   "save_every_n_epochs": "N エポックごとにチェックポイントを保存します。max_train_epochs と同じ値に設定すると最終モデルのみ保存されます。",
   "checkpointing_epochs": "N エポックごとに再開可能な学習状態を保存します。状態ファイルは大きいので save_every_n_epochs より大きい間隔を使用してください。",

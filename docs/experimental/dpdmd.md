@@ -76,7 +76,18 @@ Per training step:
    the diversity term is backwarded immediately and the step-0 graph is severed —
    the DMD reverse-KL from later steps must **not** flow back into the diversity
    mapping (their Fig 5: preference rises while diversity falls without it). Steps
-   2..N then roll on with grad to produce `x_θ`.
+   2..N then carry the DMD-refine grad, routed by `grad_step` (also honored under
+   the anchor — `[dmd].grad_step`): **`all`** rolls 2..N with grad (BPTT, holds the
+   N-graph) onto the true endpoint `x_θ`; **`last`** (default) backward-simulates
+   2..N−1 under no_grad and grads only the cleanest-σ final step onto `x_θ`
+   (memory-flat, but the noisy refinement steps train only indirectly — and under
+   `per_step_expert` only head N−1 trains); **`random`** samples one refinement step
+   `g~U{1..N−1}`, backward-simulates the `1..g−1` prefix under no_grad from the
+   post-anchor latent, and grads only step `g`'s **one-step x0-prediction**
+   `x_g − σ_g·v_g` (memory-flat; supervises every refinement grid point + trains
+   every head, at the cost of spreading the mode-seeking DMD grad across all
+   refinement σ rather than concentrating it on the tail — A/B vs `last` for pose
+   diversity; CMMD is blind to it).
 3. **DMD on `x_θ` (no-grad teacher + no-grad fake, τ_DM ∈ [0,1]).** The real score
    is **CFG-guided** (`v_u + α·(v_c − v_u)`) — *not* cond-only. This is the one
    un-decoupling vs the CA-era code: the old DM branch was deliberately unguided
@@ -119,6 +130,7 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | `[network]` | `student_rank` / `fake_rank` | `64` / `64` | `fake_rank ≥ student_rank` (fake is a score *tracker*, capacity ceiling on DM strength) |
 | `[dmd]` | `student_steps` (N) | `2` | Euler steps the student rolls; inference matches (`--infer_steps 2`) |
 | `[dmd]` | `teacher_cfg` (α) | `4` | CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4) |
+| `[dmd]` | `grad_step` | `all` | which refinement step(s) carry the DMD grad: `all` (BPTT) / `last` (tail-only, memory-flat) / `random` (one-step x0-pred at `g~U{1..N−1}`, memory-flat, trains every head). Honored under **both** `base_loss`. |
 | `[dmd]` | `dm_x0_norm` | `true` | per-sample x0-space magnitude normalization of the DM grad ([[project_turbo_dmd_x0_norm_wins]]) |
 | `[dmd]` | `norm_floor` | `0.05` | clamp_min for the `dm_x0_norm` denominator (latent scale) |
 | `[dpdmd]` | `k_anchor` (K) | `4` | teacher steps rolled to the diversity anchor |

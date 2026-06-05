@@ -568,16 +568,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         raise ValueError(
             f"dmd.grad_step={dmd_grad_step!r}: expected 'all', 'last', or 'random'"
         )
-    if use_anchor and dmd_grad_step == "random":
-        # 'random' is a plain-DMD2 multistep concept. The DP-DMD path keeps its
-        # structural step-0 diversity anchor and lands the DMD-refine grad on the
-        # last step; randomizing the supervised step there would fight the anchor.
-        logger.warning(
-            "dmd.grad_step='random' is ignored under base_loss='dpdmd' (the anchor "
-            "path keeps step-0 diversity + last-step DMD); treating as 'last'. Use "
-            "base_loss='dmd' for canonical random-step DMD2."
-        )
-        dmd_grad_step = "last"
     if (
         not use_anchor
         and student_steps > 1
@@ -607,7 +597,16 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             "dmd.grad_step='last': rollout steps 0..N-2 run no_grad; only the final "
             "step backprops to x_pred (memory-flat at any student_steps)."
         )
-    elif dmd_grad_step == "random" and not use_anchor:
+    elif dmd_grad_step == "random" and use_anchor:
+        logger.info(
+            "dmd.grad_step='random' under base_loss='dpdmd': step 0 keeps the "
+            "diversity anchor (detached); each iteration then samples a refinement "
+            "step g~U{1..N-1}, backward-simulates the 1..g-1 prefix under no_grad, "
+            "and grads only step g's one-step x0-prediction (memory-flat; supervises "
+            "every refinement grid point + trains every head under per_step_expert, "
+            "vs 'last' which only ever grads the clean tail)."
+        )
+    elif dmd_grad_step == "random":
         logger.info(
             "dmd.grad_step='random': canonical DMD2 multistep — each iteration "
             "samples g~U{0..N-1}, backward-simulates to g under no_grad, and grads "
