@@ -21,7 +21,6 @@ Two things a scripts/ author repeatedly needs:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -30,9 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 from library.datasets.distill import CachedDataset
+from library.env import default_checkpoints
 from library.models import qwen_vae
 
-VAE = os.environ.get("ANIMA_VAE", "models/vae/qwen_image_vae.safetensors")
+# env ANIMA_VAE (incl. a project-root `.env`) → configs/base.toml → fallback.
+VAE = default_checkpoints().vae
 
 
 def _load_vae(device):

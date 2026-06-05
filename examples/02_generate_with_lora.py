@@ -21,7 +21,6 @@ adapters.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -37,6 +36,7 @@ import torch
 # programmatic front door (a thin lazy re-export of the `library.*` homes).
 from anima_lora import (
     GenerationRequest,
+    default_checkpoints,
     generate,
     get_generation_settings,
     load_vae,
@@ -44,11 +44,12 @@ from anima_lora import (
 )
 from library.runtime.device import clean_memory_on_device
 
-DIT = os.environ.get("ANIMA_DIT", "models/diffusion_models/anima-base-v1.0.safetensors")
-VAE = os.environ.get("ANIMA_VAE", "models/vae/qwen_image_vae.safetensors")
-TEXT_ENCODER = os.environ.get(
-    "ANIMA_TEXT_ENCODER", "models/text_encoders/qwen_3_06b_base.safetensors"
-)
+# env (ANIMA_DIT / ANIMA_VAE / ANIMA_TEXT_ENCODER, incl. a project-root `.env`)
+# → configs/base.toml → built-in fallbacks. See `.env.example`.
+_ckpt = default_checkpoints()
+DIT = _ckpt.dit
+VAE = _ckpt.vae
+TEXT_ENCODER = _ckpt.text_encoder
 
 
 def build_request(opts: argparse.Namespace) -> GenerationRequest:

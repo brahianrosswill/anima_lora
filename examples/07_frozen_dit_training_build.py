@@ -29,7 +29,6 @@ it stops once the model is ready to train and prints the trainable-param split).
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -38,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 from library.anima import weights as anima_weights
+from library.env import default_checkpoints
 from library.runtime.harness import (
     compile_dit_blocks,
     enable_training_grad_ckpt,
@@ -45,7 +45,8 @@ from library.runtime.harness import (
 )
 from networks.lora_anima.factory import create_network
 
-DIT = os.environ.get("ANIMA_DIT", "models/diffusion_models/anima-base-v1.0.safetensors")
+# env ANIMA_DIT (incl. a project-root `.env`) → configs/base.toml → fallback.
+DIT = default_checkpoints().dit
 
 
 def main() -> None:

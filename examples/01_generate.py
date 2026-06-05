@@ -17,7 +17,6 @@ spelled out in main().
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -37,6 +36,7 @@ import torch
 # default (building a bare Namespace by hand silently drops dozens of them).
 from anima_lora import (
     GenerationRequest,
+    default_checkpoints,
     generate,
     get_generation_settings,
     load_vae,
@@ -44,13 +44,15 @@ from anima_lora import (
 )
 from library.runtime.device import clean_memory_on_device
 
-# Default checkpoint locations (from configs/base.toml). Override via env if
-# your weights live elsewhere.
-DIT = os.environ.get("ANIMA_DIT", "models/diffusion_models/anima-base-v1.0.safetensors")
-VAE = os.environ.get("ANIMA_VAE", "models/vae/qwen_image_vae.safetensors")
-TEXT_ENCODER = os.environ.get(
-    "ANIMA_TEXT_ENCODER", "models/text_encoders/qwen_3_06b_base.safetensors"
-)
+# Default checkpoint locations. default_checkpoints() resolves them in order
+# (highest wins): ANIMA_DIT / ANIMA_VAE / ANIMA_TEXT_ENCODER env vars — a
+# project-root `.env` is loaded automatically, see `.env.example` — then
+# configs/base.toml, then built-in fallbacks. To point at weights elsewhere,
+# set those keys in `.env` rather than editing this file.
+_ckpt = default_checkpoints()
+DIT = _ckpt.dit
+VAE = _ckpt.vae
+TEXT_ENCODER = _ckpt.text_encoder
 
 
 def build_request(

@@ -20,7 +20,6 @@ needs the DiT, not just the text encoder).
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -29,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 
 from library.anima import weights as anima_weights
+from library.env import default_checkpoints
 from library.inference.models import load_text_encoder
 from library.inference.text import (
     MAX_CROSSATTN_TOKENS,
@@ -37,11 +37,12 @@ from library.inference.text import (
 )
 from library.models import qwen_vae
 
-DIT = os.environ.get("ANIMA_DIT", "models/diffusion_models/anima-base-v1.0.safetensors")
-VAE = os.environ.get("ANIMA_VAE", "models/vae/qwen_image_vae.safetensors")
-TEXT_ENCODER = os.environ.get(
-    "ANIMA_TEXT_ENCODER", "models/text_encoders/qwen_3_06b_base.safetensors"
-)
+# env (ANIMA_DIT / ANIMA_VAE / ANIMA_TEXT_ENCODER, incl. a project-root `.env`)
+# → configs/base.toml → built-in fallbacks. See `.env.example`.
+_ckpt = default_checkpoints()
+DIT = _ckpt.dit
+VAE = _ckpt.vae
+TEXT_ENCODER = _ckpt.text_encoder
 
 
 def main() -> None:
