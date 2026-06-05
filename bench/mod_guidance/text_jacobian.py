@@ -48,7 +48,6 @@ import logging
 import math
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_file
 
@@ -65,6 +64,30 @@ from library.inference.uncond import (
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+def _dc_ac(x4: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, float, float]:
+    """Split a velocity delta ``(1, C, H, W)`` into DC (per-channel spatial mean)
+    and AC (the residual), DAVE-style.
+
+    Returns ``(dc_vec, ac_vec, dc_field_energy, ac_energy)``:
+      * ``dc_vec`` — ``(C,)`` the per-channel mean; cosines on it are scale-free
+        so the H·W field-vs-vector factor is irrelevant for direction.
+      * ``ac_vec`` — flattened ``h − μ`` residual.
+      * energies use the **field** convention (DC energy ×H·W) so they're additive:
+        ``‖x‖² = dc_field_energy + ac_energy`` (DC field ⊥ AC by construction).
+
+    The shift term of AdaLN injects a spatially-uniform per-channel constant ⇒
+    pure DC; the scale/gate gains rescale the AC that's already present. So
+    comparing dS's vs dT's DC/AC split is exactly the "what subspace can the mod
+    head reach, and how much of the teacher response lives there" question.
+    """
+    HW = x4.shape[-2] * x4.shape[-1]
+    dc = x4.mean(dim=(2, 3))  # (1, C)
+    ac = x4 - dc[:, :, None, None]  # (1, C, H, W)
+    dc_energy = float((dc * dc).sum()) * HW
+    ac_energy = float((ac * ac).sum())
+    return dc.flatten(), ac.flatten(), dc_energy, ac_energy
 
 
 def parse_args():
@@ -218,22 +241,43 @@ def main():
             cross_p = cross_a + args.h * (cross_b - cross_a)
             pool_p = pool_a + args.h * (pool_b - pool_a)
 
-            # Teacher (text via cross-attn, proj skipped).
-            t_a = fwd(noisy, sigma, cross_a, skip_pooled=True)
-            t_p = fwd(noisy, sigma, cross_p, skip_pooled=True)
-            dT = (t_p - t_a).flatten()
+            # Teacher (text via cross-attn, proj skipped). squeeze dim-2 (T=1)
+            # to (1,16,H,W) so the DC/AC split reads the spatial grid.
+            t_a = fwd(noisy, sigma, cross_a, skip_pooled=True).squeeze(2)
+            t_p = fwd(noisy, sigma, cross_p, skip_pooled=True).squeeze(2)
+            dT4 = t_p - t_a  # (1,16,H,W)
+            dT = dT4.flatten()
 
             # Student (text via modulation MLP; crossattn pinned at uncond).
             uncond = uncond_for_batch(uncond_te_1, cross_a)
-            s_a = fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_a)
-            s_p = fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_p)
-            dS = (s_p - s_a).flatten()
+            s_a = fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_a).squeeze(2)
+            s_p = fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_p).squeeze(2)
+            dS4 = s_p - s_a
+            dS = dS4.flatten()
 
             dT_norm = dT.norm().item()
             if dT_norm < eps:
                 continue  # texts too similar — no teacher signal to align against
             cos = F.cosine_similarity(dS, dT, dim=0).item()
             ratio = dS.norm().item() / (dT_norm + eps)
+
+            # --- DAVE DC/AC decomposition of the two response deltas ---
+            dT_dc, dT_ac, dT_dce, dT_ace = _dc_ac(dT4)
+            dS_dc, dS_ac, dS_dce, dS_ace = _dc_ac(dS4)
+            cos_dc = F.cosine_similarity(dS_dc, dT_dc, dim=0).item()  # within-DC aim (σ-FiLM owns this)
+            cos_ac = F.cosine_similarity(dS_ac, dT_ac, dim=0).item()  # gain-rescaling reach
+            dT_tot = dT_dce + dT_ace
+            dS_tot = dS_dce + dS_ace
+            dT_ac_frac = dT_ace / (dT_tot + eps)  # teacher response: AC share
+            dS_ac_frac = dS_ace / (dS_tot + eps)  # student response: AC share
+            # Hard ceiling for ANY pure-DC head: best full-cos = ‖dT_DC‖/‖dT‖.
+            cos_ceiling = math.sqrt(max(0.0, 1.0 - dT_ac_frac))
+            # Achievable full-cos if the DC aim were perfected (cos_dc→1) at the
+            # CURRENT energy split — i.e. the headroom σ-FiLM/more training can buy.
+            dc_aligned_full = (
+                math.sqrt(max(dS_dce, 0.0) * max(dT_dce, 0.0))
+                + cos_ac * math.sqrt(max(dS_ace, 0.0) * max(dT_ace, 0.0))
+            ) / (math.sqrt(dS_tot * dT_tot) + eps)
             # Held-out pointwise distillation residual at A: this is exactly what
             # MSE distillation minimizes. If err_a >~ ‖ΔT‖ (delta_snr < 1) then the
             # text-swap signal is buried under the head's own pointwise error and
@@ -241,39 +285,62 @@ def main():
             # genuine text-derivative misalignment (the GAD-relevant case).
             err_a = (s_a.flatten() - t_a.flatten()).norm().item()
             rel_err_a = err_a / (t_a.flatten().norm().item() + eps)  # held-out distill residual, normalized
-            rows.append((float(sigma), cos, ratio, dT_norm, err_a, rel_err_a))
+            rows.append((
+                float(sigma), cos, ratio, dT_norm, err_a, rel_err_a,
+                cos_dc, cos_ac, dT_ac_frac, dS_ac_frac, cos_ceiling, dc_aligned_full,
+            ))
 
     if not rows:
         raise SystemExit("No valid trials (all text deltas below eps). Check the dataset.")
 
     # --- Aggregate per σ + overall ---
+    def _col(rs_, sig, idx):
+        return [r[idx] for r in rs_ if r[0] == sig]
+
+    def _mean(xs):
+        return sum(xs) / len(xs) if xs else float("nan")
+
     per_sigma = {}
     for sigma in args.sigmas:
-        cs = [r[1] for r in rows if r[0] == sigma]
-        rs = [r[2] for r in rows if r[0] == sigma]
-        dn = [r[3] for r in rows if r[0] == sigma]
-        ea = [r[4] for r in rows if r[0] == sigma]
-        re_ = [r[5] for r in rows if r[0] == sigma]
+        cs = _col(rows, sigma, 1)
         if not cs:
             continue
+        rs = _col(rows, sigma, 2)
+        dn = _col(rows, sigma, 3)
+        ea = _col(rows, sigma, 4)
+        re_ = _col(rows, sigma, 5)
+        cdc = _col(rows, sigma, 6)
+        cac = _col(rows, sigma, 7)
+        dtacf = _col(rows, sigma, 8)
+        dsacf = _col(rows, sigma, 9)
+        ceil = _col(rows, sigma, 10)
+        dcaf = _col(rows, sigma, 11)
         mean = sum(cs) / len(cs)
         std = math.sqrt(sum((c - mean) ** 2 for c in cs) / len(cs))
-        dn_mean = sum(dn) / len(dn)
-        ea_mean = sum(ea) / len(ea)
+        dn_mean = _mean(dn)
+        ea_mean = _mean(ea)
         per_sigma[f"{sigma:.2f}"] = {
             "cos_mean": mean, "cos_std": std,
-            "ratio_mean": sum(rs) / len(rs),
+            "ratio_mean": _mean(rs),
             "dT_norm_mean": dn_mean,
             "err_a_mean": ea_mean,
-            "rel_err_a_mean": sum(re_) / len(re_),  # ‖s_a−t_a‖/‖t_a‖ — comparable to val MSE
+            "rel_err_a_mean": _mean(re_),  # ‖s_a−t_a‖/‖t_a‖ — comparable to val MSE
             "delta_snr": dn_mean / (ea_mean + eps),  # ‖ΔT‖ vs head pointwise error
+            # --- DAVE DC/AC decomposition ---
+            "cos_dc_mean": _mean(cdc),  # within-DC aim — the factor σ-FiLM/training owns
+            "cos_ac_mean": _mean(cac),  # within-AC aim — limited to gain-rescaling
+            "dT_ac_frac_mean": _mean(dtacf),  # teacher response: AC energy share (ceiling driver)
+            "dS_ac_frac_mean": _mean(dsacf),  # student response: AC energy share (gain reach)
+            "cos_ceiling_mean": _mean(ceil),  # √(dT DC frac): best full-cos for ANY pure-DC head
+            "dc_aligned_full_mean": _mean(dcaf),  # full-cos if DC aim perfected at current split
             "n": len(cs),
         }
         logger.info(
-            f"σ={sigma:.2f}  cos={mean:.4f}±{std:.4f}  "
-            f"ratio={sum(rs) / len(rs):.4f}  ‖ΔT‖={dn_mean:.3f}  "
-            f"err_a={ea_mean:.3f}  rel_err={sum(re_) / len(re_):.4f}  "
-            f"ΔSNR={dn_mean / (ea_mean + eps):.3f}  (n={len(cs)})"
+            f"σ={sigma:.2f}  cos={mean:.4f}±{std:.4f}  ratio={_mean(rs):.3f}  "
+            f"ΔSNR={dn_mean / (ea_mean + eps):.2f}  ||  "
+            f"cos_dc={_mean(cdc):.4f}  cos_ac={_mean(cac):.4f}  "
+            f"dT_ac={_mean(dtacf):.3f}  dS_ac={_mean(dsacf):.3f}  "
+            f"ceiling={_mean(ceil):.3f}  dc_aligned={_mean(dcaf):.3f}  (n={len(cs)})"
         )
 
     all_cos = [r[1] for r in rows]
@@ -289,7 +356,10 @@ def main():
     csv_path = run_dir / "per_trial.csv"
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["sigma", "cos", "ratio", "dT_norm", "err_a", "rel_err_a"])
+        w.writerow([
+            "sigma", "cos", "ratio", "dT_norm", "err_a", "rel_err_a",
+            "cos_dc", "cos_ac", "dT_ac_frac", "dS_ac_frac", "cos_ceiling", "dc_aligned_full",
+        ])
         w.writerows(rows)
     write_result(
         run_dir, script=__file__, args=args,

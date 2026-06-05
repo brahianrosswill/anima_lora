@@ -43,6 +43,7 @@ from .config import (
     snapshot_toml_text,
     tb_config_text,
 )
+from .diversity import run_diversity_validation
 from .metrics import TurboMetrics, tqdm_postfix, write_scalars
 from .primitives import (
     PadCache,
@@ -222,6 +223,32 @@ def main():
         sample_ratio=cfg.sample_ratio,
         mask_dir=cfg.mask_dir if cfg.use_masked_loss else None,
     )
+    # Held-out conditioning for the DAVE diversity probe — captured from the
+    # FULL sample list before any single-prompt slice mutates it, and chosen
+    # distinct from the overfit sample so a collapsed run is visible. We only
+    # need the cached crossattn_emb + a latent shape; loaded once, reused every
+    # validation pass.
+    val_cond = None
+    val_latent_shape = None
+    val_clean = None
+    if cfg.validate_every_n_steps > 0 and len(dataset.samples) > 0:
+        n = len(dataset.samples)
+        if cfg.val_prompt_idx >= 0:
+            v_idx = cfg.val_prompt_idx % n
+        else:
+            v_idx = n - 1  # auto: last sample
+            if cfg.single_prompt_idx is not None and v_idx == cfg.single_prompt_idx % n:
+                v_idx = (v_idx - 1) % n  # avoid the overfit sample when possible
+        _, v_lat, v_ca, _v_pool = dataset[v_idx][:4]
+        val_cond = v_ca.unsqueeze(0).to(device, dtype=dtype)  # (1, seq, D)
+        val_latent_shape = (1, *tuple(v_lat.shape))  # (1, C, H, W)
+        val_clean = v_lat.unsqueeze(0).to(device, dtype=dtype)  # (1, C, H, W) for FM MSE
+        logger.info(
+            f"diversity validation: every {cfg.validate_every_n_steps} steps, "
+            f"{cfg.val_diversity_seeds} seeds, held-out idx={v_idx} "
+            f"(latent {tuple(v_lat.shape)})"
+        )
+
     if cfg.single_prompt_idx is not None:
         # Phase 0 overfit — wrap as a 1-sample list so the dataloader cycles it.
         # The "N samples from ..." line above is CachedDataset.__init__'s own
@@ -719,6 +746,37 @@ def main():
             # postfix — harmless.
             progress.set_postfix(**tqdm_postfix(m))
             metrics.reset()
+
+        # --- diversity validation (DAVE same-prompt probe) ---
+        if (
+            val_cond is not None
+            and (step + 1) % cfg.validate_every_n_steps == 0
+        ):
+            dm = run_diversity_validation(
+                model=model,
+                forward_fn=_forward,
+                set_student_step=turbo.set_student_step,
+                student_sigmas=student_sigmas,
+                crossattn_emb=val_cond,
+                latent_shape=val_latent_shape,
+                num_seeds=cfg.val_diversity_seeds,
+                seed0=cfg.seed,
+                device=device,
+                dtype=dtype,
+                clean_latent=val_clean,
+            )
+            if writer is not None:
+                writer.add_scalar("val/div_ac_sim", dm.ac_sim, step + 1)
+                writer.add_scalar("val/div_dc_sim", dm.dc_sim, step + 1)
+                writer.add_scalar("val/div_gap", dm.gap, step + 1)
+                writer.add_scalar("val/div_xpred_ac_sim", dm.xpred_ac_sim, step + 1)
+                writer.add_scalar("val/fm_mse", dm.fm_mse, step + 1)
+            logger.info(
+                f"[val@{step + 1}] diversity: AC sim={dm.ac_sim:.4f} "
+                f"(lower=more diverse) | DC sim={dm.dc_sim:.4f} | gap={dm.gap:+.4f} "
+                f"| x_pred AC sim={dm.xpred_ac_sim:.4f} | FM MSE={dm.fm_mse:.4f} "
+                f"(fidelity; not a quality score)"
+            )
 
         # --- save ---
         # Every save_every checkpoint is kept under a step-tagged name (no

@@ -47,7 +47,7 @@ per_step_expert = false
 
 # DMD schedule.
 [dmd]
-student_steps = 2               # N — student rolls N Euler steps; inference matches (--infer_steps 2)
+student_steps = 4               # N — student rolls N Euler steps; inference matches (--infer_steps 2)
 teacher_cfg = 4                 # CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4)
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
@@ -136,3 +136,4 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 save_every = 1000
 log_interval = 5
 log_dir = "output/logs/turbo"
+validate_every_n_steps = 500

@@ -141,6 +141,43 @@ tonal richness for diversity. Open follow-up: **RMS-renormalize after the DC
 subtraction** to conserve tonal energy (recolor-not-remove, à la CNS) — would test
 whether the posterization is separable from the diversity gain.
 
+## Spin-off — DAVE as a training diversity signal (turbo / DP-DMD)
+
+The intervention is the less interesting half; the **diagnostic** (DC = seed-shared
+conditioning, AC = seed-specific diversity) ports to training as a *measurement*.
+DP-DMD's whole pitch is *diversity-preserved* distillation, but its in-loop `div`
+loss only measures how close the student's first step lands to the teacher's
+K-step anchor — it says nothing about whether the student's own same-prompt
+samples have collapsed across seeds (the canonical DMD failure mode). The DAVE
+cross-seed **AC sim** is exactly that mode-collapse detector.
+
+Wired as a `validate_every_n_steps`-style pass in the turbo loop (mirrors
+`distill_mod`'s validation): fix one **held-out** conditioning, roll the student's
+N-step Euler grid across N seeds under `no_grad` (the live `_forward` /
+`set_student_step` / `student_sigmas` primitives), hook every block, and log:
+
+- `val/div_ac_sim` — cross-seed cosine of the AC residual; **lower = more diverse**
+  (rising over training = collapse). The headline signal.
+- `val/div_dc_sim` — reference; should stay high (~conditioning lock).
+- `val/div_gap` (`dc−ac`) and `val/div_xpred_ac_sim` (same split on the final latent).
+- `val/fm_mse` — flow-matching reconstruction MSE on the held-out sample (the
+  **fidelity** half of the fidelity↔diversity tradeoff view). ⚠️ FM val loss has
+  *not* tracked sample quality on Anima (CMMD replaced it as the quality signal),
+  so read it as a divergence/sanity number paired against AC-sim, not a score.
+
+The metric is layout-robust (DC = mean over all non-(batch,channel) axes), so it
+reads correctly under both eager 5D blocks and the compiled native-flatten.
+
+```bash
+make exp-turbo  # then add to the turbo config or CLI:
+#   --validate_every_n_steps 750 --val_diversity_seeds 8 [--val_prompt_idx N]
+```
+
+Code: `scripts/distill_turbo/diversity.py` (probe), `config.py` (`io.validate_every_n_steps`
+/ `val_diversity_seeds` / `val_prompt_idx`), `distill.py` (held-out capture + in-loop call).
+Status: wired + unit-smoke-tested (layout-invariance, cosine math, config round-trip);
+**not yet exercised in a live distill run**.
+
 ## Files
 
 | File | Role |

@@ -76,6 +76,27 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--iterations", type=int, default=-1)
     parser.add_argument("--batch_size", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=-1)
+    parser.add_argument(
+        "--validate_every_n_steps",
+        type=int,
+        default=-1,
+        help="Run the DAVE same-prompt diversity probe every N optimizer steps "
+        "(0 disables; see scripts/distill_turbo/diversity.py). Logs "
+        "val/div_ac_sim (lower = more diverse), val/div_dc_sim, val/div_gap.",
+    )
+    parser.add_argument(
+        "--val_diversity_seeds",
+        type=int,
+        default=-1,
+        help="Number of seeds the diversity probe rolls per validation (>=2).",
+    )
+    parser.add_argument(
+        "--val_prompt_idx",
+        type=int,
+        default=-1,
+        help="Held-out dataset index whose cached conditioning the diversity "
+        "probe fixes (-1 = auto: last sample, distinct from --single_prompt_idx).",
+    )
     parser.add_argument("--student_rank", type=int, default=-1)
     parser.add_argument("--fake_rank", type=int, default=-1)
     parser.add_argument(
@@ -331,6 +352,11 @@ class TurboConfig:
     log_interval: int
     no_log: bool
 
+    # Diversity validation (DAVE same-prompt probe; 0 = off)
+    validate_every_n_steps: int
+    val_diversity_seeds: int
+    val_prompt_idx: int
+
     # Run shape
     iterations: int
     batch_size: int
@@ -411,6 +437,13 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     log_dir = _pick(args.log_dir, cfg, "io.log_dir", "output/logs/turbo")
     save_every = int(_pick(args.save_every, cfg, "io.save_every", 1000))
     log_interval = int(_pick(args.log_interval, cfg, "io.log_interval", 2))
+    validate_every_n_steps = int(
+        _pick(args.validate_every_n_steps, cfg, "io.validate_every_n_steps", 0)
+    )
+    val_diversity_seeds = int(
+        _pick(args.val_diversity_seeds, cfg, "io.val_diversity_seeds", 8)
+    )
+    val_prompt_idx = int(_pick(args.val_prompt_idx, cfg, "io.val_prompt_idx", -1))
 
     # Run shape
     iterations = int(_pick(args.iterations, cfg, "iterations", 20000))
@@ -668,6 +701,9 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         save_every=save_every,
         log_interval=log_interval,
         no_log=bool(args.no_log),
+        validate_every_n_steps=validate_every_n_steps,
+        val_diversity_seeds=val_diversity_seeds,
+        val_prompt_idx=val_prompt_idx,
         iterations=iterations,
         batch_size=batch_size,
         seed=seed,

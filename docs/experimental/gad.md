@@ -217,14 +217,34 @@ already drives the A-residual to ~0, GAD pulls the B-residual the same way
 (synergistic, not competing). A strictly-symmetric both-endpoints gradient would
 hold two student graphs and need `--grad_ckpt`.
 
-**Open question (the decisive experiment).** Retrain with `--gad_weight ∈
-{0.25, 1, 4}` and re-run the probe. **Success = `cos` lifts off zero AND the
-high-σ ratio rises** vs the 0602 baseline. If `cos` stays ~0 even as
-`train/loss_gad` falls, a global AdaLN shift fundamentally can't express
-cross-attn's text geometry — an *architectural ceiling*, a clean negative result;
-keep `gad_weight=0` as the shipped path. Plan + decision rule:
-`scripts/distill_mod/plan.md` (Phase 3). The two readings (direction vs magnitude)
-are separable — see the finding doc.
+**RESOLVED 2026-06-05 — architectural ceiling confirmed; ship `gad_weight=0`.**
+A σ-FiLM head (`pooled_text_proj.safetensors`, 1500 iters, `gad_weight=1.0
+gad_loss=l2`, trained on synth) was probed head-to-head against the 0602 baseline,
+**both on synth** (`bench/mod_guidance/results/20260605-1620-sigma-film-dcac-synth`
+and `…-1627-0602-dcac-synth`). By the decision rule above it **fails on both axes**:
+`cos` stays ~0 at every σ, and the high-σ `ratio` does *not* rise (σ=0.9: 0602 0.049
+→ σ-FiLM 0.056). σ-FiLM is a **no-op** vs the plain head — including on its own
+stated target (the magnitude collapse).
+
+The *why* is now measured, not inferred. `text_jacobian.py` was extended with a
+**DAVE DC/AC decomposition** of the response deltas (DC = per-channel spatial mean,
+AC = residual). The teacher's text response is **~99% AC** (`dT_ac_frac` 0.997→0.967,
+identical across heads since `dT` is head-independent), so the hard ceiling for *any*
+AdaLN-modulation head — `cos_ceiling = √(DC frac)` — is just **0.05 (low σ) → 0.17
+(high σ)**. The full `cos` sits at that ceiling. AdaLN `shift` injects a spatially-
+*uniform* per-channel constant (pure DC) and `scale`/`gate` only rescale the AC that
+cross-attn already wrote — so the head structurally cannot synthesize the *new*
+spatial structure a text change demands. The magnitude collapse was a *symptom* of
+this directional ceiling (GAD-l2 has no incentive to grow ‖ΔS‖ in a direction
+orthogonal to ΔT), which is why σ-FiLM's per-σ magnitude knob did nothing.
+
+**Takeaway:** mod-guidance via AdaLN is a global-tone/contrast lever, not a content
+lever — content lives in the AC, which is cross-attention's job. Reaching it needs an
+AC-writing route (mini-cross-attn / pooled-text-gated *spatial* LoRA), i.e. abandoning
+the pure-AdaLN premise. Don't keep tuning the head (σ-FiLM, more steps, gad_h, or
+retargeting GAD to `dT_DC` — the DC piece is 0.3–5% of the response *and* unaligned).
+Plan + decision rule: `scripts/distill_mod/plan.md` (Phase 3); finding doc + the
+per-σ DC/AC tables in the two `result.json`s above.
 
 So GAD's homes in this codebase are **turbo** (initial-noise sensitivity under
 trajectory compression) and **mod-guidance** (text-direction sensitivity under
