@@ -955,7 +955,23 @@ def generate(
     # at training; at inference we run it once here (no KV cache yet).
     _setup_easycontrol(args, anima, device, shared_models)
 
-    return generate_body(args, anima, context, context_null, device, seed)
+    # DAVE: arm the per-block DC-attenuation hooks (training-free diversity edit).
+    # Hooks must be removed after generation — the model is shared across seeds,
+    # so a stacked hook set would compound the attenuation. See dave.py.
+    dave_hooks = None
+    if getattr(args, "dave", None):
+        from library.inference.corrections.dave import setup_dave
+
+        dave_hooks = setup_dave(args, anima, device)
+    else:
+        anima.reset_dave()
+
+    try:
+        return generate_body(args, anima, context, context_null, device, seed)
+    finally:
+        if dave_hooks is not None:
+            dave_hooks.remove()
+            anima.reset_dave()
 
 
 def _setup_ip_adapter(args, anima, device):

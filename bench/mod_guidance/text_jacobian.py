@@ -112,8 +112,22 @@ def load_model(args, device, dtype) -> Anima:
     # pooled_text_proj is not in the base checkpoint — materialize then load trained weights.
     model.pooled_text_proj.to_empty(device="cpu")
     state = load_file(args.pooled_text_proj)
-    model.pooled_text_proj.load_state_dict(state)
+    # σ-FiLM weights (if present) ride under a 'sigma_film.' prefix.
+    film_state = {
+        k[len("sigma_film.") :]: v
+        for k, v in state.items()
+        if k.startswith("sigma_film.")
+    }
+    model.pooled_text_proj.load_state_dict(
+        {k: v for k, v in state.items() if not k.startswith("sigma_film.")}
+    )
     model.pooled_text_proj.to(device=device, dtype=torch.float32)
+    if film_state:
+        model.pooled_text_sigma_film.to_empty(device="cpu")
+        model.pooled_text_sigma_film.load_state_dict(film_state)
+        model.pooled_text_sigma_film.to(device=device, dtype=torch.float32)
+        model.enable_pooled_text_sigma_film = True
+        print("σ-FiLM weights present → probing the timestep-conditioned mod head")
     # The mod-guidance steering buffers are non-persistent zeros created on CPU
     # (distill.py moves them via place_dit_for_training, which we skip). They stay
     # zero here — the probe does its own text perturbation, not inference steering —

@@ -46,6 +46,8 @@ def _base_test_args(*, lora_default: bool = True) -> list[str]:
     - ``SPD=1`` appends SPD (Spectral Progressive Diffusion) flags. Mutually
       exclusive with ``SPECTRUM=1`` (both replace the denoise loop).
     - ``MOD=1`` appends ``--pooled_text_proj <latest>``.
+    - ``DAVE=1`` appends the DAVE DC-attenuation flags (``--dave auto``); tune via
+      ``DAVE_STRENGTH=`` and ``DAVE_SIGMA='lo,hi'``.
     """
     args = list(INFERENCE_BASE)
     nolora_env = os.environ.get("NOLORA")
@@ -65,7 +67,24 @@ def _base_test_args(*, lora_default: bool = True) -> list[str]:
         args += _spd_flags()
     if _env_truthy("MOD"):
         args += _mod_flags()
+    if _env_truthy("DAVE"):
+        args += _dave_flags()
     return args
+
+
+def _dave_flags() -> list[str]:
+    """DAVE DC-attenuation (training-free diversity). ``DAVE_STRENGTH`` and
+    ``DAVE_SIGMA='lo,hi'`` tune the live knobs; both optional."""
+    flags = ["--dave", "auto"]
+    if s := os.environ.get("DAVE_STRENGTH", "").strip():
+        flags += ["--dave_strength", s]
+    if win := os.environ.get("DAVE_SIGMA", "").strip():
+        lo, hi = (x.strip() for x in win.split(","))
+        flags += ["--dave_sigma_lo", lo, "--dave_sigma_hi", hi]
+    if blk := os.environ.get("DAVE_BLOCKS", "").strip():
+        lo, hi = (x.strip() for x in blk.split(","))
+        flags += ["--dave_block_lo", lo, "--dave_block_hi", hi]
+    return flags
 
 
 def _spectrum_flags(stop_caching_step: int = 27) -> list[str]:

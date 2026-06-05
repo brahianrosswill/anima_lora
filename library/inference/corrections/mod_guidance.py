@@ -110,6 +110,16 @@ def setup_mod_guidance(
 
     # Pool and project through trained pooled_text_proj. Note: unit delta -- the
     # per-block weight comes from the schedule, not baked in here.
+    if getattr(anima, "enable_pooled_text_sigma_film", False):
+        # This head is σ-conditioned, but the single baked delta below is σ-flat
+        # (no timestep available at bake time). It falls back to the σ-flat proj
+        # path (t_embedding=None), so steering ignores the FiLM. Per-step steering
+        # is a follow-up; warn rather than silently mis-steer.
+        logger.warning(
+            "pooled_text_proj was trained with σ-FiLM, but inference steering bakes "
+            "a single σ-flat delta — the timestep conditioning is ignored. "
+            "Use bench/mod_guidance/text_jacobian.py to evaluate the σ-FiLM head."
+        )
     with torch.no_grad():
         pos_pooled = pos_crossattn.max(dim=1).values  # (1, 1024)
         neg_pooled = neg_crossattn.max(dim=1).values

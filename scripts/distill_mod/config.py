@@ -66,20 +66,14 @@ def build_argparser() -> argparse.ArgumentParser:
         default="output/ckpt/pooled_text_proj.safetensors",
         help="Where to save the trained projection weights",
     )
-    parser.add_argument("--iterations", type=int, default=15000)
-    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--iterations", type=int, default=1500)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(
         "--blocks_to_swap",
         type=int,
         default=0,
         help="Number of transformer blocks to offload to CPU",
-    )
-    parser.add_argument(
-        "--save_every",
-        type=int,
-        default=1000,
-        help="Save checkpoint every N iterations",
     )
     parser.add_argument(
         "--attn_mode",
@@ -191,8 +185,14 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validate_every_n_steps",
         type=int,
-        default=1000,
+        default=750,
         help="Run validation every N optimizer steps (only if validation_split>0)",
+    )
+    parser.add_argument(
+        "--save_every",
+        type=int,
+        default=750,
+        help="Save checkpoint every N iterations",
     )
     parser.add_argument(
         "--validation_sigmas",
@@ -288,6 +288,16 @@ def build_argparser() -> argparse.ArgumentParser:
         "dataset). 'dataset': draw a random other sample's cached (crossattn, "
         "pooled) each step (reproducible via --seed).",
     )
+    parser.add_argument(
+        "--mod_sigma_film",
+        action="store_true",
+        help="σ-FiLM: timestep-condition the mod head's hidden activation (FiLM "
+        "from the normed time embedding) so the text push can scale/re-aim per σ. "
+        "Targets the σ-flat magnitude collapse (ratio ‖ΔS‖/‖ΔT‖ → 0.05 at σ=0.9) "
+        "and disentangles the spatial-ceiling vs σ-averaging cause of GAD cos≈0. "
+        "Adds a Linear(D,2D) generator; off ⇒ bit-exact to the plain head. "
+        "Saved under a 'sigma_film.' prefix; probe/inference auto-arm on load.",
+    )
     return parser
 
 
@@ -349,6 +359,9 @@ class ModConfig:
     gad_loss: str
     gad_pair_source: str
 
+    # σ-FiLM: timestep-condition the mod head (off ⇒ plain σ-flat head)
+    mod_sigma_film: bool
+
 
 def resolve_config(args: argparse.Namespace) -> ModConfig:
     """Pure CLI→dataclass map (no TOML) + GAD sanity checks."""
@@ -405,4 +418,5 @@ def resolve_config(args: argparse.Namespace) -> ModConfig:
         gad_h=float(args.gad_h),
         gad_loss=args.gad_loss,
         gad_pair_source=args.gad_pair_source,
+        mod_sigma_film=bool(args.mod_sigma_film),
     )

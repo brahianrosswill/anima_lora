@@ -519,6 +519,57 @@ def build_parser() -> argparse.ArgumentParser:
         "CNS, 0.0 = pass-through. Safety knob for over-injection off-manifold.",
     )
 
+    # DAVE: DC Attenuation for diVersity Enhancement (training-free, ICML'26).
+    # Per-block representation edit ĥ = α·μ + (h−μ) that attenuates the cross-seed-
+    # shared DC component to recover same-prompt diversity. Hook-based; standard
+    # denoise loop only (no Spectrum/SPD compose). Mask from
+    # bench/dave/derive_alpha_mask.py. See library/inference/corrections/dave.py.
+    parser.add_argument(
+        "--dave",
+        type=str,
+        default=None,
+        help="Enable DAVE DC-attenuation. Pass a path to a dave_alpha.npz mask, "
+        "or 'auto' for the shipped default (networks/calibration/dave_alpha.npz).",
+    )
+    parser.add_argument(
+        "--dave_strength",
+        type=float,
+        default=0.1,
+        help="DC attenuation strength: per-block (1−α) = strength·w(ℓ). 0 = off, "
+        "1 = fully remove the DC of the most-implicated block. The late blocks' "
+        "DC carries the bulk of the image energy, so >~0.2 collapses output to a "
+        "grid; sweep up from a small value to eyeball the diversity/quality knee.",
+    )
+    parser.add_argument(
+        "--dave_block_lo",
+        type=int,
+        default=0,
+        help="Lowest block index DAVE may touch (inclusive). Blocks below are "
+        "forced to no-op. Use with --dave_block_hi to sweep mid-only vs mid+late.",
+    )
+    parser.add_argument(
+        "--dave_block_hi",
+        type=int,
+        default=-1,
+        help="Highest block index DAVE may touch (inclusive; -1 = last block). "
+        "Lower it to spare the final content blocks (e.g. --dave_block_hi 18 to "
+        "attenuate only the mid blocks where the DC pins layout, not content).",
+    )
+    parser.add_argument(
+        "--dave_sigma_lo",
+        type=float,
+        default=0.0,
+        help="Low σ bound of the DAVE active window (σ∈[0,1]). Default 0 (all σ).",
+    )
+    parser.add_argument(
+        "--dave_sigma_hi",
+        type=float,
+        default=1.0,
+        help="High σ bound of the DAVE active window. Default 1 (all σ). Late-only "
+        "(σ<0.45, where DC energy grows) = --dave_sigma_hi 0.45; early-only = "
+        "--dave_sigma_lo 0.45.",
+    )
+
     # arguments for batch and interactive modes
     parser.add_argument(
         "--from_file", type=str, default=None, help="Read prompts from a file"

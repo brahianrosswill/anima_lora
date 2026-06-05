@@ -172,6 +172,12 @@ def main():
     nn.init.zeros_(model.pooled_text_proj[0].bias)
     nn.init.zeros_(model.pooled_text_proj[-1].weight)
     nn.init.zeros_(model.pooled_text_proj[-1].bias)
+    if cfg.mod_sigma_film:
+        # Same meta→CPU materialization for the σ-FiLM sibling; zero-init ⇒
+        # identity FiLM, so the head starts equal to the plain σ-flat head.
+        model.pooled_text_sigma_film.to_empty(device="cpu")
+        nn.init.zeros_(model.pooled_text_sigma_film.weight)
+        nn.init.zeros_(model.pooled_text_sigma_film.bias)
 
     # Resume from checkpoint if provided
     if cfg.resume:
@@ -179,7 +185,16 @@ def main():
         from safetensors.torch import load_file
 
         state = load_file(cfg.resume)
-        model.pooled_text_proj.load_state_dict(state)
+        film_state = {
+            k[len("sigma_film.") :]: v
+            for k, v in state.items()
+            if k.startswith("sigma_film.")
+        }
+        model.pooled_text_proj.load_state_dict(
+            {k: v for k, v in state.items() if not k.startswith("sigma_film.")}
+        )
+        if film_state:
+            model.pooled_text_sigma_film.load_state_dict(film_state)
 
     # Block swap for VRAM efficiency (two forwards per step), then compile each
     # block._forward (native-shape flatten → no flash pad-leak into the target).
@@ -197,10 +212,25 @@ def main():
     enable_training_grad_ckpt(model, enabled=cfg.grad_ckpt)
     model.train()
 
-    # Freeze everything, then unfreeze pooled_text_proj
+    # The trainable mod head: pooled_text_proj, plus the σ-FiLM generator when
+    # enabled. Used for unfreeze / fp32 cast / optimizer / grad-norm / save.
+    mod_modules = [model.pooled_text_proj]
+    if cfg.mod_sigma_film:
+        model.enable_pooled_text_sigma_film = True
+        mod_modules.append(model.pooled_text_sigma_film)
+        logger.info(
+            "σ-FiLM ON: mod head hidden is FiLM-modulated by the time embedding "
+            "(text push scales/re-aims per σ)"
+        )
+
+    def mod_parameters():
+        for m in mod_modules:
+            yield from m.parameters()
+
+    # Freeze everything, then unfreeze the mod head
     for param in model.parameters():
         param.requires_grad_(False)
-    for param in model.pooled_text_proj.parameters():
+    for param in mod_parameters():
         param.requires_grad_(True)
 
     # Arm the student forward's pooled_text_proj path. The output layer starts
@@ -208,10 +238,11 @@ def main():
     # gradient — the teacher forward still passes skip_pooled_text_proj=True.
     model.enable_pooled_text_modulation = True
 
-    # Train pooled_text_proj in float32 for precision
-    model.pooled_text_proj.to(dtype=torch.float32)
+    # Train the mod head in float32 for precision
+    for m in mod_modules:
+        m.to(dtype=torch.float32)
 
-    trainable_params = sum(p.numel() for p in model.pooled_text_proj.parameters())
+    trainable_params = sum(p.numel() for p in mod_parameters())
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(
         f"Trainable: {trainable_params:,} / {total_params:,} params "
@@ -220,7 +251,7 @@ def main():
 
     # --- Optimizer ---
     optimizer = torch.optim.AdamW(
-        model.pooled_text_proj.parameters(),
+        list(mod_parameters()),
         lr=cfg.lr,
         fused=torch.cuda.is_available(),
     )
@@ -613,7 +644,7 @@ def main():
         grad_norm = None
         if writer is not None and (step + 1) % cfg.log_interval == 0:
             sq = 0.0
-            for p in model.pooled_text_proj.parameters():
+            for p in mod_parameters():
                 if p.grad is not None:
                     sq += p.grad.detach().float().pow(2).sum().item()
             grad_norm = sq**0.5
@@ -712,6 +743,11 @@ def main():
                 k: v.to(torch.bfloat16)
                 for k, v in model.pooled_text_proj.state_dict().items()
             }
+            if cfg.mod_sigma_film:
+                # σ-FiLM weights ride under a 'sigma_film.' prefix so load can
+                # route them back (and auto-arm enable_pooled_text_sigma_film).
+                for k, v in model.pooled_text_sigma_film.state_dict().items():
+                    state[f"sigma_film.{k}"] = v.to(torch.bfloat16)
             save_file(state, save_path)
             if val_enabled:
                 logger.info(

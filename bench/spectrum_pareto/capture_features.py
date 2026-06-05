@@ -47,6 +47,7 @@ import networks.spectrum  # noqa: E402,F401
 from library.inference import sampling as inference_utils  # noqa: E402
 from library.inference.adapters import clear_hydra_sigma, set_hydra_sigma  # noqa: E402
 from library.inference.generation import register_spectrum_runner  # noqa: E402
+from anima_lora import default_checkpoints  # noqa: E402
 from bench._common import make_run_dir, write_result  # noqa: E402
 
 # Filled by the capture runner on each generate() call, drained by the caller.
@@ -56,11 +57,13 @@ POOL_DIR = "post_image_dataset/distill_mod_synth"
 CAPTION_DIR = "image_dataset"
 
 # Inference needs explicit model paths (base.toml is training-side and isn't
-# merged into the inference arg namespace). Mirror configs/base.toml; override
-# via the CLI flags or ANIMA_DIT / ANIMA_VAE / ANIMA_TEXT_ENCODER.
-DEFAULT_DIT = "models/diffusion_models/anima-base-v1.0.safetensors"
-DEFAULT_VAE = "models/vae/qwen_image_vae.safetensors"
-DEFAULT_TEXT_ENCODER = "models/text_encoders/qwen_3_06b_base.safetensors"
+# merged into the inference arg namespace). default_checkpoints() reads
+# configs/base.toml with ANIMA_DIT / ANIMA_VAE / ANIMA_TEXT_ENCODER overrides;
+# the CLI flags still win over these per-run (see `dit or DEFAULT_DIT` below).
+_ckpts = default_checkpoints()
+DEFAULT_DIT = _ckpts.dit
+DEFAULT_VAE = _ckpts.vae
+DEFAULT_TEXT_ENCODER = _ckpts.text_encoder
 
 
 def _make_capture_runner(capture_uncond: bool):

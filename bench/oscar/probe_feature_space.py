@@ -70,16 +70,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from anima_lora import default_checkpoints
 from bench._common import make_run_dir, write_result
 
 log = logging.getLogger("bench.oscar.probe_feature_space")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-DIT = os.environ.get("ANIMA_DIT", "models/diffusion_models/anima-base-v1.0.safetensors")
-VAE = os.environ.get("ANIMA_VAE", "models/vae/qwen_image_vae.safetensors")
-TEXT_ENCODER = os.environ.get(
-    "ANIMA_TEXT_ENCODER", "models/text_encoders/qwen_3_06b_base.safetensors"
-)
+_ckpts = default_checkpoints()
+DIT, VAE, TEXT_ENCODER = _ckpts.dit, _ckpts.vae, _ckpts.text_encoder
 
 # Varied content so the read reflects the model, not one prompt's manifold.
 DEFAULT_PROMPTS = [

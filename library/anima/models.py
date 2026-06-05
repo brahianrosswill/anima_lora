@@ -1287,6 +1287,20 @@ class Anima(nn.Module):
             nn.Linear(model_channels, model_channels),
         )
 
+        # σ-FiLM (experimental): timestep-condition the mod head's hidden
+        # activation. The plain head is σ-flat — its text push is added to the
+        # (linear) AdaLN time embedding, so the text-induced Δγ,Δβ are constant
+        # across σ and the magnitude ratio ‖ΔS‖/‖ΔT‖ collapses at high σ (the
+        # teacher leans on text ~9× harder there). This generator FiLMs the
+        # hidden between the two proj linears with the normed time embedding, so
+        # the push can scale/re-aim per σ. Kept as a sibling of pooled_text_proj
+        # (not folded into the Sequential) so the [...]-indexing elsewhere stays
+        # valid. Gated by enable_pooled_text_sigma_film — off ⇒ bit-exact to the
+        # plain head. Zero-init ⇒ identity FiLM (scale=shift=0) at start.
+        # See bench/mod_guidance + docs/experimental/gad.md.
+        self.pooled_text_sigma_film = nn.Linear(model_channels, 2 * model_channels)
+        self.enable_pooled_text_sigma_film = False
+
         # Whether the per-forward pooled_text_proj path runs. Default off: the
         # base DiT checkpoint never carries these weights (re-zeroed on load), so
         # the proj is a no-op and the max-reduce + 2 linears are pure per-step
@@ -1317,13 +1331,62 @@ class Anima(nn.Module):
             persistent=False,
         )
 
+        # DAVE — DC Attenuation for diVersity Enhancement (training-free, ICML'26).
+        # Per-block representation edit `ĥ = α·μ + (h−μ)` applied via post-`forward`
+        # hooks (see library/inference/corrections/dave.py); these buffers carry the
+        # runtime state the hooks read. ``_dave_atten[l] = (1−α_l)`` is the per-block
+        # DC attenuation factor (zeros ⇒ exact no-op). The edit is gated to the σ
+        # window [lo, hi]; ``_dave_cur_sigma`` is restamped from the timestep on every
+        # forward (the per-step model buffer the README's design calls for) so the
+        # block hooks — which never see the timestep — can gate on σ. ``enable_dave``
+        # is a plain bool flipped only by ``setup_dave`` (guards the σ stash; no
+        # per-forward toggling, so no recompile churn — cf. enable_pooled_text_modulation).
+        self.enable_dave = False
+        self.register_buffer("_dave_atten", torch.zeros(num_blocks), persistent=False)
+        self.register_buffer("_dave_sigma_lo", torch.zeros(()), persistent=False)
+        self.register_buffer("_dave_sigma_hi", torch.ones(()), persistent=False)
+        self.register_buffer("_dave_cur_sigma", torch.zeros(()), persistent=False)
+
         self.init_weights()
+
+    def _pooled_text_delta(
+        self,
+        pooled_text: torch.Tensor,
+        t_embedding: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Mod-guidance delta (B, D) added to the AdaLN time embedding.
+
+        With σ-FiLM enabled, the head's hidden activation is FiLM-modulated by
+        the (normed) time embedding so the text push becomes σ-dependent — this
+        is what lets ΔS track the teacher's σ-growing text response instead of
+        staying σ-flat. ``t_embedding`` is required for that path; callers
+        without one (the legacy single-delta inference bake) fall back to the
+        σ-flat projection.
+        """
+        if not self.enable_pooled_text_sigma_film or t_embedding is None:
+            return self.pooled_text_proj(pooled_text)
+        lin_in, act, lin_out = self.pooled_text_proj
+        h = lin_in(pooled_text)
+        t = t_embedding[:, 0, :] if t_embedding.ndim == 3 else t_embedding
+        scale, shift = self.pooled_text_sigma_film(t).chunk(2, dim=-1)
+        h = act(h * (1.0 + scale) + shift)
+        return lin_out(h)
 
     def reset_mod_guidance(self) -> None:
         """Disable modulation guidance by zeroing the runtime buffers."""
         self._mod_guidance_delta.zero_()
         self._mod_guidance_schedule.zero_()
         self._mod_guidance_final_w.zero_()
+
+    def reset_dave(self) -> None:
+        """Disable DAVE: zero the attenuation factors and the enable flag.
+
+        Hooks are removed by their owner (``setup_dave`` returns a handle); this
+        just neutralizes the buffers so any still-attached hook is a no-op.
+        """
+        self.enable_dave = False
+        self._dave_atten.zero_()
+        self._dave_cur_sigma.zero_()
 
     def init_weights(self) -> None:
         self.x_embedder.init_weights()
@@ -1336,6 +1399,9 @@ class Anima(nn.Module):
         # Zero-init pooled_text_proj output layer so it's a no-op at init
         nn.init.zeros_(self.pooled_text_proj[-1].weight)
         nn.init.zeros_(self.pooled_text_proj[-1].bias)
+        # Zero-init σ-FiLM generator → identity (scale=shift=0) at init.
+        nn.init.zeros_(self.pooled_text_sigma_film.weight)
+        nn.init.zeros_(self.pooled_text_sigma_film.bias)
 
     def enable_gradient_checkpointing(
         self, cpu_offload: bool = False, unsloth_offload: bool = False
@@ -1713,6 +1779,14 @@ class Anima(nn.Module):
 
         if timesteps_B_T.ndim == 1:
             timesteps_B_T = timesteps_B_T.unsqueeze(1)
+
+        # DAVE: restamp the current σ so the per-block hooks can gate the DC edit
+        # to a σ window. ``timesteps`` is the DiT time argument on the σ∈[0,1]
+        # scale (sampling.py::get_timesteps_sigmas). Eager region (only block._forward
+        # is compiled), so this scalar copy never enters the compiled graph.
+        if self.enable_dave:
+            self._dave_cur_sigma.copy_(timesteps_B_T.detach().float().reshape(-1)[0])
+
         t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder(timesteps_B_T)
         t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
 
@@ -1731,8 +1805,8 @@ class Anima(nn.Module):
             else:
                 pooled_text = None
             if pooled_text is not None:
-                t_embedding_B_T_D = t_embedding_B_T_D + self.pooled_text_proj(
-                    pooled_text
+                t_embedding_B_T_D = t_embedding_B_T_D + self._pooled_text_delta(
+                    pooled_text, t_embedding_B_T_D
                 ).unsqueeze(1)
 
         # Phase 2: modulation guidance delta.
