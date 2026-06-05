@@ -50,6 +50,12 @@ class EasyControlTab(ConfigTab):
     }
 
     def __init__(self):
+        # Created BEFORE super().__init__ because ConfigTab.__init__ ends by
+        # calling _try_reattach → _attach_to_job, which disables preprocess_btn.
+        # On a GUI reopen mid-train that reattach fires during super().__init__,
+        # before the post-super setup below would otherwise create the button.
+        self.preprocess_btn = QPushButton(t("preprocess"))
+
         super().__init__(methods=["easycontrol"])
 
         # The easycontrol route trains exactly the shipped family variants
@@ -77,7 +83,7 @@ class EasyControlTab(ConfigTab):
         # ConfigTab has no Preprocess button (it auto-chains a daemon preprocess).
         # EasyControl preprocessing is the bespoke easycontrol-preprocess
         # (mangafy for colorize), so it gets an explicit button before Train.
-        self.preprocess_btn = QPushButton(t("preprocess"))
+        # (preprocess_btn itself is built above the super() call.)
         self.preprocess_btn.setStyleSheet(
             "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
         )
