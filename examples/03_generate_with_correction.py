@@ -24,10 +24,10 @@ cns, …): build the token list and hand it to `extra_argv`.
 
 Run from the repo root (anima_lora/):
 
-    python examples/08_generate_with_correction.py --correction dcw
-    python examples/08_generate_with_correction.py --correction dcw --dcw_lambda -0.012
-    python examples/08_generate_with_correction.py --correction spectrum --spectrum_warmup 6
-    python examples/08_generate_with_correction.py --correction none   # baseline
+    python examples/03_generate_with_correction.py --correction dcw
+    python examples/03_generate_with_correction.py --correction dcw --dcw_lambda -0.012
+    python examples/03_generate_with_correction.py --correction spectrum --spectrum_warmup 6
+    python examples/03_generate_with_correction.py --correction none   # baseline
 
 Compare the saved PNGs against `--correction none` to eyeball the effect.
 """
@@ -119,7 +119,7 @@ def main() -> None:
     p.add_argument(
         "--prompt", default="a red fox sitting in a snowy forest, golden hour"
     )
-    p.add_argument("--save_path", default="output/tests/example_08.png")
+    p.add_argument("--save_path", default="output/tests/example_03.png")
     p.add_argument("--steps", type=int, default=30)
     p.add_argument("--cfg", type=float, default=3.5)
     p.add_argument(

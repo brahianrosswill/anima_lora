@@ -15,6 +15,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS_768
+
 
 def _write_image(path: Path, size: tuple[int, int]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +157,51 @@ def test_resize_to_buckets_writes_and_mirrors_layout(tmp_path: Path) -> None:
         assert (im.width, im.height) in bucket_counts
 
 
+def test_resize_to_buckets_skips_up_to_date_and_rebuckets_on_tier_change(
+    tmp_path: Path,
+) -> None:
+    """Idempotent skip: a re-run touches nothing; adding a 768 tier re-resizes
+    only the image whose target bucket actually moves."""
+    from library.preprocess import resize_to_buckets
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    _write_image(src / "small.png", (700, 860))  # ~0.6MP → flips to 768 tier
+    _write_image(src / "big.png", (1400, 1050))  # ~1.5MP → stays 1024 tier
+
+    # First pass at the single 1024 tier writes both.
+    stats, _ = resize_to_buckets(
+        src, dst, target_res=[1024], min_pixels=0, workers=1, verbose=False
+    )
+    assert (stats.written, stats.skipped) == (2, 0)
+
+    # Re-run, same tiers: both already at their bucket → all skipped.
+    stats, _ = resize_to_buckets(
+        src, dst, target_res=[1024], min_pixels=0, workers=1, verbose=False
+    )
+    assert (stats.written, stats.skipped) == (0, 2)
+
+    # Add the 768 tier: only `small` moves bucket → exactly one re-resize.
+    stats, counts = resize_to_buckets(
+        src, dst, target_res=[768, 1024], min_pixels=0, workers=1, verbose=False
+    )
+    assert (stats.written, stats.skipped) == (1, 1)
+    with Image.open(dst / "small.png") as im:
+        assert (im.width, im.height) in CONSTANT_TOKEN_BUCKETS_768
+
+    # overwrite=True forces both even when up to date.
+    stats, _ = resize_to_buckets(
+        src,
+        dst,
+        target_res=[768, 1024],
+        min_pixels=0,
+        workers=1,
+        verbose=False,
+        overwrite=True,
+    )
+    assert (stats.written, stats.skipped) == (2, 0)
+
+
 def test_resize_to_buckets_min_pixels_filter(tmp_path: Path) -> None:
     from library.preprocess import resize_to_buckets
 
@@ -167,3 +214,49 @@ def test_resize_to_buckets_min_pixels_filter(tmp_path: Path) -> None:
     assert stats.skipped == 1
     assert stats.written == 0
     assert not (dst / "tiny.png").exists()
+
+
+def test_reconcile_caches_removes_only_wrong_bucket(tmp_path: Path) -> None:
+    """Under [768, 1024], the small image's old 1024-tier caches are stale; the
+    big image's correct caches and every TE sidecar are left untouched."""
+    from library.preprocess import find_stale_caches, delete_stale
+
+    image_dir = tmp_path / "image_dataset"
+    resized = tmp_path / "post" / "resized"
+    lora = tmp_path / "post" / "lora"
+    masks = tmp_path / "post" / "masks"
+    target_res = [768, 1024]
+
+    # small: 0.6MP → flips to the 768 tier (640x864); caches still at 1024 (896x1152).
+    _write_image(image_dir / "charA" / "small.png", (700, 860))
+    _write_image(resized / "charA" / "small.png", (896, 1152))  # wrong size
+    (lora / "charA").mkdir(parents=True)
+    small_npz = lora / "charA" / "small_0896x1152_anima.npz"
+    small_pe = lora / "charA" / "small_anima_pe.safetensors"
+    small_te = lora / "charA" / "small_anima_te.safetensors"  # must survive
+    small_npz.touch()
+    small_pe.touch()
+    small_te.touch()
+    (masks / "charA").mkdir(parents=True)
+    small_mask = masks / "charA" / "small_mask.png"
+    small_mask.touch()
+
+    # big: 1.47MP → stays 1024 tier (1200x896); caches already correct.
+    _write_image(image_dir / "big.png", (1400, 1050))
+    _write_image(resized / "big.png", (1200, 896))  # correct size
+    big_npz = lora / "big_1200x0896_anima.npz"
+    big_npz.touch()
+
+    stale = find_stale_caches(image_dir, resized, lora, masks, target_res)
+    assert stale.n_images == 1
+    assert stale.npz == [small_npz]
+    assert stale.png == [resized / "charA" / "small.png"]
+    assert stale.pe == [small_pe]
+    assert stale.mask == [small_mask]
+    assert big_npz not in stale.npz  # consistent image untouched
+
+    removed = delete_stale(stale)
+    assert removed == {"npz": 1, "png": 1, "pe": 1, "mask": 1}
+    assert not small_npz.exists() and not small_pe.exists() and not small_mask.exists()
+    assert small_te.exists()  # TE is text-only — never reconciled
+    assert big_npz.exists()

@@ -14,7 +14,7 @@ text-encoder padding invariant lives (max-pad to 512; the DiT projects the
 encoder hidden states through `_preprocess_text_embeds`, so encoding genuinely
 needs the DiT, not just the text encoder).
 
-    python examples/05_load_models.py --prompt "a lighthouse at dusk"
+    python examples/04_load_models.py --prompt "a lighthouse at dusk"
 """
 
 from __future__ import annotations

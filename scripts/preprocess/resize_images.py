@@ -99,6 +99,15 @@ def main() -> None:
             "within each subfolder; the same stem can repeat across folders."
         ),
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Re-resize every image even if a resized PNG already exists at the "
+            "correct bucket. Default skips up-to-date outputs; a bucket change "
+            "(e.g. adding a --target_res tier) still re-resizes affected images."
+        ),
+    )
     args = parser.parse_args()
 
     constant_token_buckets = (
@@ -127,6 +136,7 @@ def main() -> None:
         min_pixels=args.min_pixels,
         copy_captions=not args.no_copy_captions,
         recursive=args.recursive,
+        overwrite=args.overwrite,
         progress=tqdm_progress("Resizing"),
     )
 

@@ -248,13 +248,20 @@ def load_path_overrides(
     configs_dir = str(resolve_under_home(configs_dir))
     out: dict = {}
 
+    def _is_scalar_list(v) -> bool:
+        """A list of plain scalars (e.g. ``target_res = [768, 1024]``) — a flat
+        config value, unlike ``[[datasets]]`` which is a list of tables."""
+        return isinstance(v, list) and all(not isinstance(e, (dict, list)) for e in v)
+
     def _flat_scalars(d: dict) -> dict:
-        """Pluck top-level non-container values, skipping non-flat sections
-        (``[general]`` / ``[[datasets]]`` / ``[variant]``)."""
+        """Pluck top-level flat values — plain scalars and scalar lists —
+        skipping non-flat sections (``[general]`` / ``[[datasets]]`` /
+        ``[variant]``) and any other table/list-of-tables."""
         return {
             k: v
             for k, v in d.items()
-            if k not in _NON_FLAT_SECTIONS and not isinstance(v, (dict, list))
+            if k not in _NON_FLAT_SECTIONS
+            and (not isinstance(v, (dict, list)) or _is_scalar_list(v))
         }
 
     base_path = os.path.join(configs_dir, "base.toml")
@@ -331,7 +338,11 @@ def _resolve_preset(preset: str, configs_dir: str = "configs") -> tuple[dict, st
             section = presets[preset]
             if not isinstance(section, dict):
                 raise ValueError(f"Preset '{preset}' in {presets_path} is not a table")
-            return dict(section), presets_path, f"{_display_path(presets_path)}[{preset}]"
+            return (
+                dict(section),
+                presets_path,
+                f"{_display_path(presets_path)}[{preset}]",
+            )
     custom_path = os.path.join(configs_dir, "custom", f"{preset}.toml")
     if os.path.exists(custom_path):
         with open(custom_path, "r", encoding="utf-8") as f:

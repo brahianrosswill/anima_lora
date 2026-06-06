@@ -14,8 +14,8 @@ Two things a scripts/ author repeatedly needs:
      post_image_dataset/lora/ — no DiT/encoder needed, it's all on disk.
      Samples are bucket-grouped so each batch is one resolution.
 
-    python examples/06_vae_and_dataset.py --image some/photo.png      # part A
-    python examples/06_vae_and_dataset.py --data_dir post_image_dataset/lora  # part B
+    python examples/05_vae_and_dataset.py --image some/photo.png      # part A
+    python examples/05_vae_and_dataset.py --data_dir post_image_dataset/lora  # part B
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def iterate_cache(data_dir: str, device) -> None:
     from library.inference.output import decode_to_pil
 
     vae = _load_vae(device)
-    out = "output/tests/example_06_cached_sample0.png"
+    out = "output/tests/example_05_cached_sample0.png"
     with torch.no_grad():
         decode_to_pil(vae, latent.unsqueeze(0), device).save(out)
     print(f"  decoded cached latent → {out}")
@@ -103,7 +103,7 @@ def main() -> None:
         default="post_image_dataset/lora",
         help="run part B: iterate this cache dir",
     )
-    p.add_argument("--out", default="output/tests/example_06_roundtrip.png")
+    p.add_argument("--out", default="output/tests/example_05_roundtrip.png")
     opts = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

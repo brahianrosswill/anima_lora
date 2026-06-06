@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a frozen DiT + fresh adapter for a *training* run — the harness helpers.
 
-`build_anima` (shown indirectly by 02/05) owns the inference path: it loads an
+`build_anima` (shown indirectly by 01/04) owns the inference path: it loads an
 *existing* adapter checkpoint and applies it. When you write a distillation /
 fine-tuning trainer you instead attach a *fresh, untrained* network and drive
 your own optimizer — so you can't call `build_anima` wholesale. The three
@@ -22,8 +22,8 @@ This is exactly the sequence scripts/distill_{mod,spd,turbo}.py run; this script
 distills it to the smallest demonstrable build (no dataset, no optimizer step —
 it stops once the model is ready to train and prints the trainable-param split).
 
-    python examples/07_frozen_dit_training_build.py
-    python examples/07_frozen_dit_training_build.py --blocks_to_swap 16 --compile
+    python examples/06_frozen_dit_training_build.py
+    python examples/06_frozen_dit_training_build.py --blocks_to_swap 16 --compile
 """
 
 from __future__ import annotations

@@ -148,6 +148,11 @@ COMMANDS = {
         preprocess.cmd_preprocess_resize,
         "Resize images to bucket resolutions",
     ),
+    "preprocess-reconcile": (
+        preprocess.cmd_preprocess_reconcile,
+        "Remove resized/latent/PE/mask caches stale for the configured "
+        'target_res (dry-run; ARGS="--delete" to act). Run after changing tiers.',
+    ),
     "preprocess-vae": (preprocess.cmd_preprocess_vae, "Cache VAE latents"),
     "preprocess-te": (preprocess.cmd_preprocess_te, "Cache text encoder embeddings"),
     "preprocess-pooled": (

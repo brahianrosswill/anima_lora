@@ -149,6 +149,38 @@ def cmd_preprocess_resize(extra):
     )
 
 
+def cmd_preprocess_reconcile(extra):
+    """Remove caches stale for the configured ``target_res`` (dry-run by default).
+
+    Pass ``ARGS="--delete"`` to actually remove. ``target_res`` comes from the
+    merged config (same as resize); an explicit ``--target_res`` in ``ARGS``
+    wins. Useful after adding/dropping a tier so re-running preprocess + mask
+    regenerates only the images whose bucket moved.
+    """
+    # _target_res_args returns [] for a bare [1024]/absent config AND when ARGS
+    # already carries --target_res. Inject the 1024 default only in the former
+    # case (no explicit flag in ARGS) so we never duplicate it.
+    tr_args = _target_res_args(extra)
+    if not tr_args and "--target_res" not in extra:
+        tr_args = ["--target_res", "1024"]
+    run(
+        [
+            PY,
+            "scripts/preprocess/reconcile_caches.py",
+            "--image-dir",
+            _path("source_image_dir", "image_dataset"),
+            "--resized-dir",
+            _path("resized_image_dir", "post_image_dataset/resized"),
+            "--cache-dir",
+            _path("lora_cache_dir", "post_image_dataset/lora"),
+            "--mask-dir",
+            _path("mask_dir", "post_image_dataset/masks"),
+            *tr_args,
+            *extra,
+        ]
+    )
+
+
 def cmd_preprocess_vae(extra):
     run(
         [

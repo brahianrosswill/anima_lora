@@ -2,7 +2,7 @@
 
 ``generate(args, gen_settings)`` reads ~40 fields off an ``argparse.Namespace``
 via ``getattr``, so historically the only safe way to build one was to call the
-CLI parser (what ``examples/01``–``03`` all do). This dataclass makes the request
+CLI parser (what ``examples/01`` and ``03`` do). This dataclass makes the request
 the canonical constructor and turns the CLI parser into *one* consumer instead of
 the only one::
 

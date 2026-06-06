@@ -125,8 +125,8 @@ def build_network(merged: dict):
 def run_training(method: str, preset: str, extra_argv: list[str]) -> None:
     """Part 3 — reproduce train.py's __main__ block and run the trainer.
 
-        setup_parser() + populate_schema()  →  parse  →  read_config_from_file  →
-        AnimaTrainer().train(args)
+    setup_parser() + populate_schema()  →  parse  →  read_config_from_file  →
+    AnimaTrainer().train(args)
     """
     from train import (
         AnimaTrainer,
