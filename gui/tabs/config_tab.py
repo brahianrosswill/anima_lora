@@ -567,7 +567,11 @@ class ConfigTab(QWidget):
             QSpinBox,
         )
 
-        if isinstance(w, QComboBox):
+        from gui import _TargetResWidget
+
+        if isinstance(w, _TargetResWidget):
+            w.changed.connect(self._mark_dirty)
+        elif isinstance(w, QComboBox):
             w.currentTextChanged.connect(self._mark_dirty)
         elif isinstance(w, QCheckBox):
             w.toggled.connect(self._mark_dirty)

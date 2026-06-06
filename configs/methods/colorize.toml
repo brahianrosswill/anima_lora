@@ -23,7 +23,7 @@ network_dim = 32
 network_alpha = 32
 
 network_args = [
-    "b_cond_init=-3",
+    "b_cond_init=-4",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
 ]
@@ -34,9 +34,9 @@ logging_dir = "output/logs"
 log_with = "tensorboard"
 
 learning_rate = 2e-5
-max_train_epochs = 2
-save_every_n_epochs = 2
-checkpointing_epochs = 2
+max_train_epochs = 3
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 
 use_easycontrol = true
 easycontrol_drop_p = 0.0

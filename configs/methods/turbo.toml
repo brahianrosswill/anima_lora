@@ -16,7 +16,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 1000
+iterations = 2500
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -32,10 +32,10 @@ unsloth_offload_checkpointing = false
 base_loss = "dpdmd"
 
 [network]
-student_rank = 64
-student_alpha = 64
-fake_rank = 64
-fake_alpha = 64
+student_rank = 96
+student_alpha = 96
+fake_rank = 96
+fake_alpha = 96
 attn_mode = "flash"
 # Per-step expert: split the student into K = student_steps up-heads off a
 # shared down-proj, head k serving denoise step k. Removes the diversity↔quality
@@ -72,7 +72,7 @@ grad_step = "random"            # which rollout step carries gradient (BOTH base
 [optim]
 student_lr = 2e-5
 fake_lr = 2e-5
-fake_steps_per_student_step = 3
+fake_steps_per_student_step = 4
 fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
                                 # against the student's (init ≈ teacher) x_pred before the
@@ -146,7 +146,7 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 1000
+save_every = 750
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 500
+validate_every_n_steps = 750

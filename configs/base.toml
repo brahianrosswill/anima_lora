@@ -40,6 +40,18 @@ path_pattern = "*"
 drop_lowres_images = true
 min_pixels = 500000
 
+# Multi-scale constant-token tiers. Each image is preprocessed into the tier that
+# resizes it the LEAST (nearest bucket by scale — see library/datasets/buckets.py
+# choose_edge), giving v1.0-style diverse-resolution training from a mixed
+# dataset. Allowed edges: 512 768 1024 1280 1536 (tokens 1024+1008 / 2160 / 4032+
+# 4200 / 6300 / 8640). `[1024]` (the default) = single ~1MP tier = legacy
+# behavior. Each extra tier adds compiled block graph(s): 768/1280/1536 +1 each,
+# 512 +2 (it carries the 512x512 square + a diversity family). The same value is
+# read at train time only to size the torch.compile dynamo cache budget —
+# training itself consumes whatever latent shapes are on disk. Override per-run:
+#   make preprocess ARGS="--target_res 1024 1536"
+target_res = [1024]
+
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"
 lr_warmup_steps = 0.05   # ratio (<1) → 5% of total steps; warms AdamW before full LR

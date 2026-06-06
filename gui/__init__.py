@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import toml
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -281,6 +282,7 @@ _GROUPS = {
         "path_pattern",
         "drop_lowres_images",
         "min_pixels",
+        "target_res",
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
@@ -317,6 +319,7 @@ _BASIC = {
     "path_pattern",
     "drop_lowres_images",
     "min_pixels",
+    "target_res",
     "use_valid",
     "validation_split_num",
     "sample_prompts",
@@ -951,7 +954,44 @@ def _image_dirs() -> dict[str, Path]:
     return dirs
 
 
+# Allowed multi-scale tiers — mirrors library.datasets.buckets.ALLOWED_TARGET_RES
+# (hardcoded so the GUI import stays light / library-free).
+_TARGET_RES_TIERS = (512, 768, 1024, 1280, 1536)
+
+
+class _TargetResWidget(QWidget):
+    """Horizontal row of tier checkboxes for the multi-scale ``target_res`` knob.
+
+    Reads/writes a list of edge ints (e.g. ``[1024, 1536]``). Never returns an
+    empty list — unchecking everything falls back to ``[1024]`` (the legacy
+    single ~1MP tier) so preprocess/train always have a valid tier.
+    """
+
+    changed = Signal()
+
+    def __init__(self, selected) -> None:
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        sel = {int(e) for e in selected} if selected else set()
+        self._boxes: dict[int, QCheckBox] = {}
+        for edge in _TARGET_RES_TIERS:
+            cb = QCheckBox(str(edge))
+            cb.setChecked(edge in sel)
+            cb.toggled.connect(self.changed)
+            lay.addWidget(cb)
+            self._boxes[edge] = cb
+        lay.addStretch(1)
+
+    def value(self) -> list[int]:
+        out = [e for e, cb in self._boxes.items() if cb.isChecked()]
+        return out or [1024]
+
+
 def _widget(v: Any, key: str = "") -> QWidget:
+    if key == "target_res":
+        sel = v if isinstance(v, (list, tuple)) else ([v] if v else [1024])
+        return _TargetResWidget(sel)
     if key == "sample_prompts":
         # One preview prompt per line. Stored in TOML as a string (single line)
         # or an array (multi-line); train.py materializes either into the
@@ -1001,6 +1041,8 @@ def _widget(v: Any, key: str = "") -> QWidget:
 
 
 def _read(w: QWidget, orig: Any = None) -> Any:
+    if isinstance(w, _TargetResWidget):
+        return w.value()
     if isinstance(w, QPlainTextEdit):
         # sample_prompts box → list of non-empty, non-comment lines.
         return [

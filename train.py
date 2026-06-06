@@ -634,9 +634,16 @@ class AnimaTrainer:
         # on the flatten (one block graph per token-count family: 4032/4200) and
         # raises the dynamo cache-size budget itself.
         if args.torch_compile:
+            target_res = getattr(args, "target_res", None)
+            n_token_families = None
+            if target_res:
+                from library.datasets.buckets import token_count_families
+
+                n_token_families = token_count_families(target_res)
             model.compile_blocks(
                 args.dynamo_backend,
                 mode=getattr(args, "compile_inductor_mode", None),
+                n_token_families=n_token_families,
             )
 
         # Store unsloth preference so that when the base trainer calls

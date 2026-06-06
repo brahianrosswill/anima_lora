@@ -335,6 +335,20 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="use torch.compile (requires PyTorch 2.0)",
     )
     parser.add_argument(
+        "--target_res",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="EDGE",
+        help=(
+            "Multi-scale constant-token tiers the dataset was preprocessed with "
+            "(512 768 1024 1280 1536). Only used to size the torch.compile dynamo "
+            "cache budget so multi-tier training does not recompile-storm; "
+            "training itself reads whatever latent shapes are on disk. Default "
+            "(unset) = single 1024 tier."
+        ),
+    )
+    parser.add_argument(
         "--dynamo_backend",
         type=str,
         default="inductor",

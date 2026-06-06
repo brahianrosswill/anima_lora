@@ -47,6 +47,58 @@ def _config_min_pixels() -> int:
         return 500_000
 
 
+def _target_res_args(extra) -> list[str]:
+    """``--target_res E1 E2 …`` derived from the merged TOML's ``target_res`` key.
+
+    Returns ``[]`` when an explicit ``--target_res`` is already in ``extra`` (CLI
+    ARGS wins, no duplicate) or when the config value is absent / a bare
+    ``[1024]`` (the legacy single-tier default — leave it off so the resize
+    script's own default path runs). Invalid / unknown edges are dropped here so
+    a typo in the TOML doesn't abort preprocessing.
+    """
+    if "--target_res" in extra:
+        return []
+
+    from library.datasets.buckets import ALLOWED_TARGET_RES
+
+    from ._common import _path_overrides
+
+    raw = _path_overrides().get("target_res")
+    if not raw:
+        return []
+    edges = raw if isinstance(raw, (list, tuple)) else [raw]
+    try:
+        edges = [int(e) for e in edges]
+    except (TypeError, ValueError):
+        return []
+    edges = [e for e in edges if e in ALLOWED_TARGET_RES]
+    if not edges or edges == [1024]:
+        return []
+    return ["--target_res", *(str(e) for e in edges)]
+
+
+def _pop_target_res(extra) -> list[str]:
+    """Strip ``--target_res E1 E2 …`` (a resize-only flag) from ``extra``.
+
+    The VAE/TE/PE stages read whatever latent shapes are already on disk, so
+    they must never see ``--target_res`` (their argparse doesn't define it).
+    Removes the flag and its following ``nargs='+'`` integer values up to the
+    next ``--option``.
+    """
+    cleaned: list[str] = []
+    it = iter(extra)
+    for tok in it:
+        if tok == "--target_res":
+            # drop the flag, then drop trailing int values until the next flag
+            for nxt in it:
+                if nxt.startswith("--"):
+                    cleaned.append(nxt)
+                    break
+            continue
+        cleaned.append(tok)
+    return cleaned
+
+
 def _resolve_lowres_filter(extra) -> tuple[list[str], list[str]]:
     """Reconcile the low-res input filter against CLI ``ARGS``.
 
@@ -79,6 +131,7 @@ def _resolve_lowres_filter(extra) -> tuple[list[str], list[str]]:
 
 def cmd_preprocess_resize(extra):
     mp_args, extra = _resolve_lowres_filter(extra)
+    tr_args = _target_res_args(extra)
     run(
         [
             PY,
@@ -90,6 +143,7 @@ def cmd_preprocess_resize(extra):
             "--no_copy_captions",
             "--recursive",
             *mp_args,
+            *tr_args,
             *extra,
         ]
     )
@@ -238,12 +292,13 @@ def cmd_preprocess(extra):
     # `exp-ip-adapter-preprocess`). Leaving PE out keeps the default LoRA
     # preprocess fast on machines that won't ever use the vision tower.
     cmd_preprocess_resize(extra)
-    # The VAE step doesn't filter on size; strip the low-res convenience flags
-    # so its argparse never sees an arg it doesn't define. (resize/te pop them
-    # themselves via _resolve_lowres_filter.)
-    _, vae_extra = _resolve_lowres_filter(extra)
+    # The VAE/TE steps read on-disk shapes — strip the low-res convenience flags
+    # AND the resize-only --target_res so their argparse never sees an arg it
+    # doesn't define. (resize pops lowres itself via _resolve_lowres_filter.)
+    downstream = _pop_target_res(extra)
+    _, vae_extra = _resolve_lowres_filter(downstream)
     cmd_preprocess_vae(vae_extra)
-    cmd_preprocess_te(extra)
+    cmd_preprocess_te(downstream)
     # Build the method-agnostic caption index (pure data, no GPU, ~seconds) as a
     # free by-product — it's consumed by the IP-Adapter pair sampler, artist
     # balancing, dataset analytics, AND soft-tokens contrastive training (which

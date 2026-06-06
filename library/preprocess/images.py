@@ -16,7 +16,11 @@ from pathlib import Path
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-from library.datasets.buckets import BucketManager
+from library.datasets.buckets import (
+    BucketManager,
+    buckets_for_edges,
+    choose_edge,
+)
 from library.preprocess._dataset import PreprocessStats, walk_images
 from library.preprocess._progress import ProgressFn
 
@@ -68,19 +72,29 @@ def process_image(
     the output mirrors it as ``out_dir / rel_dir / stem.png``. Empty ``rel_dir``
     collapses to the flat layout.
     """
-    max_reso, min_size, max_size, reso_steps, use_constant = bucket_args
+    # 6th element (target_res) is optional so pre-multiscale 5-tuple callers
+    # still work.
+    max_reso, min_size, max_size, reso_steps, use_constant, *rest = bucket_args
+    target_res = rest[0] if rest else None
     bucket_mgr = BucketManager(
         max_reso=max_reso,
         min_size=min_size,
         max_size=max_size,
         reso_steps=reso_steps,
     )
-    bucket_mgr.make_buckets(constant_token_buckets=use_constant)
 
     src_img = Image.open(image_path)
     save_kwargs = _collect_metadata(src_img)
     img = src_img.convert("RGB")
     w, h = img.size
+
+    if use_constant and target_res:
+        # Multi-scale: pick the tier that resizes this image the least (nearest
+        # bucket by cover-scale), then the nearest-aspect bucket within it.
+        edge = choose_edge(w, h, target_res)
+        bucket_mgr.set_predefined_resos(buckets_for_edges([edge]))
+    else:
+        bucket_mgr.make_buckets(constant_token_buckets=use_constant)
 
     bucket_reso, _, _ = bucket_mgr.select_bucket(w, h)
     bw, bh = bucket_reso
@@ -126,6 +140,7 @@ def resize_to_buckets(
     max_bucket_reso: int = 2048,
     bucket_reso_steps: int = 64,
     constant_token_buckets: bool = True,
+    target_res: list[int] | None = None,
     workers: int = 4,
     min_pixels: int = 500_000,
     copy_captions: bool = True,
@@ -148,6 +163,7 @@ def resize_to_buckets(
         max_bucket_reso,
         bucket_reso_steps,
         constant_token_buckets,
+        target_res,
     )
 
     # walk_images enforces per-subfolder stem uniqueness (same-folder stem
@@ -181,10 +197,14 @@ def resize_to_buckets(
         image_files = kept
 
     if verbose:
-        print(
-            f"Resizing {len(image_files)} images to "
-            f"{'constant-token' if constant_token_buckets else 'standard'} buckets"
-        )
+        mode = "standard"
+        if constant_token_buckets:
+            mode = (
+                f"multi-scale constant-token (tiers {sorted(target_res)})"
+                if target_res
+                else "constant-token"
+            )
+        print(f"Resizing {len(image_files)} images to {mode} buckets")
 
     def _rel_for(p: Path) -> str:
         try:

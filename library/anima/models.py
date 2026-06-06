@@ -1415,7 +1415,12 @@ class Anima(nn.Module):
         for block in self.blocks:
             block.disable_gradient_checkpointing()
 
-    def compile_blocks(self, backend: str = "inductor", mode: Optional[str] = None):
+    def compile_blocks(
+        self,
+        backend: str = "inductor",
+        mode: Optional[str] = None,
+        n_token_families: Optional[int] = None,
+    ):
         """Enable native-shape flattening and torch.compile each block's _forward.
 
         Two coupled effects, both owned by this one call:
@@ -1455,12 +1460,19 @@ class Anima(nn.Module):
 
         from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS
 
-        n = len(
-            {
-                (h // self.patch_spatial) * (w // self.patch_spatial)
-                for h, w in CONSTANT_TOKEN_BUCKETS
-            }
-        )
+        # Number of distinct token-count families (== compiled block graphs).
+        # Defaults to the canonical single-scale 1024 table (2: 4032/4200);
+        # multi-scale ``--target_res`` runs pass the wider count so the dynamo
+        # cache budget grows with the active tiers instead of recompile-storming.
+        if n_token_families is not None:
+            n = n_token_families
+        else:
+            n = len(
+                {
+                    (h // self.patch_spatial) * (w // self.patch_spatial)
+                    for h, w in CONSTANT_TOKEN_BUCKETS
+                }
+            )
         _dynamo.config.cache_size_limit = max(
             _dynamo.config.cache_size_limit, 2 * n + 8
         )
