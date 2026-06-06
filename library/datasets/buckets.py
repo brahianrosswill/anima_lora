@@ -308,9 +308,16 @@ class BucketManager:
         self.buckets = sorted_buckets
         self.reso_to_id = sorted_reso_to_id
 
-    def make_buckets(self, constant_token_buckets: bool = False):
+    def make_buckets(self, constant_token_buckets: bool = False, target_res=None):
         if constant_token_buckets:
-            resos = list(CONSTANT_TOKEN_BUCKETS)
+            # Union of every preprocessed tier's table (default [1024] reproduces
+            # the canonical single-scale list byte-for-byte). select_bucket hits
+            # the exact-match branch for any cached reso in this set, so a
+            # multi-tier dataset keeps each latent at its true (W, H) instead of
+            # AR-snapping non-1024 caches into a 1024 bucket. target_res MUST list
+            # every tier present on disk — it also drives the compile budget
+            # (token_count_families), so the two stay in sync.
+            resos = buckets_for_edges(target_res or DEFAULT_TARGET_RES)
         else:
             resos = make_bucket_resolutions(
                 self.max_reso, self.min_size, self.max_size, self.reso_steps

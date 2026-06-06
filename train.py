@@ -1597,9 +1597,13 @@ class AnimaTrainer:
                 config_util.generate_dataset_group_by_blueprint(
                     blueprint.dataset_group,
                     # Native constant-token bucketing is the only mode: the sampler
-                    # buckets into CONSTANT_TOKEN_BUCKETS (the 4032/4200 families)
-                    # so compile_blocks' flatten keys on token count, not resolution.
+                    # buckets into the union of the requested tier tables so
+                    # compile_blocks' flatten keys on token count, not resolution.
+                    # target_res must list every preprocessed tier (also drives the
+                    # compile token-family budget) — else non-1024 caches are
+                    # AR-snapped into a 1024 bucket and never loaded.
                     constant_token_buckets=True,
+                    target_res=getattr(args, "target_res", None),
                 )
             )
 

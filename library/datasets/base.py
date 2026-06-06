@@ -437,12 +437,14 @@ class BaseDataset(torch.utils.data.Dataset):
         self.image_data[info.image_key] = info
         self.image_to_subset[info.image_key] = subset
 
-    def make_buckets(self, constant_token_buckets: bool = False):
+    def make_buckets(self, constant_token_buckets: bool = False, target_res=None):
         """Assign every image to its nearest bucket resolution.
 
         With ``constant_token_buckets`` (the only training mode) buckets come
-        from the fixed ``CONSTANT_TOKEN_BUCKETS`` table — native shapes, no
-        padding.
+        from the union of the ``target_res`` tier tables — native shapes, no
+        padding. ``target_res`` must list every tier preprocessed on disk
+        (defaults to ``[1024]``); non-1024 caches are otherwise AR-snapped into
+        a 1024 bucket and their real npz is never loaded.
         """
         logger.info("loading image sizes.")
         for info in tqdm(self.image_data.values()):
@@ -451,14 +453,16 @@ class BaseDataset(torch.utils.data.Dataset):
 
         logger.info("make buckets")
 
-        # Remember the mode so a later rebuild (e.g. restrict_to_byg_tuples)
-        # re-buckets identically.
+        # Remember the mode + tier set so a later rebuild (e.g.
+        # restrict_to_byg_tuples) re-buckets identically.
         self._constant_token_buckets = constant_token_buckets
+        self._target_res = target_res
 
         if self.bucket_manager is None:
             self.bucket_manager = BucketManager()
             self.bucket_manager.make_buckets(
-                constant_token_buckets=constant_token_buckets
+                constant_token_buckets=constant_token_buckets,
+                target_res=target_res,
             )
 
         img_ar_errors = []
@@ -1257,8 +1261,10 @@ class BaseDataset(torch.utils.data.Dataset):
                 f"{npz_path}. Run the cond prep step first "
                 f"(e.g. `make easycontrol-preprocess EASYADAPTER=colorize`)."
             )
-        cond, _, _, cond_flipped, _ = self.latents_caching_strategy.load_latents_from_disk(
-            npz_path, image_info.bucket_reso
+        cond, _, _, cond_flipped, _ = (
+            self.latents_caching_strategy.load_latents_from_disk(
+                npz_path, image_info.bucket_reso
+            )
         )
         if flipped:
             if cond_flipped is None:
@@ -1453,7 +1459,8 @@ class BaseDataset(torch.utils.data.Dataset):
         # bucket_manager.add_image accumulates, so reset before re-bucketing.
         self.bucket_manager = None
         self.make_buckets(
-            constant_token_buckets=getattr(self, "_constant_token_buckets", True)
+            constant_token_buckets=getattr(self, "_constant_token_buckets", True),
+            target_res=getattr(self, "_target_res", None),
         )
         return (len(kept), dropped)
 
@@ -1662,7 +1669,9 @@ class BaseDataset(torch.utils.data.Dataset):
 
             images.append(image)
             latents_list.append(latents)
-            cond_latents_list.append(self._load_cond_latent(subset, image_info, flipped))
+            cond_latents_list.append(
+                self._load_cond_latent(subset, image_info, flipped)
+            )
             alpha_mask_list.append(alpha_mask)
 
             target_size = (

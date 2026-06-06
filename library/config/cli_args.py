@@ -342,10 +342,11 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         metavar="EDGE",
         help=(
             "Multi-scale constant-token tiers the dataset was preprocessed with "
-            "(512 768 1024 1280 1536). Only used to size the torch.compile dynamo "
-            "cache budget so multi-tier training does not recompile-storm; "
-            "training itself reads whatever latent shapes are on disk. Default "
-            "(unset) = single 1024 tier."
+            "(512 768 1024 1280 1536). Drives BOTH the training bucket table "
+            "(union of these tiers — list every tier on disk or its caches get "
+            "AR-snapped into a 1024 bucket and never loaded) and the torch.compile "
+            "dynamo cache budget so multi-tier training does not recompile-storm. "
+            "Default (unset) = single 1024 tier."
         ),
     )
     parser.add_argument(
