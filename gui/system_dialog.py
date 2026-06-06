@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -140,20 +141,82 @@ class _StreamingDialog(QDialog):
         super().closeEvent(ev)
 
 
+class _HFLoginThread(QThread):
+    """Validate + persist a HuggingFace token off the UI thread.
+
+    Mirrors ``hf auth login`` non-interactively: ``huggingface_hub.login()``
+    checks the token via ``whoami`` and writes it to the HF token cache, so
+    every subsequent ``hf download`` invocation (which the model downloads
+    shell out to) is authenticated without the user opening a terminal.
+
+    Emits ``done`` with a dict: ``ok`` (bool), ``name`` (username on success),
+    ``error`` (str, populated only on failure).
+    """
+
+    done = Signal(dict)
+
+    def __init__(self, token: str, parent=None):
+        super().__init__(parent)
+        self._token = token
+
+    def run(self) -> None:  # noqa: D401 — Qt override
+        result = {"ok": False, "name": "", "error": ""}
+        try:
+            from huggingface_hub import login, whoami
+
+            login(token=self._token, add_to_git_credential=False)
+            info = whoami()
+            result["ok"] = True
+            result["name"] = info.get("name", "") if isinstance(info, dict) else ""
+        except Exception as e:  # invalid token / network / SDK error
+            result["error"] = str(e)
+        self.done.emit(result)
+
+
 class ModelsDialog(_StreamingDialog):
     """One row per model group: label · status · download button.
 
     Download-all button at the top runs ``download-models`` (Anima + SAM3 +
-    MIT + PE). Per-group buttons let users pick just one (re)download.
+    MIT + PE). Per-group buttons let users pick just one (re)download. A token
+    field at the very top lets users authenticate to HuggingFace without
+    dropping to a terminal — required for the gated SAM3 repo.
     """
 
     def __init__(self, parent=None):
         # Each entry: (status_label, paths, button) — populated in _build_actions
         # so _after_finished can refresh every row after a download-all run.
         self._rows: list[tuple[QLabel, list[str], QPushButton]] = []
+        self._login_thread: _HFLoginThread | None = None
         super().__init__(t("models_title"), parent)
 
     def _build_actions(self, layout: QVBoxLayout) -> None:
+        # ── HuggingFace authentication ──
+        # SAM3 is gated and several repos are rate-limited for anonymous pulls,
+        # so we accept a pasted token here and persist it via huggingface_hub
+        # (same cache `hf auth login` writes) — the `hf download` calls below
+        # then pick it up unchanged.
+        auth_row = QHBoxLayout()
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.Password)
+        self.token_edit.setPlaceholderText(t("models_hf_token_placeholder"))
+        self.token_edit.returnPressed.connect(self._authenticate)
+        auth_row.addWidget(self.token_edit, 1)
+        self.auth_btn = QPushButton(t("models_hf_authenticate"))
+        self.auth_btn.clicked.connect(self._authenticate)
+        auth_row.addWidget(self.auth_btn)
+        layout.addLayout(auth_row)
+
+        self.auth_status = QLabel()
+        self.auth_status.setWordWrap(True)
+        layout.addWidget(self.auth_status)
+
+        hint = QLabel(t("models_hf_token_hint"))
+        hint.setWordWrap(True)
+        hint.setOpenExternalLinks(True)
+        hint.setStyleSheet("color:#888;font-size:11px;margin-bottom:6px;")
+        layout.addWidget(hint)
+        self._refresh_auth_status()
+
         intro = QLabel(t("models_intro"))
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#aaa;")
@@ -210,6 +273,50 @@ class ModelsDialog(_StreamingDialog):
         # row was clicked.
         self._run([f"download-{key}"])
 
+    def _refresh_auth_status(self) -> None:
+        """Show whether a token is already cached (no network call)."""
+        try:
+            from huggingface_hub import get_token
+
+            token = get_token()
+        except Exception:
+            token = None
+        if token:
+            self.auth_status.setText(t("models_hf_token_present"))
+            self.auth_status.setStyleSheet("color:#4ade80;")
+        else:
+            self.auth_status.setText(t("models_hf_not_authenticated"))
+            self.auth_status.setStyleSheet("color:#9ca3af;")
+
+    def _authenticate(self) -> None:
+        token = self.token_edit.text().strip()
+        if not token:
+            self.auth_status.setText(t("models_hf_token_empty"))
+            self.auth_status.setStyleSheet("color:#f87171;")
+            return
+        if self._login_thread is not None and self._login_thread.isRunning():
+            return
+        self.auth_btn.setEnabled(False)
+        self.auth_status.setText(t("models_hf_authenticating"))
+        self.auth_status.setStyleSheet("color:#9ca3af;")
+        self._login_thread = _HFLoginThread(token, self)
+        self._login_thread.done.connect(self._on_login_result)
+        self._login_thread.start()
+
+    def _on_login_result(self, result: dict) -> None:
+        self.auth_btn.setEnabled(True)
+        if result.get("ok"):
+            self.token_edit.clear()  # don't leave the secret sitting in the field
+            self.auth_status.setText(
+                t("models_hf_logged_in", name=result.get("name", ""))
+            )
+            self.auth_status.setStyleSheet("color:#4ade80;font-weight:bold;")
+        else:
+            self.auth_status.setText(
+                t("models_hf_login_failed", err=result.get("error", ""))
+            )
+            self.auth_status.setStyleSheet("color:#f87171;")
+
     def _set_busy(self, busy: bool) -> None:
         super()._set_busy(busy)
         self.all_btn.setEnabled(not busy)
@@ -241,6 +348,12 @@ class ModelsDialog(_StreamingDialog):
                 t("models_done_title"),
                 t("models_done_message"),
             )
+
+    def closeEvent(self, ev):
+        # Without wait(), Qt warns about destroying a running QThread.
+        if self._login_thread is not None and self._login_thread.isRunning():
+            self._login_thread.wait(2000)
+        super().closeEvent(ev)
 
 
 GITHUB_REPO = "sorryhyun/anima_lora"

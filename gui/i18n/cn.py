@@ -44,8 +44,7 @@ STRINGS: dict[str, str] = {
     "preprocess_masking_mit": "MIT 蒙版 (漫画文字)",
     "preprocess_sam_prompts": "SAM 提示词 (每行一个):",
     "preprocess_sam_prompts_tip": (
-        "SAM3 要查找的文本提示词,每行一个。"
-        "默认值: 'speech bubble' 和 'text bubble'。"
+        "SAM3 要查找的文本提示词,每行一个。默认值: 'speech bubble' 和 'text bubble'。"
     ),
     "preprocess_sam_focus_prompts": "SAM 焦点提示词 (每行一个):",
     "preprocess_sam_focus_prompts_tip": (
@@ -74,8 +73,7 @@ STRINGS: dict[str, str] = {
     ),
     "preprocess_dilate": "膨胀 (px):",
     "preprocess_dilate_tip": (
-        "对二值蒙版应用的膨胀像素数。值越大蒙版边缘越往外扩。"
-        "默认 5。设为 0 表示禁用。"
+        "对二值蒙版应用的膨胀像素数。值越大蒙版边缘越往外扩。默认 5。设为 0 表示禁用。"
     ),
     "preprocess_mit_threshold": "MIT 文字阈值 (0.0–1.0):",
     "preprocess_mit_threshold_tip": (
@@ -100,9 +98,7 @@ STRINGS: dict[str, str] = {
         "在蒙版生成阶段运行 MIT/ComicTextDetector 文字分割。"
         "取消勾选则跳过 MIT,仅使用 SAM。"
     ),
-    "preprocess_mask_nothing_enabled": (
-        "SAM 和 MIT 蒙版至少需启用一项。"
-    ),
+    "preprocess_mask_nothing_enabled": ("SAM 和 MIT 蒙版至少需启用一项。"),
     "preprocess_status_resized": "已调整大小的图像: {n}",
     "preprocess_status_caches": "缓存 — latents: {lat}, text: {te}, PE: {pe}",
     "preprocess_status_masks": "蒙版: {masks}",
@@ -166,19 +162,16 @@ STRINGS: dict[str, str] = {
     "daemon_error_cause": "↳ 可能原因: {summary}",
     "update_success_title": "更新已应用",
     "update_success_message": (
-        "anima_lora 已更新至 {v}。\n\n"
-        "请关闭并重新启动 GUI 以加载新代码。"
+        "anima_lora 已更新至 {v}。\n\n请关闭并重新启动 GUI 以加载新代码。"
     ),
     "update_success_badge": "已更新 → {v} (需重启生效)",
     "update_dryrun_done_title": "试运行结束",
     "update_dryrun_done_message": (
-        "试运行已完成 —— 未写入任何文件。"
-        "查看日志可了解真实更新会改动什么。"
+        "试运行已完成 —— 未写入任何文件。查看日志可了解真实更新会改动什么。"
     ),
     "update_failed_title": "更新失败",
     "update_failed_message": (
-        "更新以退出码 {code} 退出。"
-        "详情请查看日志;工作树可能已部分修改。"
+        "更新以退出码 {code} 退出。详情请查看日志;工作树可能已部分修改。"
     ),
     "resume_checkpoint_title": "继续训练?",
     "resume_checkpoint_question": (
@@ -305,6 +298,19 @@ STRINGS: dict[str, str] = {
     "model_sam3": "SAM3 — 对话气泡蒙版",
     "model_mit": "MIT — 漫画文字蒙版",
     "model_pe": "PE-Core-L14-336 — IP-Adapter 视觉编码器",
+    # HuggingFace 认证（模型对话框）
+    "models_hf_token_placeholder": "粘贴你的 HuggingFace 令牌 (hf_…)",
+    "models_hf_authenticate": "认证",
+    "models_hf_token_hint": "用于受限/限速下载（例如 SAM3）。"
+    '请在 <a href="https://huggingface.co/settings/tokens">'
+    "huggingface.co/settings/tokens</a> 创建令牌，并在 "
+    '<a href="https://huggingface.co/facebook/sam3">huggingface.co/facebook/sam3</a> 申请 SAM3 访问权限。',
+    "models_hf_token_present": "✓ 已保存 HuggingFace 令牌。",
+    "models_hf_not_authenticated": "未认证 — 粘贴令牌以启用受限下载。",
+    "models_hf_token_empty": "请先粘贴令牌。",
+    "models_hf_authenticating": "正在认证…",
+    "models_hf_logged_in": "✓ 已登录为 {name}。",
+    "models_hf_login_failed": "认证失败：{err}",
     # Update dialog
     "update_title": "更新 anima_lora",
     "update_warning": "更新会从 GitHub 拉取最新版本并覆盖工作树 "

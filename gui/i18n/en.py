@@ -320,6 +320,19 @@ STRINGS: dict[str, str] = {
     "model_sam3": "SAM3 — text-bubble masking",
     "model_mit": "MIT — manga text masking",
     "model_pe": "PE-Core-L14-336 — IP-Adapter vision encoder",
+    # HuggingFace authentication (Models dialog)
+    "models_hf_token_placeholder": "Paste your HuggingFace token (hf_…)",
+    "models_hf_authenticate": "Authenticate",
+    "models_hf_token_hint": "Needed for gated / rate-limited downloads (e.g. SAM3). "
+    'Create a token at <a href="https://huggingface.co/settings/tokens">'
+    "huggingface.co/settings/tokens</a> · request SAM3 access at "
+    '<a href="https://huggingface.co/facebook/sam3">huggingface.co/facebook/sam3</a>.',
+    "models_hf_token_present": "✓ A HuggingFace token is already saved.",
+    "models_hf_not_authenticated": "Not authenticated — paste a token to enable gated downloads.",
+    "models_hf_token_empty": "Paste a token first.",
+    "models_hf_authenticating": "Authenticating…",
+    "models_hf_logged_in": "✓ Logged in as {name}.",
+    "models_hf_login_failed": "Authentication failed: {err}",
     # Update dialog
     "update_title": "Update anima_lora",
     "update_warning": "Update will pull the latest release from GitHub and overwrite the working "

@@ -80,8 +80,7 @@ STRINGS: dict[str, str] = {
     ),
     "preprocess_mit_threshold": "MIT テキストしきい値 (0.0–1.0):",
     "preprocess_mit_threshold_tip": (
-        "MIT/ComicTextDetector テキストセグメンタの信頼度しきい値。"
-        "デフォルト 0.8。"
+        "MIT/ComicTextDetector テキストセグメンタの信頼度しきい値。デフォルト 0.8。"
     ),
     "preprocess_mask_path_pattern": "マスクパスフィルター:",
     "preprocess_mask_path_pattern_tip": (
@@ -307,6 +306,19 @@ STRINGS: dict[str, str] = {
     "model_sam3": "SAM3 — テキストバブルマスキング",
     "model_mit": "MIT — 漫画テキストマスキング",
     "model_pe": "PE-Core-L14-336 — IP-Adapter ビジョンエンコーダー",
+    # HuggingFace 認証 (モデルダイアログ)
+    "models_hf_token_placeholder": "HuggingFace トークンを貼り付けてください (hf_…)",
+    "models_hf_authenticate": "認証",
+    "models_hf_token_hint": "ゲート付き/レート制限のあるダウンロード(SAM3 など)に必要です。"
+    '<a href="https://huggingface.co/settings/tokens">'
+    "huggingface.co/settings/tokens</a> でトークンを作成し、"
+    '<a href="https://huggingface.co/facebook/sam3">huggingface.co/facebook/sam3</a> で SAM3 のアクセスを申請してください。',
+    "models_hf_token_present": "✓ HuggingFace トークンは既に保存されています。",
+    "models_hf_not_authenticated": "未認証 — トークンを貼り付けてゲート付きダウンロードを有効にしてください。",
+    "models_hf_token_empty": "先にトークンを貼り付けてください。",
+    "models_hf_authenticating": "認証中…",
+    "models_hf_logged_in": "✓ {name} としてログインしました。",
+    "models_hf_login_failed": "認証に失敗しました: {err}",
     # Update dialog
     "update_title": "anima_lora の更新",
     "update_warning": "更新により GitHub から最新リリースが取得され、作業ツリーが上書きされます "

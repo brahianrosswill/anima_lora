@@ -15,7 +15,7 @@
 # Single phase: both pools, both routers, and shared A train jointly under
 # the denoise loss + per-pool balance loss. T-LoRA's mask is applied to
 # the content branch only (the freq branch keeps full rank at every t).
-
+target_res = [768, 1024]
 network_alpha = 64
 network_dim = 64
 
@@ -34,7 +34,7 @@ caption_dropout_rate = 0.1
 logging_dir = "output/logs"
 log_with = "tensorboard"
 
-output_name = "anima_chimera-0531-64"
+output_name = "anima_chimera-0606-64"
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 use_ortho = true
@@ -55,10 +55,10 @@ use_chimera_hydra = true
 num_experts_content = 8
 num_experts_freq = 2
 
-balance_loss_warmup_ratio = 0.1
+balance_loss_warmup_ratio = 0.0
 balance_loss_weight = 1.0
-balance_w_content = 1e-6
-network_content_router_lr_scale = 10.0
+balance_w_content = 2e-5
+network_content_router_lr_scale = 2.0
 
 # Content routing is always the network-level ContentRouter fed the pooled
 # crossattn_emb (the per-Linear lx_c router was removed). Only the LN toggle

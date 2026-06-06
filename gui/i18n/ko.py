@@ -305,6 +305,19 @@ STRINGS: dict[str, str] = {
     "model_sam3": "SAM3 — 말풍선 마스킹",
     "model_mit": "MIT — 만화 텍스트 마스킹",
     "model_pe": "PE-Core-L14-336 — IP-Adapter 비전 인코더",
+    # HuggingFace 인증 (모델 다이얼로그)
+    "models_hf_token_placeholder": "HuggingFace 토큰을 붙여넣으세요 (hf_…)",
+    "models_hf_authenticate": "인증",
+    "models_hf_token_hint": "게이트/속도 제한 다운로드(예: SAM3)에 필요합니다. "
+    '<a href="https://huggingface.co/settings/tokens">'
+    "huggingface.co/settings/tokens</a> 에서 토큰을 생성하고 "
+    '<a href="https://huggingface.co/facebook/sam3">huggingface.co/facebook/sam3</a> 에서 SAM3 접근을 요청하세요.',
+    "models_hf_token_present": "✓ HuggingFace 토큰이 이미 저장되어 있습니다.",
+    "models_hf_not_authenticated": "인증되지 않음 — 토큰을 붙여넣어 게이트 다운로드를 활성화하세요.",
+    "models_hf_token_empty": "먼저 토큰을 붙여넣으세요.",
+    "models_hf_authenticating": "인증 중…",
+    "models_hf_logged_in": "✓ {name} (으)로 로그인되었습니다.",
+    "models_hf_login_failed": "인증 실패: {err}",
     # Update dialog
     "update_title": "anima_lora 업데이트",
     "update_warning": "업데이트는 GitHub에서 최신 릴리스를 받아 작업 트리를 덮어씁니다 "

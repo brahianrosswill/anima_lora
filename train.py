@@ -630,21 +630,14 @@ class AnimaTrainer:
             attn_softmax_scale=attn_softmax_scale,
         )
 
-        # Native-shape flattening + per-block torch.compile. compile_blocks turns
-        # on the flatten (one block graph per token-count family: 4032/4200) and
-        # raises the dynamo cache-size budget itself.
-        if args.torch_compile:
-            target_res = getattr(args, "target_res", None)
-            n_token_families = None
-            if target_res:
-                from library.datasets.buckets import token_count_families
-
-                n_token_families = token_count_families(target_res)
-            model.compile_blocks(
-                args.dynamo_backend,
-                mode=getattr(args, "compile_inductor_mode", None),
-                n_token_families=n_token_families,
-            )
+        # NOTE: torch.compile (compile_blocks) is intentionally NOT done here.
+        # It must run AFTER the adapter's apply_to monkey-patches the targeted
+        # Linears, or dynamo traces the un-adapted forward — see the compile
+        # ordering in library/runtime/harness.py. compile is lazy, so the old
+        # compile-here-apply-later ordering happened to work as long as no DiT
+        # forward ran in the window; moved to _create_and_apply_network (after
+        # apply_to + load_weights + grad-ckpt) so the invariant holds by
+        # construction rather than by luck.
 
         # Store unsloth preference so that when the base trainer calls
         # dit.enable_gradient_checkpointing(cpu_offload=...), we can override to use unsloth.
@@ -1763,6 +1756,26 @@ class AnimaTrainer:
                     if t_enc.supports_gradient_checkpointing:
                         t_enc.gradient_checkpointing_enable()
             network.enable_gradient_checkpointing()  # may have no effect
+
+        # Native-shape flattening + per-block torch.compile. COMPILE LAST —
+        # after apply_to + load_weights (above) so dynamo traces the adapter's
+        # monkey-patched Linear forwards, not the bare DiT (the invariant
+        # encoded in library/runtime/harness.py). compile_blocks turns on the
+        # flatten (one block graph per token-count family: 4032/4200) and raises
+        # the dynamo cache-size budget itself. Matches the harness order:
+        # block-swap → grad-ckpt → compile.
+        if args.torch_compile:
+            target_res = getattr(args, "target_res", None)
+            n_token_families = None
+            if target_res:
+                from library.datasets.buckets import token_count_families
+
+                n_token_families = token_count_families(target_res)
+            unet.compile_blocks(
+                args.dynamo_backend,
+                mode=getattr(args, "compile_inductor_mode", None),
+                n_token_families=n_token_families,
+            )
 
         return network, net_kwargs, train_unet, train_text_encoder
 

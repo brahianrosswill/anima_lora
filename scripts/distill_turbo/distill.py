@@ -158,11 +158,11 @@ def main():
         dit_weight_dtype=dtype,
     )
 
-    # Block swap (per-forward prepare hook done at each forward call below), then
-    # compile each block._forward (native-shape flatten, one graph per token count;
-    # the pool spans more than the 2 CONSTANT_TOKEN_BUCKETS families).
+    # Block swap (per-forward prepare hook done at each forward call below).
+    # compile_dit_blocks is deferred until AFTER the student/fake apply_to below
+    # (see the COMPILE LAST note further down) — order: block-swap → grad-ckpt →
+    # apply_to → compile, matching library/runtime/harness.py.
     place_dit_for_training(model, device, blocks_to_swap=cfg.blocks_to_swap)
-    compile_dit_blocks(model, enabled=cfg.torch_compile, mode="")
     enable_training_grad_ckpt(model, enabled=cfg.grad_ckpt)
 
     # ---------------- LoRA stacks ----------------
@@ -178,6 +178,15 @@ def main():
     turbo.freeze_dit()
     turbo.student.to(device=device, dtype=dtype)
     turbo.fake.to(device=device, dtype=dtype)
+
+    # COMPILE LAST — both student.apply_to and fake.apply_to (inside
+    # TurboDMDNetwork above) have now monkey-patched the targeted Linears, so
+    # torch.compile traces the adapter forward chain rather than the bare DiT.
+    # compile is lazy (traces on first _forward call), but compiling here makes
+    # the ordering invariant hold by construction, not by the absence of a
+    # warmup forward. native-shape flatten, one graph per token count; the pool
+    # spans more than the 2 CONSTANT_TOKEN_BUCKETS families.
+    compile_dit_blocks(model, enabled=cfg.torch_compile, mode="")
     # `model.training` gates grad-ckpt inside block.forward; toggled per
     # forward in `_forward` below so no_grad teacher/fake forwards don't
     # incur grad-ckpt setup cost. Initial state set by the first call.
