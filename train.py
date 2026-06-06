@@ -69,8 +69,12 @@ from library.runtime.accelerator import (
     resume_from_local_or_hf_if_specified,
 )
 from library.training import (
+    AcceleratedBundle,
     CheckpointSaver,
+    DatasetBundle,
     LossContext,
+    NetworkBundle,
+    OptimizerBundle,
     SAMPLER_REGISTRY,
     RuntimeState,
     SamplerContext,
@@ -1522,7 +1526,7 @@ class AnimaTrainer:
         torch.cuda.set_rng_state(gpu_rng_state)
         random.setstate(python_rng_state)
 
-    def _prepare_dataset(self, args):
+    def _prepare_dataset(self, args) -> DatasetBundle:
         """Build train/val dataset groups and the collator shared by both loaders."""
         use_dreambooth_method = args.in_json is None
         use_user_config = args.dataset_config is not None
@@ -1626,14 +1630,14 @@ class AnimaTrainer:
         )
         collator = collator_class(current_epoch, current_step, ds_for_collator)
 
-        return (
-            train_dataset_group,
-            val_dataset_group,
-            current_epoch,
-            current_step,
-            collator,
-            use_user_config,
-            use_dreambooth_method,
+        return DatasetBundle(
+            train_group=train_dataset_group,
+            val_group=val_dataset_group,
+            current_epoch=current_epoch,
+            current_step=current_step,
+            collator=collator,
+            use_user_config=use_user_config,
+            use_dreambooth_method=use_dreambooth_method,
         )
 
     def _create_and_apply_network(
@@ -1645,7 +1649,7 @@ class AnimaTrainer:
         unet,
         text_encoders,
         weight_dtype,
-    ):
+    ) -> Optional[NetworkBundle]:
         """Import network module, merge base weights, build LoRA, apply to the model."""
         sys.path.append(os.path.dirname(__file__))
         accelerator.print("import network module:", args.network_module)
@@ -1777,7 +1781,12 @@ class AnimaTrainer:
                 n_token_families=n_token_families,
             )
 
-        return network, net_kwargs, train_unet, train_text_encoder
+        return NetworkBundle(
+            network=network,
+            net_kwargs=net_kwargs,
+            train_unet=train_unet,
+            train_text_encoder=train_text_encoder,
+        )
 
     def _setup_optimizer_and_dataloader(
         self,
@@ -1787,7 +1796,7 @@ class AnimaTrainer:
         train_dataset_group,
         val_dataset_group,
         collator,
-    ):
+    ) -> OptimizerBundle:
         """Build optimizer, dataloaders, and LR scheduler; finalize max_train_steps."""
         accelerator.print("prepare optimizer, data loader etc.")
 
@@ -1882,17 +1891,17 @@ class AnimaTrainer:
         # lr scheduler
         lr_scheduler = get_scheduler_fix(args, optimizer, accelerator.num_processes)
 
-        return (
-            optimizer,
-            optimizer_name,
-            optimizer_args,
-            optimizer_train_fn,
-            optimizer_eval_fn,
-            text_encoder_lr,
-            lr_descriptions,
-            train_dataloader,
-            val_dataloader,
-            lr_scheduler,
+        return OptimizerBundle(
+            optimizer=optimizer,
+            optimizer_name=optimizer_name,
+            optimizer_args=optimizer_args,
+            optimizer_train_fn=optimizer_train_fn,
+            optimizer_eval_fn=optimizer_eval_fn,
+            text_encoder_lr=text_encoder_lr,
+            lr_descriptions=lr_descriptions,
+            train_dataloader=train_dataloader,
+            val_dataloader=val_dataloader,
+            lr_scheduler=lr_scheduler,
         )
 
     def _prepare_with_accelerator(
@@ -1913,7 +1922,7 @@ class AnimaTrainer:
         train_unet,
         train_text_encoder,
         cache_latents,
-    ):
+    ) -> AcceleratedBundle:
         """Cast model dtypes, run accelerator.prepare, flip train/eval, optional torch.compile."""
         # full fp16/bf16 training
         if args.full_fp16:
@@ -2009,17 +2018,17 @@ class AnimaTrainer:
         if args.full_fp16:
             patch_accelerator_for_fp16_training(accelerator)
 
-        return (
-            network,
-            optimizer,
-            train_dataloader,
-            val_dataloader,
-            lr_scheduler,
-            training_model,
-            unet,
-            text_encoders,
-            text_encoder,
-            unet_weight_dtype,
+        return AcceleratedBundle(
+            network=network,
+            optimizer=optimizer,
+            train_dataloader=train_dataloader,
+            val_dataloader=val_dataloader,
+            lr_scheduler=lr_scheduler,
+            training_model=training_model,
+            unet=unet,
+            text_encoders=text_encoders,
+            text_encoder=text_encoder,
+            unet_weight_dtype=unet_weight_dtype,
         )
 
     def train(self, args):
@@ -2055,15 +2064,14 @@ class AnimaTrainer:
         latents_caching_strategy = self.get_latents_caching_strategy(args)
         text_strategies.LatentsCachingStrategy.set_strategy(latents_caching_strategy)
 
-        (
-            train_dataset_group,
-            val_dataset_group,
-            current_epoch,
-            current_step,
-            collator,
-            use_user_config,
-            use_dreambooth_method,
-        ) = self._prepare_dataset(args)
+        ds = self._prepare_dataset(args)
+        train_dataset_group = ds.train_group
+        val_dataset_group = ds.val_group
+        current_epoch = ds.current_epoch
+        current_step = ds.current_step
+        collator = ds.collator
+        use_user_config = ds.use_user_config
+        use_dreambooth_method = ds.use_dreambooth_method
 
         if args.debug_dataset:
             train_dataset_group.set_current_strategies()  # dataset needs to know the strategies explicitly
@@ -2245,12 +2253,15 @@ class AnimaTrainer:
         if self._state.caption_dropout_enabled:
             self._ensure_uncond_crossattn(args, accelerator, weight_dtype)
 
-        network_result = self._create_and_apply_network(
+        net = self._create_and_apply_network(
             args, accelerator, vae, text_encoder, unet, text_encoders, weight_dtype
         )
-        if network_result is None:
+        if net is None:
             return
-        network, net_kwargs, train_unet, train_text_encoder = network_result
+        network = net.network
+        net_kwargs = net.net_kwargs
+        train_unet = net.train_unet
+        train_text_encoder = net.train_text_encoder
 
         # Resolve and run on_network_built for each method adapter (EasyControl,
         # IP-Adapter, …). Each adapter validates its runtime contract and
@@ -2268,18 +2279,7 @@ class AnimaTrainer:
             for adapter in self._adapters:
                 adapter.on_network_built(setup_ctx)
 
-        (
-            optimizer,
-            optimizer_name,
-            optimizer_args,
-            optimizer_train_fn,
-            optimizer_eval_fn,
-            text_encoder_lr,
-            lr_descriptions,
-            train_dataloader,
-            val_dataloader,
-            lr_scheduler,
-        ) = self._setup_optimizer_and_dataloader(
+        opt = self._setup_optimizer_and_dataloader(
             args,
             accelerator,
             network,
@@ -2287,19 +2287,18 @@ class AnimaTrainer:
             val_dataset_group,
             collator,
         )
+        optimizer = opt.optimizer
+        optimizer_name = opt.optimizer_name
+        optimizer_args = opt.optimizer_args
+        optimizer_train_fn = opt.optimizer_train_fn
+        optimizer_eval_fn = opt.optimizer_eval_fn
+        text_encoder_lr = opt.text_encoder_lr
+        lr_descriptions = opt.lr_descriptions
+        train_dataloader = opt.train_dataloader
+        val_dataloader = opt.val_dataloader
+        lr_scheduler = opt.lr_scheduler
 
-        (
-            network,
-            optimizer,
-            train_dataloader,
-            val_dataloader,
-            lr_scheduler,
-            training_model,
-            unet,
-            text_encoders,
-            text_encoder,
-            unet_weight_dtype,
-        ) = self._prepare_with_accelerator(
+        acc = self._prepare_with_accelerator(
             args,
             accelerator,
             network,
@@ -2317,6 +2316,16 @@ class AnimaTrainer:
             train_text_encoder,
             cache_latents,
         )
+        network = acc.network
+        optimizer = acc.optimizer
+        train_dataloader = acc.train_dataloader
+        val_dataloader = acc.val_dataloader
+        lr_scheduler = acc.lr_scheduler
+        training_model = acc.training_model
+        unet = acc.unet
+        text_encoders = acc.text_encoders
+        text_encoder = acc.text_encoder
+        unet_weight_dtype = acc.unet_weight_dtype
 
         num_update_steps_per_epoch = math.ceil(
             len(train_dataloader) / args.gradient_accumulation_steps

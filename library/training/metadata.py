@@ -108,7 +108,6 @@ def build_training_metadata(
         "ss_multires_noise_iterations": args.multires_noise_iterations,
         "ss_multires_noise_discount": args.multires_noise_discount,
         "ss_adaptive_noise_scale": args.adaptive_noise_scale,
-        "ss_zero_terminal_snr": args.zero_terminal_snr,
         "ss_training_comment": args.training_comment,
         "ss_sd_scripts_commit_hash": get_git_revision_hash(),
         "ss_optimizer": optimizer_name

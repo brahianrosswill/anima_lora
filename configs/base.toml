@@ -6,24 +6,19 @@ vae = "models/vae/qwen_image_vae.safetensors"
 
 output_dir = "output/ckpt"
 output_name = "anima_lora"
-save_model_as = "safetensors"
 
 network_module = "networks.lora_anima"
 network_train_unet_only = true
 
 # ── Dataset paths (shared preprocess ↔ training contract) ──────────────────
 # Top-level scalars so any preset / method can override (the merge chain is
-# base.toml → presets.toml[<preset>] → methods/<method>.toml). The dataset
-# blueprint subset (below) interpolates `{resized_image_dir}` /
-# `{lora_cache_dir}` so editing these keys propagates to training too.
-# `tasks.py` preprocess commands also read them via `load_path_overrides`.
+# base.toml → presets.toml[<preset>] → methods/<method>.toml). 
 # NOTE: preprocess-only knobs (source_image_dir, drop_lowres_images,
-# min_pixels) now live in configs/preprocess.toml — these here are the keys
-# BOTH stages must agree on, so they stay in base.toml where the blueprint can
-# see them. A legacy copy of a preprocess key left in base.toml still wins
-# (read after preprocess.toml in load_path_overrides), so old configs keep working.
+# min_pixels) now live in configs/preprocess.toml
+
 resized_image_dir = "post_image_dataset/resized"
 lora_cache_dir = "post_image_dataset/lora"
+
 # fnmatch glob applied to each image's path relative to its subset's image_dir.
 # `*` (or unset) trains on everything. Use `|` to OR-combine patterns:
 #   `char_a/*`           → one subfolder
@@ -36,22 +31,18 @@ path_pattern = "*"
 # resizes it the LEAST (nearest bucket by scale — see library/datasets/buckets.py
 # choose_edge), giving v1.0-style diverse-resolution training from a mixed
 # dataset. Allowed edges: 512 768 1024 1280 1536 (tokens 1024+1008 / 2160 / 4032+
-# 4200 / 6300 / 8640). `[1024]` (the default) = single ~1MP tier = legacy
-# behavior. Each extra tier adds compiled block graph(s): 768/1280/1536 +1 each,
-# 512 +2 (it carries the 512x512 square + a diversity family). The same value is
-# read at train time only to size the torch.compile dynamo cache budget —
-# training itself consumes whatever latent shapes are on disk. Override per-run:
+# 4200 / 6300 / 8640). `[1024]` (the default) = single ~1MP tier
+# Override per-run:
 #   make preprocess ARGS="--target_res 1024 1536"
 target_res = [1024]
 
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"
-lr_warmup_steps = 0.05   # ratio (<1) → 5% of total steps; warms AdamW before full LR
+lr_warmup_steps = 0.05
 
 timestep_sampling = "sigmoid"
 sigmoid_bias = 0.0
 discrete_flow_shift = 1.0
-mixed_precision = "bf16"
 
 gradient_checkpointing = false
 unsloth_offload_checkpointing = false
@@ -71,7 +62,6 @@ dataloader_pin_memory = true
 persistent_data_loader_workers= true
 use_cmmd = false
 channel_scaling_alpha = 0.5
-
 
 
 [general]

@@ -28,11 +28,6 @@ def add_sd_models_arguments(parser: argparse.ArgumentParser):
         help="load Stable Diffusion v2.0 model",
     )
     parser.add_argument(
-        "--v_parameterization",
-        action="store_true",
-        help="enable v-parameterization training",
-    )
-    parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
         default=None,
@@ -186,47 +181,13 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "/ 'none' / 'off' to disable.",
     )
     parser.add_argument(
-        "--huggingface_repo_id",
-        type=str,
-        default=None,
-        help="huggingface repo name to upload",
-    )
-    parser.add_argument(
-        "--huggingface_repo_type",
-        type=str,
-        default=None,
-        help="huggingface repo type to upload",
-    )
-    parser.add_argument(
-        "--huggingface_path_in_repo",
-        type=str,
-        default=None,
-        help="huggingface model path to upload files",
-    )
-    parser.add_argument(
         "--huggingface_token",
         type=str,
         default=None,
         help="huggingface token",
     )
     parser.add_argument(
-        "--huggingface_repo_visibility",
-        type=str,
-        default=None,
-        help="huggingface repository visibility ('public' for public, 'private' or None for private)",
-    )
-    parser.add_argument(
-        "--save_state_to_huggingface",
-        action="store_true",
-        help="save state to huggingface",
-    )
-    parser.add_argument(
         "--resume_from_huggingface", action="store_true", help="resume from huggingface"
-    )
-    parser.add_argument(
-        "--async_upload",
-        action="store_true",
-        help="upload to huggingface asynchronously",
     )
     parser.add_argument(
         "--save_precision",
@@ -312,11 +273,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=None,
         choices=[None, 150, 225],
         help="max token length of text encoder (default for 75, 150 or 225)",
-    )
-    parser.add_argument(
-        "--mem_eff_attn",
-        action="store_true",
-        help="use memory efficient attention for CrossAttention",
     )
     parser.add_argument(
         "--profile_steps",
@@ -448,9 +404,9 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default="no",
+        default="bf16",
         choices=["no", "fp16", "bf16"],
-        help="use mixed precision",
+        help="use mixed precision (Anima trains in bf16; fp16/no are untested)",
     )
     parser.add_argument(
         "--full_fp16", action="store_true", help="fp16 training including gradients"
@@ -555,11 +511,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         type=float,
         default=None,
         help="add `latent mean absolute value * this value` to noise_offset (disabled if None, default)",
-    )
-    parser.add_argument(
-        "--zero_terminal_snr",
-        action="store_true",
-        help="fix noise scheduler betas to enforce zero terminal SNR",
     )
     parser.add_argument(
         "--min_timestep",
@@ -718,12 +669,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
 
 def add_masked_loss_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--conditioning_data_dir",
-        type=str,
-        default=None,
-        help="conditioning data directory",
-    )
-    parser.add_argument(
         "--masked_loss", action="store_true", help="apply mask for calculating loss."
     )
 
@@ -743,11 +688,6 @@ def add_dit_training_arguments(parser: argparse.ArgumentParser):
         type=int,
         default=None,
         help="text encoder batch size (default: None, use dataset's batch size)",
-    )
-    parser.add_argument(
-        "--disable_mmap_load_safetensors",
-        action="store_true",
-        help="disable mmap load for safetensors. Speed up model loading in WSL environment",
     )
     parser.add_argument(
         "--weighting_scheme",
@@ -1063,7 +1003,6 @@ def get_sanitized_config_or_none(args: argparse.Namespace):
         "vae",
         "tokenizer_cache_dir",
         "train_data_dir",
-        "conditioning_data_dir",
         "reg_data_dir",
         "output_dir",
         "logging_dir",
@@ -1098,7 +1037,6 @@ def verify_command_line_training_args(args: argparse.Namespace):
         "vae",
         "tokenizer_cache_dir",
         "train_data_dir",
-        "conditioning_data_dir",
         "reg_data_dir",
         "output_dir",
         "logging_dir",
@@ -1119,14 +1057,6 @@ def verify_command_line_training_args(args: argparse.Namespace):
     if getattr(args, "config_file", None) is not None:
         logger.info(
             "wandb is enabled, but option `config_file` is included in the command line. Please be careful about the information included in the path."
-        )
-
-    if (
-        args.huggingface_repo_id is not None
-        and args.huggingface_repo_visibility != "public"
-    ):
-        logger.info(
-            "wandb is enabled, but option huggingface_repo_id is included in the command line and huggingface_repo_visibility is not 'public'. It is recommended to move it to the `.toml` file."
         )
 
 
@@ -1155,19 +1085,6 @@ def verify_training_args(args: argparse.Namespace):
 
     if args.adaptive_noise_scale is not None and args.noise_offset is None:
         raise ValueError("adaptive_noise_scale requires noise_offset")
-
-    if args.scale_v_pred_loss_like_noise_pred and not args.v_parameterization:
-        raise ValueError(
-            "scale_v_pred_loss_like_noise_pred can be enabled only with v_parameterization"
-        )
-
-    if args.v_pred_like_loss and args.v_parameterization:
-        raise ValueError("v_pred_like_loss cannot be enabled with v_parameterization")
-
-    if args.zero_terminal_snr and not args.v_parameterization:
-        logger.warning(
-            "zero_terminal_snr is enabled, but v_parameterization is not enabled. training will be unexpected"
-        )
 
     if args.sample_every_n_epochs is not None and args.sample_every_n_epochs <= 0:
         logger.warning(
@@ -1369,16 +1286,3 @@ def add_dataset_arguments(
             default=1,
             help="repeat dataset when training with captions",
         )
-
-
-def add_sd_saving_arguments(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--save_model_as",
-        type=str,
-        default=None,
-        choices=[None, "ckpt", "safetensors", "diffusers", "diffusers_safetensors"],
-        help="format to save the model (default is same to original)",
-    )
-    parser.add_argument(
-        "--use_safetensors", action="store_true", help="use safetensors format to save"
-    )

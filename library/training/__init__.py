@@ -14,6 +14,10 @@
 
 # === contexts ===
 from library.training.contexts import (
+    AcceleratedBundle,
+    DatasetBundle,
+    NetworkBundle,
+    OptimizerBundle,
     RuntimeState,
     TrainCtx,
     ValCtx,
@@ -133,6 +137,10 @@ from library.training.loss_recorder import LossRecorder
 
 __all__ = [
     # contexts
+    "AcceleratedBundle",
+    "DatasetBundle",
+    "NetworkBundle",
+    "OptimizerBundle",
     "RuntimeState",
     "TrainCtx",
     "ValCtx",
