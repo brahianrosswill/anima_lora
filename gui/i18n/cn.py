@@ -24,6 +24,23 @@ STRINGS: dict[str, str] = {
         "训练配置选项卡的「训练」按钮在没有缓存时会用默认设置自动运行预处理 —— "
         "本选项卡用于细调和单独重跑某个步骤。"
     ),
+    "preprocess_image_prep": "图像预处理 (调整大小 / 过滤)",
+    "preprocess_source_image_dir": "源图像目录:",
+    "preprocess_source_image_dir_tip": (
+        "存放原始训练图像的文件夹 (含 .txt 标注附属文件)，"
+        "缓存步骤会将其调整大小后写入 post_image_dataset/。"
+        "保存至 configs/preprocess.toml。"
+    ),
+    "preprocess_drop_lowres": "丢弃低分辨率图像",
+    "preprocess_drop_lowres_tip": (
+        "跳过小于下方像素阈值的源图像，使其不进入调整大小 / VAE / 文本缓存。"
+        "取消勾选可保留所有图像，无论大小。"
+    ),
+    "preprocess_min_pixels": "最小像素数 (过滤阈值):",
+    "preprocess_min_pixels_tip": (
+        "低分辨率过滤器的像素数阈值。500000 = 0.5MP。"
+        "当「丢弃低分辨率图像」未勾选时忽略。"
+    ),
     "preprocess_text_caching": "缓存 (VAE + 文本)",
     "preprocess_caption_shuffle_variants": "每条标注的随机变体数 (N):",
     "preprocess_caption_shuffle_variants_tip": (
@@ -105,7 +122,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "尚无已调整大小的图像 —— 请先在训练配置选项卡运行预处理。",
     "preprocess_log_placeholder": "预处理输出将显示在此处……",
     "preprocess_save_settings": "保存",
-    "preprocess_save_settings_tip": "持久化这些设置 (写入 configs/sam_mask.yaml + GUI 设置)。",
+    "preprocess_save_settings_tip": "持久化这些设置 (写入 configs/preprocess.toml + configs/sam_mask.yaml + GUI 设置)。",
     "preprocess_settings_saved": "预处理设置已保存。",
     "preprocess_invalid_float": "{field} 的数字无效: {value}",
     "preprocess_already_running": "已有预处理步骤在运行。",

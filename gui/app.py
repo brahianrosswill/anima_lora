@@ -358,19 +358,23 @@ class MainWindow(QMainWindow):
 def _ensure_source_image_dir() -> None:
     """Create the training source dir on launch so first-time users hit an
     empty folder rather than a confusing "no images found" error from the
-    preprocess pipeline. Path comes from base.toml's `source_image_dir`
-    so preset/method overrides are respected; falls back to `image_dataset/`.
+    preprocess pipeline. Path comes from `source_image_dir` (now in
+    configs/preprocess.toml; a legacy copy in base.toml still wins, mirroring
+    load_path_overrides); falls back to `image_dataset/`.
     """
     src = "image_dataset"
-    base_path = _REPO_ROOT / "configs" / "base.toml"
-    try:
-        if base_path.exists():
-            raw = toml.loads(base_path.read_text(encoding="utf-8"))
-            cfg_src = raw.get("source_image_dir")
-            if isinstance(cfg_src, str) and cfg_src.strip():
-                src = cfg_src
-    except (OSError, toml.TomlDecodeError):
-        pass
+    # preprocess.toml supplies the default; a legacy key in base.toml overrides
+    # it (read second), matching load_path_overrides' precedence.
+    for fname in ("preprocess.toml", "base.toml"):
+        cfg_path = _REPO_ROOT / "configs" / fname
+        try:
+            if cfg_path.exists():
+                raw = toml.loads(cfg_path.read_text(encoding="utf-8"))
+                cfg_src = raw.get("source_image_dir")
+                if isinstance(cfg_src, str) and cfg_src.strip():
+                    src = cfg_src
+        except (OSError, toml.TomlDecodeError):
+            pass
     src_path = Path(src)
     if not src_path.is_absolute():
         src_path = _REPO_ROOT / src_path

@@ -39,6 +39,7 @@ from gui import (
     _SKIP,
     _VIRTUAL_KEYS,
     _load,
+    _load_base,
     _read,
     _save,
     _widget,
@@ -679,7 +680,7 @@ class ConfigTab(QWidget):
         path = variant_path(variant)
 
         method_orig = _load(path)
-        base = _load(CONFIGS_DIR / "base.toml")
+        base = _load_base()
         # Default-preset overlay is the implicit baseline used by _reload, so
         # we treat it as part of the "effective baseline" when deciding which
         # form values are worth writing to disk (skips redundant entries).

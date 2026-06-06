@@ -21,6 +21,24 @@ STRINGS: dict[str, str] = {
         "キャッシュが存在しない場合にデフォルト設定で前処理を自動実行します。"
         "このタブは設定の調整や個別ステップの再実行に使用します。"
     ),
+    "preprocess_image_prep": "画像前処理 (リサイズ / フィルター)",
+    "preprocess_source_image_dir": "ソース画像フォルダー:",
+    "preprocess_source_image_dir_tip": (
+        "学習用元画像が入ったフォルダー (.txt キャプションサイドカーを含む)。"
+        "キャッシュステップで post_image_dataset/ にリサイズされます。"
+        "configs/preprocess.toml に保存されます。"
+    ),
+    "preprocess_drop_lowres": "低解像度画像を除外",
+    "preprocess_drop_lowres_tip": (
+        "下のピクセル閾値を下回るソース画像をスキップし、"
+        "リサイズ / VAE / テキストキャッシュに含まれないようにします。"
+        "チェックを外すとサイズに関わらずすべての画像を保持します。"
+    ),
+    "preprocess_min_pixels": "最小ピクセル数 (フィルター閾値):",
+    "preprocess_min_pixels_tip": (
+        "低解像度フィルターのピクセル数閾値。500000 = 0.5MP。"
+        "「低解像度画像を除外」がオフの場合は無視されます。"
+    ),
     "preprocess_text_caching": "キャッシュ (VAE + テキスト)",
     "preprocess_caption_shuffle_variants": "キャプションあたりのシャッフルバリアント数 (N):",
     "preprocess_caption_shuffle_variants_tip": (
@@ -110,7 +128,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "リサイズ済み画像がありません — まず学習設定タブの前処理を実行してください。",
     "preprocess_log_placeholder": "前処理の出力がここに表示されます...",
     "preprocess_save_settings": "保存",
-    "preprocess_save_settings_tip": "設定を保存します (configs/sam_mask.yaml + GUI設定に書き込みます)。",
+    "preprocess_save_settings_tip": "設定を保存します (configs/preprocess.toml + configs/sam_mask.yaml + GUI設定に書き込みます)。",
     "preprocess_settings_saved": "前処理設定を保存しました。",
     "preprocess_invalid_float": "{field} の値が不正です: {value}",
     "preprocess_already_running": "前処理ステップが既に実行中です。",

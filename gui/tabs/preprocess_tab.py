@@ -28,6 +28,7 @@ import re
 import sys
 from pathlib import Path
 
+import toml
 import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -57,11 +58,15 @@ from gui.progress import TQDM_RE, TqdmProgressTracker, make_progress_bar
 from gui.tabs.config_tab import ClickableLabel
 
 SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
+PREPROCESS_TOML = ROOT / "configs" / "preprocess.toml"
 SETTINGS_FILE = Path(__file__).resolve().parent.parent / "gui_settings.json"
 
 # Defaults match the historical hardcoded values in scripts/tasks/preprocess.py
 # and scripts/preprocess/generate_masks_mit.py so a freshly installed GUI runs the
 # same pipeline as the bare CLI.
+DEFAULT_SOURCE_IMAGE_DIR = "image_dataset"
+DEFAULT_DROP_LOWRES_IMAGES = True
+DEFAULT_MIN_PIXELS = 500000
 DEFAULT_TE_SHUFFLE_VARIANTS = 4
 DEFAULT_TE_TAG_DROPOUT = 0.1
 DEFAULT_SAM_PROMPTS = ("speech bubble", "text bubble")
@@ -94,6 +99,44 @@ def _save_settings(updates: dict) -> None:
     data = _load_settings()
     data.update(updates)
     SETTINGS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _load_preprocess_toml() -> dict:
+    """Read configs/preprocess.toml (the preprocess-only knobs split out of
+    base.toml). Returns {} if absent/unparseable so callers fall back to
+    defaults. This tab edits the file directly; the daemon's preprocess job
+    reads it back through ``load_path_overrides`` at launch."""
+    if not PREPROCESS_TOML.exists():
+        return {}
+    try:
+        return toml.loads(PREPROCESS_TOML.read_text(encoding="utf-8"))
+    except (OSError, toml.TomlDecodeError):
+        return {}
+
+
+def _update_preprocess_toml(updates: dict) -> None:
+    """Update top-level ``key = value`` scalar lines in preprocess.toml in
+    place, preserving comments and layout (toml.dumps would drop the file's
+    heavy comments). Matched keys are rewritten; missing keys are appended."""
+    text = (
+        PREPROCESS_TOML.read_text(encoding="utf-8") if PREPROCESS_TOML.exists() else ""
+    )
+    lines = text.splitlines(keepends=True)
+    remaining = dict(updates)
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)([A-Za-z0-9_]+)\s*=", line)
+        if not m or m.group(2) not in remaining:
+            continue
+        key = m.group(2)
+        eol = "\n" if line.endswith("\n") else ""
+        lines[i] = toml.dumps({key: remaining.pop(key)}).strip() + eol
+    if remaining:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        for key, value in remaining.items():
+            lines.append(toml.dumps({key: value}).strip() + "\n")
+    PREPROCESS_TOML.parent.mkdir(parents=True, exist_ok=True)
+    PREPROCESS_TOML.write_text("".join(lines), encoding="utf-8")
 
 
 def _load_sam_yaml() -> dict:
@@ -216,9 +259,7 @@ class _RuleCard(QGroupBox):
         self.path_pattern_edit.setPlaceholderText("*")
         self.path_pattern_edit.setToolTip(t("preprocess_sam_rule_path_pattern_tip"))
         form.addRow(
-            self._label(
-                "sam_rule_path_pattern", t("preprocess_sam_rule_path_pattern")
-            ),
+            self._label("sam_rule_path_pattern", t("preprocess_sam_rule_path_pattern")),
             self.path_pattern_edit,
         )
 
@@ -386,12 +427,56 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         form_layout.setContentsMargins(0, 0, 0, 0)
 
         settings = _load_settings()
+        pp_cfg = _load_preprocess_toml()
         sam_yaml = _load_sam_yaml()
         # Normalize either schema (flat or rules array) into a list of rule
         # dicts, one per editor card below. Flat configs collapse to a single
         # catch-all card; saving always re-emits the rules form.
         sam_rules = _load_rules(sam_yaml)
         mask_path_pattern = sam_yaml.get("path_pattern") or DEFAULT_MASK_PATH_PATTERN
+
+        # Image preprocessing group — the resize/filter knobs from
+        # configs/preprocess.toml (source dir + low-res filter). Edited here and
+        # read back by the daemon's preprocess job via load_path_overrides.
+        img_box = QGroupBox(t("preprocess_image_prep"))
+        img_form = QFormLayout()
+
+        self.source_dir_edit = QLineEdit(
+            str(pp_cfg.get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR))
+        )
+        self.source_dir_edit.setPlaceholderText(DEFAULT_SOURCE_IMAGE_DIR)
+        self.source_dir_edit.setToolTip(t("preprocess_source_image_dir_tip"))
+        img_form.addRow(
+            self._field_label("source_image_dir", t("preprocess_source_image_dir")),
+            self.source_dir_edit,
+        )
+
+        self.drop_lowres_chk = QCheckBox(t("preprocess_drop_lowres"))
+        self.drop_lowres_chk.setToolTip(t("preprocess_drop_lowres_tip"))
+        self.drop_lowres_chk.setChecked(
+            bool(pp_cfg.get("drop_lowres_images", DEFAULT_DROP_LOWRES_IMAGES))
+        )
+        img_form.addRow(
+            self._field_label("drop_lowres_images", t("preprocess_drop_lowres")),
+            self.drop_lowres_chk,
+        )
+
+        self.min_pixels_spin = QSpinBox()
+        self.min_pixels_spin.setRange(0, 100_000_000)
+        self.min_pixels_spin.setSingleStep(50_000)
+        self.min_pixels_spin.setGroupSeparatorShown(True)
+        self.min_pixels_spin.setValue(int(pp_cfg.get("min_pixels", DEFAULT_MIN_PIXELS)))
+        self.min_pixels_spin.wheelEvent = lambda e: e.ignore()
+        # min_pixels only applies when the filter is on (mirrors the CLI:
+        # drop_lowres=false → --min_pixels 0). Grey it out when unchecked.
+        self.min_pixels_spin.setEnabled(self.drop_lowres_chk.isChecked())
+        self.drop_lowres_chk.toggled.connect(self.min_pixels_spin.setEnabled)
+        img_form.addRow(
+            self._field_label("min_pixels", t("preprocess_min_pixels")),
+            self.min_pixels_spin,
+        )
+        img_box.setLayout(img_form)
+        form_layout.addWidget(img_box)
 
         # Text caching group
         text_box = QGroupBox(t("preprocess_text_caching"))
@@ -665,6 +750,15 @@ class PreprocessingTab(LazyTabMixin, QWidget):
 
         mask_path_pattern = (
             self.mask_path_pattern_edit.text().strip() or DEFAULT_MASK_PATH_PATTERN
+        )
+        _update_preprocess_toml(
+            {
+                "source_image_dir": (
+                    self.source_dir_edit.text().strip() or DEFAULT_SOURCE_IMAGE_DIR
+                ),
+                "drop_lowres_images": self.drop_lowres_chk.isChecked(),
+                "min_pixels": int(self.min_pixels_spin.value()),
+            }
         )
         _save_sam_yaml(rules, mask_path_pattern)
         _save_settings(
