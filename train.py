@@ -677,9 +677,6 @@ class AnimaTrainer:
         )
         return tokenize_strategy
 
-    def get_tokenizers(self, tokenize_strategy: strategy_anima.AnimaTokenizeStrategy):
-        return [tokenize_strategy.qwen3_tokenizer]
-
     def get_latents_caching_strategy(self, args):
         return strategy_anima.AnimaLatentsCachingStrategy(
             args.cache_latents_to_disk, args.vae_batch_size, args.skip_cache_check
@@ -763,14 +760,6 @@ class AnimaTrainer:
             num_train_timesteps=1000, shift=args.discrete_flow_shift
         )
         return noise_scheduler
-
-    def encode_images_to_latents(self, args, vae, images):
-        vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage
-        return vae.encode_pixels_to_latents(images)  # Keep 4D for input/output
-
-    def shift_scale_latents(self, args, latents):
-        # Latents already normalized by vae.encode with scale
-        return latents
 
     def get_noise_pred_and_target(
         self,
@@ -1148,10 +1137,8 @@ class AnimaTrainer:
                     args.vae_batch_size is None
                     or len(batch["images"]) <= args.vae_batch_size
                 ):
-                    latents = self.encode_images_to_latents(
-                        args,
-                        vae,
-                        batch["images"].to(accelerator.device, dtype=vae_dtype),
+                    latents = vae.encode_pixels_to_latents(
+                        batch["images"].to(accelerator.device, dtype=vae_dtype)
                     )
                 else:
                     chunks = [
@@ -1161,8 +1148,8 @@ class AnimaTrainer:
                     list_latents = []
                     for chunk in chunks:
                         with torch.no_grad():
-                            chunk = self.encode_images_to_latents(
-                                args, vae, chunk.to(accelerator.device, dtype=vae_dtype)
+                            chunk = vae.encode_pixels_to_latents(
+                                chunk.to(accelerator.device, dtype=vae_dtype)
                             )
                             list_latents.append(chunk)
                     latents = torch.cat(list_latents, dim=0)
@@ -1172,8 +1159,6 @@ class AnimaTrainer:
                     latents = typing.cast(
                         torch.FloatTensor, torch.nan_to_num(latents, 0, out=latents)
                     )
-
-            latents = self.shift_scale_latents(args, latents)
 
         text_encoder_conds = []
         text_encoder_outputs_list = batch.get("text_encoder_outputs_list", None)
@@ -1397,30 +1382,6 @@ class AnimaTrainer:
 
     def is_train_text_encoder(self, args):
         return not args.network_train_unet_only
-
-    def cast_text_encoder(self, args):
-        return True
-
-    def cast_vae(self, args):
-        return True
-
-    def cast_unet(self, args):
-        return True
-
-    def call_unet(
-        self,
-        args,
-        accelerator,
-        unet,
-        noisy_latents,
-        timesteps,
-        text_conds,
-        batch,
-        weight_dtype,
-        **kwargs,
-    ):
-        noise_pred = unet(noisy_latents, timesteps, text_conds[0]).sample
-        return noise_pred
 
     def cache_text_encoder_outputs_if_needed(
         self,
@@ -1941,8 +1902,7 @@ class AnimaTrainer:
         unet_weight_dtype = te_weight_dtype = weight_dtype
 
         unet.requires_grad_(False)
-        if self.cast_unet(args):
-            unet.to(dtype=unet_weight_dtype)
+        unet.to(dtype=unet_weight_dtype)
         for i, t_enc in enumerate(text_encoders):
             # None when the TE was never loaded (cache_text_encoder_outputs with
             # no sample prompts / val / TE-training -- qwen3_needed=False).
@@ -1951,7 +1911,7 @@ class AnimaTrainer:
             t_enc.requires_grad_(False)
 
             # in case of cpu, dtype is already set to fp32 because cpu does not support fp16/bf16
-            if t_enc.device.type != "cpu" and self.cast_text_encoder(args):
+            if t_enc.device.type != "cpu":
                 t_enc.to(dtype=te_weight_dtype)
 
         # accelerator preparation (no deepspeed)
@@ -1960,7 +1920,7 @@ class AnimaTrainer:
         else:
             unet.to(
                 accelerator.device,
-                dtype=unet_weight_dtype if self.cast_unet(args) else None,
+                dtype=unet_weight_dtype,
             )
         if train_text_encoder:
             text_encoders = [
@@ -2056,9 +2016,9 @@ class AnimaTrainer:
 
         tokenize_strategy = self.get_tokenize_strategy(args)
         text_strategies.TokenizeStrategy.set_strategy(tokenize_strategy)
-        tokenizers = self.get_tokenizers(
-            tokenize_strategy
-        )  # will be removed after sample_image is refactored
+        tokenizers = [
+            tokenize_strategy.qwen3_tokenizer
+        ]  # will be removed after sample_image is refactored
 
         # prepare caching strategy: this must be set before preparing dataset. because dataset may use this strategy for initialization.
         latents_caching_strategy = self.get_latents_caching_strategy(args)
@@ -2178,11 +2138,7 @@ class AnimaTrainer:
 
         # mixed precision dtype
         weight_dtype, save_dtype = prepare_dtype(args)
-        vae_dtype = (
-            (torch.float32 if args.no_half_vae else weight_dtype)
-            if self.cast_vae(args)
-            else None
-        )
+        vae_dtype = torch.float32 if args.no_half_vae else weight_dtype
 
         # load target models: unet may be None for lazy loading
         model_version, text_encoder, vae, unet = self.load_target_model(

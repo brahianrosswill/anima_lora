@@ -23,11 +23,6 @@ logger = logging.getLogger(__name__)
 
 def add_sd_models_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--v2",
-        action="store_true",
-        help="load Stable Diffusion v2.0 model",
-    )
-    parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
         default=None,
@@ -415,12 +410,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--full_bf16", action="store_true", help="bf16 training including gradients"
     )
 
-    parser.add_argument(
-        "--clip_skip",
-        type=int,
-        default=None,
-        help="use output of nth layer from back of text encoder (n>=1)",
-    )
     parser.add_argument(
         "--logging_dir",
         type=str,
@@ -1068,9 +1057,6 @@ def enable_high_vram(args: argparse.Namespace):
 
 def verify_training_args(args: argparse.Namespace):
     enable_high_vram(args)
-
-    if args.v2 and args.clip_skip is not None:
-        logger.warning("v2 with clip_skip will be unexpected")
 
     # Expand the two semantic cache knobs into the legacy internal flags that
     # the dataset / strategy / metadata code still reads. `use_vae_cache` and
