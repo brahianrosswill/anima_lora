@@ -382,4 +382,6 @@ STRINGS: dict[str, str] = {
     "merge_pick_dit": "Select base DiT .safetensors",
     "merge_pick_out": "Save merged DiT as...",
     "browse": "Browse…",
+    # Multi-scale target_res tiers
+    "target_res_danger_tooltip": "Heavy tier: {edge}px runs ~{tokens} tokens per image and adds an extra compiled block graph (slower compile, higher VRAM). Only enable if you actually need this resolution.",
 }

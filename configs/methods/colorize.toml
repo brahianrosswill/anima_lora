@@ -19,11 +19,11 @@ dataset_config = "configs/datasets/colorize.toml"
 
 network_module = "networks.methods.easycontrol"
 
-network_dim = 32
-network_alpha = 32
+network_dim = 48
+network_alpha = 48
 
 network_args = [
-    "b_cond_init=-4",
+    "b_cond_init=-6.0",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
 ]

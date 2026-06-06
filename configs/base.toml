@@ -50,7 +50,7 @@ min_pixels = 500000
 # read at train time only to size the torch.compile dynamo cache budget —
 # training itself consumes whatever latent shapes are on disk. Override per-run:
 #   make preprocess ARGS="--target_res 1024 1536"
-target_res = [1024]
+target_res = [768, 1024]
 
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"

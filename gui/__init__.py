@@ -958,6 +958,10 @@ def _image_dirs() -> dict[str, Path]:
 # (hardcoded so the GUI import stays light / library-free).
 _TARGET_RES_TIERS = (512, 768, 1024, 1280, 1536)
 
+# High-cost tiers: large per-image token counts + an extra compiled block
+# graph each. Flagged in the GUI so users don't casually enable them.
+_TARGET_RES_DANGER = {1280: 6300, 1536: 8640}
+
 
 class _TargetResWidget(QWidget):
     """Horizontal row of tier checkboxes for the multi-scale ``target_res`` knob.
@@ -965,6 +969,9 @@ class _TargetResWidget(QWidget):
     Reads/writes a list of edge ints (e.g. ``[1024, 1536]``). Never returns an
     empty list — unchecking everything falls back to ``[1024]`` (the legacy
     single ~1MP tier) so preprocess/train always have a valid tier.
+
+    The 1280/1536 tiers are visually flagged as "dangerous" (high token count
+    + extra compile graph / VRAM) via colour + an i18n tooltip.
     """
 
     changed = Signal()
@@ -979,6 +986,15 @@ class _TargetResWidget(QWidget):
             cb = QCheckBox(str(edge))
             cb.setChecked(edge in sel)
             cb.toggled.connect(self.changed)
+            if edge in _TARGET_RES_DANGER:
+                cb.setStyleSheet("QCheckBox { color: #d9822b; font-weight: bold; }")
+                cb.setToolTip(
+                    t(
+                        "target_res_danger_tooltip",
+                        edge=edge,
+                        tokens=_TARGET_RES_DANGER[edge],
+                    )
+                )
             lay.addWidget(cb)
             self._boxes[edge] = cb
         lay.addStretch(1)

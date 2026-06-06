@@ -365,4 +365,6 @@ STRINGS: dict[str, str] = {
     "merge_pick_dit": "选择基础 DiT .safetensors",
     "merge_pick_out": "另存为合并后的 DiT...",
     "browse": "浏览……",
+    # Multi-scale target_res tiers
+    "target_res_danger_tooltip": "高开销档位：{edge}px 每张图像约使用 {tokens} 个 token，并额外增加一张已编译的块图（编译更慢、显存更高）。仅在确实需要该分辨率时才启用。",
 }

@@ -367,4 +367,6 @@ STRINGS: dict[str, str] = {
     "merge_pick_dit": "베이스 DiT .safetensors 선택",
     "merge_pick_out": "병합된 DiT 저장 위치...",
     "browse": "찾아보기…",
+    # Multi-scale target_res tiers
+    "target_res_danger_tooltip": "고비용 티어: {edge}px는 이미지당 약 {tokens} 토큰을 사용하고 컴파일된 블록 그래프를 하나 더 추가합니다(컴파일 느려짐, VRAM 증가). 이 해상도가 정말 필요할 때만 켜세요.",
 }

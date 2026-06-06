@@ -368,4 +368,6 @@ STRINGS: dict[str, str] = {
     "merge_pick_dit": "ベース DiT .safetensors を選択",
     "merge_pick_out": "マージ済み DiT を名前を付けて保存...",
     "browse": "参照…",
+    # Multi-scale target_res tiers
+    "target_res_danger_tooltip": "高コストなティア：{edge}px は画像あたり約 {tokens} トークンを使用し、コンパイル済みブロックグラフを 1 つ追加します（コンパイルが遅くなり、VRAM が増加）。この解像度が本当に必要な場合のみ有効にしてください。",
 }
