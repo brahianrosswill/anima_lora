@@ -14,6 +14,7 @@ STRINGS: dict[str, str] = {
     "tab_images": "データセット",
     "tab_merge": "マージ",
     "tab_preprocess": "前処理",
+    "tab_tensorboard": "TensorBoard",
     # PreprocessingTab
     "preprocess_intro": (
         "キャプションのシャッフルやテキストバブルのマスキングを設定し、"

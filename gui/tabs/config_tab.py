@@ -64,7 +64,6 @@ from gui.progress import (
     TqdmProgressTracker,
     make_progress_bar,
 )
-from gui.tensorboard import TensorBoardPanel
 
 
 class ClickableLabel(QLabel):
@@ -83,8 +82,11 @@ class ClickableLabel(QLabel):
 
 
 class ConfigTab(QWidget):
-    def __init__(self, methods: list[str] | None = None):
+    def __init__(self, methods: list[str] | None = None, tb_panel=None):
         super().__init__()
+        # The TensorBoard runs panel lives on its own dedicated tab now; we only
+        # hold a reference so we can sync its log dir / current run. May be None.
+        self._tb_panel = tb_panel
         self._w: dict[str, QWidget] = {}
         self._preprocessed = (ROOT / "post_image_dataset").exists()
         # Advanced section starts collapsed; user's expand/collapse state
@@ -300,13 +302,6 @@ class ConfigTab(QWidget):
         vsplit.setSizes([500, 200])
         lay.addWidget(vsplit)
 
-        # TensorBoard runs panel — shows all past runs in the logging_dir with
-        # remove buttons and a one-click "Open TensorBoard" launcher. Initialized
-        # with the logging_dir from the current variant; updated on each training
-        # launch and on run_start progress events.
-        self._tb_panel = TensorBoardPanel(self)
-        lay.addWidget(self._tb_panel)
-
         # QProcess for training. The launchers we spawn (``accelerate launch``,
         # ``python tasks.py …``) fork the real training process, which is what
         # holds VRAM. Run the child in its own session so kill_process_tree
@@ -385,7 +380,7 @@ class ConfigTab(QWidget):
 
         # Sync the TensorBoard panel to the current variant's logging_dir.
         logging_dir = merged.get("logging_dir")
-        if logging_dir and hasattr(self, "_tb_panel"):
+        if logging_dir and self._tb_panel is not None:
             self._tb_panel.set_log_dir(logging_dir)
 
         if hasattr(self, "_explain"):
@@ -1008,7 +1003,7 @@ class ConfigTab(QWidget):
         # starts scanning for the new run dir immediately.
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         logging_dir = merged.get("logging_dir")
-        if logging_dir:
+        if logging_dir and self._tb_panel is not None:
             self._tb_panel.set_log_dir(logging_dir)
 
         # Flip to busy + repaint before the submit so the UI feels responsive
@@ -1232,7 +1227,7 @@ class ConfigTab(QWidget):
         the current run at a glance.
         """
         log_dir = ev.get("log_dir")
-        if log_dir:
+        if log_dir and self._tb_panel is not None:
             self._tb_panel.set_current_run(log_dir)
 
     def cleanup_subprocess(self):
@@ -1241,7 +1236,6 @@ class ConfigTab(QWidget):
         training survives the GUI closing (re-attached on next launch)."""
         self._job_timer.stop()
         kill_process_tree(self._proc)
-        self._tb_panel.cleanup()
 
     def _read_stdout(self):
         data = self._proc.readAllStandardOutput().data().decode(errors="replace")

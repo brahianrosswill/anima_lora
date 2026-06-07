@@ -39,6 +39,7 @@ from gui.tabs.image_tab import ImageViewerTab
 from gui.tabs.merge_tab import MergeTab
 from gui.tabs.methods_tab import MethodsTab
 from gui.tabs.preprocess_tab import PreprocessingTab
+from gui.tensorboard import TensorBoardTab
 from gui.system_dialog import (
     GITHUB_ISSUES_URL,
     check_for_update_async,
@@ -278,13 +279,21 @@ class MainWindow(QMainWindow):
         # image-conditioning adapters (IP-Adapter / EasyControl) live behind
         # the experimental toggle.
         self.tabs = QTabWidget()
+        # The TensorBoard runs panel sits on its own dedicated tab (no longer
+        # pinned to the bottom of ConfigTab). ConfigTab keeps a reference so it
+        # can still sync the log dir on variant switch / launch / run_start.
+        self._tb_tab = TensorBoardTab()
         self.tabs.addTab(
-            ConfigTab(methods=["lora", "tlora", "hydralora", "reft"]),
+            ConfigTab(
+                methods=["lora", "tlora", "hydralora", "reft"],
+                tb_panel=self._tb_tab.panel,
+            ),
             t("tab_config"),
         )
         self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
+        self.tabs.addTab(self._tb_tab, t("tab_tensorboard"))
 
         # Experimental set: a unified Methods picker + image-conditioning
         # adapters. MethodsTab folds every trainable experimental method behind
@@ -293,9 +302,15 @@ class MainWindow(QMainWindow):
         # need a tab each. IP-Adapter and EasyControl have their own
         # preprocess/dataset lifecycles, so they keep dedicated tabs.
         self.experimental_tabs = QTabWidget()
-        self.experimental_tabs.addTab(MethodsTab(), t("tab_methods"))
+        # Experimental set gets its own TensorBoard tab (separate instance — a
+        # widget can't live in two tab bars) wired to MethodsTab's editor.
+        self._tb_tab_exp = TensorBoardTab()
+        self.experimental_tabs.addTab(
+            MethodsTab(tb_panel=self._tb_tab_exp.panel), t("tab_methods")
+        )
         self.experimental_tabs.addTab(IPAdapterTab(), t("tab_ip_adapter"))
         self.experimental_tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
+        self.experimental_tabs.addTab(self._tb_tab_exp, t("tab_tensorboard"))
 
         self.tab_stack = QStackedWidget()
         self.tab_stack.addWidget(self.tabs)

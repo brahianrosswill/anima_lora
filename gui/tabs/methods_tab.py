@@ -41,7 +41,7 @@ class MethodsTab(QWidget):
     # superseded it; the fera.toml / network module still exist for the CLI).
     _FLAT_METHODS = ("chimera", "soft_tokens")
 
-    def __init__(self):
+    def __init__(self, tb_panel=None):
         super().__init__()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -49,7 +49,7 @@ class MethodsTab(QWidget):
 
         # Embedded editors. The distill tabs are LazyTabMixin — their TOML scan
         # is deferred to the first time the stack shows them (i.e. when picked).
-        self._config = ConfigTab(methods=list(self._FLAT_METHODS))
+        self._config = ConfigTab(methods=list(self._FLAT_METHODS), tb_panel=tb_panel)
         # The wrapper owns method selection, so hide ConfigTab's own method
         # picker; its inline variant picker stays (it switches the bound
         # gui-methods/<variant>.toml within the selected family).

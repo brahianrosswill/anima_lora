@@ -14,6 +14,7 @@ STRINGS: dict[str, str] = {
     "tab_images": "데이터셋",
     "tab_merge": "병합",
     "tab_preprocess": "전처리",
+    "tab_tensorboard": "텐서보드",
     # PreprocessingTab
     "preprocess_intro": (
         "캡션 셔플과 말풍선 마스킹을 설정하고, 각 단계를 원할 때 실행합니다. "

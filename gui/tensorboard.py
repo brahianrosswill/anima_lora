@@ -122,7 +122,7 @@ class TensorBoardPanel(QGroupBox):
         panel.set_current_run("output/logs/anima_20260607-0000")  # on run_start
     """
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, expand: bool = False) -> None:
         super().__init__(t("tb_panel_title"), parent)
         self._manager = TensorBoardManager()
         self._log_dir: Optional[Path] = None
@@ -136,7 +136,10 @@ class TensorBoardPanel(QGroupBox):
         # Scrollable run list
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
-        self._scroll.setMaximumHeight(140)
+        # As a bottom-of-form panel the list is capped so it doesn't crowd the
+        # config; on its own dedicated tab (``expand=True``) it fills the page.
+        if not expand:
+            self._scroll.setMaximumHeight(140)
         self._scroll.setMinimumHeight(60)
         self._inner = QWidget()
         self._inner_lay = QVBoxLayout(self._inner)
@@ -279,3 +282,23 @@ class TensorBoardPanel(QGroupBox):
         self._manager.stop()
         self._stop_btn.setEnabled(False)
         self._status_label.setText(t("tb_status_stopped"))
+
+
+class TensorBoardTab(QWidget):
+    """Dedicated tab hosting a :class:`TensorBoardPanel`.
+
+    The panel used to sit permanently at the bottom of the ConfigTab; it now
+    lives on its own tab so the training form isn't always crowded by it.
+    ConfigTab keeps a reference to ``.panel`` for log-dir / current-run syncing.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        self.panel = TensorBoardPanel(self, expand=True)
+        lay.addWidget(self.panel)
+
+    def cleanup_subprocess(self) -> None:
+        """App-shutdown hook (mirrors the other tabs) — stops the server."""
+        self.panel.cleanup()

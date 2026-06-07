@@ -18,6 +18,7 @@ STRINGS: dict[str, str] = {
     "tab_images": "数据集",
     "tab_merge": "合并",
     "tab_preprocess": "预处理",
+    "tab_tensorboard": "TensorBoard",
     # PreprocessingTab
     "preprocess_intro": (
         "配置标注随机化和气泡蒙版,然后按需运行每个步骤。"
