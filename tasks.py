@@ -53,6 +53,11 @@ COMMANDS = {
         "EasyControl training (extended self-attn KV with VAE-encoded reference). "
         "EASYADAPTER=<task> (e.g. colorize) selects a control-task project.",
     ),
+    "easycontrol-staging": (
+        training.cmd_easycontrol_staging,
+        "Generate an EasyControl adapter's staging dataset (no VAE/TE caching). "
+        "EASYADAPTER=near_twin → mine the in-artist near-twin pair tree.",
+    ),
     "easycontrol-preprocess": (
         training.cmd_easycontrol_preprocess,
         "Full EasyControl preprocess: latents + text emb. "

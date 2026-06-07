@@ -7,7 +7,13 @@ dataset blueprint (`configs/datasets/easycontrol.toml`).
 
 | File | Producer | Points at |
 |---|---|---|
-| `near_twins.toml` | `easycontrol_adapters/tools/near_twin_tag_gap_miner.py` | the materialized `_tags`/`_no_tags` near-twin pair tree under `post_image_dataset/easycontrol/near_twins/` |
+| `near_twins.toml` | `python -m easycontrol_adapters.tools.near_twin` | the materialized `_tags`/`_no_tags` near-twin pair tree under `post_image_dataset/easycontrol/near_twins/staging/` (VAE/TE caches land beside it under `near_twins/cache/`) |
+
+`near_twins.toml` carries two hand-edited tables above the generated blueprint:
+`[staging]` (mining run knobs, read by the miner — legacy name `[miner]` still
+accepted) and `[preprocess]` (VAE/TE caching knobs, read by
+`make easycontrol-preprocess EASYADAPTER=near_twin`). Both survive re-runs of the
+miner verbatim; only the blueprint tail is rewritten.
 
 These are **seed / eval** datasets, not turnkey control-adapter blueprints: each
 accepted pair is a `{id}_tags` / `{id}_no_tags` couple (the `_tags` side holds

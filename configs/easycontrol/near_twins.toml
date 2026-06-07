@@ -1,11 +1,15 @@
-# near-twin tag-gap miner config. Edit the [miner] table, then just run:
-#   python easycontrol_adapters/tools/near_twin_tag_gap_miner.py
+# near-twin tag-gap miner config. Edit the [staging] table, then run the two
+# pipeline steps (knobs for each live in their own table here):
+#   make easycontrol-staging    EASYADAPTER=near_twin   # [staging] → mine pair tree
+#   make easycontrol-preprocess EASYADAPTER=near_twin   # [preprocess] → VAE/TE caches
 # CLI flags override these. Paths support {CAPTION_CORPUS_DIR}/$VARS/~ expansion
 # ({CAPTION_CORPUS_DIR} comes from anima_lora/.env).
 
-[miner]
+# Mining run knobs (read by `python -m easycontrol_adapters.tools.near_twin`;
+# legacy name [miner] still accepted). Any --flag dest works as a key here.
+[staging]
 # Discriminator — set exactly one of: tag_any / tag / region (bool) / signal.
-tag_any = ["speech bubble", "thought bubble", "blank speech bubble"]
+tag_any = ["speech bubble", "thought bubble", "blank speech bubble", "spoken text", "english text", "japanese text"]
 # Source trees (<dir>/<artist>/<id>.<ext>).
 image_dirs = ["{CAPTION_CORPUS_DIR}/retrieved"]
 # Stage/threshold knobs (any --flag dest works here, e.g. grid, ratio, geom_check):
@@ -13,6 +17,29 @@ sim_min = 0.85
 match_frac_min = 0.66
 cell_match_min = 0.9
 max_extra_diff = 6
+
+# Resize + VAE/TE caching pass over the mined pair tree (read by
+# `make easycontrol-preprocess EASYADAPTER=near_twin`). The native-res staging
+# tree is first resized into constant-token buckets under resized_dir (that
+# resized tree is the training image_dir below), then VAE/TE-encoded into
+# cache_dir. The tree is nested <artist>/<pair_id>_{tags,no_tags} so recursive =
+# true; caches mirror flat-stem under cache_dir (the EasyControl cache_dir pattern).
+[preprocess]
+image_dir = 'post_image_dataset/easycontrol/near_twins/staging'    # resize source (mined native-res tree)
+resized_dir = 'post_image_dataset/easycontrol/near_twins/resized'  # bucket-resized → training image_dir
+cache_dir = 'post_image_dataset/easycontrol/near_twins/cache'
+# Constant-token bucket tiers to resize into before VAE encoding (allowed edges:
+# 512 768 1024 1280 1536; see configs/base.toml target_res). Must match training.
+target_res = [768, 1024]
+min_pixels = 0  # 0 = never drop a member (dropping one orphans its pair partner)
+recursive = true
+vae = 'models/vae/qwen_image_vae.safetensors'
+batch_size = 4
+chunk_size = 64
+qwen3 = 'models/text_encoders/qwen_3_06b_base.safetensors'
+dit = 'models/diffusion_models/anima-base-v1.0.safetensors'
+caption_shuffle_variants = 4
+caption_tag_dropout_rate = 0.1
 
 # === generated dataset blueprint (rewritten by the miner; do not edit below) ===
 # Near-twin pair tree as an EasyControl-style subset. Source images stay
@@ -28,6 +55,7 @@ caption_extension = '.txt'
 batch_size = 1
 
   [[datasets.subsets]]
-  image_dir = 'post_image_dataset/easycontrol/near_twins'
-  cache_dir = 'post_image_dataset/easycontrol/near_twins_cache'
+  image_dir = 'post_image_dataset/easycontrol/near_twins/resized'
+  cache_dir = 'post_image_dataset/easycontrol/near_twins/cache'
+  recursive = true  # tree is nested <artist>/<pair_id>_{tags,no_tags}; caches mirror flat-stem under cache_dir
   num_repeats = 1
