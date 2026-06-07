@@ -9,8 +9,13 @@ wired up under ``make exp-*`` in ``tasks.py``.
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import sys
 import tomllib
+from pathlib import Path
+
+import toml
 
 from ._common import PY, ROOT, run, train
 
@@ -64,10 +69,108 @@ def cmd_lora_gui(extra):
     train(variant, extra, methods_subdir="gui-methods")
 
 
+def _toml_table_to_argv(table: dict) -> list[str]:
+    """Flatten a flat TOML table into ``--key value`` train.py argv.
+
+    Bools become bare ``--flag`` when true (omitted when false); lists spread
+    into ``--key v1 v2``; scalars become ``--key str(value)``. Used to fold a
+    near_twins.toml ``[training]`` table into CLI overrides (CLI wins the merge
+    chain, so these override the easycontrol method config).
+    """
+    argv: list[str] = []
+    for key, val in table.items():
+        flag = f"--{key}"
+        if isinstance(val, bool):
+            if val:
+                argv.append(flag)
+        elif isinstance(val, (list, tuple)):
+            argv.append(flag)
+            argv.extend(str(v) for v in val)
+        else:
+            argv.append(flag)
+            argv.append(str(val))
+    return argv
+
+
+def _near_twin_train_extra(extra) -> list[str]:
+    """Build train.py extra-argv for an ``EASYADAPTER=near_twin`` run.
+
+    ``near_twins.toml`` is a multi-purpose file (``[staging]`` / ``[preprocess]``
+    / ``[training]`` knob tables above the generated ``[general]`` + ``[[datasets]]``
+    blueprint), but train.py's dataset-config validator rejects any top-level key
+    outside the blueprint. So we extract just the blueprint sections into a clean
+    generated sidecar and point ``--dataset_config`` at that, then fold the
+    optional ``[training]`` table into CLI overrides on top of the easycontrol
+    method config. User-supplied ``extra`` argv is appended last so it still wins.
+
+    Note: the generated blueprint exposes each mined member as an independent
+    ref==target subset (no ``cond_cache_dir`` pairing), so this is a vanilla
+    EasyControl run over the mined images — not yet a clean→tagged control task.
+    """
+    cfg_path = ROOT / "configs" / "easycontrol" / "near_twins.toml"
+    if not cfg_path.is_file():
+        raise SystemExit(
+            f"{cfg_path} not found — run `make easycontrol-staging "
+            "EASYADAPTER=near_twin` then `make easycontrol-preprocess "
+            "EASYADAPTER=near_twin` first."
+        )
+    cfg = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    blueprint = {k: cfg[k] for k in ("general", "datasets") if k in cfg}
+    if not blueprint.get("datasets"):
+        raise SystemExit(
+            f"{cfg_path} has no [[datasets]] blueprint yet — run "
+            "`make easycontrol-staging EASYADAPTER=near_twin` to mine the pair "
+            "tree (it writes the blueprint tail)."
+        )
+
+    # Write the blueprint-only dataset config beside the caches (a gitignored data
+    # dir that exists once preprocess has run). Regenerated each invocation so it
+    # tracks the source file, and stable-pathed so the --queue daemon path can
+    # re-read it later.
+    subset = next(
+        (
+            s
+            for ds in blueprint["datasets"]
+            for s in ds.get("subsets", [])
+            if s.get("image_dir")
+        ),
+        None,
+    )
+    base_dir = (
+        ROOT / Path(subset["image_dir"]).parent
+        if subset
+        else ROOT / "post_image_dataset" / "easycontrol" / "near_twins"
+    )
+    base_dir.mkdir(parents=True, exist_ok=True)
+    ds_path = base_dir / "dataset_config.toml"
+    ds_path.write_text(
+        "# AUTO-GENERATED from configs/easycontrol/near_twins.toml — do not edit.\n"
+        "# Blueprint-only copy (train.py's dataset-config validator rejects the\n"
+        "# [staging]/[preprocess]/[training] knob tables in the source file).\n\n"
+        + toml.dumps(blueprint),
+        encoding="utf-8",
+    )
+
+    return [
+        "--dataset_config",
+        str(ds_path),
+        *_toml_table_to_argv(cfg.get("training") or {}),
+        *list(extra or []),
+    ]
+
+
 def cmd_easycontrol(extra):
     """EasyControl. ``EASYADAPTER=<name>`` selects a control-task project under
     easycontrol_adapters/ (e.g. ``colorize``) → runs configs/methods/<name>.toml;
-    unset → the default ref==target easycontrol.toml."""
+    unset → the default ref==target easycontrol.toml.
+
+    ``EASYADAPTER=near_twin`` runs the easycontrol method against the mined
+    near-twin blueprint (``configs/easycontrol/near_twins.toml``), folding that
+    file's optional ``[training]`` table in as CLI overrides."""
+    adapter = (os.environ.get("EASYADAPTER") or "").strip()
+    if adapter in ("near_twin", "near_twins"):  # accept the easy plural typo
+        train("easycontrol", _near_twin_train_extra(extra))
+        return
     train(_easyadapter() or "easycontrol", extra)
 
 
@@ -175,6 +278,60 @@ def _near_twin_preprocess() -> None:
             str(pp.get("caption_tag_dropout_rate", 0.1)),
             *recursive,
         ]
+    )
+    # 4. Pair the cond/ tree (the _tags reference latent for each _no_tags target).
+    _near_twin_build_cond(pp)
+
+
+def _near_twin_build_cond(pp: dict) -> None:
+    """Materialize the ``cond/`` latent tree for the near-twin *removal* task.
+
+    Pairing convention (matches the generated blueprint): the denoising target is
+    the clean ``_no_tags`` member; its ``_tags`` twin is the EasyControl condition
+    reference. The loader resolves the cond latent by the *target* stem+bucket
+    under ``cond_cache_dir``, so for each ``{id}_no_tags_{WxH}_anima.npz`` target
+    latent we symlink the sibling ``{id}_tags_{WxH}_anima.npz`` into
+    ``cond/<artist>/{id}_no_tags_{WxH}_anima.npz`` (cond content = the _tags
+    latent, filed under the _no_tags name). Same-bucket twins only — a member that
+    bucketed to a different resolution has no latent at the target's bucket and is
+    skipped with a warning.
+
+    Pure symlinks over the existing cache; the tree is rebuilt from scratch each
+    run so a dropped pair can't leave a stale link behind.
+    """
+    base = "post_image_dataset/easycontrol/near_twins"
+    cache_dir = ROOT / pp.get("cache_dir", f"{base}/cache")
+    cond_dir = ROOT / pp.get("cond_dir", f"{base}/cond")
+    if not cache_dir.is_dir():
+        raise SystemExit(
+            f"{cache_dir} not found — run the VAE/TE caching pass first "
+            "(`make easycontrol-preprocess EASYADAPTER=near_twin`)."
+        )
+    if cond_dir.exists():
+        shutil.rmtree(cond_dir)
+
+    pat = re.compile(r"^(?P<id>.+)_no_tags_(?P<bucket>\d{4}x\d{4})_anima\.npz$")
+    linked = skipped = 0
+    for npz in sorted(cache_dir.rglob("*_no_tags_*_anima.npz")):
+        m = pat.match(npz.name)
+        if not m:
+            continue
+        twin = npz.with_name(f"{m['id']}_tags_{m['bucket']}_anima.npz")
+        if not twin.is_file():
+            print(
+                f"  [near_twin cond] no _tags twin at bucket {m['bucket']} for "
+                f"{npz.relative_to(cache_dir)} — skipping (unpaired / diff bucket).",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
+        link = cond_dir / npz.relative_to(cache_dir)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(twin.resolve())
+        linked += 1
+    print(
+        f"[near_twin cond] linked {linked} cond latents into {cond_dir}"
+        + (f" ({skipped} skipped)" if skipped else "")
     )
 
 

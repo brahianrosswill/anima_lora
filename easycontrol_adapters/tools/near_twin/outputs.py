@@ -225,6 +225,7 @@ max_extra_diff = 6
 image_dir = 'post_image_dataset/easycontrol/near_twins/staging'    # resize source
 resized_dir = 'post_image_dataset/easycontrol/near_twins/resized'  # → training image_dir
 cache_dir = 'post_image_dataset/easycontrol/near_twins/cache'
+cond_dir = 'post_image_dataset/easycontrol/near_twins/cond'  # paired _tags reference latents (symlinks)
 target_res = [1024]  # bucket tiers (512 768 1024 1280 1536); must match training
 min_pixels = 0  # 0 = never drop a member (would orphan its pair partner)
 recursive = true
@@ -235,6 +236,18 @@ qwen3 = 'models/text_encoders/qwen_3_06b_base.safetensors'
 dit = 'models/diffusion_models/anima-base-v1.0.safetensors'
 caption_shuffle_variants = 4
 caption_tag_dropout_rate = 0.1
+
+# Training overrides for `make easycontrol EASYADAPTER=near_twin` (optional).
+# Each key is folded in as a `--key value` CLI override on top of
+# configs/methods/easycontrol.toml; `--dataset_config` is injected automatically.
+# Omit the table to train with the plain easycontrol method defaults.
+[training]
+output_name = "anima_easycontrol_near_twins"
+learning_rate = 3e-5
+max_train_epochs = 8
+# Removal task: the _tags reference is the structural source of truth, so keep
+# the cond clean (no training-time perturbation) for faithful reconstruction.
+easycontrol_cond_noise_max = 0.0
 """
 
 
@@ -244,13 +257,21 @@ def _blueprint_text(export_dir: Path) -> str:
     # subset image_dir points at the resized sibling, not the export dir itself.
     img_dir = _rel_to_repo(export_dir.parent / "resized")
     cache_dir = _rel_to_repo(export_dir.parent / "cache")
+    cond_dir = _rel_to_repo(export_dir.parent / "cond")
     return f"""{_BLUEPRINT_SENTINEL}
-# Near-twin pair tree as an EasyControl-style subset. The mined staging tree is
-# resized into constant-token buckets under `resized/` (the training image_dir);
-# VAE/TE/PE caches land under `cache/` (the IP-Adapter / EasyControl cache_dir
-# pattern). Seed/eval data, NOT a turnkey control-adapter dataset — each accepted
-# pair is a `{{id}}_tags` / `{{id}}_no_tags` couple, the `_tags` side holding the
-# discriminator attribute (see the proposal doc).
+# Near-twin pair tree wired as an EasyControl *text-removal* control task. The
+# mined staging tree is resized into constant-token buckets under `resized/`,
+# then VAE/TE-encoded into `cache/` (nested <artist>/ mirror of the resized tree).
+# Each accepted pair is a `{{id}}_tags` / `{{id}}_no_tags` couple, the `_tags` side
+# holding the discriminator attribute (speech bubbles / text).
+#
+# Roles (EasyControl: cache_dir = denoising target, cond_cache_dir = condition):
+#   target = the clean `_no_tags` member (+ its caption) — what the model generates
+#   cond   = the paired `_tags` latent (the text-bearing reference fed via set_cond),
+#            symlinked into `cond/` under the `_no_tags` stem by the preprocess step.
+# So the adapter learns: given a text-bearing panel as the reference, regenerate
+# the clean version. `path_pattern` keeps only the `_no_tags` members as targets;
+# the `_tags` members enter solely as the condition via cond_cache_dir.
 
 [general]
 caption_extension = '.txt'
@@ -260,8 +281,11 @@ batch_size = 1
 
   [[datasets.subsets]]
   image_dir = '{img_dir}'
-  cache_dir = '{cache_dir}'
-  recursive = true  # tree is nested <artist>/<pair_id>_{{tags,no_tags}}; caches mirror flat-stem under cache_dir
+  cache_dir = '{cache_dir}'        # denoising target: the clean _no_tags members
+  cond_cache_dir = '{cond_dir}'    # condition: the paired _tags latent (keyed by the _no_tags stem)
+  path_pattern = '*_no_tags.*'     # targets = clean members only (the _tags twin rides in as the cond)
+  recursive = true                 # tree is nested <artist>/<pair_id>_{{tags,no_tags}}; caches mirror the nesting
+  flip_aug = false                 # latents can't be flipped post-hoc; the cond cache has no flipped variant
   num_repeats = 1
 """
 
