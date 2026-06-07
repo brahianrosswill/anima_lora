@@ -24,8 +24,6 @@ network_alpha = 64
 
 output_name = "anima_byg"
 
-logging_dir = "output/logs"
-log_with = "tensorboard"
 
 # Paper App. B.1: lr 3e-4, AdamW wd 1e-2. Epoch-based here (the repo trains by
 # epochs); ~30k steps in the paper at bs 8.

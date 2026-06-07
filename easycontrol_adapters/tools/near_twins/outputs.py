@@ -193,8 +193,8 @@ _BLUEPRINT_SENTINEL = (
 _DEFAULT_STAGING_HEADER = """\
 # near-twin tag-gap miner config. Edit the [staging] table, then run the two
 # pipeline steps (knobs for each live in their own table here):
-#   make easycontrol-staging    EASYADAPTER=near_twin   # [staging] → mine pair tree
-#   make easycontrol-preprocess EASYADAPTER=near_twin   # [preprocess] → VAE/TE caches
+#   make easycontrol-staging    EASYADAPTER=near_twins   # [staging] → mine pair tree
+#   make easycontrol-preprocess EASYADAPTER=near_twins   # [preprocess] → VAE/TE caches
 # CLI flags override these. Paths support {CAPTION_CORPUS_DIR}/$VARS/~ expansion.
 
 # Output slug — the single source of truth for every derived path. The whole

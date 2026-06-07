@@ -97,7 +97,7 @@ def _toml_table_to_argv(table: dict) -> list[str]:
 _NEAR_TWIN_CFG = ROOT / "configs" / "easycontrol" / "near_twins.toml"
 
 
-def _near_twin_load() -> tuple[dict, str, str]:
+def _near_twins_load() -> tuple[dict, str, str]:
     """Load ``near_twins.toml`` → ``(cfg, name, base)``.
 
     The top-level ``name`` key (default ``near_twins``) is the single source of
@@ -113,7 +113,7 @@ def _near_twin_load() -> tuple[dict, str, str]:
     if not _NEAR_TWIN_CFG.is_file():
         raise SystemExit(
             f"{_NEAR_TWIN_CFG} not found — run `make easycontrol-staging "
-            "EASYADAPTER=near_twin` first to mine the pair tree."
+            "EASYADAPTER=near_twins` first to mine the pair tree."
         )
     cfg = tomllib.loads(_NEAR_TWIN_CFG.read_text(encoding="utf-8"))
     name = str(cfg.get("name") or _NEAR_TWIN_CFG.stem).strip()
@@ -138,8 +138,8 @@ def _resolve_blueprint_path(path: str, name: str) -> str:
     return path
 
 
-def _near_twin_train_extra(extra) -> list[str]:
-    """Build train.py extra-argv for an ``EASYADAPTER=near_twin`` run.
+def _near_twins_train_extra(extra) -> list[str]:
+    """Build train.py extra-argv for an ``EASYADAPTER=near_twins`` run.
 
     ``near_twins.toml`` is a multi-purpose file (top-level ``name`` + ``[staging]``
     / ``[preprocess]`` / ``[training]`` knob tables above the generated
@@ -155,12 +155,12 @@ def _near_twin_train_extra(extra) -> list[str]:
     ref==target subset (no ``cond_cache_dir`` pairing), so this is a vanilla
     EasyControl run over the mined images — not yet a clean→tagged control task.
     """
-    cfg, name, base = _near_twin_load()
+    cfg, name, base = _near_twins_load()
     blueprint = {k: cfg[k] for k in ("general", "datasets") if k in cfg}
     if not blueprint.get("datasets"):
         raise SystemExit(
             f"{_NEAR_TWIN_CFG} has no [[datasets]] blueprint yet — run "
-            "`make easycontrol-staging EASYADAPTER=near_twin` to mine the pair "
+            "`make easycontrol-staging EASYADAPTER=near_twins` to mine the pair "
             "tree (it writes the blueprint tail)."
         )
 
@@ -215,12 +215,12 @@ def cmd_easycontrol(extra):
     easycontrol_adapters/ (e.g. ``colorize``) → runs configs/methods/<name>.toml;
     unset → the default ref==target easycontrol.toml.
 
-    ``EASYADAPTER=near_twin`` runs the easycontrol method against the mined
-    near-twin blueprint (``configs/easycontrol/near_twins.toml``), folding that
+    ``EASYADAPTER=near_twins`` runs the easycontrol method against the mined
+    near-twins blueprint (``configs/easycontrol/near_twins.toml``), folding that
     file's optional ``[training]`` table in as CLI overrides."""
     adapter = (os.environ.get("EASYADAPTER") or "").strip()
-    if adapter in ("near_twin", "near_twins"):  # accept the easy plural typo
-        train("easycontrol", _near_twin_train_extra(extra))
+    if adapter in ("near_twins", "near_twins"):  # accept the easy plural typo
+        train("easycontrol", _near_twins_train_extra(extra))
         return
     train(_easyadapter() or "easycontrol", extra)
 
@@ -246,7 +246,7 @@ def cmd_easycontrol_download(extra):
     )
 
 
-def _near_twin_preprocess() -> None:
+def _near_twins_preprocess() -> None:
     """Resize + VAE/TE caching for the mined near-twin pair tree.
 
     Every knob is read from the ``[preprocess]`` table of
@@ -261,7 +261,7 @@ def _near_twin_preprocess() -> None:
     ``resized/`` (``target_res`` tiers) — that resized tree is the training
     ``image_dir`` — and only then VAE/TE-encodes it into ``cache/``.
     """
-    cfg, _name, base = _near_twin_load()
+    cfg, _name, base = _near_twins_load()
     pp = cfg.get("preprocess") or {}
     staging = pp.get("image_dir", f"{base}/staging")
     resized = pp.get("resized_dir", f"{base}/resized")
@@ -328,11 +328,11 @@ def _near_twin_preprocess() -> None:
         ]
     )
     # 4. Pair the cond/ tree (the _tags reference latent for each _no_tags target).
-    _near_twin_build_cond(pp, base)
+    _near_twins_build_cond(pp, base)
 
 
-def _near_twin_build_cond(pp: dict, base: str) -> None:
-    """Materialize the ``cond/`` latent tree for the near-twin *removal* task.
+def _near_twins_build_cond(pp: dict, base: str) -> None:
+    """Materialize the ``cond/`` latent tree for the near-twins *removal* task.
 
     Pairing convention (matches the generated blueprint): the denoising target is
     the clean ``_no_tags`` member; its ``_tags`` twin is the EasyControl condition
@@ -377,7 +377,7 @@ def _near_twin_build_cond(pp: dict, base: str) -> None:
         link.symlink_to(twin.resolve())
         linked += 1
     print(
-        f"[near_twin cond] linked {linked} cond latents into {cond_dir}"
+        f"[near_twins cond] linked {linked} cond latents into {cond_dir}"
         + (f" ({skipped} skipped)" if skipped else "")
     )
 
@@ -393,12 +393,12 @@ def cmd_easycontrol_preprocess(extra):
     reused from the LoRA cache, so no target re-encode is needed. See
     ``easycontrol_adapters/colorization/prep.py``.
 
-    ``EASYADAPTER=near_twin`` caches the mined pair tree, with every knob (source,
+    ``EASYADAPTER=near_twins`` caches the mined pair tree, with every knob (source,
     cache dir, model paths, batch/chunk, caption policy) read from the
     ``[preprocess]`` table of ``configs/easycontrol/near_twins.toml``.
     """
-    if (os.environ.get("EASYADAPTER") or "").strip() == "near_twin":
-        _near_twin_preprocess()
+    if (os.environ.get("EASYADAPTER") or "").strip() == "near_twins":
+        _near_twins_preprocess()
         return
     adapter = _easyadapter()
     if adapter == "colorize":
@@ -447,7 +447,7 @@ def cmd_easycontrol_preprocess(extra):
 # materializes the training tree, before the VAE/TE preprocess pass) → the CLI
 # that produces it. ``near_twin`` mines the in-artist pair tree.
 _EASY_STAGERS = {
-    "near_twin": [PY, "-m", "easycontrol_adapters.tools.near_twin"],
+    "near_twins": [PY, "-m", "easycontrol_adapters.tools.near_twins"],
 }
 
 
@@ -458,12 +458,12 @@ def cmd_easycontrol_staging(extra):
     tree — analogous to colorize's cond synthesis — kept separate from the later
     ``easycontrol-preprocess`` VAE/TE caching pass.
 
-    ``EASYADAPTER=near_twin`` mines the in-artist near-twin pair tree into
+    ``EASYADAPTER=near_twins`` mines the in-artist near-twin pair tree into
     ``post_image_dataset/easycontrol/near_twins/staging/`` and (re)writes the
     dataset blueprint ``configs/easycontrol/near_twins.toml``. Run knobs come from
     that file's ``[staging]`` table; extra CLI args override it, e.g.::
 
-        make easycontrol-staging EASYADAPTER=near_twin \\
+        make easycontrol-staging EASYADAPTER=near_twins \\
             ARGS="--region --artists ama_mitsuki"
     """
     adapter = (os.environ.get("EASYADAPTER") or "").strip()

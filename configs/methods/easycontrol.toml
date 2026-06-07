@@ -35,8 +35,6 @@ network_args = [
 
 output_name = "anima_easycontrol"
 
-logging_dir = "output/logs"
-log_with = "tensorboard"
 
 learning_rate = 5e-5
 max_train_epochs = 6

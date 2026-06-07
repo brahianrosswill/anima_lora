@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""near_twin_tag_gap_miner — mine in-artist variant pairs by attribute gap.
+"""near_twins_tag_gap_miner — mine in-artist variant pairs by attribute gap.
 
 An **exploration / curation tool** (not a training step) that surfaces
 near-duplicate *variant* pairs within a single artist where the two members
@@ -7,7 +7,7 @@ differ by a **specified attribute** — e.g. one has a speech bubble and the
 other doesn't. It feeds EasyControl builders: eval sets, seed data for unpaired
 editing, and a difference-region mask localizing *where* the two members differ.
 
-Pipeline (see ``docs/proposal/near_twin_tag_gap_miner.md`` for the full design):
+Pipeline (see ``docs/proposal/near_twins_tag_gap_miner.md`` for the full design):
 
 1. **Gather members** per artist from ``--image-dirs`` (default the raw crawl
    pool ``~/gelcrawl/{retrieved,selected}``), scoped ``union`` so a twin can
@@ -43,7 +43,7 @@ Pipeline (see ``docs/proposal/near_twin_tag_gap_miner.md`` for the full design):
 
 Run from the repo root::
 
-    python -m easycontrol_adapters.tools.near_twin \
+    python -m easycontrol_adapters.tools.near_twins \
         --tag-any "speech bubble,thought bubble,blank speech bubble" \
         --artists ama_mitsuki --out output/near_twins/pairs.html
 

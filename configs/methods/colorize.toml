@@ -30,8 +30,6 @@ network_args = [
 
 output_name = "anima_colorize"
 sigmoid_bias=0
-logging_dir = "output/logs"
-log_with = "tensorboard"
 
 learning_rate = 2e-5
 max_train_epochs = 3
