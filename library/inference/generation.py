@@ -326,7 +326,8 @@ def generate_body_tiled(
     negative_embed = negative_embed.to(torch.bfloat16)
 
     timesteps, sigmas = inference_utils.get_timesteps_sigmas(
-        args.infer_steps, args.flow_shift, device
+        args.infer_steps, args.flow_shift, device,
+        tail_power=getattr(args, "sigma_tail_power", 1.0),
     )
     timesteps = timesteps.to(device, dtype=torch.bfloat16)  # σ∈[0,1] — DiT time arg
 
@@ -608,7 +609,8 @@ def generate_body(
 
     # Prepare timesteps
     timesteps, sigmas = inference_utils.get_timesteps_sigmas(
-        args.infer_steps, args.flow_shift, device
+        args.infer_steps, args.flow_shift, device,
+        tail_power=getattr(args, "sigma_tail_power", 1.0),
     )
     timesteps = timesteps.to(device, dtype=torch.bfloat16)  # σ∈[0,1] — DiT time arg
 

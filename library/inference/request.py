@@ -66,6 +66,7 @@ class GenerationRequest:
     infer_steps: int = 50
     guidance_scale: float = 3.5
     flow_shift: float = 3.0
+    sigma_tail_power: float = 1.0
     sampler: str = "euler"
     seed: Optional[int] = None
 
@@ -119,6 +120,7 @@ class GenerationRequest:
         argv += ["--infer_steps", str(self.infer_steps)]
         argv += ["--guidance_scale", str(self.guidance_scale)]
         argv += ["--flow_shift", str(self.flow_shift)]
+        argv += ["--sigma_tail_power", str(self.sigma_tail_power)]
         argv += ["--sampler", self.sampler]
         argv += ["--attn_mode", self.attn_mode]
         argv += ["--output_type", self.output_type]

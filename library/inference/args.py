@@ -182,6 +182,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Shift factor for flow matching schedulers. Default is 3.0 (matches the official Anima scheduler config).",
     )
     parser.add_argument(
+        "--sigma_tail_power",
+        type=float,
+        default=1.0,
+        help="σ-schedule reshape exponent (default 1.0 = canonical schedule). >1 packs "
+        "more steps into the low-σ resolve tail (σ<0.45); see bench/sigma_reshape.",
+    )
+    parser.add_argument(
         "--sampler",
         type=str,
         default="euler",
