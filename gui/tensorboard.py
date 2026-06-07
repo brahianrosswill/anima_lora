@@ -29,14 +29,19 @@ class TensorBoardManager:
 
     def __init__(self) -> None:
         self._process = None
+        self._log_dir: Optional[str] = None
 
     def start(self, log_dir: str) -> int:
         """Start TensorBoard pointed at *log_dir*. Returns the port.
 
-        No-op (returns port) if already running. Raises ``RuntimeError`` when
-        tensorboard is not importable."""
+        If a server is already running against a *different* ``log_dir`` it is
+        restarted so the view re-scopes (e.g. switching between "all runs" and
+        the single current-run dir). Already running against the same dir is a
+        no-op. Raises ``RuntimeError`` when tensorboard is not importable."""
         if self.running:
-            return self._PORT
+            if self._log_dir == log_dir:
+                return self._PORT
+            self.stop()
         import subprocess
 
         try:
@@ -54,6 +59,7 @@ class TensorBoardManager:
             )
         except FileNotFoundError:
             raise RuntimeError("tensorboard module not found")
+        self._log_dir = log_dir
         return self._PORT
 
     def stop(self) -> None:
@@ -64,6 +70,7 @@ class TensorBoardManager:
             except Exception:
                 pass
             self._process = None
+        self._log_dir = None
 
     @property
     def running(self) -> bool:
@@ -76,7 +83,7 @@ class TensorBoardManager:
 
 
 class _RunRow(QWidget):
-    """One row: run name label + Remove button."""
+    """One row: run name label + View + Remove buttons."""
 
     def __init__(self, run_dir: Path, is_current: bool, parent=None) -> None:
         super().__init__(parent)
@@ -90,6 +97,12 @@ class _RunRow(QWidget):
         self.label.setWordWrap(False)
         self._set_current_style(is_current)
         lay.addWidget(self.label, 1)
+
+        self.view_btn = QPushButton(t("tb_view"))
+        self.view_btn.setFixedWidth(60)
+        self.view_btn.setStyleSheet("padding:2px 6px;")
+        self.view_btn.setToolTip(t("tb_view_tip"))
+        lay.addWidget(self.view_btn)
 
         self.remove_btn = QPushButton(t("tb_remove"))
         self.remove_btn.setFixedWidth(70)
@@ -127,6 +140,8 @@ class TensorBoardPanel(QGroupBox):
         self._manager = TensorBoardManager()
         self._log_dir: Optional[Path] = None
         self._current_run_name: Optional[str] = None
+        self._current_run_path: Optional[Path] = None
+        self._training_active: bool = False
         self._rows: list[_RunRow] = []
 
         outer = QVBoxLayout(self)
@@ -157,6 +172,12 @@ class TensorBoardPanel(QGroupBox):
         # Button bar
         btn_bar = QHBoxLayout()
 
+        # Scoped to the single in-progress run — highlighted while training is
+        # active so the user can jump straight to the current run's curves.
+        self._current_btn = QPushButton(t("tb_open_current"))
+        self._current_btn.clicked.connect(self._open_current_run)
+        btn_bar.addWidget(self._current_btn)
+
         self._open_btn = QPushButton(t("tb_open"))
         self._open_btn.setStyleSheet(
             "background:#2471a3;color:white;font-weight:bold;padding:4px 14px;"
@@ -184,6 +205,8 @@ class TensorBoardPanel(QGroupBox):
         self._refresh_timer.timeout.connect(self._refresh_runs)
         self._refresh_timer.start()
 
+        self._update_current_btn()
+
     # ── Public API ──────────────────────────────────────────────────────────
 
     def set_log_dir(self, log_dir: str) -> None:
@@ -196,10 +219,28 @@ class TensorBoardPanel(QGroupBox):
 
         Called when a ``run_start`` progress event carries a ``log_dir`` field.
         The corresponding row is highlighted green and gains a "(current)"
-        suffix to make it easy to spot in TensorBoard's sidebar.
+        suffix to make it easy to spot in TensorBoard's sidebar. While a run is
+        marked current the "현재 학습 조회" (view current run) button lights up.
         """
-        self._current_run_name = Path(run_dir).name if run_dir else None
+        if run_dir:
+            self._current_run_path = Path(run_dir)
+            self._current_run_name = self._current_run_path.name
+            self._training_active = True
+        else:
+            self._current_run_path = None
+            self._current_run_name = None
+            self._training_active = False
+        self._update_current_btn()
         self._refresh_runs()
+
+    def clear_current_run(self) -> None:
+        """Mark training as no longer active (dims the current-run button).
+
+        Called when the run ends. The row highlight is kept so the just-finished
+        run stays easy to spot, but the button stops advertising a live run.
+        """
+        self._training_active = False
+        self._update_current_btn()
 
     def cleanup(self) -> None:
         """Stop the TensorBoard server and halt background polling."""
@@ -207,6 +248,20 @@ class TensorBoardPanel(QGroupBox):
         self._refresh_timer.stop()
 
     # ── Internal ────────────────────────────────────────────────────────────
+
+    def _update_current_btn(self) -> None:
+        """Highlight + enable the current-run button only while a run is live."""
+        live = self._training_active and self._current_run_path is not None
+        self._current_btn.setEnabled(live)
+        if live:
+            # Pulsing-green primary look so it stands out during training.
+            self._current_btn.setStyleSheet(
+                "background:#27ae60;color:white;font-weight:bold;padding:4px 14px;"
+            )
+            self._current_btn.setToolTip(t("tb_open_current_tip"))
+        else:
+            self._current_btn.setStyleSheet("color:#888;padding:4px 14px;")
+            self._current_btn.setToolTip(t("tb_open_current_idle_tip"))
 
     def _refresh_runs(self) -> None:
         if self._log_dir is None or not self._log_dir.exists():
@@ -238,6 +293,7 @@ class TensorBoardPanel(QGroupBox):
             if d.name not in known_names:
                 is_current = d.name == self._current_run_name
                 row = _RunRow(d, is_current, self._inner)
+                row.view_btn.clicked.connect(lambda _, r=row: self._launch(r.run_dir))
                 row.remove_btn.clicked.connect(lambda _, r=row: self._remove_run(r))
                 self._rows.insert(insert_pos, row)
                 # Insert before the stretch (last item) and any existing rows
@@ -266,10 +322,18 @@ class TensorBoardPanel(QGroupBox):
         self._empty_label.setVisible(not has_rows)
 
     def _open_tensorboard(self) -> None:
-        if self._log_dir is None:
+        self._launch(self._log_dir)
+
+    def _open_current_run(self) -> None:
+        """Launch TensorBoard scoped to only the current run's directory so the
+        view shows just the in-progress training's curves."""
+        self._launch(self._current_run_path)
+
+    def _launch(self, log_dir: Optional[Path]) -> None:
+        if log_dir is None:
             return
         try:
-            port = self._manager.start(str(self._log_dir))
+            port = self._manager.start(str(log_dir))
         except RuntimeError:
             self._status_label.setText(t("tb_not_installed"))
             return

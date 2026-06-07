@@ -1206,6 +1206,8 @@ class ConfigTab(QWidget):
         self.method_combo.setEnabled(True)
         self.variant_combo.setEnabled(True)
         self.new_variant_btn.setEnabled(True)
+        if self._tb_panel is not None:
+            self._tb_panel.clear_current_run()
 
     def _stop_training(self):
         # A daemon training job is aborted via the daemon (the job timer then

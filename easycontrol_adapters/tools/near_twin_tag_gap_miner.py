@@ -11,9 +11,16 @@ Pipeline (see ``docs/proposal/near_twin_tag_gap_miner.md`` for the full design):
 
 1. **Gather members** per artist from ``--image-dirs`` (default the raw crawl
    pool ``~/gelcrawl/{retrieved,selected}``), scoped ``union`` so a twin can
-   straddle the curated cut.
-2. **Embed** each image with **PE-Spatial-B16-512** (``library.vision``) at a
-   fixed 512x512 native bucket → CLS descriptor + 32x32 patch grid (pooled to
+   straddle the curated cut. Each member's native pixel ``(W, H)`` is read from
+   the image header here (no decode).
+1b. **Same-size gate**: a true variant pair (a redraw that adds one attribute)
+   shares the **exact** canvas, so only members that share their ``(W, H)`` with
+   ≥1 sibling *in the same artist* survive — the rest can never pair and are
+   dropped before embedding. The pair loop then only ever compares equal-size
+   members, which also makes the dense grid match pixel-aligned by construction
+   (the original cross-crop case the PE machinery was hedging against is gone).
+2. **Embed** each *surviving* image with **PE-Spatial-B16-512** (``library.vision``)
+   at a fixed 512x512 native bucket → CLS descriptor + 32x32 patch grid (pooled to
    16x16, L2-normed). Cached per-image under ``~/.cache/near_twin/``.
 3. **Stage A — global prefilter**: within-artist all-pairs cosine on the CLS
    descriptor; keep ``>= --sim-min``.
@@ -57,7 +64,7 @@ import re
 import shutil
 import sys
 import tomllib
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,15 +77,19 @@ from PIL import Image, ImageDraw
 try:
     from dotenv import load_dotenv  # picks up CAPTION_CORPUS_DIR from anima_lora/.env
 except ImportError:  # dotenv is a soft dependency — env vars still work without it
+
     def load_dotenv(*_a, **_k):  # type: ignore
         return False
+
 
 # Run from the repo root; `library` is installed editable (`uv sync`).
 from library.vision import load_pe_encoder
 from library.vision.encoder import encode_pe_from_imageminus1to1  # noqa: F401  (kept for API parity)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CACHE_ROOT = Path(os.environ.get("NEAR_TWIN_CACHE", Path.home() / ".cache" / "near_twin"))
+CACHE_ROOT = Path(
+    os.environ.get("NEAR_TWIN_CACHE", Path.home() / ".cache" / "near_twin")
+)
 IMAGE_EXTS = (".png", ".webp", ".jpg", ".jpeg", ".jxl", ".avif")
 PE_NATIVE = 512  # PE-Spatial-B16-512 square bucket → 32x32 patch grid
 GRID_NATIVE = 32
@@ -105,7 +116,11 @@ def read_tags(txt_path: Path) -> set[str]:
 
 
 def caption_text(txt_path: Path) -> str:
-    return txt_path.read_text(encoding="utf-8", errors="ignore").strip() if txt_path.is_file() else ""
+    return (
+        txt_path.read_text(encoding="utf-8", errors="ignore").strip()
+        if txt_path.is_file()
+        else ""
+    )
 
 
 # ---------------------------------------------------------------------------- member discovery
@@ -117,9 +132,31 @@ class Member:
     stem: str
     image_path: Path
     txt_path: Path
+    wh: tuple[int, int] = (0, 0)  # native pixel (W, H); (0, 0) = unreadable header
 
 
-def gather_members(image_dirs: list[Path], artists_filter: set[str] | None) -> dict[str, list[Member]]:
+def _image_size(path: Path) -> tuple[int, int]:
+    """Native ``(W, H)`` from the image header (no pixel decode); (0,0) on error."""
+    try:
+        with Image.open(path) as im:
+            return im.size  # PIL returns (width, height)
+    except Exception:  # noqa: BLE001 — corrupt/unreadable image
+        return (0, 0)
+
+
+def keep_size_cohabiting(members: list[Member]) -> list[Member]:
+    """Drop members with no exact same-size sibling — they can never form a pair.
+
+    The same-size gate's pre-embedding half: a unique canvas size within an
+    artist has nothing to pair against, so embedding it would be wasted work.
+    """
+    sizes = Counter(m.wh for m in members)
+    return [m for m in members if m.wh != (0, 0) and sizes[m.wh] >= 2]
+
+
+def gather_members(
+    image_dirs: list[Path], artists_filter: set[str] | None
+) -> dict[str, list[Member]]:
     """Walk ``<dir>/<artist>/<stem>.<ext>`` trees → ``artist -> [Member]``.
 
     Scope is ``union`` across all ``image_dirs`` (a twin can straddle the
@@ -142,7 +179,9 @@ def gather_members(image_dirs: list[Path], artists_filter: set[str] | None) -> d
                 key = (artist, img.stem)
                 if key in seen:
                     continue
-                seen[key] = Member(artist, img.stem, img, img.with_suffix(".txt"))
+                seen[key] = Member(
+                    artist, img.stem, img, img.with_suffix(".txt"), _image_size(img)
+                )
     by_artist: dict[str, list[Member]] = {}
     for (artist, _), m in seen.items():
         by_artist.setdefault(artist, []).append(m)
@@ -239,7 +278,9 @@ def embed_members(
         cp = _cache_path(m)
         if cp.is_file():
             with np.load(cp) as z:
-                feats[m.stem] = Feature(cls=z["cls"].astype(np.float32), grid16=z["grid16"])
+                feats[m.stem] = Feature(
+                    cls=z["cls"].astype(np.float32), grid16=z["grid16"]
+                )
         else:
             todo.append(m)
     if not todo:
@@ -262,7 +303,10 @@ def embed_members(
             for k, i in enumerate(idxs):
                 done += 1
                 if not oks[k]:
-                    print(f"  [warn] skipped unreadable {todo[i].image_path}", file=sys.stderr)
+                    print(
+                        f"  [warn] skipped unreadable {todo[i].image_path}",
+                        file=sys.stderr,
+                    )
                     continue
                 f = Feature(cls=cls_b[k], grid16=grid_b[k])
                 feats[todo[i].stem] = f
@@ -340,7 +384,9 @@ def match_grids(
     )
 
 
-def _geom_filter(matched: list[tuple[int, int]], G: int) -> tuple[list[tuple[int, int]], tuple[float, float]]:
+def _geom_filter(
+    matched: list[tuple[int, int]], G: int
+) -> tuple[list[tuple[int, int]], tuple[float, float]]:
     """RANSAC-lite translation consistency: keep matches near the median offset.
 
     Rejects "same character, different pose" (whose cell offsets scatter) and
@@ -351,7 +397,9 @@ def _geom_filter(matched: list[tuple[int, int]], G: int) -> tuple[list[tuple[int
     b = np.array([[j // G, j % G] for _, j in matched], dtype=np.float32)
     deltas = b - a
     med = np.median(deltas, axis=0)
-    keep = np.abs(deltas - med).max(axis=1) <= 1.0  # within 1 cell of the consensus shift
+    keep = (
+        np.abs(deltas - med).max(axis=1) <= 1.0
+    )  # within 1 cell of the consensus shift
     kept = [m for m, k in zip(matched, keep) if k]
     return kept, (float(med[0]), float(med[1]))
 
@@ -403,7 +451,11 @@ class PairVerdict:
 
 
 def discriminate_tag(
-    tags_a: set[str], tags_b: set[str], target: set[str], max_extra: int, rest_jaccard_min: float
+    tags_a: set[str],
+    tags_b: set[str],
+    target: set[str],
+    max_extra: int,
+    rest_jaccard_min: float,
 ) -> PairVerdict:
     """Keep pairs where the target tag is present in **exactly one** member."""
     in_a = bool(target & tags_a)
@@ -414,12 +466,16 @@ def discriminate_tag(
     rest_a, rest_b = tags_a - target, tags_b - target
     extra = sorted(rest_a ^ rest_b)
     if max_extra >= 0 and len(extra) > max_extra:
-        return PairVerdict(False, gap_holder, len(extra), extra, "too many other tag differences")
+        return PairVerdict(
+            False, gap_holder, len(extra), extra, "too many other tag differences"
+        )
     if rest_jaccard_min > 0:
         union = rest_a | rest_b
         jac = len(rest_a & rest_b) / len(union) if union else 1.0
         if jac < rest_jaccard_min:
-            return PairVerdict(False, gap_holder, len(extra), extra, f"rest-jaccard {jac:.2f} < min")
+            return PairVerdict(
+                False, gap_holder, len(extra), extra, f"rest-jaccard {jac:.2f} < min"
+            )
     return PairVerdict(True, gap_holder, len(extra), extra)
 
 
@@ -437,7 +493,9 @@ def discriminate_region(
     frac = size / N
     scatter = len(match.diff_cells) - size  # diff cells outside the main blob
     if not (region_min_frac <= frac <= region_max_frac):
-        return PairVerdict(False, "?", scatter, [], f"region frac {frac:.2f} out of range")
+        return PairVerdict(
+            False, "?", scatter, [], f"region frac {frac:.2f} out of range"
+        )
     if scatter > scatter_max:
         return PairVerdict(False, "?", scatter, [], f"diff scatter {scatter} > max")
     gap_holder = "a" if len(match.diff_a & blob) >= len(match.diff_b & blob) else "b"
@@ -491,6 +549,8 @@ def run_artist(
     for i in range(n):
         for j in range(i + 1, n):
             si, sj = stems[i], stems[j]
+            if idx[si].wh != idx[sj].wh:  # same-size gate: exact (W, H) only
+                continue
             if args.id_window and si.isdigit() and sj.isdigit():
                 if abs(int(si) - int(sj)) > args.id_window:
                     continue
@@ -498,19 +558,30 @@ def run_artist(
             if cos < args.sim_min:  # Stage A prefilter
                 continue
             match = match_grids(
-                feats[si], feats[sj], args.grid, args.cell_match_min, args.ratio, args.geom_check
+                feats[si],
+                feats[sj],
+                args.grid,
+                args.cell_match_min,
+                args.ratio,
+                args.geom_check,
             )
             if match.match_frac < args.match_frac_min:  # Stage B near-twin gate
                 continue
             ma, mb = idx[si], idx[sj]
             if args.mode == "tag":
                 verdict = discriminate_tag(
-                    read_tags(ma.txt_path), read_tags(mb.txt_path), target_tags,
-                    args.max_extra_diff, args.rest_jaccard_min,
+                    read_tags(ma.txt_path),
+                    read_tags(mb.txt_path),
+                    target_tags,
+                    args.max_extra_diff,
+                    args.rest_jaccard_min,
                 )
             elif args.mode == "region":
                 verdict = discriminate_region(
-                    match, args.region_min_frac, args.region_max_frac, args.region_scatter_max
+                    match,
+                    args.region_min_frac,
+                    args.region_max_frac,
+                    args.region_scatter_max,
                 )
             else:  # signal
                 verdict = discriminate_signal(ma, mb, args)
@@ -544,7 +615,9 @@ def _mit_text_fraction(member: Member, device: str) -> float:
         return float(cache.read_text())
     with Image.open(member.image_path) as im:
         arr = np.asarray(im.convert("RGB"))
-    mask = _SIGNAL_STATE["mit_detect"](_SIGNAL_STATE["mit_model"], arr, device=device, text_threshold=0.8)
+    mask = _SIGNAL_STATE["mit_detect"](
+        _SIGNAL_STATE["mit_model"], arr, device=device, text_threshold=0.8
+    )
     frac = float(np.count_nonzero(mask) / mask.size)
     cache.write_text(f"{frac:.6f}")
     return frac
@@ -556,7 +629,9 @@ def discriminate_signal(a: Member, b: Member, args: argparse.Namespace) -> PairV
     fa = _mit_text_fraction(a, args.device)
     fb = _mit_text_fraction(b, args.device)
     hi, lo = (fa, fb) if fa >= fb else (fb, fa)
-    if hi - lo < args.signal_delta or lo > args.signal_delta:  # gap present + low side ≈ 0
+    if (
+        hi - lo < args.signal_delta or lo > args.signal_delta
+    ):  # gap present + low side ≈ 0
         return PairVerdict(False, "?", 0, [], f"signal gap {hi - lo:.3f} insufficient")
     gap_holder = "a" if fa >= fb else "b"
     return PairVerdict(True, gap_holder, 0, [])
@@ -565,14 +640,20 @@ def discriminate_signal(a: Member, b: Member, args: argparse.Namespace) -> PairV
 # ---------------------------------------------------------------------------- outputs
 
 
-def _thumb_b64(member: Member, bbox: tuple[float, float, float, float] | None, size: int) -> str:
+def _thumb_b64(
+    member: Member, bbox: tuple[float, float, float, float] | None, size: int
+) -> str:
     with Image.open(member.image_path) as im:
         im = im.convert("RGB")
         im.thumbnail((size, size), Image.BILINEAR)
         if bbox and bbox[2] > bbox[0]:
             d = ImageDraw.Draw(im)
             w, h = im.size
-            d.rectangle([bbox[0] * w, bbox[1] * h, bbox[2] * w, bbox[3] * h], outline=(255, 40, 40), width=3)
+            d.rectangle(
+                [bbox[0] * w, bbox[1] * h, bbox[2] * w, bbox[3] * h],
+                outline=(255, 40, 40),
+                width=3,
+            )
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=82)
     return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -583,7 +664,6 @@ def write_html(pairs: list[PairRecord], out_path: Path, thumb: int) -> None:
     for p in pairs:
         bbox = diff_bbox_norm(p.match.diff_cells, p.match.G)
         holder, clean = p.holder_member(), p.clean_member()
-        ta, tb = read_tags(p.a.txt_path), read_tags(p.b.txt_path)
         added = sorted((read_tags(holder.txt_path) - read_tags(clean.txt_path)))
         removed = sorted((read_tags(clean.txt_path) - read_tags(holder.txt_path)))
         h_img = _thumb_b64(holder, bbox, thumb)
@@ -592,6 +672,7 @@ def write_html(pairs: list[PairRecord], out_path: Path, thumb: int) -> None:
         <div class="pair">
           <div class="meta">
             <b>{html.escape(p.artist)}</b> &nbsp; {html.escape(p.pair_id)}
+            &nbsp; {p.a.wh[0]}×{p.a.wh[1]}
             &nbsp;|&nbsp; cos {p.cosine:.3f} &nbsp; match {p.match.match_frac:.2f}
             &nbsp; extra-diff {p.verdict.n_extra_diff}
             &nbsp; holder=<b>{html.escape(holder.stem)}</b>
@@ -618,7 +699,7 @@ figcaption{{color:#888;font-size:11px}}
 .add{{color:#7cdd7c}} .rem{{color:#dd7c7c}}
 </style>
 <h1>near-twin tag-gap pairs — {len(pairs)} accepted</h1>
-{''.join(rows)}
+{"".join(rows)}
 """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(doc, encoding="utf-8")
@@ -629,18 +710,36 @@ def write_tsv(pairs: list[PairRecord], out_path: Path) -> None:
     with out_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t")
         w.writerow(
-            ["artist", "id_a", "id_b", "cosine", "match_frac", "gap_holder",
-             "n_extra_diff", "extra_diff_tags", "diff_bbox"]
+            [
+                "artist",
+                "id_a",
+                "id_b",
+                "wh",
+                "cosine",
+                "match_frac",
+                "gap_holder",
+                "n_extra_diff",
+                "extra_diff_tags",
+                "diff_bbox",
+            ]
         )
         for p in pairs:
             x, y = p.ids
             bbox = diff_bbox_norm(p.match.diff_cells, p.match.G)
-            w.writerow([
-                p.artist, x, y, f"{p.cosine:.4f}", f"{p.match.match_frac:.3f}",
-                p.holder_member().stem, p.verdict.n_extra_diff,
-                "|".join(p.verdict.extra_diff_tags),
-                ",".join(f"{v:.3f}" for v in bbox),
-            ])
+            w.writerow(
+                [
+                    p.artist,
+                    x,
+                    y,
+                    f"{p.a.wh[0]}x{p.a.wh[1]}",
+                    f"{p.cosine:.4f}",
+                    f"{p.match.match_frac:.3f}",
+                    p.holder_member().stem,
+                    p.verdict.n_extra_diff,
+                    "|".join(p.verdict.extra_diff_tags),
+                    ",".join(f"{v:.3f}" for v in bbox),
+                ]
+            )
 
 
 def _materialize_one(src: Path, dst: Path, copy: bool) -> None:
@@ -653,7 +752,9 @@ def _materialize_one(src: Path, dst: Path, copy: bool) -> None:
         dst.symlink_to(src.resolve())
 
 
-def export_pairs(pairs: list[PairRecord], export_dir: Path, copy: bool, emit_mask: bool) -> int:
+def export_pairs(
+    pairs: list[PairRecord], export_dir: Path, copy: bool, emit_mask: bool
+) -> int:
     """Materialize the ``_tags`` / ``_no_tags`` pair tree (the training-shaped output).
 
     Symlinks keep the source extension (``_tags.webp``); ``--copy`` re-saves as
@@ -703,7 +804,9 @@ def _rel_to_repo(path: Path) -> str:
 # blueprint) on every run, and leaves everything above it — the user's [miner]
 # run knobs + comments — untouched. So one file is both the run config (input,
 # read via --config) and the generated subset blueprint (output).
-_BLUEPRINT_SENTINEL = "# === generated dataset blueprint (rewritten by the miner; do not edit below) ==="
+_BLUEPRINT_SENTINEL = (
+    "# === generated dataset blueprint (rewritten by the miner; do not edit below) ==="
+)
 
 _DEFAULT_MINER_HEADER = """\
 # near-twin tag-gap miner config. Edit the [miner] table, then just run:
@@ -725,7 +828,9 @@ max_extra_diff = 6
 
 def _blueprint_text(export_dir: Path) -> str:
     img_dir = _rel_to_repo(export_dir)
-    cache_dir = _rel_to_repo(REPO_ROOT / "post_image_dataset" / "easycontrol" / "near_twins_cache")
+    cache_dir = _rel_to_repo(
+        REPO_ROOT / "post_image_dataset" / "easycontrol" / "near_twins_cache"
+    )
     return f"""{_BLUEPRINT_SENTINEL}
 # Near-twin pair tree as an EasyControl-style subset. Source images stay
 # user-facing; VAE/TE/PE caches land under post_image_dataset/ (the IP-Adapter /
@@ -783,7 +888,11 @@ _LIST_FLAGS = {"image_dirs": True, "tag_any": False}  # value→expand-as-path?
 
 def _explicit_dests(argv: list[str]) -> set[str]:
     """dest names the user passed explicitly on the CLI (so they override toml)."""
-    return {tok[2:].split("=", 1)[0].replace("-", "_") for tok in argv if tok.startswith("--")}
+    return {
+        tok[2:].split("=", 1)[0].replace("-", "_")
+        for tok in argv
+        if tok.startswith("--")
+    }
 
 
 def apply_miner_config(args: argparse.Namespace, argv: list[str]) -> None:
@@ -808,7 +917,9 @@ def apply_miner_config(args: argparse.Namespace, argv: list[str]) -> None:
         if dest in explicit:
             continue  # CLI wins
         if not hasattr(args, dest):
-            print(f"  [warn] unknown [miner] key {key!r} in {cfg_path}", file=sys.stderr)
+            print(
+                f"  [warn] unknown [miner] key {key!r} in {cfg_path}", file=sys.stderr
+            )
             continue
         if dest in _LIST_FLAGS:
             items = val if isinstance(val, (list, tuple)) else [val]
@@ -836,51 +947,147 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--config", default="configs/easycontrol/near_twins.toml",
+        "--config",
+        default="configs/easycontrol/near_twins.toml",
         help="toml with a [miner] table of run knobs (CLI flags override it; '' disables)",
     )
     disc = p.add_mutually_exclusive_group()
-    disc.add_argument("--tag", help="discriminator: this tag present in exactly one member")
-    disc.add_argument("--tag-any", help="discriminator: any of these comma-separated synonyms")
-    disc.add_argument("--region", action="store_true", help="discriminator: Stage-B diff region (tagless)")
-    disc.add_argument("--signal", choices=["mit_text"], help="discriminator: per-image scalar gap")
+    disc.add_argument(
+        "--tag", help="discriminator: this tag present in exactly one member"
+    )
+    disc.add_argument(
+        "--tag-any", help="discriminator: any of these comma-separated synonyms"
+    )
+    disc.add_argument(
+        "--region",
+        action="store_true",
+        help="discriminator: Stage-B diff region (tagless)",
+    )
+    disc.add_argument(
+        "--signal", choices=["mit_text"], help="discriminator: per-image scalar gap"
+    )
 
     p.add_argument(
-        "--image-dirs", default=_default_image_dirs(),
+        "--image-dirs",
+        default=_default_image_dirs(),
         help="comma-separated source trees (<dir>/<artist>/<id>.<ext>); "
         "supports {CAPTION_CORPUS_DIR}/$VARS/~ expansion",
     )
     p.add_argument("--artists", help="comma-separated artist allowlist (default: all)")
-    p.add_argument("--per-artist-topk", type=int, default=0, help="keep only the top-K pairs per artist (0=all)")
-
-    p.add_argument("--sim-min", type=float, default=0.85, help="Stage-A CLS-cosine prefilter threshold")
-    p.add_argument("--grid", type=int, default=7, help="Stage-B pooled grid edge (G×G cells)")
-    p.add_argument("--cell-match-min", type=float, default=0.9, help="per-cell cosine for an inlier match")
-    p.add_argument("--ratio", type=float, default=0.8, help="ratio-test distinctiveness (lower = stricter)")
-    p.add_argument("--match-frac-min", type=float, default=0.66, help="inlier fraction to call a near-twin")
-    p.add_argument("--geom-check", action="store_true", help="RANSAC translation consistency (reject pose twins)")
-
-    p.add_argument("--rest-jaccard-min", type=float, default=0.0, help="'same scene' rest-tag overlap floor (0=off)")
-    p.add_argument("--max-extra-diff", type=int, default=6, help="cap on non-target differing tags (-1=off)")
-    p.add_argument("--signal-delta", type=float, default=0.04, help="signal-mode gap / low-side threshold")
-    p.add_argument("--region-min-frac", type=float, default=0.02, help="region mode: min diff-blob cell fraction")
-    p.add_argument("--region-max-frac", type=float, default=0.4, help="region mode: max diff-blob cell fraction")
-    p.add_argument("--region-scatter-max", type=int, default=4, help="region mode: max diff cells outside main blob")
-    p.add_argument("--id-window", type=int, default=0, help="only pair posts within N ids (0=off)")
-
-    p.add_argument("--out", default="output/near_twins/pairs.html", help="HTML contact sheet (TSV written alongside)")
     p.add_argument(
-        "--export-dir", default="post_image_dataset/easycontrol/near_twins",
+        "--per-artist-topk",
+        type=int,
+        default=0,
+        help="keep only the top-K pairs per artist (0=all)",
+    )
+
+    p.add_argument(
+        "--sim-min",
+        type=float,
+        default=0.85,
+        help="Stage-A CLS-cosine prefilter threshold",
+    )
+    p.add_argument(
+        "--grid", type=int, default=7, help="Stage-B pooled grid edge (G×G cells)"
+    )
+    p.add_argument(
+        "--cell-match-min",
+        type=float,
+        default=0.9,
+        help="per-cell cosine for an inlier match",
+    )
+    p.add_argument(
+        "--ratio",
+        type=float,
+        default=0.8,
+        help="ratio-test distinctiveness (lower = stricter)",
+    )
+    p.add_argument(
+        "--match-frac-min",
+        type=float,
+        default=0.66,
+        help="inlier fraction to call a near-twin",
+    )
+    p.add_argument(
+        "--geom-check",
+        action="store_true",
+        help="RANSAC translation consistency (reject pose twins)",
+    )
+
+    p.add_argument(
+        "--rest-jaccard-min",
+        type=float,
+        default=0.0,
+        help="'same scene' rest-tag overlap floor (0=off)",
+    )
+    p.add_argument(
+        "--max-extra-diff",
+        type=int,
+        default=6,
+        help="cap on non-target differing tags (-1=off)",
+    )
+    p.add_argument(
+        "--signal-delta",
+        type=float,
+        default=0.04,
+        help="signal-mode gap / low-side threshold",
+    )
+    p.add_argument(
+        "--region-min-frac",
+        type=float,
+        default=0.02,
+        help="region mode: min diff-blob cell fraction",
+    )
+    p.add_argument(
+        "--region-max-frac",
+        type=float,
+        default=0.4,
+        help="region mode: max diff-blob cell fraction",
+    )
+    p.add_argument(
+        "--region-scatter-max",
+        type=int,
+        default=4,
+        help="region mode: max diff cells outside main blob",
+    )
+    p.add_argument(
+        "--id-window", type=int, default=0, help="only pair posts within N ids (0=off)"
+    )
+
+    p.add_argument(
+        "--out",
+        default="output/near_twins/pairs.html",
+        help="HTML contact sheet (TSV written alongside)",
+    )
+    p.add_argument(
+        "--export-dir",
+        default="post_image_dataset/easycontrol/near_twins",
         help="materialized _tags/_no_tags pair tree (empty string disables)",
     )
-    p.add_argument("--copy", action="store_true", help="copy images into the export tree (default: symlink)")
-    p.add_argument("--emit-mask", action="store_true", help="also write the Stage-B diff-region mask per pair")
     p.add_argument(
-        "--config-out", default="configs/easycontrol/near_twins.toml",
+        "--copy",
+        action="store_true",
+        help="copy images into the export tree (default: symlink)",
+    )
+    p.add_argument(
+        "--emit-mask",
+        action="store_true",
+        help="also write the Stage-B diff-region mask per pair",
+    )
+    p.add_argument(
+        "--config-out",
+        default="configs/easycontrol/near_twins.toml",
         help="dataset blueprint written for the export tree (empty string disables)",
     )
-    p.add_argument("--batch-size", type=int, default=16, help="PE-Spatial embed batch size")
-    p.add_argument("--num-workers", type=int, default=4, help="DataLoader workers for image decode/resize")
+    p.add_argument(
+        "--batch-size", type=int, default=16, help="PE-Spatial embed batch size"
+    )
+    p.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="DataLoader workers for image decode/resize",
+    )
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args(argv)
 
@@ -897,12 +1104,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "tag":
         raw = args.tag_any or args.tag
         if not raw:
-            print("error: tag mode needs --tag or --tag-any (or use --region / --signal)", file=sys.stderr)
+            print(
+                "error: tag mode needs --tag or --tag-any (or use --region / --signal)",
+                file=sys.stderr,
+            )
             return 2
         target_tags = {normalize_tag(t) for t in raw.split(",") if t.strip()}
 
     image_dirs = [Path(expand_path(d)) for d in args.image_dirs.split(",") if d.strip()]
-    artists_filter = {a.strip() for a in args.artists.split(",")} if args.artists else None
+    artists_filter = (
+        {a.strip() for a in args.artists.split(",")} if args.artists else None
+    )
 
     print(f"Gathering members from {len(image_dirs)} dir(s)…", file=sys.stderr)
     by_artist = gather_members(image_dirs, artists_filter)
@@ -916,13 +1128,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Loading PE-Spatial-B16-512 on {device}…", file=sys.stderr)
     bundle = load_pe_encoder(device, name="pe_spatial")
 
+    print(
+        "Same-size gate ON: pairing only exact-(W×H) members within each artist.",
+        file=sys.stderr,
+    )
     all_pairs: list[PairRecord] = []
+    n_pairable = 0
     for artist, members in by_artist.items():
+        members = keep_size_cohabiting(
+            members
+        )  # drop sizes with no sibling before embedding
+        if len(members) < 2:
+            continue
+        n_pairable += len(members)
         feats = embed_members(bundle, members, args.batch_size, args.num_workers)
         pairs = run_artist(artist, members, feats, args, target_tags)
         if pairs:
             print(f"  {artist}: {len(pairs)} pair(s)", file=sys.stderr)
         all_pairs.extend(pairs)
+    print(
+        f"  {n_pairable}/{total} image(s) had a same-size sibling (embedded)",
+        file=sys.stderr,
+    )
 
     all_pairs.sort(key=lambda p: (p.verdict.n_extra_diff, -p.cosine))
     print(f"\n{len(all_pairs)} accepted pair(s) total", file=sys.stderr)
@@ -936,8 +1163,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.export_dir and all_pairs:
         export_dir = Path(args.export_dir)
-        n = export_pairs(all_pairs, export_dir, copy=args.copy, emit_mask=args.emit_mask)
-        print(f"  pairs → {export_dir}/  ({n} pair tree(s), {'copied' if args.copy else 'symlinked'})", file=sys.stderr)
+        n = export_pairs(
+            all_pairs, export_dir, copy=args.copy, emit_mask=args.emit_mask
+        )
+        print(
+            f"  pairs → {export_dir}/  ({n} pair tree(s), {'copied' if args.copy else 'symlinked'})",
+            file=sys.stderr,
+        )
         if args.config_out:
             write_dataset_config(export_dir, Path(args.config_out))
             print(f"  cfg   → {args.config_out}", file=sys.stderr)
