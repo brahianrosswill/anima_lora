@@ -1,0 +1,33 @@
+# near-twin tag-gap miner config. Edit the [miner] table, then just run:
+#   python easycontrol_adapters/tools/near_twin_tag_gap_miner.py
+# CLI flags override these. Paths support {CAPTION_CORPUS_DIR}/$VARS/~ expansion
+# ({CAPTION_CORPUS_DIR} comes from anima_lora/.env).
+
+[miner]
+# Discriminator — set exactly one of: tag_any / tag / region (bool) / signal.
+tag_any = ["speech bubble", "thought bubble", "blank speech bubble"]
+# Source trees (<dir>/<artist>/<id>.<ext>).
+image_dirs = ["{CAPTION_CORPUS_DIR}/retrieved"]
+# Stage/threshold knobs (any --flag dest works here, e.g. grid, ratio, geom_check):
+sim_min = 0.85
+match_frac_min = 0.66
+cell_match_min = 0.9
+max_extra_diff = 6
+
+# === generated dataset blueprint (rewritten by the miner; do not edit below) ===
+# Near-twin pair tree as an EasyControl-style subset. Source images stay
+# user-facing; VAE/TE/PE caches land under post_image_dataset/ (the IP-Adapter /
+# EasyControl cache_dir pattern). Seed/eval data, NOT a turnkey control-adapter
+# dataset — each accepted pair is a `{id}_tags` / `{id}_no_tags` couple, the
+# `_tags` side holding the discriminator attribute (see the proposal doc).
+
+[general]
+caption_extension = '.txt'
+
+[[datasets]]
+batch_size = 1
+
+  [[datasets.subsets]]
+  image_dir = 'post_image_dataset/easycontrol/near_twins'
+  cache_dir = 'post_image_dataset/easycontrol/near_twins_cache'
+  num_repeats = 1
