@@ -376,6 +376,16 @@ class LoRANetworkCfg:
     # was removed). ``content_router_layer_norm`` toggles a parameterless LN on
     # the pooled input.
     content_router_layer_norm: bool = True
+    # ContentRouter output-layer init magnitude. Default 0.0 (zero-init →
+    # exactly-uniform π_c at step 0 → ΔW_c=0, base preserved). Unlike the
+    # FreqRouter, zero is NOT a fixed point here (the disjoint P_bases_c·λ_c
+    # residual + per-prompt input variation already break symmetry), so a
+    # non-zero value is purely a plateau-kick for the "usage uniform but
+    # content_margin≈0" regime — NOT needed to escape a fixed point. It tilts
+    # π_c off uniform at init, so via the live λ_c it makes ΔW_c≠0 at init
+    # (loses the exact-identity start) and seeds an initial usage skew the
+    # content balance loss then has to undo. Keep small (~0.02) and opt-in.
+    content_router_init_std: float = 0.0
 
     # ChimeraHydra centered-gate λ init (BOTH pools), always on. Each pool's
     # gate is recentered to ``π - 1/K`` in the forward, the content + freq
@@ -566,6 +576,7 @@ class LoRANetworkCfg:
         content_router_layer_norm = _as_bool(
             kwargs.get("content_router_layer_norm", True), default=True
         )
+        content_router_init_std = float(kwargs.get("content_router_init_std", 0.0))
         # Chimera is always centered-gate; centering with λ0=0 is a no-op (each
         # router's logit gradient ∝ (P_k - mean)·diag(λ0)·ℓ vanishes at λ0=0),
         # so floor to a small nonzero default.
@@ -743,6 +754,7 @@ class LoRANetworkCfg:
             content_router_lr_scale=content_router_lr_scale,
             freq_router_lr_scale=freq_router_lr_scale,
             content_router_layer_norm=content_router_layer_norm,
+            content_router_init_std=content_router_init_std,
             chimera_lambda_init=chimera_lambda_init,
             step_expert_K=step_expert_K,
             channel_scales_dict=channel_scales_dict,

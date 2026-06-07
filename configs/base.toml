@@ -6,21 +6,20 @@ vae = "models/vae/qwen_image_vae.safetensors"
 
 output_dir = "output/ckpt"
 output_name = "anima_lora"
-save_model_as = "safetensors"
 logging_dir = "output/logs"
 
 network_module = "networks.lora_anima"
 network_train_unet_only = true
 
-# ── Dataset paths ────────────────────────────────────────────────────────
+# ── Dataset paths (shared preprocess ↔ training contract) ──────────────────
 # Top-level scalars so any preset / method can override (the merge chain is
-# base.toml → presets.toml[<preset>] → methods/<method>.toml). The dataset
-# blueprint subset (below) interpolates `{resized_image_dir}` /
-# `{lora_cache_dir}` so editing these keys propagates to training too.
-# `tasks.py` preprocess commands also read them via `load_path_overrides`.
-source_image_dir = "image_dataset"
+# base.toml → presets.toml[<preset>] → methods/<method>.toml). 
+# NOTE: preprocess-only knobs (source_image_dir, drop_lowres_images,
+# min_pixels) now live in configs/preprocess.toml
+
 resized_image_dir = "post_image_dataset/resized"
 lora_cache_dir = "post_image_dataset/lora"
+
 # fnmatch glob applied to each image's path relative to its subset's image_dir.
 # `*` (or unset) trains on everything. Use `|` to OR-combine patterns:
 #   `char_a/*`           → one subfolder
@@ -29,38 +28,22 @@ lora_cache_dir = "post_image_dataset/lora"
 # Same blueprint applies to validation enumeration.
 path_pattern = "*"
 
-# Preprocess input filter. When true, scripts/tasks/preprocess.py forwards
-# `--min_pixels = min_pixels` to both preprocess/resize_images.py and
-# preprocess/cache_text_embeddings.py so under-sized source images never
-# enter the resize / VAE / TE caches. Default 500_000 = 0.5MP — matches the
-# scripts' own argparse defaults. Set drop_lowres_images = false to keep
-# every image regardless of size. Override per-run without editing this file:
-#   make preprocess ARGS="--min_pixels 0"        # explicit threshold (wins)
-#   make preprocess ARGS="--no_drop_lowres"      # keep every image
-#   make preprocess ARGS="--drop_lowres"         # force the configured threshold
-drop_lowres_images = true
-min_pixels = 500000
-
 # Multi-scale constant-token tiers. Each image is preprocessed into the tier that
 # resizes it the LEAST (nearest bucket by scale — see library/datasets/buckets.py
 # choose_edge), giving v1.0-style diverse-resolution training from a mixed
 # dataset. Allowed edges: 512 768 1024 1280 1536 (tokens 1024+1008 / 2160 / 4032+
-# 4200 / 6300 / 8640). `[1024]` (the default) = single ~1MP tier = legacy
-# behavior. Each extra tier adds compiled block graph(s): 768/1280/1536 +1 each,
-# 512 +2 (it carries the 512x512 square + a diversity family). The same value is
-# read at train time only to size the torch.compile dynamo cache budget —
-# training itself consumes whatever latent shapes are on disk. Override per-run:
+# 4200 / 6300 / 8640). `[1024]` (the default) = single ~1MP tier
+# Override per-run:
 #   make preprocess ARGS="--target_res 1024 1536"
 target_res = [1024]
 
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"
-lr_warmup_steps = 0.05   # ratio (<1) → 5% of total steps; warms AdamW before full LR
+lr_warmup_steps = 0.05
 
 timestep_sampling = "sigmoid"
 sigmoid_bias = 0.0
 discrete_flow_shift = 1.0
-mixed_precision = "bf16"
 
 gradient_checkpointing = false
 unsloth_offload_checkpointing = false
@@ -81,17 +64,8 @@ persistent_data_loader_workers= true
 use_cmmd = false
 channel_scaling_alpha = 0.5
 
-# ── Dataset config ───────────────────────────────────────────────────────
-# Formerly configs/dataset_config.toml. Consumed directly by the dataset
-# blueprint generator when no --dataset_config override is passed. The
-# `general`/`datasets` top-level sections are skipped by the flat method+preset
-# merge chain (see library.train_util._flatten_toml) so they don't pollute the
-# argparse namespace.
 
 [general]
-caption_extension = '.txt'
-keep_tokens = 3
-
 [[datasets]]
 batch_size = 1
 

@@ -20,6 +20,24 @@ STRINGS: dict[str, str] = {
         "학습 설정 탭의 학습 버튼은 캐시가 없을 때 기본값으로 전처리를 "
         "자동 실행합니다 — 이 탭은 세부 조정 및 단계별 재실행용입니다."
     ),
+    "preprocess_image_prep": "이미지 전처리 (리사이즈 / 필터)",
+    "preprocess_source_image_dir": "소스 이미지 폴더:",
+    "preprocess_source_image_dir_tip": (
+        "원본 학습 이미지가 있는 폴더 (.txt 캡션 사이드카 포함). "
+        "캐싱 단계에서 post_image_dataset/로 리사이즈됩니다. "
+        "configs/preprocess.toml에 저장됩니다."
+    ),
+    "preprocess_drop_lowres": "저해상도 이미지 제외",
+    "preprocess_drop_lowres_tip": (
+        "아래 픽셀 임계값보다 작은 소스 이미지를 건너뛰어 리사이즈 / VAE / "
+        "텍스트 캐시에 포함되지 않도록 합니다. "
+        "체크 해제 시 크기에 상관없이 모든 이미지를 유지합니다."
+    ),
+    "preprocess_min_pixels": "최소 픽셀 수 (필터 임계값):",
+    "preprocess_min_pixels_tip": (
+        "저해상도 필터의 픽셀 수 임계값. 500000 = 0.5MP. "
+        "'저해상도 이미지 제외'가 해제되면 무시됩니다."
+    ),
     "preprocess_text_caching": "캐싱 (VAE + 텍스트)",
     "preprocess_caption_shuffle_variants": "캡션당 셔플 변형 수 (N):",
     "preprocess_caption_shuffle_variants_tip": (
@@ -106,7 +124,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "리사이즈된 이미지가 없습니다 — 학습 설정 탭에서 Preprocess를 먼저 실행하세요.",
     "preprocess_log_placeholder": "전처리 출력이 여기에 표시됩니다...",
     "preprocess_save_settings": "저장",
-    "preprocess_save_settings_tip": "이 설정들을 디스크에 저장합니다 (configs/sam_mask.yaml + GUI 설정).",
+    "preprocess_save_settings_tip": "이 설정들을 디스크에 저장합니다 (configs/preprocess.toml + configs/sam_mask.yaml + GUI 설정).",
     "preprocess_settings_saved": "전처리 설정이 저장되었습니다.",
     "preprocess_invalid_float": "{field}에 잘못된 숫자: {value}",
     "preprocess_already_running": "이미 전처리 단계가 실행 중입니다.",

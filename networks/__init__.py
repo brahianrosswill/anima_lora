@@ -227,6 +227,9 @@ _CHIMERA_KWARG_FLAGS: Tuple[str, ...] = (
     # Parameterless LN on the network-level ContentRouter's pooled crossattn_emb
     # input. Consumed by ``LoRANetworkCfg.from_kwargs``.
     "content_router_layer_norm",
+    # ContentRouter output-layer init magnitude (default 0.0 = zero-init).
+    # Opt-in plateau-kick off uniform π_c. LoRANetworkCfg.from_kwargs.
+    "content_router_init_std",
     # Centered-gate λ init for BOTH pools (always-on): recenter each pool's gate
     # to (π - 1/K) + zero-init the content/freq routers + start λ_c/λ_f at
     # chimera_lambda_init. LoRANetworkCfg.from_kwargs.

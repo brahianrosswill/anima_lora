@@ -143,25 +143,27 @@ so it never pollutes argparse. Top-level path keys interpolate into the
 blueprint at load time:
 
 ```toml
-source_image_dir  = "image_dataset"            # captions live here
+# source_image_dir now lives in configs/preprocess.toml (preprocess-only).
+# These shared keys stay in base.toml so the blueprint can interpolate them:
 resized_image_dir = "post_image_dataset/resized"
 lora_cache_dir    = "post_image_dataset/lora"
 
 [general]
-caption_extension = '.txt'
-keep_tokens = 3
+# (empty) — kohya-legacy keep_tokens / caption_extension were removed: both are
+# inert in the cached workflow (keep_tokens is superseded by the pre-cached
+# shuffle variants; the TE-cacher hardcodes .txt). Add a real dataset-wide
+# default here only if one applies.
 
 [[datasets]]
-resolution = 1024
 batch_size = 1
-enable_bucket = true
-validation_split_num = 16
+validation_split_num = 0
 validation_seed = 42
 
   [[datasets.subsets]]
   image_dir = '{resized_image_dir}'
   cache_dir = '{lora_cache_dir}'
   num_repeats = 1
+  recursive = true
 ```
 
 `cache_dir` redirects every VAE / TE / PE sidecar to a flat,

@@ -827,22 +827,30 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         self.content_router: Optional[ContentRouter] = None
         self.use_content_router: bool = False
         if cfg.use_chimera_hydra and self._chimera_aware_loras:
-            # Always centered-gate zero-init (same as the FreqRouter above) —
+            # Default centered-gate zero-init (same as the FreqRouter above) —
             # the content pool's disjoint P_bases_c·λ_c residual breaks
-            # symmetry, so a uniform π_c at step 0 keeps ΔW_c=0.
+            # symmetry, so a uniform π_c at step 0 keeps ΔW_c=0. A non-zero
+            # ``content_router_init_std`` (opt-in) tilts π_c off uniform at
+            # init: a plateau-kick for the "usage uniform, margin≈0" regime
+            # that, via the live λ_c, makes ΔW_c≠0 at init (see config note).
             self.content_router = ContentRouter(
                 input_dim=CROSSATTN_EMB_DIM,
                 num_content_experts=int(cfg.num_experts_content),
                 hidden_dim=int(cfg.router_hidden_dim),
                 tau=float(cfg.router_tau),
-                init_std=0.0,
+                init_std=float(cfg.content_router_init_std),
                 apply_layer_norm=bool(cfg.content_router_layer_norm),
             )
             self.use_content_router = True
+            # Running EMA of per-expert content usage (mean π_c), the smoothed
+            # routed-fraction estimate the EMA-usage load balance reads in
+            # ``_get_chimera_balance_loss`` (detached, (K_c,) — see there).
+            self._content_usage_ema: Optional[torch.Tensor] = None
             logger.info(
                 f"ChimeraHydra ContentRouter: input_dim={CROSSATTN_EMB_DIM} "
                 f"(pooled crossattn_emb), K_c={cfg.num_experts_content}, "
                 f"hidden={cfg.router_hidden_dim}, τ={cfg.router_tau:.2f}, "
+                f"init_std={cfg.content_router_init_std}, "
                 f"LN={cfg.content_router_layer_norm}, "
                 f"chimera modules={len(self._chimera_aware_loras)}"
             )

@@ -21,6 +21,24 @@ STRINGS: dict[str, str] = {
         "preprocess with default settings when no cache exists — this tab "
         "is for tuning and for re-running individual steps."
     ),
+    "preprocess_image_prep": "Image preprocessing (resize / filter)",
+    "preprocess_source_image_dir": "Source image dir:",
+    "preprocess_source_image_dir_tip": (
+        "Folder of raw training images (with .txt caption sidecars), resized "
+        "into post_image_dataset/ by the caching step. Written to "
+        "configs/preprocess.toml."
+    ),
+    "preprocess_drop_lowres": "Drop low-resolution images",
+    "preprocess_drop_lowres_tip": (
+        "Skip source images smaller than the pixel threshold below so they "
+        "never enter the resize / VAE / text caches. Uncheck to keep every "
+        "image regardless of size."
+    ),
+    "preprocess_min_pixels": "Min pixels (filter threshold):",
+    "preprocess_min_pixels_tip": (
+        "Pixel-count threshold for the low-res filter. 500000 = 0.5MP. "
+        "Ignored when 'Drop low-resolution images' is unchecked."
+    ),
     "preprocess_text_caching": "Caching (VAE + text)",
     "preprocess_caption_shuffle_variants": "Shuffle variants per caption (N):",
     "preprocess_caption_shuffle_variants_tip": (
@@ -108,7 +126,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "No resized images yet — run Preprocess in the Training Config tab first.",
     "preprocess_log_placeholder": "Preprocessing output will appear here...",
     "preprocess_save_settings": "Save",
-    "preprocess_save_settings_tip": "Persist these settings (writes configs/sam_mask.yaml + GUI settings).",
+    "preprocess_save_settings_tip": "Persist these settings (writes configs/preprocess.toml + configs/sam_mask.yaml + GUI settings).",
     "preprocess_settings_saved": "Preprocessing settings saved.",
     "preprocess_invalid_float": "Invalid number for {field}: {value}",
     "preprocess_already_running": "A preprocessing step is already running.",

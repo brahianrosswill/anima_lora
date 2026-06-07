@@ -97,9 +97,7 @@ def build_training_metadata(
         "ss_network_dropout": args.network_dropout,
         "ss_mixed_precision": args.mixed_precision,
         "ss_full_fp16": bool(args.full_fp16),
-        "ss_v2": bool(args.v2),
         "ss_base_model_version": model_version,
-        "ss_clip_skip": args.clip_skip,
         "ss_max_token_length": args.max_token_length,
         "ss_cache_latents": bool(args.cache_latents),
         "ss_seed": args.seed,
@@ -108,7 +106,6 @@ def build_training_metadata(
         "ss_multires_noise_iterations": args.multires_noise_iterations,
         "ss_multires_noise_discount": args.multires_noise_discount,
         "ss_adaptive_noise_scale": args.adaptive_noise_scale,
-        "ss_zero_terminal_snr": args.zero_terminal_snr,
         "ss_training_comment": args.training_comment,
         "ss_sd_scripts_commit_hash": get_git_revision_hash(),
         "ss_optimizer": optimizer_name

@@ -41,17 +41,6 @@ def add_custom_train_arguments(
         help="gamma for reducing the weight of high loss timesteps. Lower numbers have stronger effect. 5 is recommended by paper.",
     )
     parser.add_argument(
-        "--scale_v_pred_loss_like_noise_pred",
-        action="store_true",
-        help="scale v-prediction loss like noise prediction loss",
-    )
-    parser.add_argument(
-        "--v_pred_like_loss",
-        type=float,
-        default=None,
-        help="add v-prediction like loss multiplied by this value",
-    )
-    parser.add_argument(
         "--debiased_estimation_loss",
         action="store_true",
         help="debiased estimation loss",

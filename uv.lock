@@ -196,7 +196,6 @@ dependencies = [
     { name = "tomlkit" },
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform != 'darwin'" },
-    { name = "torchaudio" },
     { name = "torchsde" },
     { name = "torchvision", version = "0.27.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "torchvision", version = "0.27.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform != 'darwin'" },
@@ -233,7 +232,7 @@ requires-dist = [
     { name = "blake3", specifier = ">=1.0.8" },
     { name = "comfy-aimdo", specifier = ">=0.3.0" },
     { name = "comfy-cli", specifier = ">=1.10.3" },
-    { name = "comfy-kitchen", specifier = ">=0.2.8" },
+    { name = "comfy-kitchen", specifier = ">=0.2.10" },
     { name = "controlnet-aux", specifier = ">=0.0.10" },
     { name = "datasets", specifier = ">=4.8.5" },
     { name = "diffusers", specifier = ">=0.37.0" },
@@ -275,7 +274,6 @@ requires-dist = [
     { name = "toml", specifier = ">=0.10.2" },
     { name = "tomlkit", specifier = ">=0.13" },
     { name = "torch", specifier = ">=2.12.0,<2.13" },
-    { name = "torchaudio", specifier = ">=2.11.0" },
     { name = "torchsde", specifier = ">=0.2.6" },
     { name = "torchvision", specifier = ">=0.27.0,<0.28" },
     { name = "tqdm" },
@@ -529,13 +527,13 @@ wheels = [
 
 [[package]]
 name = "comfy-kitchen"
-version = "0.2.8"
+version = "0.2.10"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/f1/1206bc530adef9193ba78964d687b6f0381a853abee04cf6fa483bd082a0/comfy_kitchen-0.2.8-cp312-abi3-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0c2eb7d03921a70e21fd9bb43d557e09b20bec81479cb85c2b58e8cdfb2cacc9", size = 791523, upload-time = "2026-03-12T04:07:47.083Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/af/e87ebae2b1bba35291663b0d6eea6748b340d7c21802224cfb37f3a48dda/comfy_kitchen-0.2.8-cp312-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:570b2eb74c77ce9356b0140ec190253dcbedeb1e92bec5092444abef9cd24ebf", size = 794595, upload-time = "2026-03-12T04:07:48.443Z" },
-    { url = "https://files.pythonhosted.org/packages/84/5c/14cb27952313dca93e3e8a58223fd6297acd701df3d9727c007edbcb3559/comfy_kitchen-0.2.8-cp312-abi3-win_amd64.whl", hash = "sha256:20b94aa87e6d42181ad928560487a0e2a692dfcc9fce40d4e31f8fc57753865c", size = 677964, upload-time = "2026-03-12T04:07:49.719Z" },
-    { url = "https://files.pythonhosted.org/packages/46/b0/64c3e0656db822cb4f7dbc928d6a13cf2cad861cc178e6386114634e355b/comfy_kitchen-0.2.8-py3-none-any.whl", hash = "sha256:0b322992cf1681ebe3d413ac7950f39e5cc425505c13cef8d08527ce82fe5e32", size = 64854, upload-time = "2026-03-12T04:07:51.051Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/4d/7416b070a0957aeb4551068306484610789c1af8bcbf2fe140a03b702e88/comfy_kitchen-0.2.10-cp312-abi3-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b945da25740a3f51e3c1c1292dc1b2f37350d7f37b1e1c73d988f33acc0aa249", size = 3727059, upload-time = "2026-05-30T04:47:40.082Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/b9/4d4efa9e5f5ec4296cfce426dbd211642685141d9a52f6b5f037fcef0e6e/comfy_kitchen-0.2.10-cp312-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:54a64bf4dddf05ad69f5eef73d72caa328a331b798a41997559a5158e616d87f", size = 3734494, upload-time = "2026-05-30T04:47:41.518Z" },
+    { url = "https://files.pythonhosted.org/packages/00/6b/75f744abcacb17ef24d61e96fee6147d2288aaa4a165cf87ad543548a37d/comfy_kitchen-0.2.10-cp312-abi3-win_amd64.whl", hash = "sha256:fe6b1789dc7a673c0f9091d693c6a1013a693c988e3dfb68dc429b4bd6d81050", size = 2525530, upload-time = "2026-05-30T04:47:42.809Z" },
+    { url = "https://files.pythonhosted.org/packages/40/a9/45869a10ead662992bd35374536e056b7ec019c6851e11e23228dc675031/comfy_kitchen-0.2.10-py3-none-any.whl", hash = "sha256:c242afd18d120e28fc949c423fa28cbb22cb4d70d627d8cc7cdf6bad54dd272c", size = 89054, upload-time = "2026-05-30T04:47:44.077Z" },
 ]
 
 [[package]]
@@ -2883,21 +2881,6 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.12.0%2Bcu132-cp313-cp313t-manylinux_2_28_aarch64.whl", hash = "sha256:936de3332eb262831f8decd01e5242038c15a4579b2e80e9793216d4bb017166", upload-time = "2026-05-13T00:14:53Z" },
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.12.0%2Bcu132-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:269760d9e1776acb2eafce33e4a465f3bfe614c4704f71a4fe40b1eb6f3b89a8", upload-time = "2026-05-13T00:15:24Z" },
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.12.0%2Bcu132-cp313-cp313t-win_amd64.whl", hash = "sha256:27983ce55156b8deb910aa99650ebee9f43ddfe132edbfef89744a9ee1386cd7", upload-time = "2026-05-13T00:17:00Z" },
-]
-
-[[package]]
-name = "torchaudio"
-version = "2.11.0"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/9e/f76fcd9877c8c78f258ee34e0fb8291fdb91e6218d582d9ca66b1e4bd4ae/torchaudio-2.11.0-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:e3f9696a9ef1d49acc452159b052370c636406d072e9d8f10895fda87b591ea9", size = 679904, upload-time = "2026-03-23T18:13:28.329Z" },
-    { url = "https://files.pythonhosted.org/packages/85/70/249c1498ebdad3e7752866635ec0855fc0dcf898beccda5a9d2b9df8e4d0/torchaudio-2.11.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:b034d7672f1c415434f48ef17807f2cce47f29e8795338c751d4e596c9fbe8b5", size = 1618523, upload-time = "2026-03-23T18:13:15.703Z" },
-    { url = "https://files.pythonhosted.org/packages/4f/98/be13fe35d9aa5c26381c0e453c828a789d15c007f8f7d08c95341d19974d/torchaudio-2.11.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:1c1101c1243ef0e4063ec63298977e2d3655c15cf88d9eb0a1bd4fe2db9f47ea", size = 1771992, upload-time = "2026-03-23T18:13:35.343Z" },
-    { url = "https://files.pythonhosted.org/packages/e2/8b/2bbb3dca6ff28cba0de250874d5ef4fc2822c47a934b59b3974cff3219ef/torchaudio-2.11.0-cp313-cp313-win_amd64.whl", hash = "sha256:986f4df5ed17b003dc52489468601720090e65f964f8bebccf90eb45bba75744", size = 328662, upload-time = "2026-03-23T18:13:18.308Z" },
-    { url = "https://files.pythonhosted.org/packages/fe/ce/52c652d30af7d6e96c8f1735d26131e94708e3f38d852b8fa97958804dd8/torchaudio-2.11.0-cp313-cp313t-macosx_12_0_arm64.whl", hash = "sha256:bda09ea630ae7207384fb0f28c35e4f8c0d82dd6eba020b6b335ad0caa9fed49", size = 680814, upload-time = "2026-03-23T18:13:17.08Z" },
-    { url = "https://files.pythonhosted.org/packages/06/95/1ad1507482e7263e556709a3f5f87fecd375a0742cdaf238806c8e72eaad/torchaudio-2.11.0-cp313-cp313t-manylinux_2_28_aarch64.whl", hash = "sha256:9fe3083c62e035646483a14e180d33561bdc2eed436c9ab1259c137fb7120b4a", size = 1618546, upload-time = "2026-03-23T18:13:29.686Z" },
-    { url = "https://files.pythonhosted.org/packages/98/4c/480328ba07487eb9890406720304d0d460dd7a6a64098614f5aa53b662ca/torchaudio-2.11.0-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:13cff988697ccbad539987599f9dc672f40c417bed67570b365e4e5002bbd096", size = 1771991, upload-time = "2026-03-23T18:13:30.843Z" },
-    { url = "https://files.pythonhosted.org/packages/3e/98/5d4790e2d6548768999acd34999d5aeefce8bcc23a07afaa5f03e723f557/torchaudio-2.11.0-cp313-cp313t-win_amd64.whl", hash = "sha256:ed404c4399ad7f172c86a47c1b25293d322d1d58e26b10b0456a86cf67d37d84", size = 328661, upload-time = "2026-03-23T18:13:34.359Z" },
 ]
 
 [[package]]

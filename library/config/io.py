@@ -234,8 +234,13 @@ def load_path_overrides(
     method: Optional[str] = None,
     methods_subdir: str = "methods",
 ) -> dict:
-    """Top-level scalar keys from base.toml → ``presets.toml[<preset>]`` →
-    ``<methods_subdir>/<method>.toml`` (when given).
+    """Top-level scalar keys from ``preprocess.toml`` → base.toml →
+    ``presets.toml[<preset>]`` → ``<methods_subdir>/<method>.toml`` (when given).
+
+    ``configs/preprocess.toml`` holds the preprocess-only knobs
+    (``source_image_dir`` / ``drop_lowres_images`` / ``min_pixels``) split out
+    of base.toml; it's read first so a legacy copy of any of those keys left in
+    base.toml still wins (backward compatible — see the inline note below).
 
     Lightweight — used by ``tasks.py`` preprocess commands so they pick up
     ``source_image_dir`` / ``resized_image_dir`` / ``lora_cache_dir`` overrides
@@ -263,6 +268,18 @@ def load_path_overrides(
             if k not in _NON_FLAT_SECTIONS
             and (not isinstance(v, (dict, list)) or _is_scalar_list(v))
         }
+
+    # Preprocess-only knobs (source_image_dir, drop_lowres_images, min_pixels)
+    # were split out of base.toml into configs/preprocess.toml. Read it FIRST,
+    # before base.toml, so any legacy copy of those keys still sitting in a
+    # user's customized base.toml keeps winning (never regress an existing
+    # customization), while a freshly-shipped base.toml — which no longer
+    # carries them — lets the preprocess.toml value through. preset / method
+    # layers below still override per-run. Absent file → no-op.
+    preprocess_path = os.path.join(configs_dir, "preprocess.toml")
+    if os.path.exists(preprocess_path):
+        with open(preprocess_path, "r", encoding="utf-8") as f:
+            out.update(_flat_scalars(toml.load(f)))
 
     base_path = os.path.join(configs_dir, "base.toml")
     if os.path.exists(base_path):

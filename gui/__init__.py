@@ -343,6 +343,19 @@ def _load(p: Path) -> dict:
     return toml.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
 
+def _load_base() -> dict:
+    """``base.toml`` overlaid on ``configs/preprocess.toml`` (the split-out
+    preprocess-only knobs: source_image_dir / drop_lowres_images / min_pixels).
+
+    Mirrors ``load_path_overrides``' preprocess→base layering so the GUI form
+    baseline matches what preprocess/training actually read: a legacy key still
+    in base.toml wins; otherwise preprocess.toml supplies it. Use this anywhere
+    the GUI needs base.toml as a flat-key baseline."""
+    merged = _load(CONFIGS_DIR / "preprocess.toml")
+    merged.update(_load(CONFIGS_DIR / "base.toml"))
+    return merged
+
+
 def _save(p: Path, d: dict):
     p.write_text(toml.dumps(d), encoding="utf-8")
 
@@ -430,7 +443,7 @@ def remove_unknown_dataset_keys(variant: str) -> list[str]:
 
 def merged_method_preset(method: str, preset: str) -> tuple[dict, dict[str, str]]:
     """Return (merged_dict, origin_map). origin_map[key] is 'base' | 'preset' | 'method'."""
-    base = _load(CONFIGS_DIR / "base.toml")
+    base = _load_base()
     pset = _load_all_presets().get(preset, {})
     meth = _load(METHODS_DIR / f"{method}.toml")
     merged: dict = {}
@@ -451,7 +464,7 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
     """Merge base + preset + gui-methods/<variant>.toml. The GUI uses this
     instead of `merged_method_preset` so edits/training target the clean
     per-variant file, not the toggle-block methods/ tree."""
-    base = _load(CONFIGS_DIR / "base.toml")
+    base = _load_base()
     pset = _load_all_presets().get(preset, {})
     meth = _load(GUI_METHODS_DIR / f"{variant}.toml")
     merged: dict = {}
