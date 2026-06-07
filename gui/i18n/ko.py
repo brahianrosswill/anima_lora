@@ -390,4 +390,14 @@ STRINGS: dict[str, str] = {
     "browse": "찾아보기…",
     # Multi-scale target_res tiers
     "target_res_danger_tooltip": "고비용 티어: {edge}px는 이미지당 약 {tokens} 토큰을 사용하고 컴파일된 블록 그래프를 하나 더 추가합니다(컴파일 느려짐, VRAM 증가). 이 해상도가 정말 필요할 때만 켜세요.",
+    # TensorBoard panel
+    "tb_panel_title": "TensorBoard 실행 목록",
+    "tb_open": "TensorBoard 열기",
+    "tb_stop": "서버 중지",
+    "tb_remove": "삭제",
+    "tb_no_runs": "아직 실행 기록이 없습니다. 학습을 시작하면 목록이 채워집니다.",
+    "tb_status_running": "포트 {port}에서 실행 중",
+    "tb_status_stopped": "",
+    "tb_not_installed": "tensorboard가 설치되지 않았습니다. 실행: pip install tensorboard",
+    "tb_current_run_label": " (현재)",
 }

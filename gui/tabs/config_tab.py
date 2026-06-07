@@ -64,6 +64,7 @@ from gui.progress import (
     TqdmProgressTracker,
     make_progress_bar,
 )
+from gui.tensorboard import TensorBoardPanel
 
 
 class ClickableLabel(QLabel):
@@ -230,7 +231,9 @@ class ConfigTab(QWidget):
         self._progress_tracker = TqdmProgressTracker(self.progress)
         # Phase-0 structured progress: tails the run's progress.jsonl and takes
         # over the bar once events appear; tqdm parsing above is the fallback.
-        self._jsonl_reader = JsonlProgressReader(self.progress)
+        self._jsonl_reader = JsonlProgressReader(
+            self.progress, on_run_start=self._on_run_start_event
+        )
         self._jsonl_timer = QTimer(self)
         self._jsonl_timer.setInterval(400)
         self._jsonl_timer.timeout.connect(self._jsonl_reader.poll)
@@ -296,6 +299,13 @@ class ConfigTab(QWidget):
 
         vsplit.setSizes([500, 200])
         lay.addWidget(vsplit)
+
+        # TensorBoard runs panel — shows all past runs in the logging_dir with
+        # remove buttons and a one-click "Open TensorBoard" launcher. Initialized
+        # with the logging_dir from the current variant; updated on each training
+        # launch and on run_start progress events.
+        self._tb_panel = TensorBoardPanel(self)
+        lay.addWidget(self._tb_panel)
 
         # QProcess for training. The launchers we spawn (``accelerate launch``,
         # ``python tasks.py …``) fork the real training process, which is what
@@ -372,6 +382,11 @@ class ConfigTab(QWidget):
         cfg = {k: v for k, v in merged.items() if k not in _SKIP}
 
         self._origin = origin
+
+        # Sync the TensorBoard panel to the current variant's logging_dir.
+        logging_dir = merged.get("logging_dir")
+        if logging_dir and hasattr(self, "_tb_panel"):
+            self._tb_panel.set_log_dir(logging_dir)
 
         if hasattr(self, "_explain"):
             self._show_explain_placeholder()
@@ -989,6 +1004,13 @@ class ConfigTab(QWidget):
         detached. That's what lets training survive the GUI closing. The caller
         owns all pre-launch confirmations (cache-reuse popup, resume prompt).
         """
+        # Sync the TensorBoard panel to the logging_dir for this variant so it
+        # starts scanning for the new run dir immediately.
+        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        logging_dir = merged.get("logging_dir")
+        if logging_dir:
+            self._tb_panel.set_log_dir(logging_dir)
+
         # Flip to busy + repaint before the submit so the UI feels responsive
         # (the daemon auto-start + /health wait can take a moment on cold start).
         self.train_btn.setText(t("train") + " ...")
@@ -1202,12 +1224,24 @@ class ConfigTab(QWidget):
             return
         kill_process_tree(self._proc)
 
+    def _on_run_start_event(self, ev: dict) -> None:
+        """Called by JsonlProgressReader when a run_start event is seen.
+
+        Extracts ``log_dir`` (the TensorBoard run directory emitted by train.py)
+        and highlights that entry in the TensorBoard panel so the user can spot
+        the current run at a glance.
+        """
+        log_dir = ev.get("log_dir")
+        if log_dir:
+            self._tb_panel.set_current_run(log_dir)
+
     def cleanup_subprocess(self):
         """App-shutdown hook. Kills a running test/preprocess subprocess, but
         deliberately leaves a daemon training job alive — it runs detached so
         training survives the GUI closing (re-attached on next launch)."""
         self._job_timer.stop()
         kill_process_tree(self._proc)
+        self._tb_panel.cleanup()
 
     def _read_stdout(self):
         data = self._proc.readAllStandardOutput().data().decode(errors="replace")
