@@ -5,6 +5,14 @@
 # CLI flags override these. Paths support {CAPTION_CORPUS_DIR}/$VARS/~ expansion
 # ({CAPTION_CORPUS_DIR} comes from anima_lora/.env).
 
+# Output slug — the single source of truth for every derived path. The whole
+# pipeline lives under post_image_dataset/easycontrol/<name>/{staging,resized,
+# cache,cond} and checkpoints save as anima_easycontrol_<name>. The blueprint
+# paths below reference {name} and are interpolated at train time, so changing
+# this (e.g. name = "sanitize" → easycontrol/sanitize/) + re-running preprocess →
+# train reroutes everything with no path edit. Defaults to "near_twins" if omitted.
+name = "sanitize"
+
 # Mining run knobs (read by `python -m easycontrol_adapters.tools.near_twin`;
 # legacy name [miner] still accepted). Any --flag dest works as a key here.
 [staging]
@@ -26,11 +34,10 @@ max_extra_diff = 6
 # true; caches mirror that <artist>/ nesting under cache_dir. The same pass then
 # pairs cond_dir: for each _no_tags target it symlinks the twin _tags latent in
 # under the _no_tags stem (the EasyControl condition; see the blueprint below).
+# image_dir/resized_dir/cache_dir/cond_dir default to easycontrol/<name>/{staging,
+# resized,cache,cond} (the `name` above) — only add a path key to point one
+# elsewhere.
 [preprocess]
-image_dir = 'post_image_dataset/easycontrol/near_twins/staging'    # resize source (mined native-res tree)
-resized_dir = 'post_image_dataset/easycontrol/near_twins/resized'  # bucket-resized → training image_dir
-cache_dir = 'post_image_dataset/easycontrol/near_twins/cache'
-cond_dir = 'post_image_dataset/easycontrol/near_twins/cond'        # paired _tags reference latents (symlinks)
 # Constant-token bucket tiers to resize into before VAE encoding (allowed edges:
 # 512 768 1024 1280 1536; see configs/base.toml target_res). Must match training.
 target_res = [768, 1024]
@@ -49,10 +56,10 @@ caption_tag_dropout_rate = 0.1
 # configs/methods/easycontrol.toml — CLI wins the merge chain, so anything here
 # beats the shipped method default; bools become bare flags, lists spread.
 # `--dataset_config` is injected automatically (points at this file's blueprint).
-# Omit the table entirely to train with the plain easycontrol method defaults.
+# output_name defaults to anima_easycontrol_<name>; omit the table entirely to
+# train with the plain easycontrol method defaults.
 [training]
-output_name = "anima_easycontrol_near_twins"
-learning_rate = 3e-5
+learning_rate = 1e-4
 max_train_epochs = 25
 save_every_n_epochs = 25
 checkpointing_epochs = 25
@@ -76,6 +83,7 @@ easycontrol_drop_p=0.0
 # So the adapter learns: given a text-bearing panel as the reference, regenerate
 # the clean version. `path_pattern` keeps only the `_no_tags` members as targets;
 # the `_tags` members enter solely as the condition via cond_cache_dir.
+# `{name}` below interpolates from the top-level `name` key at train time.
 
 [general]
 caption_extension = '.txt'
@@ -84,9 +92,9 @@ caption_extension = '.txt'
 batch_size = 1
 
   [[datasets.subsets]]
-  image_dir = 'post_image_dataset/easycontrol/near_twins/resized'
-  cache_dir = 'post_image_dataset/easycontrol/near_twins/cache'        # denoising target: the clean _no_tags members
-  cond_cache_dir = 'post_image_dataset/easycontrol/near_twins/cond'    # condition: the paired _tags latent (keyed by the _no_tags stem)
+  image_dir = 'post_image_dataset/easycontrol/{name}/resized'
+  cache_dir = 'post_image_dataset/easycontrol/{name}/cache'        # denoising target: the clean _no_tags members
+  cond_cache_dir = 'post_image_dataset/easycontrol/{name}/cond'    # condition: the paired _tags latent (keyed by the _no_tags stem)
   path_pattern = '*_no_tags.*'     # targets = clean members only (the _tags twin rides in as the cond)
   recursive = true                 # tree is nested <artist>/<pair_id>_{tags,no_tags}; caches mirror the nesting
   flip_aug = false                 # latents can't be flipped post-hoc; the cond cache has no flipped variant

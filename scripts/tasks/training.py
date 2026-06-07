@@ -92,36 +92,86 @@ def _toml_table_to_argv(table: dict) -> list[str]:
     return argv
 
 
+# The near-twin config file is fixed (selected by EASYADAPTER=near_twin); its
+# top-level ``name`` key is the slug that reroutes everything downstream.
+_NEAR_TWIN_CFG = ROOT / "configs" / "easycontrol" / "near_twins.toml"
+
+
+def _near_twin_load() -> tuple[dict, str, str]:
+    """Load ``near_twins.toml`` → ``(cfg, name, base)``.
+
+    The top-level ``name`` key (default ``near_twins``) is the single source of
+    truth for a near-twin run: it picks the
+    ``post_image_dataset/easycontrol/<name>/`` base tree (staging / resized /
+    cache / cond) and the ``anima_easycontrol_<name>`` output_name. Set
+    ``name = "sanitize"`` and the whole pipeline reroutes under
+    ``easycontrol/sanitize/`` with no other path edits — re-run staging →
+    preprocess → train so the generated blueprint tail tracks the new slug.
+    Explicit ``[preprocess]`` path keys / ``[training].output_name`` still win if
+    present (back-compat), but are no longer needed.
+    """
+    if not _NEAR_TWIN_CFG.is_file():
+        raise SystemExit(
+            f"{_NEAR_TWIN_CFG} not found — run `make easycontrol-staging "
+            "EASYADAPTER=near_twin` first to mine the pair tree."
+        )
+    cfg = tomllib.loads(_NEAR_TWIN_CFG.read_text(encoding="utf-8"))
+    name = str(cfg.get("name") or _NEAR_TWIN_CFG.stem).strip()
+    base = f"post_image_dataset/easycontrol/{name}"
+    return cfg, name, base
+
+
+def _resolve_blueprint_path(path: str, name: str) -> str:
+    """Resolve a blueprint subset path against the current ``name`` slug.
+
+    Two complementary steps so ``name`` stays the single source of truth:
+    1. Interpolate the ``{name}`` placeholder the miner now writes into the
+       blueprint tail (``post_image_dataset/easycontrol/{name}/resized`` …).
+    2. As a fallback for older blueprints that baked a resolved slug in, swap the
+       ``<slug>`` component of a ``post_image_dataset/easycontrol/<slug>/...``
+       path to ``name``. Non-matching paths (custom locations) are left untouched.
+    """
+    path = path.replace("{name}", name)
+    parts = Path(path).parts
+    if len(parts) >= 3 and parts[:2] == ("post_image_dataset", "easycontrol"):
+        return str(Path(*parts[:2], name, *parts[3:]))
+    return path
+
+
 def _near_twin_train_extra(extra) -> list[str]:
     """Build train.py extra-argv for an ``EASYADAPTER=near_twin`` run.
 
-    ``near_twins.toml`` is a multi-purpose file (``[staging]`` / ``[preprocess]``
-    / ``[training]`` knob tables above the generated ``[general]`` + ``[[datasets]]``
-    blueprint), but train.py's dataset-config validator rejects any top-level key
-    outside the blueprint. So we extract just the blueprint sections into a clean
-    generated sidecar and point ``--dataset_config`` at that, then fold the
-    optional ``[training]`` table into CLI overrides on top of the easycontrol
-    method config. User-supplied ``extra`` argv is appended last so it still wins.
+    ``near_twins.toml`` is a multi-purpose file (top-level ``name`` + ``[staging]``
+    / ``[preprocess]`` / ``[training]`` knob tables above the generated
+    ``[general]`` + ``[[datasets]]`` blueprint), but train.py's dataset-config
+    validator rejects any top-level key outside the blueprint. So we extract just
+    the blueprint sections into a clean generated sidecar and point
+    ``--dataset_config`` at that, then fold the optional ``[training]`` table
+    (with ``output_name`` defaulting to ``anima_easycontrol_<name>``) into CLI
+    overrides on top of the easycontrol method config. User-supplied ``extra``
+    argv is appended last so it still wins.
 
     Note: the generated blueprint exposes each mined member as an independent
     ref==target subset (no ``cond_cache_dir`` pairing), so this is a vanilla
     EasyControl run over the mined images — not yet a clean→tagged control task.
     """
-    cfg_path = ROOT / "configs" / "easycontrol" / "near_twins.toml"
-    if not cfg_path.is_file():
-        raise SystemExit(
-            f"{cfg_path} not found — run `make easycontrol-staging "
-            "EASYADAPTER=near_twin` then `make easycontrol-preprocess "
-            "EASYADAPTER=near_twin` first."
-        )
-    cfg = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg, name, base = _near_twin_load()
     blueprint = {k: cfg[k] for k in ("general", "datasets") if k in cfg}
     if not blueprint.get("datasets"):
         raise SystemExit(
-            f"{cfg_path} has no [[datasets]] blueprint yet — run "
+            f"{_NEAR_TWIN_CFG} has no [[datasets]] blueprint yet — run "
             "`make easycontrol-staging EASYADAPTER=near_twin` to mine the pair "
             "tree (it writes the blueprint tail)."
         )
+
+    # Resolve the blueprint's subset paths against the current `name` slug
+    # (interpolate the `{name}` placeholder; retarget any baked-in legacy slug),
+    # so a `name` change reroutes training (and the sidecar location below).
+    for ds in blueprint.get("datasets", []):
+        for s in ds.get("subsets", []):
+            for key in ("image_dir", "cache_dir", "cond_cache_dir"):
+                if key in s:
+                    s[key] = _resolve_blueprint_path(s[key], name)
 
     # Write the blueprint-only dataset config beside the caches (a gitignored data
     # dir that exists once preprocess has run). Regenerated each invocation so it
@@ -136,25 +186,26 @@ def _near_twin_train_extra(extra) -> list[str]:
         ),
         None,
     )
-    base_dir = (
-        ROOT / Path(subset["image_dir"]).parent
-        if subset
-        else ROOT / "post_image_dataset" / "easycontrol" / "near_twins"
-    )
+    base_dir = ROOT / Path(subset["image_dir"]).parent if subset else ROOT / base
     base_dir.mkdir(parents=True, exist_ok=True)
     ds_path = base_dir / "dataset_config.toml"
     ds_path.write_text(
         "# AUTO-GENERATED from configs/easycontrol/near_twins.toml — do not edit.\n"
         "# Blueprint-only copy (train.py's dataset-config validator rejects the\n"
-        "# [staging]/[preprocess]/[training] knob tables in the source file).\n\n"
+        "# name + [staging]/[preprocess]/[training] knobs in the source file).\n\n"
         + toml.dumps(blueprint),
         encoding="utf-8",
     )
 
+    # output_name defaults to the name-derived slug so it tracks `name` without a
+    # manual [training] entry; an explicit [training].output_name still wins.
+    training = dict(cfg.get("training") or {})
+    training.setdefault("output_name", f"anima_easycontrol_{name}")
+
     return [
         "--dataset_config",
         str(ds_path),
-        *_toml_table_to_argv(cfg.get("training") or {}),
+        *_toml_table_to_argv(training),
         *list(extra or []),
     ]
 
@@ -200,21 +251,18 @@ def _near_twin_preprocess() -> None:
 
     Every knob is read from the ``[preprocess]`` table of
     ``configs/easycontrol/near_twins.toml`` (written by the staging step), so this
-    stays in lockstep with the dataset blueprint that step also rewrites.
+    stays in lockstep with the dataset blueprint that step also rewrites. The
+    staging/resized/cache/cond dirs default to ``post_image_dataset/easycontrol/
+    <name>/{staging,resized,cache,cond}`` (the top-level ``name`` slug), so they
+    need no manual ``[preprocess]`` entry; an explicit path key still overrides.
 
     The mined ``staging/`` tree holds native-resolution images (symlinks to the
     corpus), so the pass first resizes them into constant-token buckets under
     ``resized/`` (``target_res`` tiers) — that resized tree is the training
     ``image_dir`` — and only then VAE/TE-encodes it into ``cache/``.
     """
-    cfg_path = ROOT / "configs" / "easycontrol" / "near_twins.toml"
-    if not cfg_path.is_file():
-        raise SystemExit(
-            f"{cfg_path} not found — run `make easycontrol-staging "
-            "EASYADAPTER=near_twin` first to mine the pair tree."
-        )
-    pp = tomllib.loads(cfg_path.read_text(encoding="utf-8")).get("preprocess") or {}
-    base = "post_image_dataset/easycontrol/near_twins"
+    cfg, _name, base = _near_twin_load()
+    pp = cfg.get("preprocess") or {}
     staging = pp.get("image_dir", f"{base}/staging")
     resized = pp.get("resized_dir", f"{base}/resized")
     cache = pp.get("cache_dir", f"{base}/cache")
@@ -280,10 +328,10 @@ def _near_twin_preprocess() -> None:
         ]
     )
     # 4. Pair the cond/ tree (the _tags reference latent for each _no_tags target).
-    _near_twin_build_cond(pp)
+    _near_twin_build_cond(pp, base)
 
 
-def _near_twin_build_cond(pp: dict) -> None:
+def _near_twin_build_cond(pp: dict, base: str) -> None:
     """Materialize the ``cond/`` latent tree for the near-twin *removal* task.
 
     Pairing convention (matches the generated blueprint): the denoising target is
@@ -299,7 +347,6 @@ def _near_twin_build_cond(pp: dict) -> None:
     Pure symlinks over the existing cache; the tree is rebuilt from scratch each
     run so a dropped pair can't leave a stale link behind.
     """
-    base = "post_image_dataset/easycontrol/near_twins"
     cache_dir = ROOT / pp.get("cache_dir", f"{base}/cache")
     cond_dir = ROOT / pp.get("cond_dir", f"{base}/cond")
     if not cache_dir.is_dir():

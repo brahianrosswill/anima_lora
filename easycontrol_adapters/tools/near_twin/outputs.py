@@ -21,7 +21,6 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .engine import (
-    REPO_ROOT,
     Member,
     PairRecord,
     caption_text,
@@ -183,13 +182,6 @@ def _write_mask(p: PairRecord, out: Path) -> None:
     Image.fromarray(grid, mode="L").resize((w, h), Image.NEAREST).save(out)
 
 
-def _rel_to_repo(path: Path) -> str:
-    try:
-        return str(path.resolve().relative_to(REPO_ROOT))
-    except ValueError:
-        return str(path.resolve())
-
-
 # The miner rewrites everything BELOW this sentinel (the output dataset
 # blueprint) on every run, and leaves everything above it — the user's
 # [staging] / [preprocess] knobs + comments — untouched. So one file is both the
@@ -204,6 +196,12 @@ _DEFAULT_STAGING_HEADER = """\
 #   make easycontrol-staging    EASYADAPTER=near_twin   # [staging] → mine pair tree
 #   make easycontrol-preprocess EASYADAPTER=near_twin   # [preprocess] → VAE/TE caches
 # CLI flags override these. Paths support {CAPTION_CORPUS_DIR}/$VARS/~ expansion.
+
+# Output slug — the single source of truth for every derived path. The whole
+# pipeline lives under post_image_dataset/easycontrol/<name>/{staging,resized,
+# cache,cond} and checkpoints save as anima_easycontrol_<name>. Change it (e.g.
+# name = "sanitize") and re-run staging → preprocess → train; no other path edit.
+name = "near_twins"
 
 # Mining run knobs (legacy name [miner] still accepted). Any --flag dest works.
 [staging]
@@ -220,12 +218,10 @@ max_extra_diff = 6
 # Resize + VAE/TE caching pass over the mined pair tree (read by
 # `make easycontrol-preprocess EASYADAPTER=near_twin`). Native-res staging is
 # resized into constant-token buckets under resized_dir (the training image_dir),
-# then VAE/TE-encoded into cache_dir.
+# then VAE/TE-encoded into cache_dir. The image_dir/resized_dir/cache_dir/cond_dir
+# default to easycontrol/<name>/{staging,resized,cache,cond} (set `name` above) —
+# only add a path key here to point one elsewhere.
 [preprocess]
-image_dir = 'post_image_dataset/easycontrol/near_twins/staging'    # resize source
-resized_dir = 'post_image_dataset/easycontrol/near_twins/resized'  # → training image_dir
-cache_dir = 'post_image_dataset/easycontrol/near_twins/cache'
-cond_dir = 'post_image_dataset/easycontrol/near_twins/cond'  # paired _tags reference latents (symlinks)
 target_res = [1024]  # bucket tiers (512 768 1024 1280 1536); must match training
 min_pixels = 0  # 0 = never drop a member (would orphan its pair partner)
 recursive = true
@@ -240,9 +236,9 @@ caption_tag_dropout_rate = 0.1
 # Training overrides for `make easycontrol EASYADAPTER=near_twin` (optional).
 # Each key is folded in as a `--key value` CLI override on top of
 # configs/methods/easycontrol.toml; `--dataset_config` is injected automatically.
-# Omit the table to train with the plain easycontrol method defaults.
+# output_name defaults to anima_easycontrol_<name>; omit the table to train with
+# the plain easycontrol method defaults.
 [training]
-output_name = "anima_easycontrol_near_twins"
 learning_rate = 3e-5
 max_train_epochs = 8
 # Removal task: the _tags reference is the structural source of truth, so keep
@@ -252,12 +248,13 @@ easycontrol_cond_noise_max = 0.0
 
 
 def _blueprint_text(export_dir: Path) -> str:
+    # Subset paths are written as `{name}` placeholders (not the resolved slug):
+    # `make easycontrol EASYADAPTER=near_twin` interpolates `{name}` from the
+    # config's top-level `name` key when it generates the dataset-config sidecar,
+    # so changing `name` reroutes everything without touching this tail.
     # Training reads the bucket-resized tree (the preprocess pass resizes the
     # native-res `staging/` export into `resized/` before VAE-encoding), so the
     # subset image_dir points at the resized sibling, not the export dir itself.
-    img_dir = _rel_to_repo(export_dir.parent / "resized")
-    cache_dir = _rel_to_repo(export_dir.parent / "cache")
-    cond_dir = _rel_to_repo(export_dir.parent / "cond")
     return f"""{_BLUEPRINT_SENTINEL}
 # Near-twin pair tree wired as an EasyControl *text-removal* control task. The
 # mined staging tree is resized into constant-token buckets under `resized/`,
@@ -272,6 +269,7 @@ def _blueprint_text(export_dir: Path) -> str:
 # So the adapter learns: given a text-bearing panel as the reference, regenerate
 # the clean version. `path_pattern` keeps only the `_no_tags` members as targets;
 # the `_tags` members enter solely as the condition via cond_cache_dir.
+# `{{name}}` below interpolates from the top-level `name` key at train time.
 
 [general]
 caption_extension = '.txt'
@@ -280,9 +278,9 @@ caption_extension = '.txt'
 batch_size = 1
 
   [[datasets.subsets]]
-  image_dir = '{img_dir}'
-  cache_dir = '{cache_dir}'        # denoising target: the clean _no_tags members
-  cond_cache_dir = '{cond_dir}'    # condition: the paired _tags latent (keyed by the _no_tags stem)
+  image_dir = 'post_image_dataset/easycontrol/{{name}}/resized'
+  cache_dir = 'post_image_dataset/easycontrol/{{name}}/cache'        # denoising target: the clean _no_tags members
+  cond_cache_dir = 'post_image_dataset/easycontrol/{{name}}/cond'    # condition: the paired _tags latent (keyed by the _no_tags stem)
   path_pattern = '*_no_tags.*'     # targets = clean members only (the _tags twin rides in as the cond)
   recursive = true                 # tree is nested <artist>/<pair_id>_{{tags,no_tags}}; caches mirror the nesting
   flip_aug = false                 # latents can't be flipped post-hoc; the cond cache has no flipped variant

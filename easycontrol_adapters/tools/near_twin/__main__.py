@@ -135,10 +135,13 @@ def apply_staging_config(args: argparse.Namespace, argv: list[str]) -> None:
     if not cfg_path.is_file():
         return
     doc = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    explicit = _explicit_dests(argv)
+    # Top-level `name` slug (outside any table) layered under --name.
+    if doc.get("name") is not None and "name" not in explicit:
+        args.name = doc["name"]
     table = doc.get("staging") or doc.get("miner")
     if not table:
         return
-    explicit = _explicit_dests(argv)
     for key, val in table.items():
         dest = key.replace("-", "_")
         if dest in explicit:
@@ -178,6 +181,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config",
         default="configs/easycontrol/near_twins.toml",
         help="toml with a [staging] table of run knobs (CLI flags override it; '' disables)",
+    )
+    p.add_argument(
+        "--name",
+        default=None,
+        help="output slug — reroutes the staging/resized/cache/cond tree (and the "
+        "generated blueprint paths) under post_image_dataset/easycontrol/<name>/. "
+        "Defaults to the config's top-level `name` key, else 'near_twins'. "
+        "An explicit --export-dir overrides this.",
     )
     disc = p.add_mutually_exclusive_group()
     disc.add_argument(
@@ -325,7 +336,13 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     args = parse_args(argv)
-    apply_staging_config(args, argv)  # [staging] toml under the CLI
+    apply_staging_config(args, argv)  # name + [staging] toml under the CLI
+    # The `name` slug reroutes the export tree (and thus the blueprint's resized/
+    # cache/cond paths, derived from export_dir.parent) under easycontrol/<name>/.
+    # Skip when the user pinned --export-dir explicitly, or disabled it ('').
+    if "export_dir" not in _explicit_dests(argv) and args.export_dir:
+        name = str(args.name or "near_twins").strip()
+        args.export_dir = f"post_image_dataset/easycontrol/{name}/staging"
     args.mode = "region" if args.region else "signal" if args.signal else "tag"
 
     target_tags: set[str] = set()
