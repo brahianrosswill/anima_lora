@@ -421,4 +421,5 @@ STRINGS: dict[str, str] = {
     "tb_open_current": "View Current Run",
     "tb_open_current_tip": "Open TensorBoard scoped to the in-progress training run only.",
     "tb_open_current_idle_tip": "Available while a training run is active.",
+    "tb_appear_hint": "If the run does not appear in the list, try pressing TensorBoard's reload (update) button.",
 }

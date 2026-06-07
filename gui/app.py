@@ -258,6 +258,28 @@ class MainWindow(QMainWindow):
         self.experimental_btn.toggled.connect(self._toggle_experimental)
         lang_bar.addWidget(self.experimental_btn)
 
+        # TensorBoard lives next to the experimental toggle because the run list
+        # is shared across every method (standard + experimental) — a single
+        # global view rather than a per-tab-set duplicate. Toggling it on swaps
+        # the whole tab area for the TensorBoard panel; toggling off returns to
+        # whichever set the experimental button currently selects.
+        self.tensorboard_btn = QPushButton(t("tab_tensorboard"))
+        self.tensorboard_btn.setCheckable(True)
+        self._tensorboard_idle_style = (
+            "QPushButton { background:#2471a3; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #2471a3; "
+            "border-radius:3px; }"
+            "QPushButton:hover { background:#2e86c1; }"
+        )
+        self._tensorboard_active_style = (
+            "QPushButton { background:#117864; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #117864; "
+            "border-radius:3px; }"
+            "QPushButton:hover { background:#148f77; }"
+        )
+        self.tensorboard_btn.toggled.connect(self._toggle_tensorboard)
+        lang_bar.addWidget(self.tensorboard_btn)
+
         lang_bar.addStretch()
         lang_bar.addWidget(QLabel(t("language")))
         self.lang_combo = QComboBox()
@@ -278,11 +300,14 @@ class MainWindow(QMainWindow):
         # a low-VRAM sibling), HydraLoRA, and ReFT. Postfix and the
         # image-conditioning adapters (IP-Adapter / EasyControl) live behind
         # the experimental toggle.
-        self.tabs = QTabWidget()
-        # The TensorBoard runs panel sits on its own dedicated tab (no longer
-        # pinned to the bottom of ConfigTab). ConfigTab keeps a reference so it
-        # can still sync the log dir on variant switch / launch / run_start.
+        # The TensorBoard runs panel is a single shared instance (the run list
+        # is method-agnostic). It's reached via the top-bar TensorBoard toggle
+        # rather than a tab in each set. Both ConfigTab and MethodsTab keep a
+        # reference to its `.panel` so either can sync the log dir on variant
+        # switch / launch / run_start.
         self._tb_tab = TensorBoardTab()
+
+        self.tabs = QTabWidget()
         self.tabs.addTab(
             ConfigTab(
                 methods=["lora", "tlora", "hydralora", "reft"],
@@ -293,7 +318,6 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
-        self.tabs.addTab(self._tb_tab, t("tab_tensorboard"))
 
         # Experimental set: a unified Methods picker + image-conditioning
         # adapters. MethodsTab folds every trainable experimental method behind
@@ -302,23 +326,21 @@ class MainWindow(QMainWindow):
         # need a tab each. IP-Adapter and EasyControl have their own
         # preprocess/dataset lifecycles, so they keep dedicated tabs.
         self.experimental_tabs = QTabWidget()
-        # Experimental set gets its own TensorBoard tab (separate instance — a
-        # widget can't live in two tab bars) wired to MethodsTab's editor.
-        self._tb_tab_exp = TensorBoardTab()
         self.experimental_tabs.addTab(
-            MethodsTab(tb_panel=self._tb_tab_exp.panel), t("tab_methods")
+            MethodsTab(tb_panel=self._tb_tab.panel), t("tab_methods")
         )
         self.experimental_tabs.addTab(IPAdapterTab(), t("tab_ip_adapter"))
         self.experimental_tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
-        self.experimental_tabs.addTab(self._tb_tab_exp, t("tab_tensorboard"))
 
         self.tab_stack = QStackedWidget()
         self.tab_stack.addWidget(self.tabs)
         self.tab_stack.addWidget(self.experimental_tabs)
+        self.tab_stack.addWidget(self._tb_tab)
         main_lay.addWidget(self.tab_stack)
         self.setCentralWidget(central)
 
         self._update_experimental_btn_style(False)
+        self._update_tensorboard_btn_style(False)
 
     def closeEvent(self, event):
         # Without this, closing the window leaves training subprocesses
@@ -328,6 +350,8 @@ class MainWindow(QMainWindow):
                 cleanup = getattr(tabs.widget(i), "cleanup_subprocess", None)
                 if callable(cleanup):
                     cleanup()
+        # The shared TensorBoard tab lives in the stack, not a tab set above.
+        self._tb_tab.cleanup_subprocess()
         super().closeEvent(event)
 
     def _show_update_available(self, latest_tag: str) -> None:
@@ -340,12 +364,38 @@ class MainWindow(QMainWindow):
         )
 
     def _toggle_experimental(self, on: bool):
+        # Switching method set implies leaving the TensorBoard view; drop its
+        # toggle so the stack lands on the chosen tab set rather than staying on
+        # TensorBoard (the setChecked(False) re-runs _toggle_tensorboard, but the
+        # explicit setCurrentWidget below has the final say).
+        if self.tensorboard_btn.isChecked():
+            self.tensorboard_btn.blockSignals(True)
+            self.tensorboard_btn.setChecked(False)
+            self.tensorboard_btn.blockSignals(False)
+            self._update_tensorboard_btn_style(False)
         self.tab_stack.setCurrentWidget(self.experimental_tabs if on else self.tabs)
         self._update_experimental_btn_style(on)
 
     def _update_experimental_btn_style(self, on: bool):
         self.experimental_btn.setStyleSheet(
             self._experimental_active_style if on else self._experimental_idle_style
+        )
+
+    def _toggle_tensorboard(self, on: bool):
+        if on:
+            self.tab_stack.setCurrentWidget(self._tb_tab)
+        else:
+            # Return to whichever method set the experimental toggle selects.
+            self.tab_stack.setCurrentWidget(
+                self.experimental_tabs
+                if self.experimental_btn.isChecked()
+                else self.tabs
+            )
+        self._update_tensorboard_btn_style(on)
+
+    def _update_tensorboard_btn_style(self, on: bool):
+        self.tensorboard_btn.setStyleSheet(
+            self._tensorboard_active_style if on else self._tensorboard_idle_style
         )
 
     def _open_guidebook(self):

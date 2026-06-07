@@ -406,4 +406,5 @@ STRINGS: dict[str, str] = {
     "tb_open_current": "現在の学習を表示",
     "tb_open_current_tip": "進行中の学習実行のみを TensorBoard で開きます。",
     "tb_open_current_idle_tip": "学習が進行中のときに使用できます。",
+    "tb_appear_hint": "実行がリストに表示されない場合は、TensorBoard の再読み込み（アップデート）ボタンを押してみてください。",
 }

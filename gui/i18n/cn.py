@@ -397,4 +397,5 @@ STRINGS: dict[str, str] = {
     "tb_open_current": "查看当前训练",
     "tb_open_current_tip": "仅打开正在进行的训练运行的 TensorBoard。",
     "tb_open_current_idle_tip": "训练进行中时可用。",
+    "tb_appear_hint": "如果运行未显示在列表中，请尝试点击 TensorBoard 的刷新（更新）按钮。",
 }

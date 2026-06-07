@@ -85,15 +85,20 @@ class TensorBoardManager:
 class _RunRow(QWidget):
     """One row: run name label + View + Remove buttons."""
 
-    def __init__(self, run_dir: Path, is_current: bool, parent=None) -> None:
+    def __init__(
+        self, run_dir: Path, label: str, is_current: bool, parent=None
+    ) -> None:
         super().__init__(parent)
         self.run_dir = run_dir
+        # Display label may be a nested relative path (e.g. "turbo/20260607-…")
+        # rather than just the leaf name, so keep it separate from run_dir.name.
+        self._label_text = label
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(4, 2, 4, 2)
         lay.setSpacing(6)
 
-        self.label = QLabel(run_dir.name)
+        self.label = QLabel(label)
         self.label.setWordWrap(False)
         self._set_current_style(is_current)
         lay.addWidget(self.label, 1)
@@ -113,12 +118,11 @@ class _RunRow(QWidget):
         if is_current:
             self.label.setStyleSheet("font-weight:bold;color:#27ae60;")
             suffix = t("tb_current_run_label")
-            name = self.run_dir.name
             if not self.label.text().endswith(suffix):
-                self.label.setText(name + suffix)
+                self.label.setText(self._label_text + suffix)
         else:
             self.label.setStyleSheet("")
-            self.label.setText(self.run_dir.name)
+            self.label.setText(self._label_text)
 
     def mark_current(self, is_current: bool) -> None:
         self._set_current_style(is_current)
@@ -198,6 +202,15 @@ class TensorBoardPanel(QGroupBox):
 
         outer.addLayout(btn_bar)
 
+        # Complementary hint shown only while a run is live (i.e. when the
+        # current-run button is activated) — reminds the user to hit the reload
+        # button if the run hasn't surfaced in TensorBoard yet. Hidden when idle.
+        self._hint_label = QLabel(t("tb_appear_hint"))
+        self._hint_label.setStyleSheet("color:#27ae60;font-size:11px;padding:2px;")
+        self._hint_label.setWordWrap(True)
+        self._hint_label.setVisible(False)
+        outer.addWidget(self._hint_label)
+
         # Periodically refresh the list while visible (catches new runs from
         # daemon-started training that the GUI never directly launched).
         self._refresh_timer = QTimer(self)
@@ -253,6 +266,7 @@ class TensorBoardPanel(QGroupBox):
         """Highlight + enable the current-run button only while a run is live."""
         live = self._training_active and self._current_run_path is not None
         self._current_btn.setEnabled(live)
+        self._hint_label.setVisible(live)
         if live:
             # Pulsing-green primary look so it stands out during training.
             self._current_btn.setStyleSheet(
@@ -263,47 +277,96 @@ class TensorBoardPanel(QGroupBox):
             self._current_btn.setStyleSheet("color:#888;padding:4px 14px;")
             self._current_btn.setToolTip(t("tb_open_current_idle_tip"))
 
+    def _find_run_dirs(self, base: Path, max_depth: int = 3) -> list[Path]:
+        """Collect every directory under *base* that actually holds TensorBoard
+        event files, descending a few levels so nested layouts surface as
+        individual runs. Turbo writes to ``output/logs/turbo/<run>`` (one level
+        deeper than plain training's ``output/logs/<run>``), so a flat
+        ``iterdir`` only ever saw a single ``turbo`` row instead of its runs.
+        A dir that holds events is treated as a leaf run and not descended into.
+        """
+        found: list[Path] = []
+
+        def walk(d: Path, depth: int) -> None:
+            try:
+                entries = list(d.iterdir())
+            except OSError:
+                return
+            if any(
+                e.name.startswith("events.out.tfevents") and e.is_file()
+                for e in entries
+            ):
+                found.append(d)
+                return
+            if depth >= max_depth:
+                return
+            for e in entries:
+                if e.is_dir():
+                    walk(e, depth + 1)
+
+        walk(base, 0)
+        return found
+
+    def _is_current(self, d: Path) -> bool:
+        """True when *d* is the live training run, matching by resolved path
+        (robust to nesting / relative-vs-absolute) and falling back to name."""
+        if self._current_run_path is not None:
+            try:
+                if d.resolve() == self._current_run_path.resolve():
+                    return True
+            except OSError:
+                pass
+        return self._current_run_name is not None and d.name == self._current_run_name
+
     def _refresh_runs(self) -> None:
         if self._log_dir is None or not self._log_dir.exists():
             return
 
         try:
             dirs = sorted(
-                [d for d in self._log_dir.iterdir() if d.is_dir()],
+                self._find_run_dirs(self._log_dir),
                 key=lambda d: d.stat().st_mtime,
                 reverse=True,
             )
         except OSError:
             return
 
-        existing_names = {d.name for d in dirs}
+        # Rows are keyed by full path string — nested runs in different
+        # subfolders can share a leaf name (e.g. timestamps), so name alone
+        # isn't unique.
+        existing_keys = {str(d) for d in dirs}
 
         # Remove stale rows
         for row in list(self._rows):
-            if row.run_dir.name not in existing_names:
+            if str(row.run_dir) not in existing_keys:
                 self._rows.remove(row)
                 self._inner_lay.removeWidget(row)
                 row.deleteLater()
 
-        known_names = {row.run_dir.name for row in self._rows}
+        known_keys = {str(row.run_dir) for row in self._rows}
 
         # Add new rows (newest-first — insert before existing rows)
         insert_pos = 0
         for d in dirs:
-            if d.name not in known_names:
-                is_current = d.name == self._current_run_name
-                row = _RunRow(d, is_current, self._inner)
+            if str(d) not in known_keys:
+                # Label nested runs by their path relative to the log dir
+                # ("turbo/20260607-…"); top-level runs keep just their name.
+                try:
+                    label = d.relative_to(self._log_dir).as_posix()
+                except ValueError:
+                    label = d.name
+                row = _RunRow(d, label, self._is_current(d), self._inner)
                 row.view_btn.clicked.connect(lambda _, r=row: self._launch(r.run_dir))
                 row.remove_btn.clicked.connect(lambda _, r=row: self._remove_run(r))
                 self._rows.insert(insert_pos, row)
                 # Insert before the stretch (last item) and any existing rows
                 self._inner_lay.insertWidget(insert_pos, row)
-                known_names.add(d.name)
+                known_keys.add(str(d))
                 insert_pos += 1
 
         # Update current highlighting on existing rows
         for row in self._rows:
-            row.mark_current(row.run_dir.name == self._current_run_name)
+            row.mark_current(self._is_current(row.run_dir))
 
         # Toggle the empty-state label
         has_rows = bool(self._rows)
