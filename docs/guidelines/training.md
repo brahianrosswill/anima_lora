@@ -16,6 +16,11 @@ make print-config METHOD=lora PRESET=default   # dump the merged config
 
 Run `ls configs/gui-methods/` for the live variant list.
 
+For a key-by-key reference of the bottom layer — model paths, the noise
+schedule, caching, compile, and every memory knob — see
+[`base-config.md`](base-config.md). This doc focuses on **method/variant
+selection** and the training-specific options on top of that base.
+
 ## LoRA family — the three-axis surface
 
 `configs/methods/lora.toml` covers LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA /

@@ -545,8 +545,9 @@ make update -- --dry-run # Preview which files would change
 
 ## Further Reading
 
+- [`docs/guidelines/base-config.md`](base-config.md) — `base.toml` key-by-key reference (model paths, noise schedule, caching, compile, memory knobs, the dataset blueprint)
 - [`docs/guidelines/training.md`](training.md) — Adapter variants, caption shuffling, masked loss, dataset config details
-- [`docs/guidelines/inference.md`](inference.md) — Inference flags, DCW, Spectrum, prompt file format
+- [`docs/guidelines/inference.md`](inference.md) — Inference workflows, flags, DCW, Spectrum, prompt file format
 - [`docs/guidelines/difference_between_comfy.md`](difference_between_comfy.md) — Implementation differences between anima_lora and ComfyUI core
 - [`docs/methods/timestep_mask.md`](../methods/timestep_mask.md) — T-LoRA timestep mask
 - [`docs/methods/psoft-integrated-ortholora.md`](../methods/psoft-integrated-ortholora.md) — OrthoLoRA details (the orthogonal rotation part of the recommended `tlora` variant)
