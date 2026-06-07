@@ -7,6 +7,7 @@ vae = "models/vae/qwen_image_vae.safetensors"
 output_dir = "output/ckpt"
 output_name = "anima_lora"
 save_model_as = "safetensors"
+logging_dir = "output/logs"
 
 network_module = "networks.lora_anima"
 network_train_unet_only = true

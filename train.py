@@ -66,6 +66,7 @@ from library.runtime.accelerator import (
     patch_accelerator_for_fp16_training,
     prepare_accelerator,
     prepare_dtype,
+    resolve_run_log_dir,
     resume_from_local_or_hf_if_specified,
 )
 from library.training import (
@@ -2341,6 +2342,7 @@ class AnimaTrainer:
                     total_steps=args.max_train_steps,
                     total_epochs=num_train_epochs,
                     pid=os.getpid(),
+                    log_dir=resolve_run_log_dir(args),
                 )
 
         if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
@@ -2529,7 +2531,27 @@ class AnimaTrainer:
             saver.cleanup_resumable()
             saver.save_final(network, loop_state.global_step, num_train_epochs)
 
+        # Remove the TensorBoard log dir for runs shorter than 2 steps — they
+        # add noise to the runs list (e.g. aborted starts, dry-runs) and carry
+        # no useful loss curves.
+        if is_main_process and loop_state.global_step < 2:
+            _cleanup_short_log_dir(args)
+
     # endregion
+
+
+def _cleanup_short_log_dir(args) -> None:
+    """Delete the TensorBoard log dir when a run completed fewer than 2 steps."""
+    import shutil
+
+    log_dir = resolve_run_log_dir(args)
+    if log_dir is None:
+        return
+    try:
+        if os.path.isdir(log_dir):
+            shutil.rmtree(log_dir)
+    except Exception as e:
+        print(f"warn: could not remove short-run log dir {log_dir}: {e}", file=sys.stderr)
 
 
 def setup_parser() -> argparse.ArgumentParser:

@@ -155,12 +155,13 @@ class JsonlProgressReader:
         # in the stdout handler, suppress tqdm bar updates while active.
     """
 
-    def __init__(self, bar: QProgressBar) -> None:
+    def __init__(self, bar: QProgressBar, *, on_run_start=None) -> None:
         self._bar = bar
         self._path: str | None = None
         self._pos = 0
         self._total_steps = 0
         self._active = False
+        self._on_run_start = on_run_start
         # (anchor_ts, anchor_step) seeded from the first step event. Uses the
         # event's embedded ``ts`` (seconds since run start), not wall-clock —
         # see ``_rate`` for why that matters on GUI re-attach.
@@ -216,6 +217,11 @@ class JsonlProgressReader:
             self._bar.setValue(0)
             self._bar.setFormat("starting…")
             self._bar.setVisible(True)
+            if self._on_run_start is not None:
+                try:
+                    self._on_run_start(ev)
+                except Exception:
+                    pass
         elif kind == "step":
             self._active = True
             self._update_bar(int(ev.get("global_step") or 0), ev.get("ts"))

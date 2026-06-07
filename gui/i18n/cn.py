@@ -364,4 +364,14 @@ STRINGS: dict[str, str] = {
     "browse": "浏览……",
     # Multi-scale target_res tiers
     "target_res_danger_tooltip": "高开销档位：{edge}px 每张图像约使用 {tokens} 个 token，并额外增加一张已编译的块图（编译更慢、显存更高）。仅在确实需要该分辨率时才启用。",
+    # TensorBoard panel
+    "tb_panel_title": "TensorBoard 运行列表",
+    "tb_open": "打开 TensorBoard",
+    "tb_stop": "停止服务器",
+    "tb_remove": "删除",
+    "tb_no_runs": "暂无运行记录，开始训练后列表将自动填充。",
+    "tb_status_running": "正在端口 {port} 上运行",
+    "tb_status_stopped": "",
+    "tb_not_installed": "未安装 tensorboard，请运行: pip install tensorboard",
+    "tb_current_run_label": "（当前）",
 }

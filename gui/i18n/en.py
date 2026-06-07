@@ -387,4 +387,14 @@ STRINGS: dict[str, str] = {
     "browse": "Browse…",
     # Multi-scale target_res tiers
     "target_res_danger_tooltip": "Heavy tier: {edge}px runs ~{tokens} tokens per image and adds an extra compiled block graph (slower compile, higher VRAM). Only enable if you actually need this resolution.",
+    # TensorBoard panel
+    "tb_panel_title": "TensorBoard Runs",
+    "tb_open": "Open TensorBoard",
+    "tb_stop": "Stop Server",
+    "tb_remove": "Remove",
+    "tb_no_runs": "No runs yet — start training to populate this list.",
+    "tb_status_running": "Running on port {port}",
+    "tb_status_stopped": "",
+    "tb_not_installed": "tensorboard is not installed. Run: pip install tensorboard",
+    "tb_current_run_label": " (current)",
 }

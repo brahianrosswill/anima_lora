@@ -137,7 +137,14 @@ class ProgressSink:
 
     # region lifecycle events
 
-    def run_start(self, *, total_steps: int, total_epochs: int, pid: int) -> None:
+    def run_start(
+        self,
+        *,
+        total_steps: int,
+        total_epochs: int,
+        pid: int,
+        log_dir: Optional[str] = None,
+    ) -> None:
         """Open the file fresh (truncating any stale stream) and write the
         opening event."""
         if self._closed:
@@ -152,6 +159,7 @@ class ProgressSink:
             logger.debug("progress sink open failed: %s", exc)
             self._fh = None
             return
+        extra = {"log_dir": log_dir} if log_dir is not None else {}
         self._emit(
             "run_start",
             run=self._run,
@@ -160,6 +168,7 @@ class ProgressSink:
             total_steps=total_steps,
             total_epochs=total_epochs,
             pid=pid,
+            **extra,
         )
 
     def run_end(
