@@ -233,7 +233,7 @@ version (read with the STATUS box above):
 1. The base modulation and the steering delta **both** read the same
    `crossattn_emb.max(dim=1)` → `pooled_text_proj`. A tag that pushes the
    projected modulation along the steering axis gets that axis driven **twice**
-   in *projection geometry* (`docs/methods/mod-guidance.md`). **Whether this
+   in *projection geometry* (`docs/inference/mod-guidance.md`). **Whether this
    double-drive actually degrades the image was never measured — see STATUS.**
 2. The hazard is **directional overlap**, not string duplication. It must be
    measured *in context* (max-pool is non-additive), and an **artist tag drives

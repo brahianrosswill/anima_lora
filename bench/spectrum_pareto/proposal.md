@@ -346,7 +346,7 @@ This proposal is based on static review of:
 - `_archive/bench/spectrum/analyze_drift.py`
 - `_archive/bench/spectrum/replay_forecaster.py`
 - `_archive/bench/spectrum/results/20260524-2031-faithful-samplers/`
-- `docs/methods/spectrum.md`
+- `docs/inference/spectrum.md`
 - `networks/spectrum.py`
 - `library/inference/generation.py`
 - `library/inference/sampling.py`

@@ -57,7 +57,7 @@ The bench measurement (`bench/smc_cfg/measure_error_magnitude.py`, summary in `a
 
 The α-adaptive form `k_t = α · mean(|e_t|)` keeps the controller in-band by construction — it scales with the natural magnitude of the residual the controller is operating on. α=0.2 (the production default) puts the correction at ~20% of the average residual magnitude per step, which is enough to clamp small-|e| noise without disturbing large-|e| structure.
 
-![controller budget vs signal envelope at CFG=4](img/smc_cfg_controller_budget.png)
+![controller budget vs signal envelope at CFG=4](../methods/img/smc_cfg_controller_budget.png)
 
 The top panel makes the instantaneous mismatch visible: in the σ ≈ 0.2–0.4 plateau the signal envelope drops to `|e_t|.mean ≈ 0.02`, while paper-k = 0.1 sits an order of magnitude above it. The bottom panel integrates that mismatch across the 28-step Euler schedule using the SMC switching term's per-voxel L1 contribution `Σ |Δσ_t| · w · |Δe_t|`:
 

@@ -129,17 +129,17 @@ python inference.py … --lora_weight turbo.safetensors --infer_steps 2 --guidan
 ### Go faster (training-free)
 | Goal | Flag | Notes |
 |---|---|---|
-| Skip blocks on cached steps | `--spectrum` | Chebyshev feature forecasting. See [`../methods/spectrum.md`](../methods/spectrum.md). |
+| Skip blocks on cached steps | `--spectrum` | Chebyshev feature forecasting. See [`../inference/spectrum.md`](../inference/spectrum.md). |
 | Compile the DiT | `--compile` / `--compile_blocks` | `torch.compile` speedup; first run pays the trace cost. |
 | Lower-VRAM text encoder | `--text_encoder_cpu` | Keeps the TE on CPU. |
 
 ### Improve quality (training-free corrections)
 | Goal | Flag | Notes |
 |---|---|---|
-| SNR-t bias correction | `--dcw` (scalar) / `--dcw_calibrator` (v4) | Composes with everything. ⚠️ **bias sign is (CFG × aspect)-dependent** — see §4. [`../methods/dcw.md`](../methods/dcw.md) |
-| Sliding-mode CFG | `--smc_cfg` | α-adaptive velocity-space correction (λ=5, α=0.2). [`../methods/smc_cfg.md`](../methods/smc_cfg.md) |
-| SDE noise recoloring | `--cns` | **`--sampler er_sde` only** (no-op on euler/lcm). [`../methods/cns.md`](../methods/cns.md) |
-| Text-conditioned AdaLN steer | `--pooled_text_proj` + `--mod_w` | Modulation guidance (global tone, not content). [`../methods/mod-guidance.md`](../methods/mod-guidance.md) |
+| SNR-t bias correction | `--dcw` (scalar) / `--dcw_calibrator` (v4) | Composes with everything. ⚠️ **bias sign is (CFG × aspect)-dependent** — see §4. [`../inference/dcw.md`](../inference/dcw.md) |
+| Sliding-mode CFG | `--smc_cfg` | α-adaptive velocity-space correction (λ=5, α=0.2). [`../inference/smc_cfg.md`](../inference/smc_cfg.md) |
+| SDE noise recoloring | `--cns` | **`--sampler er_sde` only** (no-op on euler/lcm). [`../inference/cns.md`](../inference/cns.md) |
+| Text-conditioned AdaLN steer | `--pooled_text_proj` + `--mod_w` | Modulation guidance (global tone, not content). [`../inference/mod-guidance.md`](../inference/mod-guidance.md) |
 
 ### Condition on a reference image
 | Goal | Flags |

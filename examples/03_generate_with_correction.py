@@ -14,7 +14,7 @@ both are training-free):
 
   * **dcw**      — SNR-t bias correction at the post-step boundary. `--dcw`
                    turns it on; `--dcw_lambda` is the scaler (negative on Anima —
-                   see docs/methods/dcw.md). Negligible overhead.
+                   see docs/inference/dcw.md). Negligible overhead.
   * **spectrum** — Chebyshev feature-forecasting acceleration. `--spectrum`
                    turns it on; cached steps skip the transformer blocks.
                    `--spectrum_warmup` is the full-forward warmup count.

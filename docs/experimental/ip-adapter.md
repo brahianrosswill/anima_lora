@@ -4,7 +4,7 @@ Decoupled image cross-attention. A reference image is encoded by a frozen vision
 
 DiT is **frozen** — only the resampler and the per-block KV projections train. ~150M trainable params total at the default config (`K=16`, 28 blocks, hidden=2048).
 
-Companion: `postfix.md` (text-side input-space conditioning); `mod-guidance.md` (per-block AdaLN path). IP-Adapter is the only one of these that hooks DiT cross-attention via a parallel attention pass — postfix splices into the existing text K/V.
+Companion: `postfix.md` (text-side input-space conditioning); `../inference/mod-guidance.md` (per-block AdaLN path). IP-Adapter is the only one of these that hooks DiT cross-attention via a parallel attention pass — postfix splices into the existing text K/V.
 
 ---
 

@@ -2,7 +2,8 @@
 
 Index of the `docs/` tree. Each row is a one-line orientation; read the linked doc before working on the thing it describes.
 
-- **Methods** — shipped training/inference algorithms.
+- **Methods** — shipped training algorithms (adapter families).
+- **Inference** — training-free runtime stacks: acceleration + sampler-boundary corrections.
 - **Experimental** — wired and runnable, but not part of the default stack.
 - **Structure** — architecture walkthroughs (how a thing is built, not how to use it).
 - **Findings** — negative results and feasibility probes; methods evaluated and *not* adopted.
@@ -13,7 +14,7 @@ Index of the `docs/` tree. Each row is a one-line orientation; read the linked d
 
 ## Methods
 
-Training and inference algorithms.
+Shipped training algorithms — adapter families.
 
 | Doc | Description |
 |-----|-------------|
@@ -21,13 +22,21 @@ Training and inference algorithms.
 | [methods/hydra-lora.md](methods/hydra-lora.md) | HydraLoRA — MoE multi-head routing (shared-A experts), one cell of the three-axis routing surface in `configs/methods/lora.toml` |
 | [methods/timestep_mask.md](methods/timestep_mask.md) | T-LoRA — timestep-dependent rank masking (full rank at noise, rank 1 at clean) |
 | [methods/reft.md](methods/reft.md) | ReFT — block-level residual-stream intervention; composes additively with any LoRA variant |
-| [methods/channel_scaling.md](methods/channel_scaling.md) | Channel Scaling — SmoothQuant-style per-channel LoRA input pre-scaling (usage reference; motivation in `bench/channel_stats/`) |
-| [methods/mod-guidance.md](methods/mod-guidance.md) | Modulation guidance — text-conditioned AdaLN steering via distilled `pooled_text_proj` MLP |
-| [methods/invert.md](methods/invert.md) | Embedding inversion — optimize text embeddings (full and K-slot reference) |
-| [methods/spectrum.md](methods/spectrum.md) | Spectrum — training-free inference acceleration via Chebyshev feature forecasting |
-| [methods/dcw.md](methods/dcw.md) | DCW — training-free post-step SNR-t bias correction at the sampler boundary (scalar or v4 learnable) |
-| [methods/smc_cfg.md](methods/smc_cfg.md) | SMC-CFG — training-free α-adaptive sliding-mode CFG correction in velocity space |
-| [methods/cns.md](methods/cns.md) | CNS — training-free SDE noise recolorer (`er_sde` only); shapes injected noise toward unresolved frequency bands |
+
+## Inference
+
+Training-free runtime stacks — acceleration and sampler-boundary corrections. See [inference/](inference/) for the section index.
+
+| Doc | Description |
+|-----|-------------|
+| [inference/spectrum.md](inference/spectrum.md) | Spectrum — training-free inference acceleration via Chebyshev feature forecasting |
+| [inference/spd.md](inference/spd.md) | SPD — training-free multi-resolution inference (low-res early, spectral noise-expansion handoff); Case B fine-tune wired |
+| [inference/dcw.md](inference/dcw.md) | DCW — training-free post-step SNR-t bias correction at the sampler boundary (scalar or v4 learnable) |
+| [inference/smc_cfg.md](inference/smc_cfg.md) | SMC-CFG — training-free α-adaptive sliding-mode CFG correction in velocity space |
+| [inference/cns.md](inference/cns.md) | CNS — training-free SDE noise recolorer (`er_sde` only); shapes injected noise toward unresolved frequency bands |
+| [inference/mod-guidance.md](inference/mod-guidance.md) | Modulation guidance — text-conditioned AdaLN steering via distilled `pooled_text_proj` MLP |
+| [inference/channel_scaling.md](inference/channel_scaling.md) | Channel Scaling — SmoothQuant-style per-channel LoRA input pre-scaling (usage reference; motivation in `bench/channel_stats/`) |
+| [inference/invert.md](inference/invert.md) | Embedding inversion — optimize text embeddings (full and K-slot reference) |
 
 ## Experimental
 
@@ -40,7 +49,6 @@ Wired and runnable, but not part of the default stack — may break or change.
 | [experimental/easycontrol.md](experimental/easycontrol.md) | EasyControl — extended self-attn image conditioning; frozen DiT, per-block cond LoRA + scalar gate |
 | [experimental/soft_tokens.md](experimental/soft_tokens.md) | Soft Tokens — SoftREPA per-layer × per-t soft text tokens (~1M params); frozen DiT, optional B=1 contrastive |
 | [experimental/dpdmd.md](experimental/dpdmd.md) | DP-DMD (Turbo) — diversity-preserved few-step distillation of the CFG=4 teacher into an N-step LoRA student |
-| [experimental/spd.md](experimental/spd.md) | SPD — training-free multi-resolution inference (low-res early, spectral noise-expansion handoff); Case B fine-tune wired |
 | [experimental/directedit_editing_v3.md](experimental/directedit_editing_v3.md) | DirectEdit (v3) — flow-inversion image editing; what's actually wired and runnable |
 | [experimental/anima_tagger.md](experimental/anima_tagger.md) | Anima Tagger — multi-label tagger emitting Anima-format tag strings (DirectEdit ψ_src source) |
 | [experimental/vr_loss.md](experimental/vr_loss.md) | Variance-reduced FM loss — AsymFlow §5.2 control-variate correction at the loss level |

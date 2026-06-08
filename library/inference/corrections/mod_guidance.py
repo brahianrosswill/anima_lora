@@ -50,7 +50,7 @@ def build_mod_schedule(args: argparse.Namespace, num_blocks: int) -> List[float]
 
     Default flags reproduce the 'step_i8_skip27' ComfyUI preset -- protects
     tonal-DC blocks 0-7 and the compensation block 27, applying full w to 8-26.
-    See docs/methods/mod-guidance.md for rationale.
+    See docs/inference/mod-guidance.md for rationale.
     """
     w = float(args.mod_w)
     start = int(getattr(args, "mod_start_layer", 8))
@@ -84,7 +84,7 @@ def setup_mod_guidance(
     final_w     = --mod_final_w (applied at the final_layer only)
 
     At inference each block l receives `t_emb + schedule[l] * delta_unit`;
-    `final_layer` receives `t_emb + final_w * delta_unit`. See docs/methods/mod-guidance.md.
+    `final_layer` receives `t_emb + final_w * delta_unit`. See docs/inference/mod-guidance.md.
     """
     mod_w = args.mod_w
     mod_pos = args.mod_pos_prompt

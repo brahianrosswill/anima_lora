@@ -50,7 +50,7 @@ If Phase 1 fails after one rank bump, the proposal explicitly says kill it — d
 
 ### 3. DCW calibration
 
-DCW v4 (`make dcw` → `fusion_head.safetensors`) ships. The wall is calibration coverage: each released LoRA needs its own fusion head, and several v4 controller paths are stubbed. See [`docs/methods/dcw.md`](docs/methods/dcw.md) "Limitations / open questions".
+DCW v4 (`make dcw` → `fusion_head.safetensors`) ships. The wall is calibration coverage: each released LoRA needs its own fusion head, and several v4 controller paths are stubbed. See [`docs/inference/dcw.md`](docs/inference/dcw.md) "Limitations / open questions".
 
 - **σ̂² channel re-train (3-seed rerun).** Prototype fails Gate B on the variance head. Default is to ship with `--dcw_v4_disable_shrinkage` until this clears. Run `make dcw` across 3 independent seeds, retrain `train_fusion_head.py` with the combined pool, re-evaluate Gate B. If it still fails, document the failure and harden the disable flag as permanent. *[Tier 1.5 — bench script exists, the contribution is the seed sweep + write-up]*
 - **Tiled inference path.** v4 controller currently no-ops under tiled VAE/DiT. The single-tile `c_pool` / `g_obs` is ill-defined at tile boundaries. Two paths: (a) compute one global `c_pool` / `g_obs` before tiling and broadcast it across tiles, (b) keep the no-op and document. Either is a valid PR; (a) is preferred. *[Tier 1.5]*

@@ -551,9 +551,9 @@ make update -- --dry-run # Preview which files would change
 - [`docs/guidelines/difference_between_comfy.md`](difference_between_comfy.md) — Implementation differences between anima_lora and ComfyUI core
 - [`docs/methods/timestep_mask.md`](../methods/timestep_mask.md) — T-LoRA timestep mask
 - [`docs/methods/psoft-integrated-ortholora.md`](../methods/psoft-integrated-ortholora.md) — OrthoLoRA details (the orthogonal rotation part of the recommended `tlora` variant)
-- [`docs/methods/spectrum.md`](../methods/spectrum.md) — Spectrum acceleration: how it works and options
-- [`docs/methods/dcw.md`](../methods/dcw.md) — DCW (scalar + v4 learnable calibrator)
-- [`docs/methods/mod-guidance.md`](../methods/mod-guidance.md) — Modulation guidance
+- [`docs/inference/spectrum.md`](../inference/spectrum.md) — Spectrum acceleration: how it works and options
+- [`docs/inference/dcw.md`](../inference/dcw.md) — DCW (scalar + v4 learnable calibrator)
+- [`docs/inference/mod-guidance.md`](../inference/mod-guidance.md) — Modulation guidance
 - [`docs/methods/hydra-lora.md`](../methods/hydra-lora.md) — HydraLoRA multi-head routing
 - [`docs/methods/reft.md`](../methods/reft.md) — ReFT representation editing
 - [`docs/experimental/postfix.md`](../experimental/postfix.md) — Postfix (cond+ortho)

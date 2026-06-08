@@ -126,16 +126,12 @@ The DiT forward (and `PatchEmbed`, which `assert x.dim() == 5`) takes a **5D** l
 
 ## Methods
 
-Each method has a deep-dive doc; the prose below is one-line orientation plus the load-bearing gotcha. Read the doc before working on one.
+Adapter families (training methods) below — one-line orientation plus the load-bearing gotcha; read the linked deep-dive before working on one.
+
+**Training-free inference stacks** (Spectrum, SPD, DCW, SMC-CFG, CNS, mod-guidance, channel-scaling, embedding inversion) are documented separately under [`docs/inference/`](docs/inference/README.md) — read the relevant doc when you touch one rather than carrying their details here. They ride on the sampler boundary and compose with any checkpoint.
 
 | Method | What it is | Gotcha / pointer |
 |---|---|---|
-| **Spectrum** | Training-free speedup via Chebyshev feature forecasting (`--spectrum`). Cached steps skip all blocks; `final_layer` pre-hook captures outputs. | `docs/methods/spectrum.md` |
-| **SPD** | Training-free multi-resolution inference (`--spd`): early steps at low res, spectral noise-expansion handoff to full res. Sampler-level runner in `networks/spd.py`, registered like Spectrum. | v0 = Euler-only, no DCW/SMC/Spectrum compose, single-late `0.5→1.0 @ σ0.7` default. `docs/experimental/spd.md`; `bench/spd/plan.md` Phase 3, `docs/proposal/spd_finetune_lora.md` (Case B). |
-| **DCW** | Training-free SNR-t bias correction at the sampler boundary; composes with everything. Scalar (`--dcw`) or v4 learnable (`--dcw_v4 auto`). | **Bias direction is (CFG × aspect)-dependent** — shipped scalar `−0.015` is CFG=1-only and wrong-sign on CFG=4 non-square. `docs/methods/dcw.md` |
-| **SMC-CFG** | Training-free α-adaptive sliding-mode CFG correction in velocity space (λ=5, α=0.2). | Paper's fixed k was ~14× off; ships `sign()` only (tanh ε removed). `docs/methods/smc_cfg.md` |
-| **CNS** | Training-free SDE noise recolorer (`--sampler er_sde --cns auto`): per-step injected noise is `sqrt(1−γ)`-shaped toward unresolved freq bands, RMS-renormalized (zero-sum). | **er_sde-only** (no-op on euler/lcm); faithful to paper Alg. 1 — repo's divider/tilt/energy knobs are FID-chasing the paper ablates against. `docs/methods/cns.md` |
-| **Mod guidance** | Text-conditioned AdaLN via learned `pooled_text_proj` MLP, distilled with `make distill-mod`. | `docs/methods/mod-guidance.md` |
 | **DirectEdit + Anima Tagger** | Inversion + edit-conditioning swap; Tagger (`library/captioning/`) maps image → Anima-format tags for ψ_src. | Edit leverage collapses if ψ_src is off-manifold — verify with `exp-test-directedit-dry`. `docs/experimental/directedit_editing_v3.md`, `anima_tagger.md` |
 | **IP-Adapter** | Decoupled image cross-attention; frozen DiT, trains resampler + per-block `to_k_ip`/`to_v_ip`. Defaults to pre-cached PE features. | `docs/experimental/ip-adapter.md` |
 | **EasyControl** | Extended self-attn image conditioning; frozen DiT, per-block cond LoRA + scalar `b_cond` gate. Source `easycontrol-dataset/`. | `docs/experimental/easycontrol.md` |

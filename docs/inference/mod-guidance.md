@@ -38,7 +38,7 @@ pooled = crossattn_emb.max(dim=1).values   # (B, 1024)
 t_embedding_B_T_D = t_embedding_B_T_D + self.pooled_text_proj(pooled).unsqueeze(1)
 ```
 
-**Pooled text source** — max-pool from `crossattn_emb` (post-LLMAdapter), not raw Qwen3 outputs. The HydraLoRA routing analysis ([hydra-lora.md](hydra-lora.md)) empirically evaluated pooling strategies on this encoder with 1416 images across 37 artists:
+**Pooled text source** — max-pool from `crossattn_emb` (post-LLMAdapter), not raw Qwen3 outputs. The HydraLoRA routing analysis ([hydra-lora.md](../methods/hydra-lora.md)) empirically evaluated pooling strategies on this encoder with 1416 images across 37 artists:
 
 | Strategy | Source | KMeans NMI |
 |----------|--------|:---:|

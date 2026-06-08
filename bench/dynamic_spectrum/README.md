@@ -158,4 +158,4 @@ The mod-guidance head trained a small MLP with **pointwise MSE on a derivative**
 
 - Gatmiry, Chen, Salim. *High-accuracy and dimension-free sampling with diffusions.* arXiv:2601.10708 (2026). — the smoothness-in-time result.
 - Dockhorn, Vahdat, Kreis. *GENIE: Higher-Order Denoising Diffusion Solvers.* NeurIPS 2022. — distilling the score time-derivative for bigger steps.
-- `networks/spectrum.py`, `docs/methods/spectrum.md` — the fixed-cadence forecaster this would make adaptive.
+- `networks/spectrum.py`, `docs/inference/spectrum.md` — the fixed-cadence forecaster this would make adaptive.

@@ -513,7 +513,7 @@ class SPDTrainTab(_DistillConfigTab):
     # bespoke loop `make exp-spd` (scripts/distill_spd.py, NOT train.py), so it
     # has no dataset of its own. Output anima_spd*.safetensors is a normal LoRA —
     # infer with the SPD sampler at the trained schedule (`make exp-test-spd`).
-    # See docs/experimental/spd.md.
+    # See docs/inference/spd.md.
     CONFIG_PATH = "configs/methods/spd.toml"
     TRAIN_TASK = "exp-spd"
     METHOD_LABEL = "SPD"

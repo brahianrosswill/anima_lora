@@ -431,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dcw_lambda",
         type=float,
         default=-0.015,
-        help="DCW scaler λ. Default -0.015 (negative -- see docs/methods/dcw.md). "
+        help="DCW scaler λ. Default -0.015 (negative -- see docs/inference/dcw.md). "
         "Paper-positive values widen |gap| on Anima. Use λ ≈ -0.010 if you "
         "switch --dcw_band_mask to 'all'.",
     )
@@ -449,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="LL",
         help="Restrict DCW correction to a subset of Haar subbands. Default 'LL' "
         "(LL-only is strictly better than broadband on Anima -- see "
-        "docs/methods/dcw.md §LL-only correction). Format: 'LL', 'HH', "
+        "docs/inference/dcw.md §LL-only correction). Format: 'LL', 'HH', "
         "'LH+HL+HH', or 'all'.",
     )
 
@@ -482,7 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Δe = -k_t·sign(s), s = (e - e_prev) + λ·e_prev, k_t = α·mean(|e_t|).
     # No extra DiT forwards; one prev-step velocity-residual buffer. Composes
     # with --dcw / --spectrum / --mod_guidance (operates strictly on the
-    # velocity-space CFG combine). See docs/methods/smc_cfg.md.
+    # velocity-space CFG combine). See docs/inference/smc_cfg.md.
     parser.add_argument(
         "--smc_cfg",
         action="store_true",

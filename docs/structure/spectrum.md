@@ -52,7 +52,7 @@ def _spectrum_fast_forward(model, timesteps_B_T, predicted_feature):
     return model.unpatchify(x)
 ```
 
-That's it — `t_embedder` (a tiny MLP on the scalar timestep), `t_embedding_norm`, optional mod-guidance delta (`mod-guidance.md`), `final_layer` (LayerNorm + AdaLN + linear projection back to patch space), `unpatchify`. The 28 × `self_attn + cross_attn + MLP` stack — which is 99% of the model's FLOPs — is entirely bypassed. The predicted $h^\star$ goes straight into `final_layer` as if it had come from the block stack.
+That's it — `t_embedder` (a tiny MLP on the scalar timestep), `t_embedding_norm`, optional mod-guidance delta (`../inference/mod-guidance.md`), `final_layer` (LayerNorm + AdaLN + linear projection back to patch space), `unpatchify`. The 28 × `self_attn + cross_attn + MLP` stack — which is 99% of the model's FLOPs — is entirely bypassed. The predicted $h^\star$ goes straight into `final_layer` as if it had come from the block stack.
 
 ---
 

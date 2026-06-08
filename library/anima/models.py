@@ -1827,7 +1827,7 @@ class Anima(nn.Module):
         # so early tonal-DC blocks and the final compensation layer can be skipped.
         # Buffers are zeros when guidance is off (see __init__), so the arithmetic
         # below is an unconditional identity in that case — no Python branch.
-        # See docs/methods/mod-guidance.md for the rationale.
+        # See docs/inference/mod-guidance.md for the rationale.
 
         block_kwargs = {
             "rope_cos_sin": rope_cos_sin,

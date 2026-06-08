@@ -9,7 +9,7 @@
 network_dim = 32
 network_alpha = 32
 
-learning_rate = 2e-5
+learning_rate = 5e-5
 max_train_epochs = 4
 save_every_n_epochs = 2
 checkpointing_epochs = 2
