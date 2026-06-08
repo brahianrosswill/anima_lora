@@ -293,7 +293,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         metavar="EDGE",
         help=(
             "Multi-scale constant-token tiers the dataset was preprocessed with "
-            "(512 768 1024 1280 1536). Drives BOTH the training bucket table "
+            "(512 768 896 1024 1280 1536). Drives BOTH the training bucket table "
             "(union of these tiers — list every tier on disk or its caches get "
             "AR-snapped into a 1024 bucket and never loaded) and the torch.compile "
             "dynamo cache budget so multi-tier training does not recompile-storm. "

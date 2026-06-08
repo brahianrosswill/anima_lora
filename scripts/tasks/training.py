@@ -257,7 +257,17 @@ def _near_twins_preprocess(cfg: dict, base: str, extra) -> None:
     resized = pp.get("resized_dir", f"{base}/resized")
     cache = pp.get("cache_dir", f"{base}/cache")
     recursive = ["--recursive"] if pp.get("recursive", True) else []
-    target_res = pp.get("target_res", [1024])
+    # Bucket tiers: the descriptor's [preprocess].target_res wins, else fall back
+    # to base.toml's target_res (the same merged base→preset→method chain the main
+    # `make preprocess` reads) so this tracks the shared tier contract; final
+    # fallback [1024] keeps it working with no config at all.
+    target_res = pp.get("target_res")
+    if target_res is None:
+        from ._common import _path_overrides
+
+        target_res = _path_overrides().get("target_res", [1024])
+    if not isinstance(target_res, (list, tuple)):
+        target_res = [target_res]
     target_res_flag = (
         ["--target_res", *[str(e) for e in target_res]] if target_res else []
     )

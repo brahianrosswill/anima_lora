@@ -1,134 +1,24 @@
 #!/usr/bin/env python3
-"""near_twin outputs — HTML contact sheet, TSV, pair-tree export, dataset blueprint.
+"""near_twin outputs — pair-tree export + dataset blueprint.
 
-The rendering/materialization layer of the near-twin miner. Pure I/O over the
+The materialization layer of the near-twin miner. Pure I/O over the
 ``PairRecord``s produced by ``near_twin.engine`` — no matching logic lives here.
 The two training-shaped artifacts are the ``_tags`` / ``_no_tags`` pair tree
-(``export_pairs``) and the EasyControl dataset blueprint (``write_dataset_config``);
-HTML + TSV are curation-only.
+(``export_pairs``) and the EasyControl dataset blueprint (``write_dataset_config``).
 """
 
 from __future__ import annotations
 
-import base64
-import csv
-import html
-import io
 import shutil
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from .engine import (
-    Member,
     PairRecord,
     caption_text,
-    diff_bbox_norm,
-    read_tags,
 )
-
-
-def _thumb_b64(
-    member: Member, bbox: tuple[float, float, float, float] | None, size: int
-) -> str:
-    with Image.open(member.image_path) as im:
-        im = im.convert("RGB")
-        im.thumbnail((size, size), Image.BILINEAR)
-        if bbox and bbox[2] > bbox[0]:
-            d = ImageDraw.Draw(im)
-            w, h = im.size
-            d.rectangle(
-                [bbox[0] * w, bbox[1] * h, bbox[2] * w, bbox[3] * h],
-                outline=(255, 40, 40),
-                width=3,
-            )
-        buf = io.BytesIO()
-        im.save(buf, format="JPEG", quality=82)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def write_html(pairs: list[PairRecord], out_path: Path, thumb: int) -> None:
-    rows = []
-    for p in pairs:
-        bbox = diff_bbox_norm(p.match.diff_cells, p.match.G)
-        holder, clean = p.holder_member(), p.clean_member()
-        added = sorted((read_tags(holder.txt_path) - read_tags(clean.txt_path)))
-        removed = sorted((read_tags(clean.txt_path) - read_tags(holder.txt_path)))
-        h_img = _thumb_b64(holder, bbox, thumb)
-        c_img = _thumb_b64(clean, bbox, thumb)
-        rows.append(f"""
-        <div class="pair">
-          <div class="meta">
-            <b>{html.escape(p.artist)}</b> &nbsp; {html.escape(p.pair_id)}
-            &nbsp; {p.a.wh[0]}×{p.a.wh[1]}
-            &nbsp;|&nbsp; cos {p.cosine:.3f} &nbsp; match {p.match.match_frac:.2f}
-            &nbsp; extra-diff {p.verdict.n_extra_diff}
-            &nbsp; holder=<b>{html.escape(holder.stem)}</b>
-          </div>
-          <div class="imgs">
-            <figure><img src="data:image/jpeg;base64,{h_img}"><figcaption>_tags ({html.escape(holder.stem)})</figcaption></figure>
-            <figure><img src="data:image/jpeg;base64,{c_img}"><figcaption>_no_tags ({html.escape(clean.stem)})</figcaption></figure>
-          </div>
-          <div class="tags">
-            <span class="add">+ {html.escape(", ".join(added) or "—")}</span><br>
-            <span class="rem">− {html.escape(", ".join(removed) or "—")}</span>
-          </div>
-        </div>""")
-    doc = f"""<!doctype html><meta charset="utf-8"><title>near-twin pairs</title>
-<style>
-body{{font:13px/1.4 system-ui,sans-serif;background:#111;color:#ddd;margin:0;padding:16px}}
-h1{{font-size:18px}}
-.pair{{border:1px solid #333;border-radius:8px;padding:10px;margin:10px 0;background:#181818}}
-.meta{{color:#9cf;margin-bottom:6px}}
-.imgs{{display:flex;gap:10px}}
-figure{{margin:0}} img{{max-width:{thumb}px;border:1px solid #333;border-radius:4px}}
-figcaption{{color:#888;font-size:11px}}
-.tags{{margin-top:6px;font-size:12px}}
-.add{{color:#7cdd7c}} .rem{{color:#dd7c7c}}
-</style>
-<h1>near-twin tag-gap pairs — {len(pairs)} accepted</h1>
-{"".join(rows)}
-"""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(doc, encoding="utf-8")
-
-
-def write_tsv(pairs: list[PairRecord], out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f, delimiter="\t")
-        w.writerow(
-            [
-                "artist",
-                "id_a",
-                "id_b",
-                "wh",
-                "cosine",
-                "match_frac",
-                "gap_holder",
-                "n_extra_diff",
-                "extra_diff_tags",
-                "diff_bbox",
-            ]
-        )
-        for p in pairs:
-            x, y = p.ids
-            bbox = diff_bbox_norm(p.match.diff_cells, p.match.G)
-            w.writerow(
-                [
-                    p.artist,
-                    x,
-                    y,
-                    f"{p.a.wh[0]}x{p.a.wh[1]}",
-                    f"{p.cosine:.4f}",
-                    f"{p.match.match_frac:.3f}",
-                    p.holder_member().stem,
-                    p.verdict.n_extra_diff,
-                    "|".join(p.verdict.extra_diff_tags),
-                    ",".join(f"{v:.3f}" for v in bbox),
-                ]
-            )
 
 
 def _materialize_one(src: Path, dst: Path, copy: bool) -> None:

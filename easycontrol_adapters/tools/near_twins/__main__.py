@@ -37,23 +37,23 @@ Pipeline (see ``docs/proposal/near_twins_tag_gap_miner.md`` for the full design)
 5. **Discriminator** (``--tag`` / ``--tag-any`` / ``--region`` / ``--signal``):
    keep pairs where the attribute is present in **exactly one** member.
 6. **Rank by edit-cleanliness**: fewest *other* differences first.
-7. **Output**: HTML contact sheet + TSV (curation-only) and a materialized
-   ``_tags`` / ``_no_tags`` pair tree (the only training-shaped output), plus a
-   ready-to-use EasyControl dataset config under ``configs/easycontrol/``.
+7. **Output**: a materialized ``_tags`` / ``_no_tags`` pair tree (the
+   training-shaped output), plus a ready-to-use EasyControl dataset config
+   under ``configs/easycontrol/``.
 
 Run from the repo root::
 
     python -m easycontrol_adapters.tools.near_twins \
         --tag-any "speech bubble,thought bubble,blank speech bubble" \
-        --artists ama_mitsuki --out output/near_twins/pairs.html
+        --artists ama_mitsuki
 
     # tagless visual attribute (recommended for bubbles on an untagged tree):
     python -m easycontrol_adapters.tools.near_twin --region \
-        --artists ama_mitsuki --out output/near_twins/pairs.html
+        --artists ama_mitsuki
 
-Features are cached, so the intended loop is: run → open the HTML → adjust
-``--sim-min`` / ``--match-frac-min`` / ``--cell-match-min`` / ``--max-extra-diff``
-→ re-run (seconds).
+Features are cached, so the intended loop is: run → inspect the exported pair
+tree → adjust ``--sim-min`` / ``--match-frac-min`` / ``--cell-match-min`` /
+``--max-extra-diff`` → re-run (seconds).
 
 Algorithm core lives in ``near_twin.engine``; rendering/export in
 ``near_twin.outputs``. This module holds the ``[staging]`` config layering, the
@@ -90,7 +90,7 @@ from .engine import (
     prune_for_pairing,
     run_artist,
 )
-from .outputs import export_pairs, write_dataset_config, write_html, write_tsv
+from .outputs import export_pairs, write_dataset_config
 
 
 # ---------------------------------------------------------------------------- config ([staging])
@@ -294,11 +294,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     p.add_argument(
-        "--out",
-        default="output/near_twins/pairs.html",
-        help="HTML contact sheet (TSV written alongside)",
-    )
-    p.add_argument(
         "--export-dir",
         default="post_image_dataset/easycontrol/near_twins/staging",
         help="materialized _tags/_no_tags pair tree (empty string disables)",
@@ -403,13 +398,6 @@ def main(argv: list[str] | None = None) -> int:
 
     all_pairs.sort(key=lambda p: (p.verdict.n_extra_diff, -p.cosine))
     print(f"\n{len(all_pairs)} accepted pair(s) total", file=sys.stderr)
-
-    out_html = Path(args.out)
-    write_html(all_pairs, out_html, thumb=384)
-    out_tsv = out_html.with_suffix(".tsv")
-    write_tsv(all_pairs, out_tsv)
-    print(f"  HTML  → {out_html}", file=sys.stderr)
-    print(f"  TSV   → {out_tsv}", file=sys.stderr)
 
     if args.export_dir and all_pairs:
         export_dir = Path(args.export_dir)

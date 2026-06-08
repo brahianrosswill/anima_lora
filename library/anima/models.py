@@ -662,6 +662,102 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
 
         return result
 
+    def generate_embeddings_scaled(
+        self,
+        B_T_H_W_C: torch.Size,
+        h_scale: float = 1.0,
+        w_scale: float = 1.0,
+        fps: Optional[torch.Tensor] = None,
+        h_ntk_factor: Optional[float] = None,
+        w_ntk_factor: Optional[float] = None,
+        t_ntk_factor: Optional[float] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """RoPE (cos, sin) at *fractional* spatial positions (Position-Aware
+        Interpolation).
+
+        Identical to :meth:`generate_embeddings` except each spatial patch ``i``
+        sits at position ``i * h_scale`` (height) / ``i * w_scale`` (width)
+        instead of the integer index ``i``. Used by EasyControl to place a
+        *downscaled* condition's tokens back onto the full-resolution target's
+        coordinate grid: a cond grid of ``H_c`` patches representing a target
+        grid of ``H_t`` patches uses ``h_scale = H_t / H_c`` so cond patch ``i``
+        lands at ``i * H_t / H_c`` — spanning ``[0, H_t)`` aligned with target.
+
+        The frequencies are computed analytically (no table lookup on the
+        position value), so fractional positions are exact — this is the same
+        mechanism Anima already uses for fractional temporal positions under FPS
+        modulation. At ``h_scale == w_scale == 1.0`` this reduces bit-exactly to
+        :meth:`generate_embeddings` (``self.seq[:H] * 1.0 == self.seq[:H]``).
+
+        See EasyControl §3.3 (Position-Aware Interpolation), Eq. 11-12.
+        """
+        B, T, H, W, _ = B_T_H_W_C
+
+        _compiling = torch.compiler.is_compiling()
+        # Distinct cache key (scaled positions) so the integer-position cache is
+        # never aliased. Scales are floats → fold into the key tuple.
+        scaled_key = None
+        if not _compiling:
+            if h_ntk_factor is None and w_ntk_factor is None and t_ntk_factor is None:
+                fps_val = None if fps is None else fps[:1].item()
+                scaled_key = ("scaled", T, H, W, fps_val, float(h_scale), float(w_scale))
+                cached = self._cos_sin_cache.get(scaled_key)
+                if cached is not None:
+                    return cached
+
+        h_ntk_factor = h_ntk_factor if h_ntk_factor is not None else self.h_ntk_factor
+        w_ntk_factor = w_ntk_factor if w_ntk_factor is not None else self.w_ntk_factor
+        t_ntk_factor = t_ntk_factor if t_ntk_factor is not None else self.t_ntk_factor
+
+        h_theta = 10000.0 * h_ntk_factor
+        w_theta = 10000.0 * w_ntk_factor
+        t_theta = 10000.0 * t_ntk_factor
+
+        h_spatial_freqs = 1.0 / (h_theta**self.dim_spatial_range)
+        w_spatial_freqs = 1.0 / (w_theta**self.dim_spatial_range)
+        temporal_freqs = 1.0 / (t_theta**self.dim_temporal_range)
+
+        assert H <= self.max_h and W <= self.max_w, (
+            f"Input dimensions (H={H}, W={W}) exceed the maximum dimensions "
+            f"(max_h={self.max_h}, max_w={self.max_w})"
+        )
+        # Fractional spatial positions. The *value* range is bounded by the
+        # trained grid (max scaled position ≈ H_t-1 ≤ max_h), not by the slice.
+        h_pos = self.seq[:H] * float(h_scale)
+        w_pos = self.seq[:W] * float(w_scale)
+        half_emb_h = torch.outer(h_pos, h_spatial_freqs)
+        half_emb_w = torch.outer(w_pos, w_spatial_freqs)
+
+        # Temporal positions are unscaled (cond is a single frame, T=1).
+        if self.enable_fps_modulation and fps is not None:
+            half_emb_t = torch.outer(
+                self.seq[:T] / fps[:1] * self.base_fps, temporal_freqs
+            )
+        else:
+            half_emb_t = torch.outer(self.seq[:T], temporal_freqs)
+
+        em_T_H_W_D = torch.cat(
+            [
+                repeat(half_emb_t, "t d -> t h w d", h=H, w=W),
+                repeat(half_emb_h, "h d -> t h w d", t=T, w=W),
+                repeat(half_emb_w, "w d -> t h w d", t=T, h=H),
+            ]
+            * 2,
+            dim=-1,
+        )
+
+        freqs = em_T_H_W_D.flatten(0, 2).unsqueeze(1).unsqueeze(1).float()
+        result = (torch.cos(freqs), torch.sin(freqs))
+
+        if scaled_key is not None and (
+            h_ntk_factor == self.h_ntk_factor
+            and w_ntk_factor == self.w_ntk_factor
+            and t_ntk_factor == self.t_ntk_factor
+        ):
+            self._cos_sin_cache[scaled_key] = result
+
+        return result
+
     @property
     def seq_dim(self) -> int:
         return 0

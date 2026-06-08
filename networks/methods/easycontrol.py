@@ -89,6 +89,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from library.log import setup_logging
 from library.training.method_adapter import MethodAdapter, SetupCtx, StepCtx
+from networks.lora_modules.custom_autograd import lora_down_project
 from networks.methods.base import AdapterNetworkBase
 
 setup_logging()
@@ -104,6 +105,7 @@ DEFAULT_MLP_RATIO = 4.0
 DEFAULT_LORA_DIM = 16
 DEFAULT_LORA_ALPHA = 16
 DEFAULT_B_COND_INIT = -10.0
+DEFAULT_COND_RES_SCALE = 1.0  # 1.0 = native cond res (bit-exact to pre-PAI path)
 
 
 class _LoRAProj(nn.Module):
@@ -127,10 +129,20 @@ class _LoRAProj(nn.Module):
         # is exactly zero at step 0.
         nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_up.weight)
+        # When True, the fp32 down-projection saves the bf16 input and recomputes
+        # the cast in backward instead of retaining the fp32-cast activation —
+        # the dominant activation cost on the cond stream. Set by the owning
+        # EasyControlNetwork from the `use_custom_down_autograd` cfg knob.
+        self.use_custom_down_autograd = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # fp32 bottleneck for bf16 numerical stability (matches LoRAModule policy).
-        h = F.linear(x.float(), self.lora_down.weight.float())
+        if self.use_custom_down_autograd and self.training:
+            # Unscaled variant (no per-channel calibration here) — bitwise
+            # identical to F.linear(x.float(), w.float()) in forward.
+            h = lora_down_project(x, self.lora_down.weight, None)
+        else:
+            h = F.linear(x.float(), self.lora_down.weight.float())
         h = F.linear(h, self.lora_up.weight.float())
         return (h * self.scale).to(x.dtype)
 
@@ -154,6 +166,17 @@ def create_network(
     b_cond_init = float(kwargs.get("b_cond_init", DEFAULT_B_COND_INIT))
     cond_scale = float(kwargs.get("cond_scale", 1.0))
     apply_ffn_lora = bool(int(kwargs.get("apply_ffn_lora", 1)))
+    cond_res_scale = float(kwargs.get("cond_res_scale", DEFAULT_COND_RES_SCALE))
+
+    # Activation-memory lever: recompute the fp32 down-projection cast in
+    # backward instead of retaining it. Arrives as a string "true"/"false" via
+    # the TOML allowlist (networks/__init__.py SHARED_KWARG_FLAGS); also accept
+    # a real bool.
+    raw_cda = kwargs.get("use_custom_down_autograd", False)
+    if isinstance(raw_cda, str):
+        use_custom_down_autograd = raw_cda.strip().lower() == "true"
+    else:
+        use_custom_down_autograd = bool(raw_cda)
 
     num_blocks = (
         getattr(unet, "num_blocks", DEFAULT_NUM_BLOCKS)
@@ -182,7 +205,9 @@ def create_network(
         b_cond_init=b_cond_init,
         cond_scale=cond_scale,
         apply_ffn_lora=apply_ffn_lora,
+        cond_res_scale=cond_res_scale,
         multiplier=multiplier,
+        use_custom_down_autograd=use_custom_down_autograd,
     )
 
 
@@ -221,6 +246,10 @@ def create_network_from_weights(
     b_cond_init = float(metadata.get("ss_b_cond_init", DEFAULT_B_COND_INIT))
     cond_scale = float(kwargs.get("cond_scale") or metadata.get("ss_cond_scale", 1.0))
     apply_ffn_lora = bool(int(metadata.get("ss_apply_ffn_lora", 1)))
+    cond_res_scale = float(
+        kwargs.get("cond_res_scale")
+        or metadata.get("ss_cond_res_scale", DEFAULT_COND_RES_SCALE)
+    )
 
     network = EasyControlNetwork(
         num_blocks=num_blocks,
@@ -232,6 +261,7 @@ def create_network_from_weights(
         b_cond_init=b_cond_init,
         cond_scale=cond_scale,
         apply_ffn_lora=apply_ffn_lora,
+        cond_res_scale=cond_res_scale,
         multiplier=multiplier,
     )
     return network, weights_sd
@@ -253,7 +283,9 @@ class EasyControlNetwork(AdapterNetworkBase):
         b_cond_init: float,
         cond_scale: float,
         apply_ffn_lora: bool,
+        cond_res_scale: float = DEFAULT_COND_RES_SCALE,
         multiplier: float = 1.0,
+        use_custom_down_autograd: bool = False,
     ):
         super().__init__()
         if hidden_size % num_heads != 0:
@@ -271,7 +303,20 @@ class EasyControlNetwork(AdapterNetworkBase):
         self.b_cond_init = b_cond_init
         self.cond_scale = cond_scale
         self.apply_ffn_lora = apply_ffn_lora
+        # Position-Aware Interpolation downscale factor for the cond stream.
+        # 1.0 = native (bit-exact to the pre-PAI path). 0 < s < 1 downsamples
+        # the cond latent to ~s× per axis (fewer tokens → faster/cheaper) and
+        # rescales cond's RoPE positions back onto the target grid so spatial
+        # alignment survives. Values outside (0, 1] are clamped to 1.0.
+        if not (0.0 < cond_res_scale <= 1.0):
+            logger.warning(
+                f"EasyControl: cond_res_scale={cond_res_scale} outside (0, 1]; "
+                f"resetting to 1.0 (native cond resolution)."
+            )
+            cond_res_scale = 1.0
+        self.cond_res_scale = cond_res_scale
         self.multiplier = multiplier
+        self.use_custom_down_autograd = bool(use_custom_down_autograd)
 
         D = hidden_size
         r = cond_lora_dim
@@ -342,11 +387,23 @@ class EasyControlNetwork(AdapterNetworkBase):
         # this None — every step needs the cond LoRA's gradient.
         self._cond_kv_cache: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None
 
+        if self.use_custom_down_autograd:
+            n_hits = 0
+            for m in self.modules():
+                if isinstance(m, _LoRAProj):
+                    m.use_custom_down_autograd = True
+                    n_hits += 1
+            logger.info(
+                f"EasyControl: use_custom_down_autograd enabled on {n_hits} "
+                f"cond-LoRA projections"
+            )
+
         total = sum(p.numel() for p in self.parameters())
         logger.info(
             f"EasyControlNetwork: blocks={num_blocks}, hidden={hidden_size}/{num_heads}h, "
             f"r={cond_lora_dim} alpha={cond_lora_alpha}, ffn_lora={apply_ffn_lora}, "
             f"b_cond_init={b_cond_init}, cond_scale={cond_scale}, "
+            f"cond_res_scale={self.cond_res_scale}, "
             f"params={total / 1e6:.1f}M"
         )
 
@@ -443,6 +500,33 @@ class EasyControlNetwork(AdapterNetworkBase):
             )
 
         B, _, _, H, W = cond_latent.shape
+
+        # ---- Position-Aware Interpolation (cond-only downscale) ----
+        # When cond_res_scale < 1, downsample the cond latent (fewer tokens →
+        # cheaper cond self-attn + smaller KV cache) and rescale its RoPE
+        # positions back onto the *target* grid so spatial alignment survives.
+        # The target grid equals cond's full-resolution grid (cond is the same
+        # spatial size as the target for both ref==target and colorize), so we
+        # derive the rescale from the pre/post patch-grid sizes — no caller
+        # plumbing. At cond_res_scale == 1 this whole block is skipped and the
+        # path is bit-exact to the native-resolution behavior.
+        h_scale = w_scale = 1.0
+        if self.cond_res_scale < 1.0:
+            p = self._dit.patch_spatial
+            full_gh, full_gw = H // p, W // p  # target patch grid
+            new_H = max(p, int(round(H * self.cond_res_scale / p)) * p)
+            new_W = max(p, int(round(W * self.cond_res_scale / p)) * p)
+            if (new_H, new_W) != (H, W):
+                # area resampling = anti-aliased average pooling, the right
+                # filter for downsampling. Operate on the 4D spatial form.
+                cond_latent = F.interpolate(
+                    cond_latent.squeeze(2), size=(new_H, new_W), mode="area"
+                ).unsqueeze(2)
+                H, W = new_H, new_W
+                small_gh, small_gw = H // p, W // p
+                h_scale = full_gh / small_gh
+                w_scale = full_gw / small_gw
+
         if self._dit.concat_padding_mask and padding_mask is None:
             padding_mask = torch.ones(
                 B, 1, H, W, device=cond_latent.device, dtype=cond_latent.dtype
@@ -456,7 +540,18 @@ class EasyControlNetwork(AdapterNetworkBase):
             fps=None,
             padding_mask=padding_mask,
         )
-        # Flatten cond_x to [B, S_c, D] at cond's native token count.
+        # PAI: replace the native-position RoPE with positions rescaled onto the
+        # target grid (cond patch i → i * H_t/H_c). Reduces to the native rope
+        # at scale 1.0, but we only pay for it when actually downscaling.
+        if h_scale != 1.0 or w_scale != 1.0:
+            cond_rope = self._dit.pos_embedder.generate_embeddings_scaled(
+                cond_x_5d.shape,
+                h_scale=h_scale,
+                w_scale=w_scale,
+                fps=None,
+            )
+
+        # Flatten cond_x to [B, S_c, D] at cond's (possibly reduced) token count.
         cond_x = cond_x_5d.flatten(1, 3)
 
         return cond_x, cond_rope
@@ -568,12 +663,8 @@ class EasyControlNetwork(AdapterNetworkBase):
             attn = block.self_attn
             cond_lora_qkv = self.cond_lora_qkv[idx]
             cond_lora_o = self.cond_lora_o[idx]
-            cond_lora_ffn1 = (
-                self.cond_lora_ffn1[idx] if self.apply_ffn_lora else None
-            )
-            cond_lora_ffn2 = (
-                self.cond_lora_ffn2[idx] if self.apply_ffn_lora else None
-            )
+            cond_lora_ffn1 = self.cond_lora_ffn1[idx] if self.apply_ffn_lora else None
+            cond_lora_ffn2 = self.cond_lora_ffn2[idx] if self.apply_ffn_lora else None
 
             # ---- AdaLN modulation (cond stream only) ----
             if block.use_adaln_lora:
@@ -623,15 +714,14 @@ class EasyControlNetwork(AdapterNetworkBase):
             cv = cond_v.transpose(1, 2)
             cond_attn_out = F.scaled_dot_product_attention(cq, ck, cv)
             cond_attn_out = cond_attn_out.transpose(1, 2).reshape(B_c, S_c, -1)
-            cond_attn_proj = attn.output_proj(
+            cond_attn_proj = attn.output_proj(cond_attn_out) + eff_scale * cond_lora_o(
                 cond_attn_out
-            ) + eff_scale * cond_lora_o(cond_attn_out)
+            )
             cond_attn_proj = attn.output_dropout(cond_attn_proj)
             cond_x = cond_x + cond_gate_self * cond_attn_proj
 
             cond_mlp_normed = (
-                block.layer_norm_mlp(cond_x) * (1 + cond_scale_mlp)
-                + cond_shift_mlp
+                block.layer_norm_mlp(cond_x) * (1 + cond_scale_mlp) + cond_shift_mlp
             )
             cond_mlp_h = block.mlp.layer1(cond_mlp_normed)
             if cond_lora_ffn1 is not None:
@@ -648,7 +738,9 @@ class EasyControlNetwork(AdapterNetworkBase):
         for block in self._block_modules:
             block._easycontrol_cond_x_in = None
 
-        kv_bytes = sum(k.numel() + v.numel() for k, v in cache) * cache[0][0].element_size()
+        kv_bytes = (
+            sum(k.numel() + v.numel() for k, v in cache) * cache[0][0].element_size()
+        )
         logger.info(
             f"EasyControl: precomputed cond KV cache "
             f"({len(cache)} blocks × 2 tensors, {kv_bytes / 1e6:.0f} MB)"
@@ -675,6 +767,7 @@ class EasyControlNetwork(AdapterNetworkBase):
             "ss_b_cond_init": str(self.b_cond_init),
             "ss_cond_scale": str(self.cond_scale),
             "ss_apply_ffn_lora": str(int(self.apply_ffn_lora)),
+            "ss_cond_res_scale": str(self.cond_res_scale),
         }
 
     def load_weights(self, file):
@@ -1046,9 +1139,9 @@ def _target_only_with_cached_cond_kv(
         shift_cross_attn, scale_cross_attn, gate_cross_attn = (
             block.adaln_modulation_cross_attn(emb_B_T_D).chunk(3, dim=-1)
         )
-        shift_mlp, scale_mlp, gate_mlp = block.adaln_modulation_mlp(
-            emb_B_T_D
-        ).chunk(3, dim=-1)
+        shift_mlp, scale_mlp, gate_mlp = block.adaln_modulation_mlp(emb_B_T_D).chunk(
+            3, dim=-1
+        )
 
     sh_self_5 = shift_self_attn[:, :, None, None, :]
     sc_self_5 = scale_self_attn[:, :, None, None, :]
@@ -1108,9 +1201,7 @@ def _target_only_with_cached_cond_kv(
     x_B_T_H_W_D = x_B_T_H_W_D + ga_cross_5 * target_cross_out
 
     # ---- MLP (baseline) ----
-    target_mlp_normed = (
-        block.layer_norm_mlp(x_B_T_H_W_D) * (1 + sc_mlp_5) + sh_mlp_5
-    )
+    target_mlp_normed = block.layer_norm_mlp(x_B_T_H_W_D) * (1 + sc_mlp_5) + sh_mlp_5
     target_mlp_out = block.mlp(target_mlp_normed)
     x_B_T_H_W_D = x_B_T_H_W_D + ga_mlp_5 * target_mlp_out
 
@@ -1305,8 +1396,7 @@ def _make_patched_block_forward(
                 [cond_q, cond_k, cond_v], attn_params=attn_params
             )
             cond_attn_proj = attn.output_dropout(
-                attn.output_proj(cond_attn_out)
-                + eff_scale * cond_lora_o(cond_attn_out)
+                attn.output_proj(cond_attn_out) + eff_scale * cond_lora_o(cond_attn_out)
             )
             cond_x_B_S_D = cond_x_B_S_D + cond_gate_self_attn * cond_attn_proj
 

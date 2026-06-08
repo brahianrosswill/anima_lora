@@ -93,6 +93,29 @@ CONSTANT_TOKEN_BUCKETS_768 = [
     (384, 1440), (1440, 384),  # 24 x 90, ar 0.27
 ]  # fmt: skip
 
+# 896 tier — two counts {3024, 3000}, both just under the exact square
+# (896²/256 = 3136). Like the 1024 tier's 4032/4200, the two families'
+# square-most pairs are deliberately *offset* — 3024 anchors at 54×56 (ar 0.96)
+# and 3000 at 50×60 (ar 0.83) — so together they cover the common near-square
+# portrait band (4:5=0.80 / 5:6=0.83 / 6:7=0.857) that two square-hugging
+# families (e.g. 3024+3360, both ~0.95) would leave as a hole. Two graphs, like
+# the 1024 and 512 tiers. Trade-off: 3024 carries the spread while 3000 only
+# fills the 0.83 anchor (it's divisor-sparse), so the 2:3 band (ar ~0.58–0.76)
+# is thin here — 896 is tuned for near-square portrait data; 2:3 / elongated
+# images map cleaner at 1024.
+CONSTANT_TOKEN_BUCKETS_896 = [
+    # ---- 3024-token family (54*56) ----
+    (864, 896), (896, 864),    # 54 x 56, ar 0.96 (nearest to square)
+    (768, 1008), (1008, 768),  # 48 x 63, ar 0.76
+    (672, 1152), (1152, 672),  # 42 x 72, ar 0.58
+    (576, 1344), (1344, 576),  # 36 x 84, ar 0.43
+    (448, 1728), (1728, 448),  # 28 x 108, ar 0.26
+    # ---- 3000-token family (50*60) ----
+    (800, 960), (960, 800),    # 50 x 60, ar 0.83
+    (640, 1200), (1200, 640),  # 40 x 75, ar 0.53
+    (480, 1600), (1600, 480),  # 30 x 100, ar 0.30
+]  # fmt: skip
+
 # 1280 tier — 6300 tok (< 1280²/256 = 6400). Near-square pair at ar 0.89/1.12.
 CONSTANT_TOKEN_BUCKETS_1280 = [
     (1200, 1344), (1344, 1200),  # 75 x 84, ar 0.89 (nearest to square)
@@ -121,6 +144,7 @@ CONSTANT_TOKEN_BUCKETS_1536 = [
 CONSTANT_TOKEN_BUCKETS_BY_EDGE = {
     512: CONSTANT_TOKEN_BUCKETS_512,
     768: CONSTANT_TOKEN_BUCKETS_768,
+    896: CONSTANT_TOKEN_BUCKETS_896,
     1024: CONSTANT_TOKEN_BUCKETS,
     1280: CONSTANT_TOKEN_BUCKETS_1280,
     1536: CONSTANT_TOKEN_BUCKETS_1536,

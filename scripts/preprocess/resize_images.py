@@ -63,7 +63,7 @@ def main() -> None:
         default=None,
         metavar="EDGE",
         help=(
-            "Multi-scale constant-token tiers (allowed: 512 768 1024 1280 1536). "
+            "Multi-scale constant-token tiers (allowed: 512 768 896 1024 1280 1536). "
             "Each image lands in the tier that resizes it the least (nearest). "
             "Default (unset) = single 1024 tier (current behavior). "
             "Each extra tier adds 1 compiled block graph (1024 contributes 2). "

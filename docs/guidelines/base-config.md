@@ -70,7 +70,7 @@ can override them, and the dataset blueprint interpolates them via
 | `resized_image_dir` | `post_image_dataset/resized` | Where `make preprocess` writes bucket-resized PNGs; what training reads images from. |
 | `lora_cache_dir` | `post_image_dataset/lora` | Flat, stem-keyed cache dir for VAE/TE/PE sidecars. |
 | `path_pattern` | `"*"` | `fnmatch` glob applied to each image's path **relative to its subset's `image_dir`**. `*` (or unset) = everything. OR-combine with `\|`: `char_a/*\|char_b/*`, or `*portrait*` for a substring. Applies to both training and validation enumeration. |
-| `target_res` | `[1024]` | Multi-scale constant-token tiers (allowed edges `512 768 1024 1280 1536`). Each image is assigned to the tier that **resizes it the least**. **You MUST pass the same `--target_res …` at training time as at preprocess** — it builds the bucket table and sizes the compile cache. Omit a tier and its caches get snapped into a 1024 bucket and silently never loaded. See `library/datasets/buckets.py` and the bucketing invariant in `CLAUDE.md`. |
+| `target_res` | `[1024]` | Multi-scale constant-token tiers (allowed edges `512 768 896 1024 1280 1536`). Each image is assigned to the tier that **resizes it the least**. **You MUST pass the same `--target_res …` at training time as at preprocess** — it builds the bucket table and sizes the compile cache. Omit a tier and its caches get snapped into a 1024 bucket and silently never loaded. See `library/datasets/buckets.py` and the bucketing invariant in `CLAUDE.md`. |
 
 ## Optimizer & schedule
 

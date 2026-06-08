@@ -28,7 +28,7 @@ ROPE_PATCH_CAP = 256
 def test_every_tier_is_constant_token():
     # 512 carries the 1024-tok square + a 1008-tok family; 1024 ships 4032/4200;
     # 768/1280/1536 are a single family each.
-    expected_families = {512: 2, 768: 1, 1024: 2, 1280: 1, 1536: 1}
+    expected_families = {512: 2, 768: 1, 896: 2, 1024: 2, 1280: 1, 1536: 1}
     for edge, table in CONSTANT_TOKEN_BUCKETS_BY_EDGE.items():
         counts = {(w // 16) * (h // 16) for w, h in table}
         assert len(counts) == expected_families[edge], (edge, counts)
@@ -57,7 +57,7 @@ def test_token_count_families():
     assert token_count_families([1024, 1536]) == 3
     assert token_count_families([512]) == 2  # 1024-tok square + 1008-tok family
     assert token_count_families([512, 1024]) == 4
-    assert token_count_families(list(ALLOWED_TARGET_RES)) == 7
+    assert token_count_families(list(ALLOWED_TARGET_RES)) == 9
 
 
 def test_buckets_for_edges_rejects_unknown_tier():

@@ -148,8 +148,54 @@ attention — the same padding-leak the DiT's static-pad path was removed to avo
 
 Memory scales with the cond latent's resolution: a lower-resolution reference
 produces fewer cond tokens and a smaller KV cache. To match the official
-EasyControl's small (e.g. 32×32) reference, downsample the cond image upstream
-rather than capping the token count here.
+EasyControl's small (e.g. 32×32) reference, set `cond_res_scale` (below) or
+downsample the cond image upstream.
+
+## Position-Aware Interpolation (`cond_res_scale`)
+
+The paper's **Position-Aware Training Paradigm** (§3.3) downsamples the *control
+condition* to a fixed low resolution (512²) for efficiency, then **Position-Aware
+Interpolation (PAI)** rescales the condition's position encodings back onto the
+full-resolution target grid so spatial alignment is preserved. Anima implements
+this as the `cond_res_scale` network arg (default `1.0` = off).
+
+**What it does.** With `cond_res_scale = s` (0 < s < 1), `encode_cond_latent`:
+1. downsamples the cond latent to ~`s×` per axis (`F.interpolate`, `area`
+   filter, rounded to a patch-size multiple) — **cond stream only**; the target
+   latent, the flow-matching loss, σ sampling, and cross-attn text are all
+   untouched and run at full native resolution;
+2. computes per-axis rescale factors `S_h = H_target/H_cond`, `S_w = W_target/W_cond`
+   from the pre/post patch grids (the target grid = cond's full-res grid, since
+   cond is the same spatial size as the target for both ref==target and
+   colorize — so no caller plumbing is needed);
+3. builds the cond RoPE at fractional positions `i·S_h` via
+   `VideoRopePosition3DEmb.generate_embeddings_scaled` instead of the integer
+   `seq[:H]`. Anima's RoPE is position-value-agnostic (frequencies are analytic,
+   not table-indexed — the same path already feeds fractional temporal positions
+   under FPS modulation), so fractional positions are exact.
+
+**Why it's cheap.** The cond stream's own self-attention is `O(S_c²)`, so
+quartering the token count (s ≈ 0.5) cuts it ~16×; the cond LoRA/MLP and the
+`S_t×S_c` cond tile of target's extended attention drop ~4×. Realistic
+end-to-end training speedup ≈ 25-30%, plus a smaller activation/KV footprint
+(the [memory envelope](#memory-envelope) full→low-res row). The inference KV
+cache shrinks by `1/s²` and inherits the scaled positions automatically — no
+inference-side change.
+
+**When to use it.**
+- **Subject / semantic control** (identity, object): low-res cond is essentially
+  free — the paper shows fidelity survives downscaling. Good `s` ≈ 0.5.
+- **Structure-critical tasks** (colorize lineart, edges): downscaling discards
+  high-frequency structure the cond is supposed to carry, and PAI realigns
+  *positions* but cannot restore lost *information*. Keep `cond_res_scale = 1.0`
+  (the shipped colorize default) or use a mild `s` ≥ 0.7 only if a bench shows
+  boundary fidelity holds.
+
+**Equivalence.** At `cond_res_scale = 1.0` the downscale block is skipped and
+the cond RoPE is the native-position table — bit-exact to the pre-PAI path, so
+existing checkpoints are unaffected. The `b_cond` step-0 baseline equivalence is
+undisturbed (PAI only moves cond positions, not the gate). Verified by
+`bench/easycontrol/pai_equivalence.py`.
 
 ## Variants
 
@@ -338,16 +384,20 @@ cond_scale)` change; subsequent KSampler steps use the cache automatically.
 
 ## Limitations
 
-1. **Cond runs at the reference's native resolution.** There is no token-count
-   cap — to shrink the cond stream (memory / speed), downsample the reference
-   image upstream. Automatic latent-space downsample (preserving aspect ratio)
-   is a candidate follow-up.
-2. **No spatial-control positional alignment.** Cond uses its own native
-   RoPE positions (matches the official's "subject" mode). The official's
-   `resize_position_encoding` interpolates cond positions into target's
-   coordinate system for spatial control (depth maps, edges); reproducing
-   that needs fractional positions, which Anima's `pos_embedder.seq[:H]`
-   integer indexing doesn't support out of the box.
+1. **Cond runs at the reference's native resolution by default.** Set
+   `cond_res_scale < 1.0` to downsample the cond stream in latent space for
+   faster/cheaper training (target + loss stay full-res) — see
+   [Position-Aware Interpolation](#position-aware-interpolation-cond_res_scale)
+   below. At the default `1.0` there is no token-count cap.
+2. **Spatial-control positional alignment is the PAI downscale, not arbitrary
+   remapping.** With `cond_res_scale < 1.0` the cond's RoPE positions are
+   interpolated back onto the target grid (paper §3.3 PAI, `Pᵢ = i·S_h`) so a
+   downsampled cond stays pixel-aligned with the target. This covers the
+   common case where cond and target share content/coordinates (ref==target,
+   colorize). Remapping a cond drawn in a *different* coordinate system onto
+   the target (the official's full spatial-control story for cropped/offset
+   conditions) uses the same `generate_embeddings_scaled` machinery but isn't
+   wired through a per-condition offset/crop API here.
 3. **`blocks_to_swap = 0` recommended.** The patched `Block.forward` does
    the cond compute inside the block's forward window, so block swap is
    structurally fine — but untested with EasyControl. Pinning to 0 for now;
@@ -387,5 +437,6 @@ training (vs Phase 1.5's >16 GiB OOM at the same bucket).
 | `configs/easycontrol/near_twins.toml`           | Near-twins descriptor (same shape; text-removal control task)          |
 | `easycontrol_adapters/colorization/`            | Colorize project — mangafy + `prep.py` + color-caption filter + README |
 | `bench/easycontrol/step0_equivalence.py` | `b_cond=-10` init recipe + two-stream verification     |
+| `bench/easycontrol/pai_equivalence.py`   | PAI: scale-1.0 bit-exactness + integer-ratio grid alignment |
 | `bench/easycontrol/step1p5_lse_equivalence.py` | LSE-decomposed Function vs masked-SDPA reference |
 | `bench/easycontrol/two_stream_smoke.py`  | End-to-end forward+backward smoke + peak memory        |
