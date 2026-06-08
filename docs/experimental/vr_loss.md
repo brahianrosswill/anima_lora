@@ -65,7 +65,7 @@ python tasks.py lora --vr_loss_weight 1.0
 
 VR is gated off by default (`vr_loss_weight = 0.0`). When `> 0`, the trainer
 runs one extra no-grad forward per step through the trainable DiT with
-`network.set_multiplier(0)` (zeros both LoRA and ReFT contributions). No
+`network.set_multiplier(0)` (zeros the LoRA contributions). No
 extra model is loaded into VRAM. The only cost is the extra forward
 (~+40% step time); low-VRAM presets can run this — they just pay the
 compute.
@@ -222,7 +222,7 @@ LoRA network's multiplier temporarily set to 0:
 
 ```python
 _orig_mult = float(getattr(network, "multiplier", 1.0))
-network.set_multiplier(0.0)         # zeros LoRA + ReFT (network.py:860-865)
+network.set_multiplier(0.0)         # zeros LoRA (network.py:860-865)
 try:
     with torch.no_grad():
         ref_pred = anima(x_t_L_5d, timesteps, crossattn_emb, padding_mask=padding_mask, **kw)
@@ -236,8 +236,8 @@ are *additive residuals* on top — turning the multiplier to zero collapses
 the model to its base. No `--vr_frozen_ref_dit` flag, no second model copy
 in VRAM, no constant-token-bucket state mirroring to keep in sync.
 
-`set_multiplier(0)` covers both `LoRA` / `OrthoLoRA` / `HydraLoRA` /
-`StackedExperts` *and* `ReFT` (the network walks both lists in one call).
+`set_multiplier(0)` covers `LoRA` / `OrthoLoRA` / `HydraLoRA` /
+`StackedExperts`.
 Postfix's `network.append_postfix` modifies `crossattn_emb` *before* the
 DiT call, not the DiT itself, so the bypass forward receives the same
 postfix-appended tokens as the gradient forward — postfix is therefore

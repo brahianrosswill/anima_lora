@@ -136,7 +136,7 @@ class ConfigTab(QWidget):
         top.addWidget(self._variant_label)
         self.variant_combo = QComboBox()
         # Reserve room for the longest variant stem we ship (e.g.
-        # "tlora_ortho_reft", "hydralora-8gb", "custom/<name>"). Without
+        # "chimera_hydra", "hydralora-8gb", "custom/<name>"). Without
         # this, Qt sizes to the shortest entry and the displayed text on
         # selection ends up elided with "…".
         self.variant_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)

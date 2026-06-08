@@ -176,7 +176,7 @@ class LoRANetworkCfg:
     """Run-fixed configuration for a ``LoRANetwork``.
 
     Field groupings mirror the comment blocks in ``factory.create_network``:
-    core / targeting / dropouts / regex overrides / T-LoRA / ReFT / Hydra /
+    core / targeting / dropouts / regex overrides / T-LoRA / Hydra /
     σ-router / channel scaling / logging.
     """
 
@@ -208,12 +208,6 @@ class LoRANetworkCfg:
     use_timestep_mask: bool = False
     min_rank: int = 1
     alpha_rank_scale: float = 1.0
-
-    # ReFT
-    add_reft: bool = False
-    reft_dim: int = 4
-    reft_alpha: Optional[float] = None
-    reft_layers: object = "all"
 
     # Hydra (MoE)
     num_experts: int = 4
@@ -450,13 +444,6 @@ class LoRANetworkCfg:
         alpha_rank_scale = (
             float(alpha_rank_scale) if alpha_rank_scale is not None else 1.0
         )
-
-        add_reft = _as_bool(kwargs.get("add_reft"))
-        reft_dim = kwargs.get("reft_dim")
-        reft_dim = int(reft_dim) if reft_dim is not None else network_dim
-        reft_alpha = kwargs.get("reft_alpha")
-        reft_alpha = float(reft_alpha) if reft_alpha is not None else None
-        reft_layers = kwargs.get("reft_layers", "all")
 
         num_experts = kwargs.get("num_experts")
         num_experts = int(num_experts) if num_experts is not None else 4
@@ -716,10 +703,6 @@ class LoRANetworkCfg:
             use_timestep_mask=use_timestep_mask,
             min_rank=min_rank,
             alpha_rank_scale=alpha_rank_scale,
-            add_reft=add_reft,
-            reft_dim=reft_dim,
-            reft_alpha=reft_alpha,
-            reft_layers=reft_layers,
             num_experts=num_experts,
             expert_init_std=expert_init_std,
             ortho_centered_gate=ortho_centered_gate,
@@ -769,9 +752,6 @@ class LoRANetworkCfg:
         modules_alpha: Dict[str, float],
         module_class: Type,
         train_llm_adapter: bool,
-        has_reft: bool,
-        reft_dim: Optional[int],
-        reft_block_indices,
         is_hydra_or_ortho_hydra: bool,
         hydra_num_experts: int,
         sigma_feature_dim_detected: Optional[int],
@@ -817,7 +797,7 @@ class LoRANetworkCfg:
         (``_expert_band`` / ``_sigma_edges`` are non-persistent) so it has to
         be reconstructed from those scalars at load time.
 
-        For non-MoE checkpoints (plain LoRA / OrthoLoRA / T-LoRA / ReFT) the
+        For non-MoE checkpoints (plain LoRA / OrthoLoRA / T-LoRA) the
         three-axis stamps are not stamped at save time; absence is taken as
         ``(False, False, "none")``. MoE checkpoints (Hydra / OrthoHydra /
         StackedExperts) must carry all three stamps — plan2 task #6 retired
@@ -872,9 +852,6 @@ class LoRANetworkCfg:
             modules_dim=modules_dim,
             modules_alpha=modules_alpha,
             train_llm_adapter=train_llm_adapter,
-            add_reft=has_reft,
-            reft_dim=reft_dim if reft_dim is not None else 4,
-            reft_layers=sorted(reft_block_indices) if has_reft else "all",
             num_experts=hydra_num_experts if is_hydra_or_ortho_hydra else 4,
             channel_scales_dict=channel_scales_dict,
             use_moe_style=use_moe_style,

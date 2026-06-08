@@ -20,7 +20,7 @@ Every `make test-*` target auto-picks the **latest** bakeable adapter in
 representative starting point.
 
 ```bash
-make test                  # latest LoRA / OrthoLoRA / T-LoRA / ReFT
+make test                  # latest LoRA / OrthoLoRA / T-LoRA
 make test-hydra            # latest HydraLoRA / FeRA *_moe.safetensors (router-live)
 make test-merge            # a baked/merged DiT under MODEL_DIR= (no adapter)
 ```
@@ -242,7 +242,7 @@ the CFG=1 scalar is wrong-sign there. The Spectrum ComfyUI node ships `+0.01`.
 
 Plain Anima LoRA `.safetensors` use kohya-ss `lora_unet_` key naming and load
 directly into ComfyUI's stock `LoraLoader` — no conversion. For HydraLoRA /
-FeRA / ReFT / postfix checkpoints (extra `router.*`, `reft_*`, stacked
+FeRA / postfix checkpoints (extra `router.*`, stacked
 `lora_ups.N.*` keys the stock loader drops), use the **Anima Adapter Loader** in
 `custom_nodes/comfyui-hydralora/`.
 

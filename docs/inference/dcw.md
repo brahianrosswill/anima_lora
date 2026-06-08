@@ -101,11 +101,11 @@ DCW lives at the sampler boundary, not inside any module — composes with every
 | `--sampler er_sde` | Applied post-`er_sde.step`. |
 | `--tiled_diffusion` | Applied to post-merge latents, not per-tile. **v4 controller currently no-ops in tiled mode** (single-tile assumption in `c_pool`/`g_obs`); scalar still works. |
 | `--spectrum` | Applied at the same sampler-step site on both actual-forward and cached-step branches. On cached steps, `x0_pred = latents − σ_i · noise_pred` carries Spectrum's prediction error; correction is bias-agnostic so this is fine. v4 hasn't been ablated on cached steps. |
-| `--lora_weight` / Hydra / OrthoLoRA / T-LoRA / ReFT / postfix | Orthogonal — no module patching, no extra weights. v4 calibrates against the base DiT by default; per-LoRA calibration is `make dcw --lora_weight <path>` (writes a separate artifact). |
+| `--lora_weight` / Hydra / OrthoLoRA / T-LoRA / postfix | Orthogonal — no module patching, no extra weights. v4 calibrates against the base DiT by default; per-LoRA calibration is `make dcw --lora_weight <path>` (writes a separate artifact). |
 
 Untested at v0:
 - CFG ≠ 4 with v4 (the prototype was calibrated at CFG=4; falls back to bucket prior or scalar via the proposal's fallback ladder).
-- Stacked LoRA / OrthoLoRA / T-LoRA / ReFT (one row per family).
+- Stacked LoRA / OrthoLoRA / T-LoRA (one row per family).
 
 ## v4 status (prototype)
 

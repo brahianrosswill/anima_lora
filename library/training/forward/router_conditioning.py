@@ -5,7 +5,7 @@ networks. Most calls are no-ops unless the active network exposes the
 corresponding ``set_*`` / ``step_*`` method.
 
 Same hookpoint order is preserved so cudagraph capture sees a stable
-sequence: timestep_mask → reft_timestep_mask → sigma → fei → balance.
+sequence: timestep_mask → sigma → fei → balance.
 """
 
 from __future__ import annotations
@@ -38,8 +38,6 @@ def apply_router_conditioning(
     """
     if hasattr(network, "set_timestep_mask"):
         network.set_timestep_mask(timesteps, max_timestep=1.0)
-    if hasattr(network, "set_reft_timestep_mask"):
-        network.set_reft_timestep_mask(timesteps, max_timestep=1.0)
     # σ-conditional HydraLoRA router (Track B, timestep-hydra.md). No-op
     # unless use_sigma_router is on and the variant is hydra/ortho_hydra.
     if hasattr(network, "set_sigma"):

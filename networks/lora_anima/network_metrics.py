@@ -578,7 +578,7 @@ class _NetworkMetricsMixin:
         return materialized
 
     def get_ortho_regularization(self) -> torch.Tensor:
-        """Sum orthogonality regularization from all OrthoLoRA and ReFT modules."""
+        """Sum orthogonality regularization from all OrthoLoRA modules."""
         total_reg = torch.tensor(0.0, device=next(self.parameters()).device)
         count = 0
         for lora in self.text_encoder_loras + self.unet_loras:
@@ -586,9 +586,6 @@ class _NetworkMetricsMixin:
                 p_reg, q_reg = lora.regularization()
                 total_reg = total_reg + p_reg + q_reg
                 count += 1
-        for reft in self.text_encoder_refts + self.unet_refts:
-            total_reg = total_reg + reft.regularization()
-            count += 1
         return total_reg / max(count, 1)
 
     def metrics(self, ctx: MetricContext) -> dict[str, float]:

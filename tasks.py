@@ -41,12 +41,12 @@ COMMANDS = {
     # ── Training ──────────────────────────────────────────────────────
     "lora": (
         training.cmd_lora,
-        "LoRA family (lora|tlora|tlora_rf|hydralora via configs/methods/lora.toml)",
+        "LoRA family (lora|tlora|hydralora via configs/methods/lora.toml)",
     ),
     "lora-gui": (
         training.cmd_lora_gui,
         "Train from a self-contained configs/gui-methods/<variant>.toml "
-        "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora, reft).",
+        "(variant from GUI_PRESETS env or 1st positional; e.g. tlora, hydralora).",
     ),
     "easycontrol": (
         training.cmd_easycontrol,

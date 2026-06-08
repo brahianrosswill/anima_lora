@@ -61,6 +61,7 @@ caption_tag_dropout_rate = 0.1
 [training]
 network_dim = 32
 network_alpha = 32
+masked_loss=false
 
 network_args = [
     "b_cond_init=-2.0",

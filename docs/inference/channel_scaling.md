@@ -90,7 +90,6 @@ Anima's default 12-epoch OrthoLoRA + T-LoRA stack on diverse multi-artist data s
 | HydraLoRA (shared-A) | ✓ |
 | StackedExperts / FeRA (independent-A) | ✓ |
 | ChimeraHydra (dual-pool) | ✓ |
-| ReFT | n/a — block-level intervention, not a Linear wrap |
 | T-LoRA mask | ✓ — orthogonal; mask applies after the down-projection |
 
 ## References

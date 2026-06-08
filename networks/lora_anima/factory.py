@@ -6,7 +6,6 @@
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -235,16 +234,6 @@ def create_network(
                 "router_targets regex matched zero modules — no MoE routing "
                 "is active, every target became plain LoRA."
             )
-    if cfg.add_reft:
-        _reft_alpha_str = (
-            f"{cfg.reft_alpha}"
-            if cfg.reft_alpha is not None
-            else f"{cfg.alpha} (from network_alpha)"
-        )
-        logger.info(
-            f"ReFT: reft_dim={cfg.reft_dim}, reft_alpha={_reft_alpha_str}, "
-            f"layers={cfg.reft_layers!r}"
-        )
     if cfg.layer_start is not None or cfg.layer_end is not None:
         logger.info(
             f"Layer range: training blocks [{cfg.layer_start or 0}, {cfg.layer_end or '...'})"
@@ -350,17 +339,12 @@ def create_network_from_weights(
     # here is a fallback for unstamped or legacy artifacts.
     has_stacked_experts = False
     hydra_num_experts = 0
-    has_reft = False
-    reft_dim = None
-    reft_block_indices: set[int] = set()
     # Per-module hydra flag: which lora_names were trained as MoE (Hydra) vs
     # plain LoRA / OrthoLoRA. Populated below by key sniff, then passed
     # through as `hydra_router_names` so create_modules can pick the right
     # class per module in mixed checkpoints (result of router_targets).
     hydra_module_names: set[str] = set()
     plain_module_names: set[str] = set()
-    # Block-level ReFT key pattern: reft_unet_blocks_<idx>.<...>
-    _reft_block_re = re.compile(r"^reft_unet_blocks_(\d+)$")
     # Discriminator for chimera dual-A keys: any module with a
     # ``.lora_up_c_weight`` (post-stack form) is a chimera Linear and
     # should NOT be classified as plain Hydra. Collected in the loop below.
@@ -379,22 +363,6 @@ def create_network_from_weights(
                 "the old format cannot be loaded. Retrain the LoRA to get the new "
                 "per-module router weights."
             )
-
-        # ReFT keys use "reft_" prefix (block-level: reft_unet_blocks_<idx>.*)
-        if lora_name.startswith("reft_"):
-            has_reft = True
-            m = _reft_block_re.match(lora_name)
-            if m is None:
-                raise RuntimeError(
-                    f"ReFT key {key!r} does not match the block-level scheme "
-                    "'reft_unet_blocks_<idx>.*'. This checkpoint was likely trained "
-                    "with the old per-Linear ReFT wiring and cannot be loaded by the "
-                    "current block-level implementation."
-                )
-            reft_block_indices.add(int(m.group(1)))
-            if "rotate_layer" in key and "weight" in key:
-                reft_dim = value.size()[0]
-            continue
 
         if "alpha" in key:
             modules_alpha[lora_name] = value
@@ -838,9 +806,6 @@ def create_network_from_weights(
         modules_alpha=modules_alpha,
         module_class=module_class,
         train_llm_adapter=train_llm_adapter,
-        has_reft=has_reft,
-        reft_dim=reft_dim,
-        reft_block_indices=reft_block_indices,
         is_hydra_or_ortho_hydra=has_hydra or has_ortho_hydra,
         hydra_num_experts=hydra_num_experts,
         sigma_feature_dim_detected=sigma_feature_dim_detected,

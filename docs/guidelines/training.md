@@ -23,8 +23,8 @@ selection** and the training-specific options on top of that base.
 
 ## LoRA family — the three-axis surface
 
-`configs/methods/lora.toml` covers LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA /
-ReFT under one routing surface:
+`configs/methods/lora.toml` covers LoRA / OrthoLoRA / T-LoRA / HydraLoRA / FeRA
+under one routing surface:
 
 ```toml
 use_moe_style    = false | "shared_A" | "independent_A"
@@ -75,12 +75,6 @@ FEI-routed shared-A is the shipped default and the FEI lineage is documented in
 `balance_loss_weight` ceiling is ~5e-5 on Anima — above that the Switch loss
 saturates.
 
-### ReFT
-
-Block-level residual-stream intervention. Off by default; flip
-`add_reft = true` and pick a layer band (`reft_layers = "last_8"`).
-See [`../methods/reft.md`](../methods/reft.md).
-
 ## Other adapter families
 
 Each has its own method TOML and `make` entrypoint:
@@ -97,7 +91,7 @@ Deep dives in `docs/methods/` (shipped) and `docs/experimental/`.
 
 ## FP32 accumulation
 
-Unconditional. LoRA / Hydra / ReFT bottleneck matmuls run in fp32 regardless
+Unconditional. LoRA / Hydra bottleneck matmuls run in fp32 regardless
 of autocast; stored parameters stay bf16. The legacy `lora_fp32_accumulation`
 flag is deprecated and ignored.
 

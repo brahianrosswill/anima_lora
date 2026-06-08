@@ -48,8 +48,8 @@ Output:
   trained LoRA. Use it exactly like the output of the Anima Adapter Loader; no
   separate loader node needed.
 
-The method is locked to `configs/gui-methods/tlora.toml` (T-LoRA + OrthoLoRA,
-no ReFT). Saves to
+The method is locked to `configs/gui-methods/tlora.toml` (T-LoRA + OrthoLoRA).
+Saves to
 `<ComfyUI>/models/loras/anima_trainer_<timestamp>.safetensors`.
 
 ## Notes

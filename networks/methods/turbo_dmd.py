@@ -207,8 +207,8 @@ class TurboDMDNetwork:
 
         # Plain LoRA on both — defaults from LoRANetworkCfg give us
         # use_moe_style=False / route_per_layer=False / router_source="none" /
-        # use_ortho=False / use_timestep_mask=False / add_reft=False. No MoE,
-        # no ortho, no T-LoRA, no ReFT — keep slice 1 KISS.
+        # use_ortho=False / use_timestep_mask=False. No MoE, no ortho,
+        # no T-LoRA — keep slice 1 KISS.
         # alpha = rank by default (scale = alpha/rank = 1.0) — matches the
         # project's LoRA-family convention. Halving alpha would silently halve
         # every student contribution per forward, making the 28→4 step trajectory

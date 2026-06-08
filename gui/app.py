@@ -297,7 +297,7 @@ class MainWindow(QMainWindow):
         # buffers survive toggling between modes.
         # Standard set: the official adapter families — plain LoRA (with
         # hardware variants), T-LoRA (stacked with OrthoLoRA by default, plus
-        # a low-VRAM sibling), HydraLoRA, and ReFT. Postfix and the
+        # a low-VRAM sibling), and HydraLoRA. Postfix and the
         # image-conditioning adapters (IP-Adapter / EasyControl) live behind
         # the experimental toggle.
         # The TensorBoard runs panel is a single shared instance (the run list
@@ -310,7 +310,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(
             ConfigTab(
-                methods=["lora", "tlora", "hydralora", "reft"],
+                methods=["lora", "tlora", "hydralora"],
                 tb_panel=self._tb_tab.panel,
             ),
             t("tab_config"),

@@ -286,7 +286,7 @@ make gui-shortcut   # (Optional) Create a no-console-window .lnk shortcut on the
 
 Main GUI tabs:
 
-- **Training Config**: Select a LoRA family variant from the dropdown (recommended: `tlora` — Ortho + T-LoRA / others include `lora`, `tlora-8gb`, `tlora_ortho_reft`, `hydralora`, `reft`, etc.), edit the `presets.toml` preset (default / low_vram / etc.) and all training keys, then start training.
+- **Training Config**: Select a LoRA family variant from the dropdown (recommended: `tlora` — Ortho + T-LoRA / others include `lora`, `tlora-8gb`, `hydralora`, etc.), edit the `presets.toml` preset (default / low_vram / etc.) and all training keys, then start training.
 - **Preprocess**: Run resize + VAE + text embedding caching in one shot.
 - **Dataset**: Preview images/captions and edit captions directly.
 - **Merge**: Bake a trained LoRA into the base DiT to produce a standalone ComfyUI checkpoint (supports base LoRA / OrthoLoRA / T-LoRA only).
@@ -343,9 +343,7 @@ PRESET=low_vram make lora-gui GUI_PRESETS=tlora-8gb   # VRAM 8~12 GB
 
 # Other variants (configs/gui-methods/<variant>.toml — clean single files)
 make lora-gui GUI_PRESETS=lora                   # Plain baseline LoRA
-make lora-gui GUI_PRESETS=tlora_ortho_reft       # Ortho + T-LoRA + ReFT stack
 make lora-gui GUI_PRESETS=hydralora              # MoE multi-head routing
-make lora-gui GUI_PRESETS=reft                   # ReFT only
 
 # Toggle-block style (select variant inside configs/methods/lora.toml directly)
 make lora                          # presets.toml[default]
@@ -379,7 +377,7 @@ Output PNGs are black-and-white: **white (255) = train**, **black (0) = exclude*
 | `caption_dropout_rate` | `0.1` | Replaces some captions with empty strings (helps CFG) |
 | `use_shuffled_caption_variants` | `true` | Use comma-shuffled caption variants |
 
-Variant toggles (`use_ortho`, `use_timestep_mask`, `add_reft`, `use_moe_style`, `router_source`, etc.) are activated by uncommenting the relevant block in `configs/methods/lora.toml`, or by using the per-variant single-file from `configs/gui-methods/<variant>.toml`. **The recommended `tlora` variant has `use_ortho = true` + `use_timestep_mask = true` pre-enabled, giving you the OrthoLoRA + T-LoRA combination out of the box.**
+Variant toggles (`use_ortho`, `use_timestep_mask`, `use_moe_style`, `router_source`, etc.) are activated by uncommenting the relevant block in `configs/methods/lora.toml`, or by using the per-variant single-file from `configs/gui-methods/<variant>.toml`. **The recommended `tlora` variant has `use_ortho = true` + `use_timestep_mask = true` pre-enabled, giving you the OrthoLoRA + T-LoRA combination out of the box.**
 
 ### 8.4 What Happens During Training
 
@@ -392,7 +390,7 @@ Variant toggles (`use_ortho`, `use_timestep_mask`, `add_reft`, `use_moe_style`, 
 
 ### 8.5 Outputs
 
-- Trained weights: `output/ckpt/<output_name>.safetensors` (auto-differentiated per variant as `anima`, `anima_tlora_ortho`, `anima_tlora_reft`, `anima_hydra`, `anima_postfix`, etc.)
+- Trained weights: `output/ckpt/<output_name>.safetensors` (auto-differentiated per variant as `anima`, `anima_tlora_ortho`, `anima_hydra`, `anima_postfix`, etc.)
 - Checkpoints: saved to `output/ckpt/` every `save_every_n_epochs` (`.snapshot.toml` sidecar + `_moe` companion for Hydra)
 - Validation samples: `output/ckpt/sample/`
 - Inference output images: `output/tests/`
@@ -435,17 +433,15 @@ How it works:
 | **OrthoLoRA + T-LoRA (8 GB)** | `make lora-gui GUI_PRESETS=tlora-8gb` or `PRESET=low_vram make lora-gui GUI_PRESETS=tlora` | Same recommended combination on VRAM 8~12 GB |
 | **Plain LoRA** | `make lora-gui GUI_PRESETS=lora` or `make lora` | Simplest baseline, for comparison experiments |
 | **Plain LoRA (8 GB)** | `make lora-gui GUI_PRESETS=lora-8gb` or `PRESET=low_vram make lora` | VRAM 8~12 GB |
-| **T-LoRA + Ortho + ReFT** | `make lora-gui GUI_PRESETS=tlora_ortho_reft` | Adds representation editing (ReFT) to the recommended combination for fine-grained control with fewer extra parameters |
 | **HydraLoRA** | `make lora-gui GUI_PRESETS=hydralora` (8 GB: `hydralora-8gb`) | MoE multi-head routing; fit multiple concepts in one adapter |
-| **ReFT only** | `make lora-gui GUI_PRESETS=reft` or set `add_reft = true` in `methods/lora.toml` | Representation Fine-Tuning — very few parameters |
 | **Postfix Tuning** *(experimental)* | `make exp-postfix` or `make lora-gui GUI_PRESETS=postfix_ortho_cond` | Learnable N-vector appendix on cross-attention (caption-conditional + orthogonal) |
 | **ChimeraHydra** *(experimental)* | `make exp-chimera` or `make lora-gui GUI_PRESETS=chimera_hydra` | Content/frequency dual-pool MoE — for research |
 
 For detailed options per variant, see [`docs/guidelines/training.md`](training.md) and the individual docs under `docs/methods/`.
 
 > **Compatibility notes**
-> - HydraLoRA / ReFT and similar adapter variants require `cache_llm_adapter_outputs = true` (enabled by default) to work correctly.
-> - The OrthoLoRA + T-LoRA portions of `tlora` and `tlora_ortho_reft` can be baked into the base DiT with `make merge` to produce a standalone ComfyUI checkpoint (the ReFT portion cannot be baked — use `--allow-partial`).
+> - HydraLoRA and similar adapter variants require `cache_llm_adapter_outputs = true` (enabled by default) to work correctly.
+> - The OrthoLoRA + T-LoRA portions of `tlora` can be baked into the base DiT with `make merge` to produce a standalone ComfyUI checkpoint.
 
 ---
 
@@ -456,7 +452,7 @@ For detailed options per variant, see [`docs/guidelines/training.md`](training.m
 To immediately generate samples with the adapter you just trained, use the matching `make test-*` command. All of them automatically pick the most recently saved adapter from `output/ckpt/`.
 
 ```bash
-make test                        # Plain LoRA / OrthoLoRA / T-LoRA / ReFT
+make test                        # Plain LoRA / OrthoLoRA / T-LoRA
 make test SPECTRUM=1             # Spectrum-accelerated inference
 make test MOD=1                  # Modulation guidance (pooled_text_proj) — composable with SPECTRUM=1
 make test NOLORA=1               # Base DiT only (omits --lora_weight); combine with MOD=1 for mod-only path
@@ -523,11 +519,11 @@ make merge ADAPTER_DIR=output/ckpt MULTIPLIER=0.8  # Adjust strength
 
 The baked `*_merged.safetensors` can be loaded as a standalone model with ComfyUI's `UNETLoader`.
 
-### 11.2 HydraLoRA / ReFT / Postfix
+### 11.2 HydraLoRA / Postfix
 
 These variants cannot be loaded with ComfyUI's default LoraLoader (they involve routing and token insertion, not simple weight deltas) and require dedicated nodes:
 
-- **Anima Adapter Loader** (`custom_nodes/comfyui-hydralora/`) — unified handling for LoRA / Hydra / ReFT / postfix. See the `README.md` in that folder for usage details.
+- **Anima Adapter Loader** (`custom_nodes/comfyui-hydralora/`) — unified handling for LoRA / Hydra / postfix. See the `README.md` in that folder for usage details.
 - **Spectrum KSampler / Mod Guidance / DCW nodes** — separate repository at <https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler>
 
 ---
@@ -555,7 +551,6 @@ make update -- --dry-run # Preview which files would change
 - [`docs/inference/dcw.md`](../inference/dcw.md) — DCW (scalar + v4 learnable calibrator)
 - [`docs/inference/mod-guidance.md`](../inference/mod-guidance.md) — Modulation guidance
 - [`docs/methods/hydra-lora.md`](../methods/hydra-lora.md) — HydraLoRA multi-head routing
-- [`docs/methods/reft.md`](../methods/reft.md) — ReFT representation editing
 - [`docs/experimental/postfix.md`](../experimental/postfix.md) — Postfix (cond+ortho)
 
 Questions and bug reports are welcome on GitHub Issues. Happy training!

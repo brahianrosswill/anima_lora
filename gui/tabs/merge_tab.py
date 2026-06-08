@@ -93,7 +93,6 @@ def _scan_adapter(path: Path) -> dict:
         "lora_down": 0,
         "lora_up_weight": 0,  # hydra stacked
         "lora_ups": 0,  # hydra split
-        "reft": 0,
         "postfix": 0,
         "ortho_sp": 0,  # .S_p keys (OrthoLoRA / OrthoHydraLoRA)
         "other": 0,
@@ -128,9 +127,7 @@ def _scan_adapter(path: Path) -> dict:
     }
 
     for k in keys:
-        if k.startswith("reft_"):
-            counts["reft"] += 1
-        elif k.endswith(".lora_up_weight"):
+        if k.endswith(".lora_up_weight"):
             counts["lora_up_weight"] += 1
         elif ".lora_ups." in k:
             counts["lora_ups"] += 1
@@ -148,8 +145,6 @@ def _scan_adapter(path: Path) -> dict:
         details.append(f"{counts['lora_down']} LoRA keys")
     if counts["ortho_sp"]:
         details.append(f"{counts['ortho_sp']} OrthoLoRA keys")
-    if counts["reft"]:
-        details.append(f"{counts['reft']} ReFT keys")
     if counts["lora_up_weight"] or counts["lora_ups"]:
         n = counts["lora_up_weight"] + counts["lora_ups"]
         details.append(f"{n} HydraLoRA keys")
@@ -165,12 +160,6 @@ def _scan_adapter(path: Path) -> dict:
         severity = "block"
     elif is_postfix_only:
         verdict = t("merge_verdict_postfix_only")
-        severity = "block"
-    elif counts["reft"] and has_lora_like:
-        verdict = t("merge_verdict_partial")
-        severity = "partial"
-    elif counts["reft"] and not has_lora_like:
-        verdict = t("merge_verdict_reft_only")
         severity = "block"
     elif has_lora_like:
         verdict = t("merge_verdict_ready")

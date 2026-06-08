@@ -200,7 +200,7 @@ anima_lora's entire performance stack is structured around "16GB VRAM must work 
 
 **comfy** applies LoRAs via `comfy/lora.py` + `comfy/model_patcher.py`. Weight merging is the default; patch-based is also supported. ComfyUI's stock `LoraLoader` recognizes anima's `lora_unet_` key naming directly (it's the kohya-ss convention) — it strips the prefix and swaps underscores back to dots to map onto `diffusion_model.*` targets. No conversion step is needed.
 
-**Practical consequence.** Plain LoRAs trained in anima_lora load fine in ComfyUI's stock LoRA loader. HydraLoRA / FeRA / ReFT and prefix/postfix checkpoints carry extra keys (`router.*`, `reft_*`, stacked `lora_ups.N.*`) that the stock loader silently drops — those need the `custom_nodes/comfyui-hydralora/` Anima Adapter Loader node.
+**Practical consequence.** Plain LoRAs trained in anima_lora load fine in ComfyUI's stock LoRA loader. HydraLoRA / FeRA and prefix/postfix checkpoints carry extra keys (`router.*`, stacked `lora_ups.N.*`) that the stock loader silently drops — those need the `custom_nodes/comfyui-hydralora/` Anima Adapter Loader node.
 
 ## 5. Text encoder / conditioning interface
 

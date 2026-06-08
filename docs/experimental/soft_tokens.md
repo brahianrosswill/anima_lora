@@ -63,7 +63,7 @@ Defaults: 10 · 4 · 1024 + 100 · 10 · 1024 ≈ 41k + 1.05M ≈ **1.05M params
 | File | Role |
 |------|------|
 | `networks/methods/soft_tokens.py` | `SoftTokensNetwork` — per-(layer, t) token bank, splice hook, save/load. |
-| `apply_to(text_encoders, unet)` | Walks `unet.blocks[:n_layers]`, replaces each `block.forward` with a wrapper that splices `s^(k, t)` into `crossattn_emb` before calling the original (ReFT-pattern monkey-patch). |
+| `apply_to(text_encoders, unet)` | Walks `unet.blocks[:n_layers]`, replaces each `block.forward` with a wrapper that splices `s^(k, t)` into `crossattn_emb` before calling the original (monkey-patch). |
 | `append_postfix(crossattn_emb, seqlens, timesteps)` | Receives `timesteps` from `train.py`'s existing per-step hook; computes `(n_layers, B, K, D)` step-scoped tokens and caches them on the network. **Returns `crossattn_emb` unchanged** — splicing happens inside the block hooks. |
 | `_make_block_hook(layer_idx, org_forward)` | Closure that reads the cached step tokens at `layer_idx`, splices into `crossattn_emb`, calls the original block forward. |
 | `SoftTokensMethodAdapter` (same file) | Contrastive extra-forward driver: stashes `neg_crossattn_emb` in `prime_for_forward`, runs the negative forwards + the active objective in `extra_forwards`, replays the deferred ∂L/∂v_neg in `after_backward`, surfaces metrics. Auto-resolved by `resolve_adapters` when `_contrastive_target_weight > 0`. |
@@ -234,7 +234,7 @@ cross-objective comparability) and, under dual bank,
 | `blocks_to_swap` | ❌ method-forced 0 | The hook captures each `Block` by reference at `apply_to()` time; a swapped block is a different object instance, so the hook would fire on the wrong tensor. |
 | `gradient_checkpointing` | ✅ | The hook is the outermost wrapper; the original `forward` (which itself runs `checkpoint(_forward, ...)`) is called underneath, and the spliced `crossattn_emb` is part of the saved input graph. |
 | Modulation guidance | ✅ orthogonal | Modulation = per-block AdaLN path; soft tokens = K/V input path per block. |
-| T-LoRA / OrthoLoRA / ReFT | n/a | Soft tokens freeze the DiT; LoRA-family methods are not stacked in this config. |
+| T-LoRA / OrthoLoRA | n/a | Soft tokens freeze the DiT; LoRA-family methods are not stacked in this config. |
 
 ## Evaluation
 

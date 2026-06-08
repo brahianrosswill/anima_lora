@@ -12,7 +12,6 @@ from networks.lora_modules.ortho import (
     OrthoHydraLoRAModule,
     OrthoLoRAModule,
 )
-from networks.lora_modules.reft import ReFTModule
 from networks.lora_modules.stacked_experts import StackedExpertsLoRAModule
 from networks.lora_modules.step_expert import StepExpertLoRAModule
 
@@ -24,7 +23,6 @@ __all__ = [
     "LoRAModule",
     "OrthoHydraLoRAModule",
     "OrthoLoRAModule",
-    "ReFTModule",
     "StackedExpertsLoRAModule",
     "StepExpertLoRAModule",
     "_absorb_channel_scale",

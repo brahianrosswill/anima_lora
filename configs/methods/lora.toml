@@ -1,6 +1,6 @@
 # LoRA family — method selection via toggle blocks.
 #
-# Default (uncommented) = LoRA + OrthoLoRA + T-LoRA + Hydra (σ-routed) + ReFT.
+# Default (uncommented) = LoRA + OrthoLoRA + T-LoRA + Hydra (σ-routed).
 # Routing config is on the three-axis surface (plan2.md §three-axis-config):
 #
 #     use_moe_style    = False | "shared_A" | "independent_A"
@@ -138,14 +138,6 @@ validation_split_num = 0
 # balance_loss_warmup_ratio = 0.4
 # router_targets = ".*\\.(qkv_proj|q_proj|kv_proj|output_proj|layer[12])$"
 # output_name = "anima_crossattn_routed"
-
-# -------------
-# reft
-
-# add_reft = true
-# reft_dim = 64
-# reft_alpha = 64
-# reft_layers = "last_8"
 
 # -------------
 # Variance-reduced FM loss (AsymFlow §5.2, arXiv:2605.12964). One extra

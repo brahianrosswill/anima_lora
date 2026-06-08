@@ -11,7 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_M"
+output_name = "anima_turbo_M_NOGAD"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -119,7 +119,7 @@ detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
 # best (Table 9). CAUTION: a hard-routed fake/critic can route-flip across the
 # perturbation, making Δε_fake discontinuous — keep h small there.
 [gad]
-weight = 1.0
+weight = 0.0
 h = 0.01
 
 # τ sampling distribution for the fake/critic update (+ fake warmup).

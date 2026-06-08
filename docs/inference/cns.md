@@ -93,7 +93,7 @@ CNS lives at the per-step noise-injection seam (`ERSDESampler._sample_noise`, `l
 | **SMC-CFG** | Independent — SMC-CFG corrects the velocity/drift CFG combine (pre-`denoised`); CNS is the noise term. Different seams. |
 | **mod-guidance** | Orthogonal seam (AdaLN t-embedding), but it changes the v-trajectory → γ should be recalibrated with mod-guidance ON if co-deployed (2nd-order; the shipped γ was calibrated mod-guidance OFF). |
 | **DCW** | Watch, don't block. CNS already injects *less* energy into the resolved LL band; DCW then bias-corrects LL post-step. Possible partial double-count — no conflict observed, but worth an explicit ablation if stacked. |
-| LoRA / OrthoLoRA / T-LoRA / Hydra / ReFT | Orthogonal — no module patching, no extra weights. γ is LoRA-transparent (Phase 0). |
+| LoRA / OrthoLoRA / T-LoRA / Hydra | Orthogonal — no module patching, no extra weights. γ is LoRA-transparent (Phase 0). |
 
 ## Faithfulness to the paper, and knobs deliberately omitted
 

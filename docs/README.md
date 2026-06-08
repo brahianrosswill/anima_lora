@@ -21,7 +21,6 @@ Shipped training algorithms — adapter families.
 | [methods/psoft-integrated-ortholora.md](methods/psoft-integrated-ortholora.md) | OrthoLoRA (Cayley) — SVD-informed init, structural orthogonality via tiny skew-symmetric seeds |
 | [methods/hydra-lora.md](methods/hydra-lora.md) | HydraLoRA — MoE multi-head routing (shared-A experts), one cell of the three-axis routing surface in `configs/methods/lora.toml` |
 | [methods/timestep_mask.md](methods/timestep_mask.md) | T-LoRA — timestep-dependent rank masking (full rank at noise, rank 1 at clean) |
-| [methods/reft.md](methods/reft.md) | ReFT — block-level residual-stream intervention; composes additively with any LoRA variant |
 
 ## Inference
 
@@ -66,7 +65,6 @@ Architecture walkthroughs — how a component is built.
 | [structure/hydralora.md](structure/hydralora.md) | HydraLoRA — layer-local MoE over LoRA up-heads |
 | [structure/chimera-hydra.md](structure/chimera-hydra.md) | ChimeraHydra — dual-pool additive MoE on the OrthoHydra basis |
 | [structure/timestep-mask.md](structure/timestep-mask.md) | T-LoRA — the one-line timestep→rank masking change |
-| [structure/reft.md](structure/reft.md) | ReFT — low-rank residual edit wrapping the block instead of its linears |
 | [structure/modulation.md](structure/modulation.md) | Pooled-text modulation — max-pooled caption summary into the AdaLN stack |
 | [structure/spectrum.md](structure/spectrum.md) | Spectrum — Chebyshev feature forecasting at inference (run-or-predict per step) |
 | [structure/dpdmd.md](structure/dpdmd.md) | DP-DMD — structural walkthrough of the diversity-preserved distillation |
@@ -97,7 +95,7 @@ Compiler, kernel, and hardware setup.
 | [optimizations/for_compile.md](optimizations/for_compile.md) | Changes from sd-scripts for torch.compile / dynamo |
 | [optimizations/fa4.md](optimizations/fa4.md) | Flash Attention 4 — why it was evaluated and removed |
 | [optimizations/adamw_fused.md](optimizations/adamw_fused.md) | AdamW8bit → fused AdamW — why bitsandbytes was dropped |
-| [optimizations/hydra_analysis.md](optimizations/hydra_analysis.md) | HydraLoRA + ReFT — nsys-driven optimization pass (2026-05-03) |
+| [optimizations/hydra_analysis.md](optimizations/hydra_analysis.md) | HydraLoRA — nsys-driven optimization pass (2026-05-03) |
 
 ## Guidelines
 

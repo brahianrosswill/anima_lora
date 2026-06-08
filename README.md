@@ -9,9 +9,9 @@ Four things this repo aims to do well:
 1. **Fast LoRA training** on consumer GPUs — per-block `torch.compile` over a tiny fixed shape set (one block graph per token-count family), end to end.
 2. **Solid conventional implementations** — LoRA, OrthoLoRA, and T-LoRA stack together and bake losslessly into a standalone DiT checkpoint.
 3. **Recent methods, engineered for Anima** — Spectrum inference, DCW & SMC-CFG samplers, OrthoHydraLoRA, and modulation guidance, each implemented end-to-end against Anima's compile contract rather than dropped in as a toy port.
-4. **A broad experimental surface** — SPD, ChimeraHydra, Soft Tokens, Turbo distillation, ReFT, IP-Adapter, EasyControl, DirectEdit, embedding inversion.
+4. **A broad experimental surface** — SPD, ChimeraHydra, Soft Tokens, Turbo distillation, IP-Adapter, EasyControl, DirectEdit, embedding inversion.
 
-> **At-a-glance diagrams** for every method (DiT internals, LoRA, OrthoLoRA, T-LoRA, HydraLoRA, ReFT, Spectrum, modulation, compile optimizations) live in [`docs/structure_images/`](docs/structure_images/) — paired with prose walkthroughs in [`docs/structure/`](docs/structure/).
+> **At-a-glance diagrams** for every method (DiT internals, LoRA, OrthoLoRA, T-LoRA, HydraLoRA, Spectrum, modulation, compile optimizations) live in [`docs/structure_images/`](docs/structure_images/) — paired with prose walkthroughs in [`docs/structure/`](docs/structure/).
 
 ---
 
@@ -126,7 +126,7 @@ make merge                                  # bake latest LoRA at multiplier 1.0
 make merge ADAPTER_DIR=output/ckpt MULTIPLIER=0.8
 ```
 
-Refuses non-linear-delta variants (ReFT / HydraLoRA `_moe`) by default; `--allow-partial` drops those and bakes only the LoRA portion.
+Refuses non-linear-delta variants (HydraLoRA `_moe`) by default; `--allow-partial` drops those and bakes only the LoRA portion.
 
 ---
 
@@ -155,7 +155,6 @@ Each ships with a doc — see the link for usage, flags, and caveats.
 | **Soft Tokens** | SoftREPA (Lee et al., NeurIPS 2025) — per-layer × per-t learnable text tokens (~1M params) spliced into `crossattn_emb`; DiT frozen. `make exp-soft-tokens`. | [soft_tokens.md](docs/experimental/soft_tokens.md) |
 | **Turbo** | DP-DMD distillation (Wu et al., arXiv:2602.03139) of the CFG=4 teacher into a few-step generator. Output is a normal LoRA — infer with `--infer_steps 2 --cfg 1.0`. `make exp-turbo`. | [dpdmd.md](docs/experimental/dpdmd.md) |
 | **DirectEdit** | Flow-inversion image editing (Yang & Ye, 2026) — invert to noise, swap edit conditioning, re-denoise with V-injection. Source captions come from the **Anima Tagger** (image → Anima-format tags). `make exp-test-directedit`. | [directedit_editing_v3.md](docs/experimental/directedit_editing_v3.md) |
-| **ReFT** | Block-level residual-stream intervention (LoReFT, NeurIPS 2024). Composes with any LoRA variant. | [reft.md](docs/methods/reft.md) |
 | **IP-Adapter** | Decoupled image cross-attention (Ye et al. 2023). DiT frozen; trains Perceiver resampler + per-block `to_k_ip`/`to_v_ip`. | [ip-adapter.md](docs/experimental/ip-adapter.md) |
 | **EasyControl** | Extended self-attention image conditioning. DiT frozen; trains per-block cond LoRA on self-attn + FFN + scalar `b_cond` gate. | [easycontrol.md](docs/experimental/easycontrol.md) |
 | **Embedding inversion** | Optimize a text embedding to match a target image through the frozen DiT. | [invert.md](docs/inference/invert.md) |
@@ -201,7 +200,7 @@ Config chain: `configs/base.toml → configs/presets.toml[<preset>] → configs/
 | [guidelines/training.md](docs/guidelines/training.md) | Training flags, LoRA variants, caption shuffle, masked loss, dataset config |
 | [guidelines/inference.md](docs/guidelines/inference.md) | Inference flags, P-GRAFT, prompt files, LoRA format conversion |
 | [optimizations/](docs/optimizations/) | Compile pipeline, FA4 post-mortem, CUDA 13.2 |
-| [methods/](docs/methods/) | One doc per method — HydraLoRA, ReFT, Spectrum, inversion, mod guidance, T-LoRA, OrthoLoRA |
+| [methods/](docs/methods/) | One doc per method — HydraLoRA, Spectrum, inversion, mod guidance, T-LoRA, OrthoLoRA |
 
 ---
 

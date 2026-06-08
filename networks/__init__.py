@@ -66,9 +66,9 @@ class NetworkSpec:
 
 
 # Kwargs every LoRA-family variant consumes in ``create_network``: core
-# targeting knobs + cross-cutting add-ons (ReFT, channel scaling,
-# LoRA+, T-LoRA). Cross-cutting because these compose on top of any
-# variant rather than belonging to a single one.
+# targeting knobs + cross-cutting add-ons (channel scaling, LoRA+, T-LoRA).
+# Cross-cutting because these compose on top of any variant rather than
+# belonging to a single one.
 SHARED_KWARG_FLAGS: Tuple[str, ...] = (
     # Core network targeting / knobs
     "train_llm_adapter",
@@ -115,11 +115,6 @@ SHARED_KWARG_FLAGS: Tuple[str, ...] = (
     # FECL knobs (FeRA auxiliary loss; opt-in via fera_fecl_weight > 0).
     "fera_fecl_weight",
     "fera_num_bands",
-    # ReFT add-on (composes with any variant)
-    "add_reft",
-    "reft_dim",
-    "reft_alpha",
-    "reft_layers",
 )
 
 

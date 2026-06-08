@@ -13,7 +13,6 @@ from library.log import setup_logging
 from networks import NETWORK_REGISTRY, NetworkSpec, lora_save
 from networks.lora_anima.config import LoRANetworkCfg
 from networks.lora_anima.loading import (
-    _parse_reft_layers,
     _refuse_split_hydra_keys,
     _refuse_split_stacked_experts_keys,
     _refuse_unfused_attn_lora_keys,
@@ -26,7 +25,6 @@ from networks.lora_modules import (
     LoRAModule,
     OrthoHydraLoRAModule,
     OrthoLoRAModule,
-    ReFTModule,
     StackedExpertsLoRAModule,
     StepExpertLoRAModule,
     _sigma_sinusoidal_features,
@@ -111,7 +109,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         # entropy normalization (per-pool log(K_pool)). Same lifecycle.
         self._chimera_router_stats_cache: Optional[Dict[str, object]] = None
 
-        # Local aliases read by the closure body and the post-closure ReFT block.
+        # Local aliases read by the closure body.
         module_class = cfg.module_class
         modules_dim = cfg.modules_dim
         modules_alpha = cfg.modules_alpha
@@ -122,10 +120,6 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         alpha = cfg.alpha
         lora_dim = cfg.lora_dim
         train_llm_adapter = cfg.train_llm_adapter
-        add_reft = cfg.add_reft
-        reft_dim = cfg.reft_dim
-        reft_alpha = cfg.reft_alpha
-        reft_layers = cfg.reft_layers
 
         # Unified routing scope. ``cfg.router_targets`` is the single regex
         # that governs which Linears participate in routed adaptation (Hydra
@@ -632,56 +626,9 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                     f"if this is unexpected."
                 )
 
-        # Create ReFT modules on the DiT residual stream (block outputs), following
-        # Wu et al. (2024) §3.3 — one intervention per selected block, not per
-        # internal Linear. Selection is controlled by ``reft_layers``.
-        self.unet_refts: List[ReFTModule] = []
-        self.text_encoder_refts: List[ReFTModule] = []
-        if add_reft:
-            dit_blocks = getattr(unet, "blocks", None)
-            if dit_blocks is None or len(dit_blocks) == 0:
-                raise ValueError(
-                    "add_reft=True but DiT has no .blocks attribute to wrap. "
-                    "Block-level ReFT requires a transformer with a `blocks` ModuleList."
-                )
-            num_blocks = len(dit_blocks)
-            selected_indices = _parse_reft_layers(reft_layers, num_blocks)
-
-            reft_alpha_value = reft_alpha if reft_alpha is not None else alpha
-            for idx in selected_indices:
-                block = dit_blocks[idx]
-                block_embed_dim = getattr(block, "x_dim", None)
-                if block_embed_dim is None:
-                    raise ValueError(
-                        f"Block {idx} ({type(block).__name__}) has no `x_dim`; "
-                        "cannot infer embed_dim for ReFT."
-                    )
-                reft_name = f"reft_unet_blocks_{idx}"
-                reft = ReFTModule(
-                    reft_name,
-                    block,
-                    embed_dim=block_embed_dim,
-                    multiplier=multiplier,
-                    reft_dim=reft_dim,
-                    alpha=reft_alpha_value,
-                    dropout=dropout,
-                    module_dropout=module_dropout,
-                )
-                reft.original_name = f"blocks.{idx}"
-                self.unet_refts.append(reft)
-            logger.info(
-                f"create ReFT for Anima DiT: {len(self.unet_refts)}/{num_blocks} "
-                f"blocks (reft_dim={reft_dim}, layers={reft_layers!r})"
-            )
-
         # assertion: no duplicate names
         names = set()
-        for lora in (
-            self.text_encoder_loras
-            + self.unet_loras
-            + self.text_encoder_refts
-            + self.unet_refts
-        ):
+        for lora in self.text_encoder_loras + self.unet_loras:
             assert lora.lora_name not in names, (
                 f"duplicated lora name: {lora.lora_name}"
             )
@@ -983,7 +930,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         if getattr(args, "lora_fp32_accumulation", False):
             logger.warning(
                 "--lora_fp32_accumulation is deprecated and has no effect; "
-                "fp32 accumulation is now unconditional in LoRA/Hydra/ReFT "
+                "fp32 accumulation is now unconditional in LoRA/Hydra "
                 "bottleneck matmuls. Remove the flag from your config."
             )
 
@@ -991,8 +938,6 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         self.multiplier = multiplier
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.multiplier = self.multiplier
-        for reft in self.text_encoder_refts + self.unet_refts:
-            reft.multiplier = self.multiplier
 
     def set_enabled(self, is_enabled):
         for lora in self.text_encoder_loras + self.unet_loras:
@@ -1049,33 +994,8 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         r = r.clamp(max=float(max_rank))
         mask.copy_((self._timestep_mask_arange < r).to(mask.dtype).unsqueeze(0))
 
-    def set_reft_timestep_mask(
-        self, timesteps: torch.Tensor, max_timestep: float = 1.0
-    ):
-        """Compute and set timestep-dependent mask on ReFT modules."""
-        if not self.cfg.use_timestep_mask:
-            return
-        refts = self.text_encoder_refts + self.unet_refts
-        if not refts:
-            return
-        reft_dim = self.cfg.reft_dim
-
-        mask = getattr(self, "_shared_reft_mask", None)
-        if mask is None or mask.device != timesteps.device:
-            mask = torch.zeros(1, reft_dim, device=timesteps.device)
-            self._shared_reft_mask = mask
-            self._reft_mask_arange = torch.arange(reft_dim, device=timesteps.device)
-            for reft in refts:
-                reft._timestep_mask = mask
-
-        t = timesteps.float().mean()
-        frac = ((max_timestep - t) / max_timestep).clamp(min=0.0, max=1.0)
-        r = frac.pow(self.cfg.alpha_rank_scale) * (reft_dim - 1) + 1
-        r = r.clamp(max=float(reft_dim))
-        mask.copy_((self._reft_mask_arange < r).to(mask.dtype).unsqueeze(0))
-
     def clear_timestep_mask(self):
-        """Restore full-rank masks on every LoRA / ReFT module.
+        """Restore full-rank masks on every LoRA module.
 
         Each module's ``_timestep_mask`` is a Tensor by construction (default
         all-ones buffer at init, rebound to the shared live-updated mask when
@@ -1089,9 +1009,6 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         shared = getattr(self, "_shared_timestep_mask", None)
         if shared is not None:
             shared.fill_(1.0)
-        shared_reft = getattr(self, "_shared_reft_mask", None)
-        if shared_reft is not None:
-            shared_reft.fill_(1.0)
 
     def set_sigma(self, sigmas: torch.Tensor) -> None:
         """Stash per-sample σ on every HydraLoRA module whose router accepts σ.
@@ -1641,24 +1558,15 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
             )
         else:
             self.text_encoder_loras = []
-            self.text_encoder_refts = []
 
         if apply_unet:
             logger.info(f"enable LoRA for DiT: {len(self.unet_loras)} modules")
         else:
             self.unet_loras = []
-            self.unet_refts = []
 
         for lora in self.text_encoder_loras + self.unet_loras:
             lora.apply_to()
             self.add_module(lora.lora_name, lora)
-
-        # ReFT wraps each selected DiT Block's forward, so the chain is:
-        #   Block.__call__ -> ReFT.forward -> original Block.forward
-        #   (inside which LoRA-wrapped Linears still fire normally).
-        for reft in self.text_encoder_refts + self.unet_refts:
-            reft.apply_to()
-            self.add_module(reft.lora_name, reft)
 
     def is_mergeable(self):
         return True
@@ -1894,28 +1802,6 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
             all_params.extend(params)
             lr_descriptions.extend(
                 ["unet" + (" " + d if d else "") for d in descriptions]
-            )
-
-        if self.text_encoder_refts:
-            params, descriptions = assemble_params(
-                self.text_encoder_refts,
-                text_encoder_lr[0],
-                self.loraplus_text_encoder_lr_ratio or self.loraplus_lr_ratio,
-            )
-            all_params.extend(params)
-            lr_descriptions.extend(
-                ["reft textencoder" + (" " + d if d else "") for d in descriptions]
-            )
-
-        if self.unet_refts:
-            params, descriptions = assemble_params(
-                self.unet_refts,
-                unet_lr if unet_lr is not None else default_lr,
-                self.loraplus_unet_lr_ratio or self.loraplus_lr_ratio,
-            )
-            all_params.extend(params)
-            lr_descriptions.extend(
-                ["reft unet" + (" " + d if d else "") for d in descriptions]
             )
 
         # HydraLoRA per-module routers are submodules of HydraLoRAModule instances,

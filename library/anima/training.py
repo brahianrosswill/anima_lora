@@ -463,7 +463,7 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "--lora_fp32_accumulation",
         action="store_true",
         help="[DEPRECATED, no-op] fp32 accumulation is now unconditional in "
-        "LoRA/Hydra/ReFT bottleneck matmuls. Flag accepted for one release "
+        "LoRA/Hydra bottleneck matmuls. Flag accepted for one release "
         "cycle; will be removed.",
     )
     parser.add_argument(
@@ -1253,9 +1253,9 @@ def decode_pending_samples(accelerator: Accelerator, args, vae) -> None:
                 image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
                 if image.ndim == 4:  # drop temporal dim if present
                     image = image[:, 0, :, :]
-                decoded_np = (
-                    255.0 * np.moveaxis(image.cpu().numpy(), 0, 2)
-                ).astype(np.uint8)
+                decoded_np = (255.0 * np.moveaxis(image.cpu().numpy(), 0, 2)).astype(
+                    np.uint8
+                )
                 pil = Image.fromarray(decoded_np)
                 stem = os.path.splitext(fn)[0]
                 pil.save(os.path.join(save_dir, stem + ".png"))

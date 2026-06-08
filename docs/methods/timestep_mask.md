@@ -10,7 +10,6 @@ T-LoRA variants live in `configs/gui-methods/` (one file per variant, no toggle 
 
 ```bash
 make lora-gui GUI_PRESETS=tlora              # OrthoLoRA + timestep masking (rank 64)
-make lora-gui GUI_PRESETS=tlora_ortho_reft   # OrthoLoRA + T-LoRA + ReFT stack (default)
 ```
 
 Or toggle inside `configs/methods/lora.toml` by uncommenting the T-LoRA block and running `make lora`.
@@ -33,9 +32,8 @@ Timestep masking composes with every adapter module type. The mask is applied at
 | **LoRA** | After `lora_down`, before dropout and `lora_up` |
 | **OrthoLoRA (Cayley)** | After `Q_eff` projection, multiplied with `lambda_layer` |
 | **HydraLoRA** | After shared `lora_down`; per-expert `lora_up` heads unaffected |
-| **ReFT** | Separate mask with its own `reft_dim` and floor of 1 |
 
-`configs/gui-methods/tlora_ortho_reft.toml` and the default block in `configs/methods/lora.toml` stack LoRA + OrthoLoRA + T-LoRA + ReFT together.
+The default block in `configs/methods/lora.toml` stacks LoRA + OrthoLoRA + T-LoRA together.
 
 ## Configs
 
@@ -54,7 +52,6 @@ network_dim = 64
 | File | Role |
 |------|------|
 | `networks/lora_anima/network.py` | `set_timestep_mask()` — computes rank, writes shared mask |
-| `networks/lora_anima/network.py` | `set_reft_timestep_mask()` — same for ReFT modules |
 | `networks/lora_anima/network.py` | `clear_timestep_mask()` — removes mask (for inference) |
 | `networks/lora_modules/lora.py` | Per-module mask application in each forward method |
 | `train.py` | Calls `set_timestep_mask()` each step after noise sampling |

@@ -131,7 +131,7 @@ ChimeraHydra is a fourth dispatch cell on top of the shared-A row, opt-in via `u
 
 | Variant | `use_moe_style` | `route_per_layer` | `router_source` | Extra |
 |---|---|---|---|---|
-| Plain LoRA / OrthoLoRA / T-LoRA / ReFT | `False` | — | `"none"` | — |
+| Plain LoRA / OrthoLoRA / T-LoRA | `False` | — | `"none"` | — |
 | HydraLoRA (paper) | `"shared_A"` | `True` | `"input"` | — |
 | σ-router on Hydra | `"shared_A"` | `True` | `"sigma"` | — |
 | FEI-on-Hydra (`lora.toml` default) | `"shared_A"` | `True` | `"fei"` | — |
@@ -279,7 +279,7 @@ ss_router_source               = "input"
 | `gradient_checkpointing` | ✅ | The adapter is a thin Linear-replacement; checkpointing at block granularity wraps it correctly. |
 | Modulation guidance | ✅ orthogonal | AdaLN path is untouched. |
 | T-LoRA | ✅ | Built-in (per-half asymmetric masking — content rank-modulated, freq full-rank). |
-| OrthoLoRA / ReFT | ⚠ partial | `use_ortho=true` is the chimera default. ReFT is designed against shared-A / plain-LoRA layouts; verify on a small bench before stacking. |
+| OrthoLoRA | ✅ | `use_ortho=true` is the chimera default. |
 | DCW (scalar / v4) | ✅ orthogonal | Sampler-level correction; composes with anything upstream of the Euler step. |
 | ComfyUI | ❌ | The 2-A on-disk layout (`lora_ups_c.{i}` + `lora_ups_f.{j}` + dual `lora_down_{c,f}` per Linear) is NOT what the `comfyui-hydralora` node currently understands (it expects the legacy 1-A Hydra-MoE shape). Existing tests under `tests/test_chimera_node_loader.py` exercise the legacy synthetic layout, not the new emitter. ComfyUI loader needs ~150 lines of new code to read the 2-A keys + broadcast `π_f` per step. |
 | Static merge into DiT | ❌ | `scripts/merge_to_dit.py` refuses MoE methods by default (router is sample-dependent). `--allow-partial` would drop the chimera portion entirely. |

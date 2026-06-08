@@ -170,7 +170,6 @@ The **Anima Adapter Loader** node installs per-Linear `forward_hook`s that repro
 | ------------------------ | ------------------------------------------------------------------------------------------------ |
 | **T-LoRA**               | Mask applies to shared `lora_down`, before the router already cached its gate. Default on.       |
 | **OrthoLoRA**            | Supported via `OrthoHydraLoRAModule`. Per-expert Cayley rotations, disjoint output subspaces. |
-| **ReFT**                 | Orthogonal side-channel. No interaction.                                                         |
 | **Spectrum**             | Cached steps skip all transformer blocks (router included) — hydra just runs fewer times.        |
 | **Modulation guidance**  | Orthogonal. Touches AdaLN only, outside the hydra-adapted Linears.                               |
 

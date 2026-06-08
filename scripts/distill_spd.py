@@ -520,7 +520,7 @@ def main():
     )
     patch = model.patch_spatial
 
-    # --- Plain LoRA adapter (paper-faithful: no MoE / ortho / T-LoRA / ReFT) ---
+    # --- Plain LoRA adapter (paper-faithful: no MoE / ortho / T-LoRA) ---
     # use_custom_down_autograd: save the bf16 lora_down input and recompute the
     # fp32 cast in backward instead of stashing the fp32 copy. Bitwise-identical
     # on the no-channel-scale path (the default); when channel_scaling_alpha>0 the
