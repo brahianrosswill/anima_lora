@@ -8,6 +8,15 @@ from library.training.forward.router_conditioning import apply_router_conditioni
 from library.training.forward.inversion_forward import compute_inversion_func_loss
 from library.training.forward.vr_forward import run_vr_reference_forward
 from library.training.forward.ste import ste_clean_blend
+from library.training.forward.renoise import (
+    PadCache,
+    from_dit_5d,
+    make_padding_mask,
+    renoise,
+    sample_sigma,
+    to_dit_5d,
+)
+from library.training.forward.dit_forward import run_mini_train_forward
 
 __all__ = [
     "ForwardKwargs",
@@ -18,4 +27,11 @@ __all__ = [
     "compute_inversion_func_loss",
     "run_vr_reference_forward",
     "ste_clean_blend",
+    "PadCache",
+    "from_dit_5d",
+    "make_padding_mask",
+    "renoise",
+    "sample_sigma",
+    "to_dit_5d",
+    "run_mini_train_forward",
 ]

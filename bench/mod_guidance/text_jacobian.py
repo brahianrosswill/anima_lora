@@ -57,6 +57,7 @@ from library.anima import weights as anima_utils
 from library.anima.models import Anima
 from library.datasets.distill import CachedDataset
 from library.runtime.harness import compile_dit_blocks
+from library.training.forward import from_dit_5d, make_padding_mask, to_dit_5d
 from library.inference.uncond import (
     default_uncond_path,
     load_uncond_crossattn,
@@ -259,8 +260,7 @@ def main():
     def fwd(noisy, sigma, crossattn_emb, *, skip_pooled, pooled_override=None):
         """One DiT noise prediction; mirrors distill.py teacher/student calls."""
         B = noisy.shape[0]
-        H, W = noisy.shape[-2], noisy.shape[-1]
-        pad = torch.zeros(B, 1, H, W, dtype=dtype, device=device)
+        pad = make_padding_mask(noisy, dtype)
         ts = torch.full((B,), float(sigma), device=device, dtype=dtype)
         with torch.no_grad(), torch.autocast("cuda", dtype=dtype):
             out = model.forward_mini_train_dit(
@@ -292,27 +292,27 @@ def main():
 
             # Fixed (latent, noise, σ); vary only text. Deterministic per trial.
             noise = torch.randn(lat.shape, generator=gen).to(device, dtype=dtype)
-            noisy = ((1.0 - sigma) * lat + sigma * noise).unsqueeze(2)  # (1,16,1,H,W)
+            noisy = to_dit_5d((1.0 - sigma) * lat + sigma * noise)  # (1,16,1,H,W)
 
             # Perturb text from A toward B by h (h=1 → full swap to B).
             cross_p = cross_a + args.h * (cross_b - cross_a)
             pool_p = pool_a + args.h * (pool_b - pool_a)
 
-            # Teacher (text via cross-attn, proj skipped). squeeze dim-2 (T=1)
+            # Teacher (text via cross-attn, proj skipped). Drop dim-2 (T=1)
             # to (1,16,H,W) so the DC/AC split reads the spatial grid.
-            t_a = fwd(noisy, sigma, cross_a, skip_pooled=True).squeeze(2)
-            t_p = fwd(noisy, sigma, cross_p, skip_pooled=True).squeeze(2)
+            t_a = from_dit_5d(fwd(noisy, sigma, cross_a, skip_pooled=True))
+            t_p = from_dit_5d(fwd(noisy, sigma, cross_p, skip_pooled=True))
             dT4 = t_p - t_a  # (1,16,H,W)
             dT = dT4.flatten()
 
             # Student (text via modulation MLP; crossattn pinned at uncond).
             uncond = uncond_for_batch(uncond_te_1, cross_a)
-            s_a = fwd(
-                noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_a
-            ).squeeze(2)
-            s_p = fwd(
-                noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_p
-            ).squeeze(2)
+            s_a = from_dit_5d(
+                fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_a)
+            )
+            s_p = from_dit_5d(
+                fwd(noisy, sigma, uncond, skip_pooled=False, pooled_override=pool_p)
+            )
             dS4 = s_p - s_a
             dS = dS4.flatten()
 

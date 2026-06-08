@@ -65,6 +65,7 @@ from bench._anima import DEFAULT_DIT
 from bench._common import make_run_dir, write_result
 from library.anima import weights as anima_utils
 from library.datasets.distill import CachedDataset
+from library.training.forward import make_padding_mask, to_dit_5d
 from networks.spd import (
     dct_lowpass_init,
     spd_rollout_to_stage,
@@ -205,9 +206,7 @@ def main() -> None:
         if network is not None:
             network.set_enabled(enabled)
         t = x5.new_full((x5.shape[0],), float(sig), dtype=dtype)
-        pad = torch.zeros(
-            x5.shape[0], 1, x5.shape[-2], x5.shape[-1], dtype=dtype, device=device
-        )
+        pad = make_padding_mask(x5, dtype)
         ac = (
             torch.autocast("cuda", dtype=dtype)
             if device.type == "cuda"
@@ -236,7 +235,7 @@ def main() -> None:
 
     for si in range(n):
         _idx, latents, crossattn_emb, _pooled = dataset[si]
-        x0_full = latents.to(device, dtype).unsqueeze(0).unsqueeze(2)  # (1,16,1,H,W)
+        x0_full = to_dit_5d(latents.to(device, dtype).unsqueeze(0))  # (1,16,1,H,W)
         c = crossattn_emb.to(device, dtype).unsqueeze(0)
         H_full, W_full = int(x0_full.shape[-2]), int(x0_full.shape[-1])
         x0_lo = dct_lowpass_init(x0_full, args.s0, patch).float()  # true clean LL

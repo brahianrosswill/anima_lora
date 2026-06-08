@@ -38,12 +38,15 @@ from tqdm import tqdm  # noqa: E402
 
 from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
+from library.datasets.cache import make_cached_collate  # noqa: E402
 from library.datasets.distill import CachedDataset  # noqa: E402
 from library.runtime.harness import (  # noqa: E402
     compile_dit_blocks,
     enable_training_grad_ckpt,
     place_dit_for_training,
 )
+from library.training.forward import PadCache, renoise, to_dit_5d  # noqa: E402
+from library.training.schedulers import make_warmup_cosine_scheduler  # noqa: E402
 from networks.lora_anima.factory import create_network  # noqa: E402
 from networks.lora_save import save_network_weights  # noqa: E402
 from networks.spd import (  # noqa: E402
@@ -64,17 +67,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
-
-def _collate(batch):
-    # Module-level (not a closure) so DataLoader workers can pickle it under the
-    # Windows/spawn start method — a local `main.<locals>._collate` is unpicklable.
-    return (
-        [b[0] for b in batch],
-        torch.stack([b[1] for b in batch]),
-        torch.stack([b[2] for b in batch]),
-        torch.stack([b[3] for b in batch]),  # pooled — unused
-    )
 
 
 def _flatten(cfg: dict, key_path: str, default):
@@ -456,6 +448,9 @@ def main():
             os.path.basename(only[0]),
         )
 
+    # Stacking collate (pooled-text slot returned but unused by SPD). Shared with
+    # the val loader; pickle-safe under the Windows/spawn DataLoader start method.
+    collate_fn = make_cached_collate()
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -463,7 +458,7 @@ def main():
         num_workers=2,
         pin_memory=True,
         drop_last=True,
-        collate_fn=_collate,
+        collate_fn=collate_fn,
     )
 
     # Held-out val loader — same batch_size as train so the compiled (stage ×
@@ -493,7 +488,7 @@ def main():
                 num_workers=2,
                 pin_memory=True,
                 drop_last=True,
-                collate_fn=_collate,
+                collate_fn=collate_fn,
             )
 
     # Generator for stage construction (fresh HF noise per step; seed offset so
@@ -503,7 +498,7 @@ def main():
     if args.dry_run:
         for i, (_idx, lat, te, _pooled) in enumerate(tqdm(dataloader, desc="dry-run")):
             lat = lat.to(device, dtype=dtype)
-            x0_full = lat.unsqueeze(2)
+            x0_full = to_dit_5d(lat)
             for s in range(len(stages)):
                 x0_si, eps_si = spd_stage_target(
                     x0_full, s, stages, transition_sigmas, patch=1, gen=gen
@@ -640,23 +635,9 @@ def main():
                     p.data.copy_(b)
 
     warmup_steps = int(warmup) if warmup >= 1 else int(warmup * iterations)
-    if warmup_steps > 0:
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[
-                torch.optim.lr_scheduler.LinearLR(
-                    optimizer, start_factor=1e-6 / lr, total_iters=warmup_steps
-                ),
-                torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer, T_max=iterations - warmup_steps, eta_min=lr * 0.1
-                ),
-            ],
-            milestones=[warmup_steps],
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=iterations, eta_min=lr * 0.1
-        )
+    scheduler = make_warmup_cosine_scheduler(
+        optimizer, iterations, lr, warmup_steps=warmup_steps
+    )
 
     # --- Logging ---
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -726,11 +707,17 @@ def main():
 
     stage_rng = torch.Generator().manual_seed(seed + 1)  # CPU: stage / mode selection
 
+    # Per-(stage × bucket) zero pad mask, recycled across forwards — a fresh
+    # allocation each call would hand the compiled forward a new input address
+    # every step (hostile to reduce-overhead CUDA graphs); recycling keeps it
+    # stable. cudagraph step-marking stays decoupled (once per optimizer step /
+    # validation pass below), so _forward_dit is left hand-rolled rather than
+    # routed through run_mini_train_forward (which marks per forward).
+    pad_cache = PadCache(dtype)
+
     def _forward_dit(x5, sig_vec, cattn):
         """Single conditional forward at x5's own resolution (adapter on)."""
-        pad = torch.zeros(
-            x5.shape[0], 1, x5.shape[-2], x5.shape[-1], dtype=dtype, device=device
-        )
+        pad = pad_cache.get(x5)
         if model.blocks_to_swap:
             model.prepare_block_swap_before_forward()
         with torch.autocast("cuda", dtype=dtype):
@@ -857,7 +844,7 @@ def main():
                 latents = latents.to(device, dtype=dtype, non_blocking=True)
                 crossattn_emb = crossattn_emb.to(device, dtype=dtype, non_blocking=True)
                 B = latents.shape[0]
-                x0_full = latents.unsqueeze(2)
+                x0_full = to_dit_5d(latents)
                 for stage_idx in range(n_stages):
                     # Entry (and ε) drawn once per (batch, stage), reused across σ.
                     x0_si, eps_si, t_lo, t_hi = _stage_entry(
@@ -877,8 +864,7 @@ def main():
                             device=device,
                             dtype=dtype,
                         )
-                        t_e = t.view(B, 1, 1, 1, 1)
-                        x_t = (1.0 - t_e) * x0_si + t_e * eps_si
+                        x_t = renoise(x0_si, t, eps_si)
                         pred = _forward_dit(x_t, t, crossattn_emb)
                         sums[stage_idx] += nn.functional.mse_loss(
                             pred.float(), v_target
@@ -908,7 +894,7 @@ def main():
         latents = latents.to(device, dtype=dtype, non_blocking=True)
         crossattn_emb = crossattn_emb.to(device, dtype=dtype, non_blocking=True)
         B = latents.shape[0]
-        x0_full = latents.unsqueeze(2)  # (B, 16, 1, H, W)
+        x0_full = to_dit_5d(latents)  # (B, 16, 1, H, W)
 
         # Optional R2 jitter: perturb the transition σ so the segment geometry is
         # learned as a band, not a point.
@@ -943,8 +929,7 @@ def main():
         )
         # FM training sample + analytic velocity target at scale s_i (Eq. 13–14).
         t = (t_lo + (t_hi - t_lo) * torch.rand(B, device=device)).to(dtype)
-        t_e = t.view(B, 1, 1, 1, 1)
-        x_t = (1.0 - t_e) * x0_si + t_e * eps_si
+        x_t = renoise(x0_si, t, eps_si)
         if args.grad_ckpt:  # reentrant checkpoint needs a grad-requiring input
             x_t.requires_grad_()
         v_target = (eps_si - x0_si).float()

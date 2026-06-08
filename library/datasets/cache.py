@@ -11,6 +11,7 @@ re-exports it for back-compat.
 
 from __future__ import annotations
 
+import functools
 import glob
 import logging
 import os
@@ -30,6 +31,32 @@ from library.io.cache import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _cached_collate_impl(batch, use_masked_loss: bool):
+    out = [
+        [b[0] for b in batch],
+        torch.stack([b[1] for b in batch]),
+        torch.stack([b[2] for b in batch]),
+        torch.stack([b[3] for b in batch]),
+    ]
+    if use_masked_loss:
+        out.append(torch.stack([b[4] for b in batch]))  # [B, 1, H, W] mask
+    return tuple(out)
+
+
+def make_cached_collate(use_masked_loss: bool = False):
+    """Stacking collate for :class:`CachedDataset` batches.
+
+    Returns ``(idx_list, latents, crossattn_emb, pooled_text[, mask])`` — the
+    per-resolution :class:`BucketBatchSampler` guarantees uniform spatial dims
+    so the ``torch.stack`` works at ``batch_size > 1``. Bypasses the default
+    ``collate_tensor_fn`` (its ``_new_shared_filename_cpu`` makes non-resizable
+    storage on some PyTorch / Python 3.13 builds). Returns a
+    ``functools.partial`` over a module-level impl (not a local closure) so
+    DataLoader workers can pickle it under the Windows / spawn start method.
+    """
+    return functools.partial(_cached_collate_impl, use_masked_loss=use_masked_loss)
 
 
 class BucketBatchSampler(torch.utils.data.Sampler):
@@ -127,7 +154,9 @@ class CachedDataset(torch.utils.data.Dataset):
                 recursive=True,
             ):
                 # `{stem}_{HxW}_anima.npz` → strip suffix, drop trailing `_HxW`
-                without_suffix = os.path.basename(path).removesuffix(LATENT_CACHE_SUFFIX)
+                without_suffix = os.path.basename(path).removesuffix(
+                    LATENT_CACHE_SUFFIX
+                )
                 stem = without_suffix.rsplit("_", 1)[0]
                 synth_by_stem.setdefault(stem, path)
             remapped: list = []
@@ -253,9 +282,7 @@ class CachedDataset(torch.utils.data.Dataset):
             if self._batches
             else None
         )
-        return BucketBatchSampler(
-            self._batches, largest, shuffle=shuffle, seed=seed
-        )
+        return BucketBatchSampler(self._batches, largest, shuffle=shuffle, seed=seed)
 
     def __getitem__(self, idx):
         latent_path, te_path = self.samples[idx]

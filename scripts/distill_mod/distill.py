@@ -47,12 +47,21 @@ from tqdm import tqdm  # noqa: E402
 
 from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
+from library.datasets.cache import make_cached_collate  # noqa: E402
 from library.datasets.distill import CachedDataset  # noqa: E402
 from library.runtime.harness import (  # noqa: E402
     compile_dit_blocks,
     enable_training_grad_ckpt,
     place_dit_for_training,
 )
+from library.training.forward import (  # noqa: E402
+    PadCache,
+    renoise,
+    run_mini_train_forward,
+    sample_sigma,
+    to_dit_5d,
+)
+from library.training.schedulers import make_warmup_cosine_scheduler  # noqa: E402
 from library.inference.uncond import (  # noqa: E402
     default_uncond_path,
     load_uncond_crossattn,
@@ -72,7 +81,9 @@ logging.basicConfig(
 )
 
 
-def _draw_gad_pair(idx_list, crossattn_emb, pooled_text, source, rng, dataset, device, dtype):
+def _draw_gad_pair(
+    idx_list, crossattn_emb, pooled_text, source, rng, dataset, device, dtype
+):
     """Return ``(crossattn_B, pooled_B)`` — another sample's text, used as the
     GAD perturbation direction.
 
@@ -117,14 +128,6 @@ def main():
             synth_data_dir=cfg.synth_data_dir,
         )
 
-        def _collate_dry(batch):
-            return (
-                [b[0] for b in batch],
-                torch.stack([b[1] for b in batch]),
-                torch.stack([b[2] for b in batch]),
-                torch.stack([b[3] for b in batch]),
-            )
-
         dl = torch.utils.data.DataLoader(
             dataset,
             batch_size=cfg.batch_size,
@@ -132,7 +135,7 @@ def main():
             num_workers=2,
             pin_memory=True,
             drop_last=True,
-            collate_fn=_collate_dry,
+            collate_fn=make_cached_collate(),
         )
         total = len(dl)
         for i, (_idxs, lat, te, pooled) in enumerate(tqdm(dl, desc="dry-run")):
@@ -201,9 +204,7 @@ def main():
     # This pool's latents span more than the 2 CONSTANT_TOKEN_BUCKETS families,
     # so bump the dynamo cache to trace every distinct token count.
     place_dit_for_training(model, device, blocks_to_swap=cfg.blocks_to_swap)
-    compile_dit_blocks(
-        model, enabled=cfg.torch_compile, mode=cfg.compile_inductor_mode
-    )
+    compile_dit_blocks(model, enabled=cfg.torch_compile, mode=cfg.compile_inductor_mode)
 
     # Gradient checkpointing recomputes block activations in backward (teacher
     # runs under no_grad, so only the student pass holds activations; peak ~12 GB
@@ -260,22 +261,9 @@ def main():
     warmup_steps = (
         int(cfg.warmup) if cfg.warmup >= 1 else int(cfg.warmup * cfg.iterations)
     )
-    if warmup_steps > 0:
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1e-6 / cfg.lr, total_iters=warmup_steps
-        )
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=cfg.iterations - warmup_steps, eta_min=cfg.lr * 0.1
-        )
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_steps],
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=cfg.iterations, eta_min=cfg.lr * 0.1
-        )
+    scheduler = make_warmup_cosine_scheduler(
+        optimizer, cfg.iterations, cfg.lr, warmup_steps=warmup_steps
+    )
 
     # --- Dataset (train + optional val split) ---
     dataset = CachedDataset(
@@ -301,25 +289,16 @@ def main():
             synth_data_dir=cfg.synth_data_dir,
         )
 
-    # Custom collate to bypass collate_tensor_fn's _new_shared_filename_cpu
-    # which creates non-resizable storage on some PyTorch/Python 3.13 builds.
-    def _collate(batch):
-        return (
-            [b[0] for b in batch],
-            torch.stack([b[1] for b in batch]),
-            torch.stack([b[2] for b in batch]),
-            torch.stack([b[3] for b in batch]),
-        )
-
     # Bucket-grouped batch sampler: every batch is one resolution (so the
-    # stacking _collate works at batch_size>1) and, when shuffling, batch order
+    # stacking collate works at batch_size>1) and, when shuffling, batch order
     # is reshuffled per epoch with the largest-token bucket pinned first.
+    collate_fn = make_cached_collate()
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_sampler=dataset.make_batch_sampler(shuffle=cfg.shuffle, seed=cfg.seed),
         num_workers=2,
         pin_memory=True,
-        collate_fn=_collate,
+        collate_fn=collate_fn,
     )
 
     if val_dataset is not None and len(val_dataset) > 0:
@@ -330,7 +309,7 @@ def main():
             num_workers=1,
             pin_memory=True,
             drop_last=True,
-            collate_fn=_collate,
+            collate_fn=collate_fn,
         )
     elif cfg.validation_split > 0.0:
         logger.warning(
@@ -423,6 +402,7 @@ def main():
         ValTeacherCache() if val_enabled and not cfg.no_val_teacher_cache else None
     )
 
+    pad_cache = PadCache(dtype)
     progress = tqdm(range(cfg.iterations), desc="distill")
     accum_loss_t = torch.zeros((), device=device)
     accum_mse_t = torch.zeros((), device=device)
@@ -475,23 +455,20 @@ def main():
             else:
                 sigma_idx_list = None
                 noise = torch.randn_like(latents)
-                sigmas = torch.sigmoid(
-                    cfg.sigmoid_scale * torch.randn(B, device=device)
+                sigmas = sample_sigma(
+                    B,
+                    sigmoid_scale=cfg.sigmoid_scale,
+                    device=device,
+                    dtype=torch.float32,
                 )
 
             timesteps = sigmas  # [0, 1] range (model expects this)
 
-            # Noisy input: (1-σ) * latents + σ * noise
-            sigmas_expand = sigmas.view(B, 1, 1, 1)
-            noisy_input = (1.0 - sigmas_expand) * latents + sigmas_expand * noise
+            # Noisy input: (1-σ)·latents + σ·noise, then 5D (B,16,1,H,W) for the DiT.
+            noisy_input = to_dit_5d(renoise(latents, sigmas, noise))
 
-            # Add temporal dim: (B, 16, H, W) -> (B, 16, 1, H, W)
-            noisy_input = noisy_input.unsqueeze(2)
-
-            # Padding mask (all zeros = no padding)
-            padding_mask = torch.zeros(
-                B, 1, latents.shape[-2], latents.shape[-1], dtype=dtype, device=device
-            )
+            # Padding mask (all zeros = no padding); recycled per spatial shape.
+            padding_mask = pad_cache.get(latents)
 
             # --- Teacher forward: real crossattn, pooled_text_proj skipped ---
             # (skipped entirely on a full-batch cache hit).
@@ -509,21 +486,19 @@ def main():
                     [c.to(device, dtype=dtype) for c in cached_list], dim=0
                 )
             else:
-                if model.blocks_to_swap:
-                    model.prepare_block_swap_before_forward()
-                # Fresh CUDA-graph epoch so teacher_pred outlives the student call.
-                torch.compiler.cudagraph_mark_step_begin()
-                with torch.no_grad(), torch.autocast("cuda", dtype=dtype):
-                    teacher_pred = model.forward_mini_train_dit(
-                        noisy_input,
-                        timesteps,
-                        crossattn_emb,
-                        padding_mask=padding_mask,
-                        skip_pooled_text_proj=True,
-                    )
-                # Detach from the static buffer in case a future caller adds
-                # a third compiled-fn invocation in the same step.
-                teacher_pred = teacher_pred.clone()
+                # clone=True: teacher_pred must outlive the student call (and any
+                # third compiled-fn invocation) before it's read into the loss.
+                teacher_pred = run_mini_train_forward(
+                    model,
+                    noisy_input,
+                    timesteps,
+                    crossattn_emb,
+                    padding_mask=padding_mask,
+                    dtype=dtype,
+                    no_grad=True,
+                    clone=True,
+                    skip_pooled_text_proj=True,
+                )
                 if teacher_cache is not None:
                     for i in range(B):
                         if cached_list[i] is None:
@@ -534,18 +509,16 @@ def main():
             # --- Student forward: T5("") crossattn, real pooled text through proj ---
             # requires_grad_ needed for gradient checkpointing
             noisy_input = noisy_input.requires_grad_()
-            if model.blocks_to_swap:
-                model.prepare_block_swap_before_forward()
             uncond_crossattn = uncond_for_batch(uncond_te_1, crossattn_emb)
-            torch.compiler.cudagraph_mark_step_begin()
-            with torch.autocast("cuda", dtype=dtype):
-                student_pred = model.forward_mini_train_dit(
-                    noisy_input,
-                    timesteps,
-                    uncond_crossattn,
-                    padding_mask=padding_mask,
-                    pooled_text_override=pooled_text,
-                )
+            student_pred = run_mini_train_forward(
+                model,
+                noisy_input,
+                timesteps,
+                uncond_crossattn,
+                padding_mask=padding_mask,
+                dtype=dtype,
+                pooled_text_override=pooled_text,
+            )
             # --- MSE loss (base pointwise term) ---
             mse_loss = nn.functional.mse_loss(
                 student_pred.float(), teacher_pred.float()
@@ -592,32 +565,29 @@ def main():
                 pool_pert = pooled_text + cfg.gad_h * (pool_b - pooled_text)
 
             # Perturbed teacher (frozen, no_grad): ΔT = v(cross_pert) − v(cross_A).
-            if model.blocks_to_swap:
-                model.prepare_block_swap_before_forward()
-            torch.compiler.cudagraph_mark_step_begin()
-            with torch.no_grad(), torch.autocast("cuda", dtype=dtype):
-                teacher_pert = model.forward_mini_train_dit(
-                    noisy_input,
-                    timesteps,
-                    cross_pert,
-                    padding_mask=padding_mask,
-                    skip_pooled_text_proj=True,
-                )
-            teacher_pert = teacher_pert.clone()
+            teacher_pert = run_mini_train_forward(
+                model,
+                noisy_input,
+                timesteps,
+                cross_pert,
+                padding_mask=padding_mask,
+                dtype=dtype,
+                no_grad=True,
+                clone=True,
+                skip_pooled_text_proj=True,
+            )
             dT = (teacher_pert - teacher_pred).float()
 
             # Perturbed student (grad → pooled_text_proj): ΔS = v(pool_pert) − v(pool_A).
-            if model.blocks_to_swap:
-                model.prepare_block_swap_before_forward()
-            torch.compiler.cudagraph_mark_step_begin()
-            with torch.autocast("cuda", dtype=dtype):
-                student_pert = model.forward_mini_train_dit(
-                    noisy_input,
-                    timesteps,
-                    uncond_crossattn,
-                    padding_mask=padding_mask,
-                    pooled_text_override=pool_pert,
-                )
+            student_pert = run_mini_train_forward(
+                model,
+                noisy_input,
+                timesteps,
+                uncond_crossattn,
+                padding_mask=padding_mask,
+                dtype=dtype,
+                pooled_text_override=pool_pert,
+            )
             dS = student_pert.float() - student_a.float()
 
             if cfg.gad_loss == "cosine":
@@ -659,7 +629,9 @@ def main():
 
         if writer is not None and (step + 1) % cfg.log_interval == 0:
             writer.add_scalar("train/loss", accum_loss, step + 1)
-            writer.add_scalar("train/loss_mse", accum_mse_t.item() / grad_accum, step + 1)
+            writer.add_scalar(
+                "train/loss_mse", accum_mse_t.item() / grad_accum, step + 1
+            )
             writer.add_scalar("train/lr", lr, step + 1)
             if grad_norm is not None:
                 writer.add_scalar("train/grad_norm", grad_norm, step + 1)

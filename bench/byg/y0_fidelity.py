@@ -43,6 +43,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from bench._anima import add_common_args, build_anima, resolve_dtype  # noqa: E402
 from library.io.cache import load_cached_latents  # noqa: E402
+from library.training.forward import (  # noqa: E402
+    from_dit_5d,
+    make_padding_mask,
+    to_dit_5d,
+)
 from networks.methods.byg import (  # noqa: E402
     BYGConditioning,
     _crossattn_seqlens,
@@ -60,22 +65,21 @@ WARPED5 = [1.0, 0.85, 0.70, 0.55, 0.40, 0.0]
 
 
 def dit_velocity(dit, x_4d, t_B, c_emb, c_mask, padding_mask):
-    x_5d = x_4d.unsqueeze(2)
     v = dit(
-        x_5d,
+        to_dit_5d(x_4d),
         t_B,
         c_emb,
         padding_mask=padding_mask,
         crossattn_seqlens=_crossattn_seqlens(c_mask),
     )
-    return v.squeeze(2)
+    return from_dit_5d(v)
 
 
 @torch.no_grad()
 def rollout_y0(dit, cond, x, eps, c_emb, c_mask, sigmas, device, dtype):
     """Euler-integrate eps -> ỹ_0 through ``sigmas`` with source=x (variable dσ)."""
-    B, _, H, W = x.shape
-    padding_mask = torch.zeros(B, 1, H, W, dtype=dtype, device=device)
+    B = x.shape[0]
+    padding_mask = make_padding_mask(x, dtype)
     src_x, src_rope = cond.encode_source(x)
     cond.set_source_precomputed(src_x, src_rope)
     y = eps.clone()
@@ -99,7 +103,9 @@ def discover(args):
     if sidecar is None:
         hits = sorted(glob.glob(os.path.join(args.byg_text_dir, "*_byg.safetensors")))
         if not hits:
-            sys.exit(f"No *_byg.safetensors under {args.byg_text_dir}; pass --byg_sidecar.")
+            sys.exit(
+                f"No *_byg.safetensors under {args.byg_text_dir}; pass --byg_sidecar."
+            )
         sidecar = hits[0]
     stem = os.path.basename(sidecar).replace("_byg.safetensors", "")
     latent = args.latent_npz
@@ -151,14 +157,18 @@ def main():
         "warped-5   (Anima)": WARPED5,
     }
 
-    print(f"\nstem={stem}  latent={os.path.basename(latent_path)}  "
-          f"instr_tokens={c_emb.shape[1]}  dtype={dtype}")
+    print(
+        f"\nstem={stem}  latent={os.path.basename(latent_path)}  "
+        f"instr_tokens={c_emb.shape[1]}  dtype={dtype}"
+    )
     print(f"{'schedule':<24} {'NFE':>4}  {'relL2 vs REF':>14}")
     print("-" * 48)
 
     ref_key = next(iter(schedules))
-    y0 = {name: rollout_y0(dit, cond, x, eps, c_emb, c_mask, sig, device, dtype)
-          for name, sig in schedules.items()}
+    y0 = {
+        name: rollout_y0(dit, cond, x, eps, c_emb, c_mask, sig, device, dtype)
+        for name, sig in schedules.items()
+    }
     ref = y0[ref_key]
     for name, sig in schedules.items():
         nfe = len(sig) - 1
