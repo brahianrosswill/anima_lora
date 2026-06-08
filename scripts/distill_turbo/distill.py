@@ -250,6 +250,41 @@ def selective_block_grad_ckpt(model: Anima):
             b.unsloth_offload_checkpointing = u
 
 
+def _pin_dynamo_limit(name: str, value: int) -> int:
+    """Raise a dynamo recompile budget so it holds in EVERY execution context.
+
+    ``torch._dynamo.config.<name>`` is backed by a ``ContextVar`` (``user_override``),
+    so a plain ``config.<name> = value`` assignment only takes effect in the thread
+    /context that ran it. Dynamo compiles the grad-bearing block ``_forward`` in a
+    *different* context (the AOTAutograd / backward compile path), where the override
+    is absent and the read falls back to the config entry's ``default`` (8) — so the
+    budget silently reverts and the loop spills to eager at the first grad forward,
+    despite a correct setup-time raise (verified: the override reads 64 in the main
+    thread but 8 in a worker thread). Pinning the canonical entry's ``.default``
+    makes the raise context-independent. We set both: the override (same-context
+    reads + log visibility) and the default (compile-/backward-thread reads).
+    Returns the effective value.
+    """
+    import torch._dynamo as _dynamo
+
+    cfg_mod = _dynamo.config
+    target = max(getattr(cfg_mod, name), value)
+    setattr(cfg_mod, name, target)  # context-local override (main thread + logs)
+    try:
+        entry = cfg_mod._config[name]
+        # An alias (e.g. cache_size_limit) stores the canonical name fully
+        # qualified; follow it to the real entry whose ``.default`` is the
+        # cross-context fallback every thread reads.
+        canon = (entry.alias or name).rsplit(".", 1)[-1]
+        cfg_mod._config[canon].default = target  # global fallback (all contexts)
+    except Exception as e:  # noqa: BLE001 - defensive against torch internals
+        logger.warning(
+            f"could not pin dynamo {name} default ({e}); budget may revert to 8 "
+            "in the backward-compile context and spill to eager"
+        )
+    return target
+
+
 def main():
     args = build_argparser().parse_args()
     cfg = resolve_config(args, load_turbo_config(args.config))
@@ -257,6 +292,35 @@ def main():
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda")
     dtype = torch.bfloat16
+
+    # ---------------- Dynamo / threading hardening (compile-storm guard) ----
+    # Pin BOTH the recompile budget and the intra-op thread count BEFORE any
+    # block._forward is traced — the turbo loop drives the one compiled block
+    # graph under many global states per step (grad_mode × requires_grad ×
+    # student/fake/teacher view × {4032, 4200} token families), so the stock
+    # per-frame limit of 8 spills to eager mid-run.
+    #
+    # The budget raise here is what guarantees the limit is up by construction:
+    # warmup (the first trace) and the main loop run after this point regardless
+    # of where compile first traces. The later, model-aware raise (after
+    # compile_dit_blocks) refines ``accumulated_recompile_limit`` with the exact
+    # block count and logs the final values; both are idempotent via ``max()``.
+    #
+    # The raise is context-pinned (``_pin_dynamo_limit`` sets the ContextVar's
+    # global default, not just the main-thread override) so it survives into the
+    # backward/AOTAutograd compile context where the grad-bearing forward first
+    # traces — a plain ``config.recompile_limit = 64`` does NOT, and the budget
+    # reverts to 8 at the first grad forward.
+    #
+    # ``set_num_threads`` force-initializes torch's intra-op pool NOW so
+    # ``torch.get_num_threads()`` is constant for the rest of the run. Left to
+    # itself the pool inits lazily on the first parallel op and the count flips
+    # mid-run — a GLOBAL_STATE guard that recompiles every {grad_mode, view}
+    # graph a second time AND is the documented CheckpointError trigger for the
+    # GAN grad-ckpt path (see ``selective_block_grad_ckpt``).
+    if cfg.torch_compile:
+        _pin_dynamo_limit("recompile_limit", cfg.dynamo_recompile_limit)
+    torch.set_num_threads(torch.get_num_threads())
 
     # ---------------- Model ----------------
     logger.info(f"loading DiT: {cfg.dit_path}")
@@ -319,28 +383,19 @@ def main():
     # warmup forward. native-shape flatten, one graph per token count; the pool
     # spans more than the 2 CONSTANT_TOKEN_BUCKETS families.
     compile_dit_blocks(model, enabled=cfg.torch_compile, mode="")
-    # Raise the dynamo recompile budget EXPLICITLY (+ log it). The turbo loop
-    # traces the compiled block ``_forward`` under more global states than the
-    # token-family default covers: grad_mode flips (no_grad teacher/disc vs
-    # grad-bearing student/fake/GAN) × {4032, 4200} token families × num_threads
-    # churn × stride/requires_grad specializations land right at the default 8 and
-    # spill to eager mid-run. ``compile_dit_blocks`` pre-raises this, but setting
-    # it here (after compile, authoritative ``recompile_limit`` name) makes the
-    # runtime value deterministic and visible in the log. accumulated covers all
-    # block code-objects together.
+    # Refine the recompile budget now that the model exists: re-assert the
+    # per-frame limit (already raised at the top of main(), kept here so the
+    # runtime value is logged next to the compile) and size
+    # ``accumulated_recompile_limit`` over the exact block code-object count.
+    # Both writes are idempotent via ``max()`` — this never lowers the early raise.
     if cfg.torch_compile:
-        import torch._dynamo as _dynamo
-
-        _dynamo.config.recompile_limit = max(
-            _dynamo.config.recompile_limit, cfg.dynamo_recompile_limit
-        )
-        _dynamo.config.accumulated_recompile_limit = max(
-            _dynamo.config.accumulated_recompile_limit,
+        rl = _pin_dynamo_limit("recompile_limit", cfg.dynamo_recompile_limit)
+        arl = _pin_dynamo_limit(
+            "accumulated_recompile_limit",
             len(model.blocks) * cfg.dynamo_recompile_limit,
         )
         logger.info(
-            f"dynamo recompile_limit={_dynamo.config.recompile_limit}, "
-            f"accumulated_recompile_limit={_dynamo.config.accumulated_recompile_limit}"
+            f"dynamo recompile_limit={rl}, accumulated_recompile_limit={arl}"
         )
     # `model.training` gates grad-ckpt inside block.forward; toggled per
     # forward in `_forward` below so no_grad teacher/fake forwards don't
