@@ -16,7 +16,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 2500
+iterations = 6000
 batch_size = 1
 seed = 42
 use_custom_down_autograd = true
@@ -70,8 +70,8 @@ grad_step = "random"            # which rollout step carries gradient (BOTH base
 
 # Optimization.
 [optim]
-student_lr = 2e-5
-fake_lr = 2e-5
+student_lr = 1e-5
+fake_lr = 1e-5
 fake_steps_per_student_step = 4
 fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
@@ -146,7 +146,7 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 
 # Logging / checkpoints.
 [io]
-save_every = 750
+save_every = 1000
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 750
+validate_every_n_steps = 1000

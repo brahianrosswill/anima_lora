@@ -64,15 +64,15 @@ network_dim = 32
 network_alpha = 32
 
 network_args = [
-    "b_cond_init=0.0",
+    "b_cond_init=-4.0",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
 ]
 
 learning_rate = 2e-5
-max_train_epochs = 12
-save_every_n_epochs = 12
-checkpointing_epochs = 12
+max_train_epochs = 18
+save_every_n_epochs = 18
+checkpointing_epochs = 18
 # Removal task: the _tags reference is the structural source of truth, so keep
 # the cond clean (no training-time perturbation) for faithful reconstruction.
 easycontrol_cond_noise_max = 0.0
