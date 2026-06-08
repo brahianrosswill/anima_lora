@@ -32,9 +32,15 @@ The cond cache is paired with the color target at train time by the loader's
 ``cond_cache_dir`` subset knob (stem-matched); the color-only text by
 ``text_cache_dir``. Run from the repo root::
 
-    python easycontrol_adapters/colorization/prep.py            # full dataset
+    python easycontrol_adapters/colorization/prep.py            # full dataset (all 3 stages)
     python easycontrol_adapters/colorization/prep.py --limit 8  # quick QA batch
-    make easycontrol-preprocess EASYADAPTER=colorize        # via task runner
+
+Via the task runner the three stages are split across two targets (knobs come
+from the ``[staging]`` / ``[preprocess]`` tables of ``configs/easycontrol/
+colorize.toml``)::
+
+    make easycontrol-staging    EASYADAPTER=colorize   # stage 1 (mangafy)
+    make easycontrol-preprocess EASYADAPTER=colorize   # stages 2-3 (encode + text)
 """
 
 from __future__ import annotations
@@ -662,9 +668,18 @@ def main() -> None:
         help="sd_match pages whose aspect (long/short) exceeds this fall back to "
         "--engine — screentone_sd distorts at extreme aspect (e.g. 1:4).",
     )
-    parser.add_argument("--skip_mangafy", action="store_true")
+    parser.add_argument(
+        "--skip_mangafy",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="skip the mangafy condition-synthesis stage (it's the "
+        "`easycontrol-staging EASYADAPTER=colorize` step); --no-skip_mangafy "
+        "re-stages inline during preprocess",
+    )
     parser.add_argument("--skip_encode", action="store_true")
-    parser.add_argument("--skip_text", action="store_true", help="skip color-only TE stage")
+    parser.add_argument(
+        "--skip_text", action="store_true", help="skip color-only TE stage"
+    )
     # ── color-only text stage ────────────────────────────────────────────────
     parser.add_argument(
         "--caption_src",
@@ -721,7 +736,11 @@ def main() -> None:
     src = Path(args.src)
     staging = Path(args.staging)
     cond_cache_dir = Path(args.cond_cache_dir)
-    sd_match = [s.strip() for s in args.sd_match.split(",") if s.strip()] if args.sd_match else []
+    sd_match = (
+        [s.strip() for s in args.sd_match.split(",") if s.strip()]
+        if args.sd_match
+        else []
+    )
 
     # Drop pure-B&W pages from the colorize set — they have no color to learn and
     # would teach "B&W in → B&W out". Stems are matched against the caption master

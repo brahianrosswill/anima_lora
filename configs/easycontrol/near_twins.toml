@@ -109,3 +109,15 @@ batch_size = 1
   recursive = true                 # tree is nested <artist>/<pair_id>_{tags,no_tags}; caches mirror the nesting
   flip_aug = false                 # latents can't be flipped post-hoc; the cond cache has no flipped variant
   num_repeats = 1
+
+# GUI dropdown metadata (ignored by the CLI descriptor machinery — train.py only
+# ever sees the extracted blueprint sidecar). The EasyControl tab lists this as a
+# descriptor variant whose scalar knob tables (name + [staging]/[preprocess]/
+# [training]) edit as a form; the [[datasets]] blueprint + this block are left
+# untouched on save. The dropdown shows the file stem (near_twins); the actual
+# cache/output tree rides the top-level `name` slug above.
+[variant]
+family = "easycontrol"
+label = "Near-twins (tag-gap pairs)"
+description = "Train EasyControl on mined in-artist near-twin pairs: a clean `_no_tags` target conditioned on its paired `_tags` twin (a sanitize / tag-removal control task). Staging mines the pair tree; cond = the paired _tags latent. Configured in configs/easycontrol/near_twins.toml."
+order = 30

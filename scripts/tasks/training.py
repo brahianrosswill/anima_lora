@@ -19,20 +19,24 @@ import toml
 
 from ._common import PY, ROOT, run, train
 
-# EasyControl control-task projects under easycontrol_adapters/. Each maps to a
-# configs/methods/<name>.toml that swaps the cond source / caption policy and an
-# easycontrol_adapters/<name>/ project (mangafy/prep etc.). Selected at runtime
-# via the EASYADAPTER env var (exported by the Makefile), e.g.
-# ``make easycontrol EASYADAPTER=colorize``.
-_EASYADAPTERS = {"colorize"}
+# EasyControl control-task projects are *descriptor-driven*: each is a single
+# self-contained ``configs/easycontrol/<EASYADAPTER>.toml`` (top-level ``name``
+# slug + ``[staging]`` / ``[preprocess]`` / ``[training]`` knob tables + a
+# ``[general]`` / ``[[datasets]]`` blueprint tail) consumed by the shared
+# machinery below — the same shape for ``near_twins`` and ``colorize``. They all
+# train the base ``easycontrol`` method with the descriptor's ``[training]`` table
+# folded in as CLI overrides. Selected at runtime via the EASYADAPTER env var
+# (exported by the Makefile), e.g. ``make easycontrol EASYADAPTER=colorize``. The
+# per-adapter staging/preprocess command bodies are registered in
+# ``_EASY_ADAPTERS`` (defined below, after those functions).
 
 
 def _easyadapter() -> str:
     """Resolve the EASYADAPTER env var (validated). "" → default easycontrol."""
     adapter = (os.environ.get("EASYADAPTER") or "").strip()
-    if adapter and adapter not in _EASYADAPTERS:
+    if adapter and adapter not in _EASY_ADAPTERS:
         raise SystemExit(
-            f"Unknown EASYADAPTER={adapter!r}. Known: {sorted(_EASYADAPTERS)}."
+            f"Unknown EASYADAPTER={adapter!r}. Known: {sorted(_EASY_ADAPTERS)}."
         )
     return adapter
 
@@ -92,31 +96,31 @@ def _toml_table_to_argv(table: dict) -> list[str]:
     return argv
 
 
-# The near-twin config file is fixed (selected by EASYADAPTER=near_twin); its
-# top-level ``name`` key is the slug that reroutes everything downstream.
-_NEAR_TWIN_CFG = ROOT / "configs" / "easycontrol" / "near_twins.toml"
+def _easy_cfg_path(adapter: str) -> Path:
+    """The descriptor file for an EasyControl adapter project."""
+    return ROOT / "configs" / "easycontrol" / f"{adapter}.toml"
 
 
-def _near_twins_load() -> tuple[dict, str, str]:
-    """Load ``near_twins.toml`` → ``(cfg, name, base)``.
+def _easy_load(adapter: str) -> tuple[dict, str, str]:
+    """Load ``configs/easycontrol/<adapter>.toml`` → ``(cfg, name, base)``.
 
-    The top-level ``name`` key (default ``near_twins``) is the single source of
-    truth for a near-twin run: it picks the
-    ``post_image_dataset/easycontrol/<name>/`` base tree (staging / resized /
-    cache / cond) and the ``anima_easycontrol_<name>`` output_name. Set
+    The top-level ``name`` key (default = the file stem) is the single source of
+    truth for the run: it picks the ``post_image_dataset/easycontrol/<name>/``
+    base tree and the ``anima_easycontrol_<name>`` output_name default. Set
     ``name = "sanitize"`` and the whole pipeline reroutes under
     ``easycontrol/sanitize/`` with no other path edits — re-run staging →
     preprocess → train so the generated blueprint tail tracks the new slug.
     Explicit ``[preprocess]`` path keys / ``[training].output_name`` still win if
     present (back-compat), but are no longer needed.
     """
-    if not _NEAR_TWIN_CFG.is_file():
+    path = _easy_cfg_path(adapter)
+    if not path.is_file():
         raise SystemExit(
-            f"{_NEAR_TWIN_CFG} not found — run `make easycontrol-staging "
-            "EASYADAPTER=near_twins` first to mine the pair tree."
+            f"{path} not found — run `make easycontrol-staging "
+            f"EASYADAPTER={adapter}` first to materialize the staging tree."
         )
-    cfg = tomllib.loads(_NEAR_TWIN_CFG.read_text(encoding="utf-8"))
-    name = str(cfg.get("name") or _NEAR_TWIN_CFG.stem).strip()
+    cfg = tomllib.loads(path.read_text(encoding="utf-8"))
+    name = str(cfg.get("name") or path.stem).strip()
     base = f"post_image_dataset/easycontrol/{name}"
     return cfg, name, base
 
@@ -138,59 +142,46 @@ def _resolve_blueprint_path(path: str, name: str) -> str:
     return path
 
 
-def _near_twins_train_extra(extra) -> list[str]:
-    """Build train.py extra-argv for an ``EASYADAPTER=near_twins`` run.
+def _easy_train_extra(adapter: str, extra) -> list[str]:
+    """Build train.py extra-argv for an ``EASYADAPTER=<adapter>`` descriptor run.
 
-    ``near_twins.toml`` is a multi-purpose file (top-level ``name`` + ``[staging]``
-    / ``[preprocess]`` / ``[training]`` knob tables above the generated
-    ``[general]`` + ``[[datasets]]`` blueprint), but train.py's dataset-config
+    ``configs/easycontrol/<adapter>.toml`` is a multi-purpose file (top-level
+    ``name`` + ``[staging]`` / ``[preprocess]`` / ``[training]`` knob tables above
+    a ``[general]`` + ``[[datasets]]`` blueprint), but train.py's dataset-config
     validator rejects any top-level key outside the blueprint. So we extract just
     the blueprint sections into a clean generated sidecar and point
     ``--dataset_config`` at that, then fold the optional ``[training]`` table
     (with ``output_name`` defaulting to ``anima_easycontrol_<name>``) into CLI
     overrides on top of the easycontrol method config. User-supplied ``extra``
     argv is appended last so it still wins.
-
-    Note: the generated blueprint exposes each mined member as an independent
-    ref==target subset (no ``cond_cache_dir`` pairing), so this is a vanilla
-    EasyControl run over the mined images — not yet a clean→tagged control task.
     """
-    cfg, name, base = _near_twins_load()
+    cfg, name, base = _easy_load(adapter)
     blueprint = {k: cfg[k] for k in ("general", "datasets") if k in cfg}
     if not blueprint.get("datasets"):
         raise SystemExit(
-            f"{_NEAR_TWIN_CFG} has no [[datasets]] blueprint yet — run "
-            "`make easycontrol-staging EASYADAPTER=near_twins` to mine the pair "
-            "tree (it writes the blueprint tail)."
+            f"{_easy_cfg_path(adapter)} has no [[datasets]] blueprint — run "
+            f"`make easycontrol-staging EASYADAPTER={adapter}` first."
         )
 
     # Resolve the blueprint's subset paths against the current `name` slug
     # (interpolate the `{name}` placeholder; retarget any baked-in legacy slug),
-    # so a `name` change reroutes training (and the sidecar location below).
+    # so a `name` change reroutes training. ``text_cache_dir`` rides the slug too
+    # (colorize redirects the TE cache; near_twins leaves it unset).
     for ds in blueprint.get("datasets", []):
         for s in ds.get("subsets", []):
-            for key in ("image_dir", "cache_dir", "cond_cache_dir"):
+            for key in ("image_dir", "cache_dir", "cond_cache_dir", "text_cache_dir"):
                 if key in s:
                     s[key] = _resolve_blueprint_path(s[key], name)
 
-    # Write the blueprint-only dataset config beside the caches (a gitignored data
-    # dir that exists once preprocess has run). Regenerated each invocation so it
-    # tracks the source file, and stable-pathed so the --queue daemon path can
+    # Write the blueprint-only dataset config under the slug base dir (a gitignored
+    # data dir that exists once preprocess has run). Regenerated each invocation so
+    # it tracks the source file, and stable-pathed so the --queue daemon path can
     # re-read it later.
-    subset = next(
-        (
-            s
-            for ds in blueprint["datasets"]
-            for s in ds.get("subsets", [])
-            if s.get("image_dir")
-        ),
-        None,
-    )
-    base_dir = ROOT / Path(subset["image_dir"]).parent if subset else ROOT / base
+    base_dir = ROOT / base
     base_dir.mkdir(parents=True, exist_ok=True)
     ds_path = base_dir / "dataset_config.toml"
     ds_path.write_text(
-        "# AUTO-GENERATED from configs/easycontrol/near_twins.toml — do not edit.\n"
+        f"# AUTO-GENERATED from configs/easycontrol/{adapter}.toml — do not edit.\n"
         "# Blueprint-only copy (train.py's dataset-config validator rejects the\n"
         "# name + [staging]/[preprocess]/[training] knobs in the source file).\n\n"
         + toml.dumps(blueprint),
@@ -211,18 +202,18 @@ def _near_twins_train_extra(extra) -> list[str]:
 
 
 def cmd_easycontrol(extra):
-    """EasyControl. ``EASYADAPTER=<name>`` selects a control-task project under
-    easycontrol_adapters/ (e.g. ``colorize``) → runs configs/methods/<name>.toml;
-    unset → the default ref==target easycontrol.toml.
+    """EasyControl. ``EASYADAPTER=<name>`` selects a control-task project
+    described by ``configs/easycontrol/<name>.toml`` (e.g. ``colorize`` or
+    ``near_twins``); unset → the default ref==target easycontrol.toml.
 
-    ``EASYADAPTER=near_twins`` runs the easycontrol method against the mined
-    near-twins blueprint (``configs/easycontrol/near_twins.toml``), folding that
-    file's optional ``[training]`` table in as CLI overrides."""
-    adapter = (os.environ.get("EASYADAPTER") or "").strip()
-    if adapter in ("near_twins", "near_twins"):  # accept the easy plural typo
-        train("easycontrol", _near_twins_train_extra(extra))
+    A descriptor run always trains the base ``easycontrol`` method, folding the
+    descriptor's blueprint tail in via ``--dataset_config`` and its optional
+    ``[training]`` table in as CLI overrides (see ``_easy_train_extra``)."""
+    adapter = _easyadapter()
+    if adapter in _EASY_ADAPTERS:
+        train("easycontrol", _easy_train_extra(adapter, extra))
         return
-    train(_easyadapter() or "easycontrol", extra)
+    train("easycontrol", extra)
 
 
 def cmd_easycontrol_download(extra):
@@ -246,7 +237,7 @@ def cmd_easycontrol_download(extra):
     )
 
 
-def _near_twins_preprocess() -> None:
+def _near_twins_preprocess(cfg: dict, base: str, extra) -> None:
     """Resize + VAE/TE caching for the mined near-twin pair tree.
 
     Every knob is read from the ``[preprocess]`` table of
@@ -261,7 +252,6 @@ def _near_twins_preprocess() -> None:
     ``resized/`` (``target_res`` tiers) — that resized tree is the training
     ``image_dir`` — and only then VAE/TE-encodes it into ``cache/``.
     """
-    cfg, _name, base = _near_twins_load()
     pp = cfg.get("preprocess") or {}
     staging = pp.get("image_dir", f"{base}/staging")
     resized = pp.get("resized_dir", f"{base}/resized")
@@ -382,27 +372,105 @@ def _near_twins_build_cond(pp: dict, base: str) -> None:
     )
 
 
+def _near_twins_stage(cfg: dict, base: str, extra) -> None:
+    """Mine the in-artist near-twin pair tree (the near_twins staging step).
+
+    The miner self-reads its ``[staging]`` table + ``name`` slug from
+    ``configs/easycontrol/near_twins.toml`` (via its ``--config`` default) and
+    rewrites the blueprint tail there, so ``cfg``/``base`` are unused here — the
+    signature just matches the registry contract. User ``extra`` argv overrides
+    the ``[staging]`` table (CLI > toml > default in the miner)."""
+    run([PY, "-m", "easycontrol_adapters.tools.near_twins", *extra])
+
+
+def _colorize_prep_paths(base: str) -> list[str]:
+    """Slug-derived prep.py path flags so ``name`` reroutes colorize's trees.
+
+    ``--src`` stays the shared color corpus (``post_image_dataset/resized`` — the
+    colorize *targets*); only the synthetic staging tree + cond/text caches ride
+    the slug, matching the blueprint's ``cond_cache_dir`` / ``text_cache_dir``.
+    Injected before the descriptor knob tables so a ``[staging]``/``[preprocess]``
+    key (or user ``extra``) still wins via argparse last-flag precedence."""
+    return [
+        "--staging",
+        f"{base}/staging",
+        "--cond_cache_dir",
+        f"{base}/cond",
+        "--text_cache_dir",
+        f"{base}/text",
+    ]
+
+
+def _colorize_stage(cfg: dict, base: str, extra) -> None:
+    """Colorize staging: synthesize the synthetic B&W manga condition tree.
+
+    Runs only prep.py's mangafy stage (``--skip_encode --skip_text``) over the
+    shared color corpus into ``{base}/staging``. Knobs come from the descriptor's
+    ``[staging]`` table; user ``extra`` argv wins last. The cond-latent +
+    color-only-text caching is the separate preprocess pass."""
+    knobs = _toml_table_to_argv(cfg.get("staging") or {})
+    run(
+        [
+            PY,
+            "easycontrol_adapters/colorization/prep.py",
+            "--skip_encode",
+            "--skip_text",
+            *_colorize_prep_paths(base),
+            *knobs,
+            *list(extra or []),
+        ]
+    )
+
+
+def _colorize_preprocess(cfg: dict, base: str, extra) -> None:
+    """Colorize preprocess: cache cond latents + color-only text over the staged tree.
+
+    Runs prep.py's encode + color-text stages (``--skip_mangafy`` — mangafy is the
+    staging step). The color *target* latents + TE are reused from the shared LoRA
+    cache, so no target re-encode. Knobs come from the descriptor's
+    ``[preprocess]`` table; pass ``ARGS="--no-skip_mangafy"`` to re-stage inline."""
+    knobs = _toml_table_to_argv(cfg.get("preprocess") or {})
+    run(
+        [
+            PY,
+            "easycontrol_adapters/colorization/prep.py",
+            "--skip_mangafy",
+            *_colorize_prep_paths(base),
+            *knobs,
+            *list(extra or []),
+        ]
+    )
+
+
+# Per-adapter materialization command bodies. The training path is generic
+# (``_easy_train_extra`` folds the descriptor's blueprint + [training] table onto
+# the base easycontrol method); only these two steps differ per adapter:
+#   stage      — data generation that materializes the training/condition tree
+#   preprocess — VAE/TE caching over that tree
+_EASY_ADAPTERS = {
+    "near_twins": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
+    "colorize": {"stage": _colorize_stage, "preprocess": _colorize_preprocess},
+}
+
+
 def cmd_easycontrol_preprocess(extra):
     """Full EasyControl preprocess: VAE latents + text-encoder outputs.
 
     Source: ``easycontrol-dataset/``  Caches: ``post_image_dataset/easycontrol/``.
 
-    ``EASYADAPTER=colorize`` instead builds the colorization *condition* cache
-    (mangafy the existing color images → VAE-encode into
-    ``post_image_dataset/easycontrol/colorize/cond/``); the color target latents + TE are
-    reused from the LoRA cache, so no target re-encode is needed. See
-    ``easycontrol_adapters/colorization/prep.py``.
-
-    ``EASYADAPTER=near_twins`` caches the mined pair tree, with every knob (source,
-    cache dir, model paths, batch/chunk, caption policy) read from the
-    ``[preprocess]`` table of ``configs/easycontrol/near_twins.toml``.
+    ``EASYADAPTER=<adapter>`` instead runs the adapter's descriptor-driven
+    preprocess (every knob from the ``[preprocess]`` table of
+    ``configs/easycontrol/<adapter>.toml``):
+      • ``colorize`` caches the synthetic-manga *condition* latents + color-only
+        text over the already-staged tree (mangafy is the separate staging step);
+        the color target latents + TE are reused from the LoRA cache.
+      • ``near_twins`` resizes + VAE/TE-caches the mined pair tree and symlinks the
+        ``cond/`` reference latents.
     """
-    if (os.environ.get("EASYADAPTER") or "").strip() == "near_twins":
-        _near_twins_preprocess()
-        return
     adapter = _easyadapter()
-    if adapter == "colorize":
-        run([PY, "easycontrol_adapters/colorization/prep.py", *extra])
+    if adapter in _EASY_ADAPTERS:
+        cfg, _name, base = _easy_load(adapter)
+        _EASY_ADAPTERS[adapter]["preprocess"](cfg, base, extra)
         return
 
     src = "easycontrol-dataset"
@@ -443,37 +511,37 @@ def cmd_easycontrol_preprocess(extra):
     )
 
 
-# EasyControl adapters that ship a *staging* step (data generation that
-# materializes the training tree, before the VAE/TE preprocess pass) → the CLI
-# that produces it. ``near_twin`` mines the in-artist pair tree.
-_EASY_STAGERS = {
-    "near_twins": [PY, "-m", "easycontrol_adapters.tools.near_twins"],
-}
-
-
 def cmd_easycontrol_staging(extra):
     """Generate an EasyControl adapter's *staging* dataset (no VAE/TE caching).
 
-    The adapter-specific data-generation step that materializes the training
-    tree — analogous to colorize's cond synthesis — kept separate from the later
-    ``easycontrol-preprocess`` VAE/TE caching pass.
+    The adapter-specific data-generation step that materializes the training/
+    condition tree, kept separate from the later ``easycontrol-preprocess`` VAE/TE
+    caching pass. Knobs come from the ``[staging]`` table of
+    ``configs/easycontrol/<adapter>.toml``; extra CLI args override them.
 
     ``EASYADAPTER=near_twins`` mines the in-artist near-twin pair tree into
     ``post_image_dataset/easycontrol/near_twins/staging/`` and (re)writes the
-    dataset blueprint ``configs/easycontrol/near_twins.toml``. Run knobs come from
-    that file's ``[staging]`` table; extra CLI args override it, e.g.::
+    descriptor's blueprint tail, e.g.::
 
         make easycontrol-staging EASYADAPTER=near_twins \\
             ARGS="--region --artists ama_mitsuki"
+
+    ``EASYADAPTER=colorize`` runs only the mangafy stage of
+    ``easycontrol_adapters/colorization/prep.py`` (synthesize the synthetic B&W
+    manga condition tree under ``post_image_dataset/easycontrol/colorize/staging/``)
+    — cond-latent + color-only-text caching stays in the later
+    ``easycontrol-preprocess EASYADAPTER=colorize`` pass (idempotent: it skips the
+    already-staged PNGs), e.g.::
+
+        make easycontrol-staging EASYADAPTER=colorize ARGS="--engine cv2 --limit 8"
     """
-    adapter = (os.environ.get("EASYADAPTER") or "").strip()
-    cmd = _EASY_STAGERS.get(adapter)
-    if cmd is None:
+    adapter = _easyadapter()
+    spec = _EASY_ADAPTERS.get(adapter)
+    if spec is None or "stage" not in spec:
         raise SystemExit(
-            f"easycontrol-staging needs a staging-capable EASYADAPTER. "
-            f"Known: {sorted(_EASY_STAGERS)}.\n"
-            "(The default EasyControl reads easycontrol-dataset/ directly; "
-            "colorize's cond synthesis runs under "
-            "`easycontrol-preprocess EASYADAPTER=colorize`.)"
+            "easycontrol-staging needs a staging-capable EASYADAPTER. "
+            f"Known: {sorted(_EASY_ADAPTERS)}.\n"
+            "(The default EasyControl reads easycontrol-dataset/ directly.)"
         )
-    run([*cmd, *extra])
+    cfg, _name, base = _easy_load(adapter)
+    spec["stage"](cfg, base, extra)

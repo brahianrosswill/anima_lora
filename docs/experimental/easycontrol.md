@@ -159,10 +159,16 @@ only in **how the condition is built**. A variant is selected by the
 `EASYADAPTER` env var (unset → the default ref==target EasyControl); per-task
 projects live under `easycontrol_adapters/`.
 
-| Variant      | `EASYADAPTER` | Condition                                   | Config                             | Project                              |
-| ------------ | ------------- | ------------------------------------------- | ---------------------------------- | ------------------------------------ |
-| **default**  | *(unset)*     | the reference image itself (cond == target) | `configs/methods/easycontrol.toml` | —                                    |
-| **colorize** | `colorize`    | synthetic mangafied B&W (XDoG + screentone) | `configs/methods/colorize.toml`    | `easycontrol_adapters/colorization/` |
+| Variant      | `EASYADAPTER` | Condition                                   | Config                                | Project                              |
+| ------------ | ------------- | ------------------------------------------- | ------------------------------------- | ------------------------------------ |
+| **default**  | *(unset)*     | the reference image itself (cond == target) | `configs/methods/easycontrol.toml`    | —                                    |
+| **colorize** | `colorize`    | synthetic mangafied B&W (XDoG + screentone) | `configs/easycontrol/colorize.toml`†  | `easycontrol_adapters/colorization/` |
+
+† colorize is a self-contained **descriptor** (top-level `name` + `[staging]` /
+`[preprocess]` / `[training]` knob tables + a `[general]`/`[[datasets]]` blueprint,
+same shape as `near_twins.toml`). It trains the base `easycontrol` method with its
+`[training]` table folded in as CLI overrides — there's no standalone `colorize`
+method/dataset file anymore.
 
 ### colorize — manga / lineart → color
 
@@ -179,17 +185,19 @@ B&W can't — hue — giving a strong prompt→color binding. At inference an em
 prompt auto-colorizes; a color prompt (`pink hair, blue eyes`) steers.
 
 ```bash
-make easycontrol-preprocess EASYADAPTER=colorize   # mangafy + VAE-encode cond
+make easycontrol-staging    EASYADAPTER=colorize   # stage 1: mangafy cond tree
+make easycontrol-preprocess EASYADAPTER=colorize   # stages 2-3: VAE-encode cond + color text
 make easycontrol            EASYADAPTER=colorize   # train (frozen DiT, adapter-only)
 REF_IMAGE=page.png make test-easycontrol EASYADAPTER=colorize   # inference
 ```
 
-In the GUI, the **EasyControl** experimental tab is a config editor (form on the
-left, field explanations on the right — like the LoRA tab) with a *Variant*
-dropdown. Pick *Colorize* and its Preprocess / Train buttons run the same
-`easycontrol*` targets with `EASYADAPTER=colorize` set automatically; Train
-passes `--methods_subdir gui-methods` so the edited `gui-methods/colorize.toml`
-is what trains.
+In the GUI, the **EasyControl** experimental tab lists *Colorize* in its *Variant*
+dropdown as a **descriptor variant**: a file-edited launcher (no in-GUI form — the
+tab shows a pointer note to edit `configs/easycontrol/colorize.toml` directly, like
+near_twins). Its Preprocess button runs staging + preprocess in one shot
+(`--no-skip_mangafy`); its Train button trains the base `easycontrol` method with
+the descriptor's blueprint + `[training]` overrides folded in (via the daemon, so
+it survives the GUI closing).
 
 Full design notes (caption policy, screentone bands, inference settings, Phase B)
 live in `easycontrol_adapters/colorization/README.md`.
@@ -375,9 +383,8 @@ training (vs Phase 1.5's >16 GiB OOM at the same bucket).
 | `networks/methods/easycontrol.py`                 | `EasyControlNetwork` + patched `Block.forward` closure |
 | `configs/methods/easycontrol.toml`              | Method config (default ref==target)                    |
 | `configs/gui-methods/easycontrol.toml`          | GUI-friendly self-contained variant                    |
-| `configs/methods/colorize.toml`                 | Colorize variant method config (CLI)                   |
-| `configs/gui-methods/colorize.toml`             | Colorize GUI variant (`[variant] family = easycontrol`) |
-| `configs/datasets/colorize.toml`                | Colorize dataset blueprint (`cond_cache_dir` + `text_cache_dir`) |
+| `configs/easycontrol/colorize.toml`             | Colorize **descriptor** — `name` + `[staging]`/`[preprocess]`/`[training]` tables + blueprint + `[variant]` GUI metadata (the single source of truth; folds onto the base easycontrol method) |
+| `configs/easycontrol/near_twins.toml`           | Near-twins descriptor (same shape; text-removal control task)          |
 | `easycontrol_adapters/colorization/`            | Colorize project — mangafy + `prep.py` + color-caption filter + README |
 | `bench/easycontrol/step0_equivalence.py` | `b_cond=-10` init recipe + two-stream verification     |
 | `bench/easycontrol/step1p5_lse_equivalence.py` | LSE-decomposed Function vs masked-SDPA reference |

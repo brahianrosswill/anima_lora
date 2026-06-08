@@ -89,7 +89,12 @@ it matters. This is expected, not a bug.
 | `color_caption.py` | reduce a full Anima caption to color tags only (`filter_to_colors`) |
 | `prep.py` | mangafy `resized/` → VAE-encode into `easycontrol/colorize/cond/`; re-encode color-only captions into `easycontrol/colorize/text/` |
 
-Configs: `configs/datasets/colorize.toml`, `configs/methods/colorize.toml`.
+Config: `configs/easycontrol/colorize.toml` — a single self-contained descriptor
+(top-level `name` + `[staging]` / `[preprocess]` / `[training]` knob tables + a
+`[general]`/`[[datasets]]` blueprint, same shape as `near_twins.toml`). Colorize
+trains the base `easycontrol` method with the descriptor's `[training]` table
+folded in as CLI overrides; the staging/preprocess knobs drive `prep.py`. Edit
+this one file to retune colorize.
 
 ## Run
 
@@ -97,11 +102,14 @@ The colorization project rides the existing `easycontrol*` targets via the
 `EASYADAPTER=colorize` selector (no separate targets):
 
 ```bash
-# 1. Build the condition latents (mangafy + VAE-encode). Idempotent.
-make easycontrol-preprocess EASYADAPTER=colorize
-#    or directly:  python easycontrol_adapters/colorization/prep.py
-#    QA a few first:  python easycontrol_adapters/colorization/prep.py --limit 8
+# 1a. Staging — synthesize the synthetic B&W manga condition tree (mangafy only).
+make easycontrol-staging EASYADAPTER=colorize
+#    or directly:  python easycontrol_adapters/colorization/prep.py --skip_encode --skip_text
+#    QA a few first:  make easycontrol-staging EASYADAPTER=colorize ARGS="--limit 8"
 #    Inspect staged manga PNGs under post_image_dataset/easycontrol/colorize/staging/
+# 1b. Preprocess — VAE-encode the cond latents + cache color-only text. Idempotent.
+make easycontrol-preprocess EASYADAPTER=colorize
+#    (re-stage inline in one shot:  make easycontrol-preprocess EASYADAPTER=colorize ARGS="--no-skip_mangafy")
 
 # 2. Train (frozen DiT, adapter-only, caption-free default).
 make easycontrol EASYADAPTER=colorize
@@ -126,10 +134,11 @@ REF_IMAGE=post_image_dataset/resized/takaman_\(gaffe\)/7645571.png \
 - Feed a **real screentoned B&W page** as the cond (it's VAE-encoded as-is, no
   XDoG at inference). A flat grayscale photo / clean lineart is out-of-distribution.
 
-`EASYADAPTER=colorize` ⇒ `configs/methods/colorize.toml` (train),
-`easycontrol_adapters/colorization/prep.py` (preprocess), and the `anima_colorize`
-checkpoint + `output/tests/colorize/` (inference). Unset ⇒ default ref==target
-EasyControl.
+`EASYADAPTER=colorize` ⇒ `configs/easycontrol/colorize.toml` (descriptor: staging
++ preprocess + train knobs, folded onto the base `easycontrol` method),
+`easycontrol_adapters/colorization/prep.py` (staging + preprocess), and the
+`anima_colorize` checkpoint + `output/tests/colorize/` (inference). Unset ⇒
+default ref==target EasyControl.
 
 ## Phase B (deferred)
 
