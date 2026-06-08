@@ -328,6 +328,51 @@ def build_argparser() -> argparse.ArgumentParser:
         "h=1e-2). Only active with --gad_weight > 0. Default: TOML (gad.h, "
         "default 0.01).",
     )
+
+    # ---- DMD2 teacher-feature GAN (FastGen idea 1; off by default) ----
+    parser.add_argument(
+        "--gan_loss_weight_gen",
+        type=float,
+        default=-1.0,
+        help="λ on the GAN generator term (softplus hinge on teacher-feature "
+        "disc logits), added to the student loss. 0 disables the whole GAN path "
+        "(byte-identical to DP-DMD). FastGen QwenImage uses 0.03. Default: TOML "
+        "(gan.weight_gen, default 0).",
+    )
+    parser.add_argument(
+        "--gan_feature_block_idx",
+        type=int,
+        default=-2,
+        help="Which DiT block's token output the discriminator taps. -1 = middle "
+        "block (num_blocks//2). Default sentinel -2 → TOML (gan.feature_block_idx, "
+        "default -1).",
+    )
+    parser.add_argument(
+        "--gan_disc_lr",
+        type=float,
+        default=-1.0,
+        help="Discriminator AdamW LR. Default: TOML (gan.disc_lr, default 1e-5).",
+    )
+    parser.add_argument(
+        "--gan_r1_weight",
+        type=float,
+        default=-1.0,
+        help="Weight on the approximate-R1 (APT) disc regularizer: MSE between "
+        "real logits and logits of a slightly-perturbed real input. 0 disables. "
+        "Default: TOML (gan.r1_weight, default 0).",
+    )
+
+    # ---- f-distill reweighting (FastGen idea 2; needs the GAN disc) ----
+    parser.add_argument(
+        "--f_div",
+        type=str,
+        default=None,
+        choices=("rkl", "kl", "js", "sf", "neyman", "sh", "jf"),
+        help="f-divergence whose weight h=f'(r) reweights the DMD signal "
+        "(r=exp(disc_logits) from idea 1). 'rkl' ≡ uniform h ≡ plain DMD2 (no-op). "
+        "Any other value REQUIRES gan_loss_weight_gen > 0. Default: TOML "
+        "(f_distill.f_div, default 'rkl').",
+    )
     return parser
 
 
@@ -395,6 +440,22 @@ class TurboConfig:
     gad_weight: float
     gad_h: float
 
+    # DMD2 teacher-feature GAN (idea 1) + f-distill reweighting (idea 2)
+    gan_loss_weight_gen: float
+    gan_feature_block_idx: int  # -1 → middle block (resolved in distill.py)
+    gan_disc_lr: float
+    gan_disc_hidden: int  # <= 0 → inner_dim // 2
+    gan_r1_weight: float
+    gan_r1_alpha: float
+    gan_use_same_t_noise: bool
+    gan_grad_ckpt: bool  # checkpoint ONLY the grad-bearing GAN gen forward
+    f_div: str
+    f_ratio_lower: float
+    f_ratio_upper: float
+    f_ratio_ema_rate: float
+    f_bin_num: int
+    f_ratio_normalization: bool
+
     # Mean-variance reg (lever B / Eq. 7)
     mean_var_weight: float
     mv_mu_t: float
@@ -417,6 +478,7 @@ class TurboConfig:
     blocks_to_swap: int
     grad_ckpt: bool
     torch_compile: bool
+    dynamo_recompile_limit: int  # per-_forward dynamo graph budget
 
 
 def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
@@ -424,7 +486,9 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
 
     # Paths
     dit_path = _pick(
-        args.dit_path, cfg, "dit_path",
+        args.dit_path,
+        cfg,
+        "dit_path",
         "models/diffusion_models/anima-base-v1.0.safetensors",
     )
     data_dir = _pick(args.data_dir, cfg, "data_dir", "post_image_dataset/lora")
@@ -455,7 +519,9 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     # use_custom_down_autograd lives at TOML top level (matches the LoRA family's
     # config layout in methods/lora.toml). CLI flag wins when set explicitly.
     if args.use_custom_down_autograd is None:
-        use_custom_down_autograd = bool(_flatten(cfg, "use_custom_down_autograd", False))
+        use_custom_down_autograd = bool(
+            _flatten(cfg, "use_custom_down_autograd", False)
+        )
     else:
         use_custom_down_autograd = bool(args.use_custom_down_autograd)
 
@@ -487,6 +553,36 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     base_loss = _pick(args.base_loss, cfg, "base_loss", "dpdmd")
     gad_weight = float(_pick(args.gad_weight, cfg, "gad.weight", 0.0))
     gad_h = float(_pick(args.gad_h, cfg, "gad.h", 1e-2))
+
+    # DMD2 teacher-feature GAN (idea 1) + f-distill (idea 2). weight_gen=0 keeps
+    # the whole GAN/disc path off → byte-identical DP-DMD. feature_block_idx uses
+    # sentinel -2 (not -1) because -1 is a meaningful value (middle block).
+    gan_loss_weight_gen = float(
+        _pick(args.gan_loss_weight_gen, cfg, "gan.weight_gen", 0.0)
+    )
+    if args.gan_feature_block_idx != -2:
+        gan_feature_block_idx = int(args.gan_feature_block_idx)
+    else:
+        gan_feature_block_idx = int(_flatten(cfg, "gan.feature_block_idx", -1))
+    gan_disc_lr = float(_pick(args.gan_disc_lr, cfg, "gan.disc_lr", 1e-5))
+    gan_disc_hidden = int(_flatten(cfg, "gan.disc_hidden", 0))
+    gan_r1_weight = float(_pick(args.gan_r1_weight, cfg, "gan.r1_weight", 0.0))
+    gan_r1_alpha = float(_flatten(cfg, "gan.r1_alpha", 0.1))
+    gan_use_same_t_noise = bool(_flatten(cfg, "gan.use_same_t_noise", True))
+    # Selectively checkpoint the single grad-bearing GAN gen teacher forward.
+    # Independent of the global ``--grad_ckpt`` (which arms unsloth offload for
+    # ALL grad-bearing forwards): the GAN gen forward retains ~half the DiT's
+    # block activations only to backprop into x_pred → student, so recomputing
+    # them in backward reclaims that peak VRAM (~one half-depth forward of extra
+    # compute) without paying the global recompute. Default on — numerically
+    # equivalent (frozen teacher, no dropout).
+    gan_grad_ckpt = bool(_flatten(cfg, "gan.grad_ckpt", True))
+    f_div = _pick(args.f_div, cfg, "f_distill.f_div", "rkl")
+    f_ratio_lower = float(_flatten(cfg, "f_distill.ratio_lower", 0.1))
+    f_ratio_upper = float(_flatten(cfg, "f_distill.ratio_upper", 20.0))
+    f_ratio_ema_rate = float(_flatten(cfg, "f_distill.ratio_ema_rate", 0.0))
+    f_bin_num = int(_flatten(cfg, "f_distill.bin_num", 10))
+    f_ratio_normalization = bool(_flatten(cfg, "f_distill.ratio_normalization", True))
 
     # Per-step expert (dual-B-head student). step_expert_K is derived from
     # student_steps so head k ↔ denoise step k by construction (the plan's
@@ -617,6 +713,43 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         raise ValueError(f"gad.weight={gad_weight}: must be >= 0")
     if gad_weight > 0.0 and gad_h <= 0.0:
         raise ValueError(f"gad.h={gad_h}: must be > 0 when gad.weight > 0")
+    if gan_loss_weight_gen < 0.0:
+        raise ValueError(f"gan.weight_gen={gan_loss_weight_gen}: must be >= 0")
+    if gan_r1_weight < 0.0:
+        raise ValueError(f"gan.r1_weight={gan_r1_weight}: must be >= 0")
+    _F_DIVS = ("rkl", "kl", "js", "sf", "neyman", "sh", "jf")
+    if f_div not in _F_DIVS:
+        raise ValueError(f"f_distill.f_div={f_div!r}: expected one of {_F_DIVS}")
+    if f_div != "rkl" and gan_loss_weight_gen <= 0.0:
+        # r = exp(disc_logits) only exists once the GAN disc is built (idea 1).
+        raise ValueError(
+            f"f_distill.f_div={f_div!r} requires gan.weight_gen > 0 — the "
+            "f-divergence weight reads the GAN discriminator's logits."
+        )
+    if not (0.0 < f_ratio_lower < f_ratio_upper):
+        raise ValueError(
+            f"f_distill: require 0 < ratio_lower ({f_ratio_lower}) < "
+            f"ratio_upper ({f_ratio_upper})"
+        )
+    if not (0.0 <= f_ratio_ema_rate < 1.0):
+        raise ValueError(
+            f"f_distill.ratio_ema_rate={f_ratio_ema_rate}: must be in [0, 1)"
+        )
+    if f_bin_num < 1:
+        raise ValueError(f"f_distill.bin_num={f_bin_num}: must be >= 1")
+    if gan_loss_weight_gen > 0.0:
+        logger.info(
+            f"GAN (DMD2 teacher-feature disc, FastGen idea 1) ON: "
+            f"weight_gen={gan_loss_weight_gen}, feature_block_idx="
+            f"{gan_feature_block_idx} (-1 = middle), disc_lr={gan_disc_lr}, "
+            f"r1_weight={gan_r1_weight}, use_same_t_noise={gan_use_same_t_noise}."
+        )
+        if f_div != "rkl":
+            logger.info(
+                f"f-distill (FastGen idea 2) ON: f_div={f_div!r}, ratio∈"
+                f"[{f_ratio_lower}, {f_ratio_upper}], ema_rate={f_ratio_ema_rate}, "
+                f"bin_num={f_bin_num}, normalization={f_ratio_normalization}."
+            )
     if flow_shift <= 0.0:
         raise ValueError(f"sampling.flow_shift={flow_shift}: must be > 0")
     if use_anchor and not detach_after_first:
@@ -749,6 +882,20 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         base_loss=base_loss,
         gad_weight=gad_weight,
         gad_h=gad_h,
+        gan_loss_weight_gen=gan_loss_weight_gen,
+        gan_feature_block_idx=gan_feature_block_idx,
+        gan_disc_lr=gan_disc_lr,
+        gan_disc_hidden=gan_disc_hidden,
+        gan_r1_weight=gan_r1_weight,
+        gan_r1_alpha=gan_r1_alpha,
+        gan_use_same_t_noise=gan_use_same_t_noise,
+        gan_grad_ckpt=gan_grad_ckpt,
+        f_div=f_div,
+        f_ratio_lower=f_ratio_lower,
+        f_ratio_upper=f_ratio_upper,
+        f_ratio_ema_rate=f_ratio_ema_rate,
+        f_bin_num=f_bin_num,
+        f_ratio_normalization=f_ratio_normalization,
         mean_var_weight=mean_var_weight,
         mv_mu_t=mv_mu_t,
         mv_sigma2_t=mv_sigma2_t,
@@ -764,6 +911,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         blocks_to_swap=int(args.blocks_to_swap),
         grad_ckpt=bool(args.grad_ckpt),
         torch_compile=bool(args.torch_compile),
+        dynamo_recompile_limit=int(_flatten(cfg, "dynamo_recompile_limit", 64)),
     )
 
 
@@ -801,6 +949,8 @@ def tb_config_text(c: TurboConfig) -> str:
         "base_loss": c.base_loss,
         "gad_weight": c.gad_weight,
         "gad_h": c.gad_h,
+        "gan_loss_weight_gen": c.gan_loss_weight_gen,
+        "f_div": c.f_div,
         "k_anchor": c.k_anchor,
         "teacher_anchor_steps": c.teacher_anchor_steps,
         "div_weight": c.div_weight,

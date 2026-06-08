@@ -51,6 +51,8 @@ class FlushedMetrics:
     cos: float
     mv: float
     div: float
+    gan_gen: float
+    gan_disc: float
 
 
 class TurboMetrics:
@@ -72,6 +74,9 @@ class TurboMetrics:
         self.mv = z()
         # DP-DMD first-step diversity loss.
         self.div = z()
+        # DMD2 teacher-feature GAN (idea 1); 0 when disabled.
+        self.gan_gen = z()
+        self.gan_disc = z()
 
     @torch.no_grad()
     def accumulate_per_step(
@@ -99,15 +104,21 @@ class TurboMetrics:
         vf = v_fake_cond_dm.float()
         dm_w = (tau_dm_e * delta_dm.float()).pow(2).mean().sqrt()
         self.rel_gap.add_(dm_w / ((tau_dm_e * vr).pow(2).mean().sqrt() + eps_r))
-        self.mag_ratio.add_(
-            vf.pow(2).mean().sqrt() / (vr.pow(2).mean().sqrt() + eps_r)
-        )
+        self.mag_ratio.add_(vf.pow(2).mean().sqrt() / (vr.pow(2).mean().sqrt() + eps_r))
         self.cos.add_((vf * vr).sum() / (vf.norm() * vr.norm() + eps_r))
 
     @torch.no_grad()
     def add_div(self, div_loss_t: torch.Tensor) -> None:
         """Accumulate the DP-DMD first-step diversity loss (pre-weight)."""
         self.div.add_(div_loss_t.detach().float())
+
+    @torch.no_grad()
+    def add_gan(
+        self, gan_gen_loss: torch.Tensor, gan_disc_mean_t: torch.Tensor
+    ) -> None:
+        """Accumulate the GAN generator/discriminator losses (pre-weight)."""
+        self.gan_gen.add_(gan_gen_loss.detach().float())
+        self.gan_disc.add_(gan_disc_mean_t.detach().float())
 
     def flush(self, log_interval: int) -> FlushedMetrics:
         """One CUDA sync per log boundary: stack everything, read once."""
@@ -124,6 +135,8 @@ class TurboMetrics:
                     self.cos,
                     self.mv,
                     self.div,
+                    self.gan_gen,
+                    self.gan_disc,
                 ]
             )
             / log_interval
@@ -139,12 +152,24 @@ class TurboMetrics:
             cos=packed[7],
             mv=packed[8],
             div=packed[9],
+            gan_gen=packed[10],
+            gan_disc=packed[11],
         )
 
     def reset(self) -> None:
         for t in (
-            self.fake, self.grad, self.dm, self.xpred, self.v_student,
-            self.rel_gap, self.mag_ratio, self.cos, self.mv, self.div,
+            self.fake,
+            self.grad,
+            self.dm,
+            self.xpred,
+            self.v_student,
+            self.rel_gap,
+            self.mag_ratio,
+            self.cos,
+            self.mv,
+            self.div,
+            self.gan_gen,
+            self.gan_disc,
         ):
             t.zero_()
 
@@ -161,6 +186,8 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     writer.add_scalar("train/dm_cos", m.cos, step)
     writer.add_scalar("train/mean_var_kl", m.mv, step)
     writer.add_scalar("train/div_loss", m.div, step)
+    writer.add_scalar("train/gan_gen_loss", m.gan_gen, step)
+    writer.add_scalar("train/gan_disc_loss", m.gan_disc, step)
 
 
 def tqdm_postfix(m: FlushedMetrics) -> dict:
@@ -176,4 +203,7 @@ def tqdm_postfix(m: FlushedMetrics) -> dict:
         postfix["mv"] = f"{m.mv:.3f}"
     if m.div > 0:
         postfix["div"] = f"{m.div:.3f}"
+    if m.gan_gen != 0 or m.gan_disc != 0:
+        postfix["gen"] = f"{m.gan_gen:.3f}"
+        postfix["dsc"] = f"{m.gan_disc:.3f}"
     return postfix

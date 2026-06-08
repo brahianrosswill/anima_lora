@@ -201,13 +201,21 @@ def apply_rotary_pos_emb_qk(
     # torch.compile and never recompiles per bucket.
     q_rot = q[..., :rot_dim]
     q_emb = (q_rot * cos_q) + (_rotate_half(q_rot, False) * sin_q)
-    q = q_emb if rot_dim == q.shape[-1] else torch.cat((q_emb, q[..., rot_dim:]), dim=-1)
+    q = (
+        q_emb
+        if rot_dim == q.shape[-1]
+        else torch.cat((q_emb, q[..., rot_dim:]), dim=-1)
+    )
 
     cos_k = cos_q if k.dtype == q.dtype else cos_.to(k.dtype)
     sin_k = sin_q if k.dtype == q.dtype else sin_.to(k.dtype)
     k_rot = k[..., :rot_dim]
     k_emb = (k_rot * cos_k) + (_rotate_half(k_rot, False) * sin_k)
-    k = k_emb if rot_dim == k.shape[-1] else torch.cat((k_emb, k[..., rot_dim:]), dim=-1)
+    k = (
+        k_emb
+        if rot_dim == k.shape[-1]
+        else torch.cat((k_emb, k[..., rot_dim:]), dim=-1)
+    )
 
     return q, k
 
@@ -1661,6 +1669,9 @@ class Anima(nn.Module):
         t_embedding_B_T_D: torch.Tensor,
         crossattn_emb: torch.Tensor,
         attn_params,
+        capture_blocks: Optional[set] = None,
+        feature_sink: Optional[dict] = None,
+        stop_after_block: Optional[int] = None,
         **block_kwargs,
     ) -> torch.Tensor:
         """The block loop — the per-block compiled hot path (see compile_blocks).
@@ -1676,6 +1687,16 @@ class Anima(nn.Module):
 
         Mod-guidance is applied via buffers on ``self`` (zero = off) so the
         per-block ``t_emb`` arithmetic is unconditional. No Python branches.
+
+        Feature tap (opt-in, all defaults off → bit-exact no-op): when
+        ``capture_blocks`` is given, each listed block's output is stored into
+        ``feature_sink`` (keyed by block index). ``stop_after_block`` breaks the
+        loop right after that index — so a feature-only forward that taps block
+        ``k`` only runs ``blocks[0..k]`` and retains just their activations for
+        backward (the memory win that makes the Turbo GAN gen-forward affordable;
+        see ``forward_mini_train_dit``'s ``return_features_early``). The capture
+        sits at block ``__call__`` granularity — eager, OUTSIDE the compiled
+        ``_forward`` — so it is compile-safe.
         """
         # Normalize requires_grad once at the stack entry. Block 0 receives
         # requires_grad=False (frozen patch_embed output) while blocks 1+
@@ -1701,8 +1722,14 @@ class Anima(nn.Module):
                 **block_kwargs,
             )
 
+            if capture_blocks is not None and block_idx in capture_blocks:
+                feature_sink[block_idx] = x
+
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks(self.blocks, block_idx)
+
+            if stop_after_block is not None and block_idx == stop_after_block:
+                break
         return x
 
     def forward_mini_train_dit(
@@ -1720,6 +1747,8 @@ class Anima(nn.Module):
         w_offset: int = 0,
         pooled_text_override: Optional[torch.Tensor] = None,
         skip_pooled_text_proj: bool = False,
+        return_block_features: Optional[set] = None,
+        return_features_early: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -1736,7 +1765,33 @@ class Anima(nn.Module):
             w_offset: Width offset in patched space for tiled diffusion RoPE
             pooled_text_override: Optional pre-computed pooled text (B, 1024) for modulation guidance.
                 Use to decouple modulation from prefix/postfix tokens in crossattn_emb.
+            return_block_features: Optional set of block indices to tap. When given,
+                each listed block's raw output (the post-block hidden state, in the
+                native-flatten ``(B, 1, L, 1, D)`` layout under ``compile_blocks`` or
+                the eager ``(B, T, H, W, D)`` grid otherwise) is captured into a dict.
+            return_features_early: When True (requires ``return_block_features``),
+                the block loop stops right after the deepest tapped block and the
+                method returns the captured-feature dict directly — skipping the
+                remaining blocks, ``final_layer`` and ``unpatchify``. This is the
+                feature-tap fast path: a forward that only needs a mid-stack feature
+                runs (and, when grad-bearing, retains activations for) just the
+                blocks up to the tap. With ``return_block_features`` but NOT early,
+                the method returns ``(velocity, feature_dict)``. Both default off →
+                bit-exact no-op (plain velocity return). Unsupported with block swap.
         """
+        if return_features_early and not return_block_features:
+            raise ValueError(
+                "return_features_early=True requires a non-empty return_block_features"
+            )
+        if return_block_features is not None and self.blocks_to_swap:
+            # Early-exit would leave the tail blocks' offloader moves un-submitted,
+            # desyncing the swap state for the next forward. Turbo keeps the teacher
+            # resident (blocks_to_swap=0), so this guard never fires in practice; it
+            # fails loud rather than corrupting silently if that changes.
+            raise RuntimeError(
+                "feature tap (return_block_features) is unsupported with block swap "
+                f"(blocks_to_swap={self.blocks_to_swap}); keep the tapped DiT resident"
+            )
         if (
             t5_input_ids is not None
             and self.use_llm_adapter
@@ -1865,6 +1920,15 @@ class Anima(nn.Module):
         # positions, so attn_params.selfattn_block_mask stays None (the legacy
         # pad-to-static path masked padded positions; that path is gone).
 
+        # Feature tap (idea 3.1): when requested, capture listed block outputs and
+        # — if early — stop after the deepest tap so only blocks[0..k] run.
+        feature_sink = {} if return_block_features is not None else None
+        stop_after_block = (
+            max(return_block_features)
+            if (return_block_features and return_features_early)
+            else None
+        )
+
         # Block stack runs in _run_blocks — a split point kept so pre/post-block
         # regions stay eager while the block loop is the compiled hot path.
         x_B_T_H_W_D = self._run_blocks(
@@ -1872,8 +1936,18 @@ class Anima(nn.Module):
             t_embedding_B_T_D,
             crossattn_emb,
             attn_params,
+            capture_blocks=return_block_features,
+            feature_sink=feature_sink,
+            stop_after_block=stop_after_block,
             **block_kwargs,
         )
+
+        # Early feature-only return: skip the rest of the head entirely. The
+        # captured features stay in the block-output layout (native-flatten or
+        # eager grid) — consumers pool over the spatial/token axes (see the Turbo
+        # PooledTokenDiscriminator), which is shape-agnostic across both.
+        if return_features_early:
+            return feature_sink
 
         # --- Native flatten: restore the original 5D shape ---
         # Delegated to a @torch.compiler.disable'd helper so the bucket-
@@ -1890,6 +1964,8 @@ class Anima(nn.Module):
             x_B_T_H_W_D, t_emb_final, adaln_lora_B_T_3D=adaln_lora_B_T_3D
         )
         x_B_C_Tt_Hp_Wp = self.unpatchify(x_B_T_H_W_O)
+        if return_block_features is not None:
+            return x_B_C_Tt_Hp_Wp, feature_sink
         return x_B_C_Tt_Hp_Wp
 
     def forward(

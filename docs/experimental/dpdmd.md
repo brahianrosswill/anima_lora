@@ -242,6 +242,37 @@ the teacher anchor. The live TB scalars:
 | `dm_mag_ratio` | `rms(v_fake)/rms(v_real)` — ≈1 healthy. |
 | `x_pred_std` / `v_student_rms` | collapse → 0 or runaway up = student exploding (`v_student_rms` leads). |
 | `mean_var_kl` | Eq.7 KL (pre-weight); 0 when the reg is off. |
+| `gan_gen_loss` / `gan_disc_loss` | softplus-hinge generator / discriminator losses (pre-weight); 0 when the GAN is off. |
+
+## GAN + f-distill (FastGen levers, off by default)
+
+DP-DMD is structurally **DMD2 with the GAN amputated**. Two off-by-default levers
+port the missing adversarial machinery from NVlabs FastGen
+(`docs/proposal/turbo_gan/plan.md`):
+
+- **Teacher-feature GAN** (`[gan] weight_gen > 0`, FastGen idea 1). A tiny pooled-
+  token discriminator (`networks/methods/turbo_dmd.py::PooledTokenDiscriminator`,
+  ~2M params) reads the **frozen teacher DiT's** mid-block activations — captured
+  with a compile-safe forward hook on `blocks[feature_block_idx]` (default middle).
+  The generator term `softplus(−disc(feat))` is added to the student loss; the disc
+  trains on the fake/critic cadence with its own AdamW (`disc_lr`, betas (0, 0.99)),
+  optional approximate-R1 (`r1_weight`). The student output stays a **plain LoRA**
+  (the disc is discarded at save, like the fake). FastGen QwenImage recipe:
+  `weight_gen=0.03`, `use_same_t_noise=true`, middle block, `disc_lr=1e-5`.
+- **f-distill reweighting** (`[f_distill] f_div != "rkl"`, FastGen idea 2). Scales
+  the DMD signal per-sample by `h = f'(r)`, `r = exp(disc logits)` (free from the
+  GAN head). Requires `weight_gen > 0`. `"rkl"` ≡ uniform h ≡ plain DMD2 (no-op).
+  Targets mode-collapse — **bench against the diversity anchor; they may not be
+  additive** (decision gate 2).
+
+**Cost (honest).** Without the idea-3.1 feature-tap API there is no early-exit, so
+the GAN adds **+1 grad-bearing teacher forward** in the student step (the generator
+term must flow grad through the teacher into `x_pred`) and **+2 no_grad teacher
+forwards** per disc step. Consider `--grad_ckpt` when the GAN is on. `weight_gen=0`
+keeps the entire path off → byte-identical DP-DMD (no disc, no hooks, no extra
+forwards). **Decision gate 1:** A/B `weight_gen` 0 vs 0.03 at fixed seed/data/steps,
+2-step `--cfg 1.0`, ship only on a CMMD/A-B win without diversity collapse (reuse
+`diversity.py`).
 
 ## Limitations & composition
 

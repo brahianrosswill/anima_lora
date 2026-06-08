@@ -29,6 +29,8 @@ import logging
 from typing import Literal
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from networks.lora_anima.factory import create_network
 from networks.lora_anima.network import LoRANetwork
@@ -36,6 +38,71 @@ from networks.lora_anima.network import LoRANetwork
 logger = logging.getLogger(__name__)
 
 View = Literal["teacher", "student", "fake"]
+
+
+# ---------------------------------------------------------------------------
+# DMD2 teacher-feature GAN (FastGen port — idea 1 of docs/proposal/turbo_gan)
+# ---------------------------------------------------------------------------
+
+
+class PooledTokenDiscriminator(nn.Module):
+    """Pooled-token GAN head over frozen-teacher block features (FastGen v0).
+
+    FastGen's ``Discriminator_ImageDiT`` un-flattens each tapped block's tokens
+    back to ``(B, D, H_p, W_p)`` and runs a conv head. Under Anima's native-shape
+    bucketing the patch grid is per-bucket and, with ``compile_blocks``, the block
+    output is the fake-5D ``(B, 1, L, 1, D)`` layout — so the spatial reshape is
+    the fragile part the proposal flags. This v0 sidesteps it: **mean-pool each
+    tap's token output over every axis between batch and channel** → ``(B, D)``,
+    then a 2-layer MLP per tap → a per-tap logit. The pool is shape-agnostic, so
+    it works identically on the eager ``(B, T, H, W, D)`` grid and the compiled
+    ``(B, 1, L, 1, D)`` layout. Logits for all taps are concatenated to
+    ``(B, num_taps)``; runs in fp32 for GAN-loss stability.
+
+    Tiny by design (~``inner_dim²/2`` params/tap, ≈2M at D=2048) and discarded at
+    save — pure training scaffolding, exactly like the fake/critic LoRA.
+    """
+
+    def __init__(
+        self, *, inner_dim: int, num_taps: int, hidden_dim: int | None = None
+    ) -> None:
+        super().__init__()
+        h = hidden_dim if hidden_dim is not None else inner_dim // 2
+        self.heads = nn.ModuleList(
+            nn.Sequential(
+                nn.LayerNorm(inner_dim),
+                nn.Linear(inner_dim, h),
+                nn.LeakyReLU(0.2),
+                nn.Linear(h, 1),
+            )
+            for _ in range(num_taps)
+        )
+
+    def forward(self, feats: list[torch.Tensor]) -> torch.Tensor:
+        if len(feats) != len(self.heads):
+            raise ValueError(
+                f"PooledTokenDiscriminator expected {len(self.heads)} feature "
+                f"tensors, got {len(feats)}"
+            )
+        logits = []
+        for head, f in zip(self.heads, feats):
+            # Pool over every axis between batch (0) and channel (-1): handles
+            # both (B, T, H, W, D) eager and (B, 1, L, 1, D) native-flatten.
+            pooled = f.float().mean(dim=tuple(range(1, f.ndim - 1)))  # (B, D)
+            logits.append(head(pooled))
+        return torch.cat(logits, dim=1)  # (B, num_taps)
+
+
+def gan_loss_generator(fake_logits: torch.Tensor) -> torch.Tensor:
+    """Softplus hinge — generator wants the disc to score its samples as real."""
+    return F.softplus(-fake_logits).mean()
+
+
+def gan_loss_discriminator(
+    real_logits: torch.Tensor, fake_logits: torch.Tensor
+) -> torch.Tensor:
+    """Softplus hinge — push real logits up, fake logits down (FastGen common_loss)."""
+    return F.softplus(fake_logits).mean() + F.softplus(-real_logits).mean()
 
 
 def load_step_expert_student(
@@ -125,6 +192,8 @@ class TurboDMDNetwork:
         fake_alpha: float | None = None,
         use_custom_down_autograd: bool = False,
         student_step_expert_K: int = 0,
+        gan_feature_indices: set[int] | None = None,
+        gan_disc_hidden: int | None = None,
     ) -> None:
         self.unet = unet
         self.student_rank = int(student_rank)
@@ -158,7 +227,9 @@ class TurboDMDNetwork:
         self.student: LoRANetwork = create_network(
             multiplier=1.0,
             network_dim=self.student_rank,
-            network_alpha=student_alpha if student_alpha is not None else self.student_rank,
+            network_alpha=student_alpha
+            if student_alpha is not None
+            else self.student_rank,
             vae=None,
             text_encoders=[],
             unet=unet,
@@ -211,6 +282,65 @@ class TurboDMDNetwork:
         self.student.set_enabled(False)
         self.fake.set_enabled(False)
         self._view: View = "teacher"
+
+        # ----------------- GAN feature tap (idea 1 + 3.1) -----------------
+        # Off unless gan_feature_indices is given (gan_loss_weight_gen > 0). The
+        # discriminator reads frozen-teacher block activations captured by the
+        # DiT's first-class feature-tap path (models.py::forward_mini_train_dit's
+        # ``return_block_features`` / ``return_features_early``) — NOT an external
+        # forward hook. The caller runs the teacher forward with those kwargs and
+        # hands the resulting feature dict to ``self.disc`` via ``features_in_order``.
+        # The tap returns block outputs in the native-flatten ``(B, 1, L, 1, D)``
+        # layout under compile, which PooledTokenDiscriminator pools shape-agnostically.
+        # Early-exit means a feature-only teacher forward only runs blocks[0..k]
+        # (the memory win that makes the grad-bearing gen-side GAN term affordable).
+        self.disc: PooledTokenDiscriminator | None = None
+        self.gan_feature_indices: list[int] = []
+        if gan_feature_indices:
+            self.gan_feature_indices = sorted(gan_feature_indices)
+            self.disc = PooledTokenDiscriminator(
+                inner_dim=unet.model_channels,
+                num_taps=len(self.gan_feature_indices),
+                hidden_dim=gan_disc_hidden,
+            )
+            logger.info(
+                f"TurboDMDNetwork: GAN disc attached (taps={self.gan_feature_indices}, "
+                f"inner_dim={unet.model_channels}, "
+                f"{sum(p.numel() for p in self.disc.parameters()):,} params)"
+            )
+
+    # ----------------- GAN feature tap helpers -----------------
+
+    @property
+    def gan_feature_set(self) -> set[int] | None:
+        """Tap indices as a set for ``return_block_features`` (None when GAN off)."""
+        return set(self.gan_feature_indices) if self.gan_feature_indices else None
+
+    def features_in_order(self, feats: dict[int, torch.Tensor]) -> list[torch.Tensor]:
+        """Reorder a model feature-dict to tap-index order for the disc.
+
+        ``feats`` is the dict returned by the teacher feature-tap forward
+        (``return_block_features``); raises if a tap is missing (mis-wired call).
+        """
+        try:
+            return [feats[i] for i in self.gan_feature_indices]
+        except KeyError as e:
+            raise RuntimeError(
+                f"GAN feature tap {e} missing from teacher forward output — "
+                "the forward was not run with return_block_features=gan_feature_set."
+            ) from e
+
+    def disc_params(self):
+        """Trainable params for the discriminator optimizer."""
+        if self.disc is None:
+            return []
+        return [p for p in self.disc.parameters() if p.requires_grad]
+
+    def set_disc_requires_grad(self, flag: bool) -> None:
+        """Toggle disc grad: False during the student (gen) step so the GAN-gen
+        gradient only reaches x_pred; True during the disc update."""
+        if self.disc is not None:
+            self.disc.requires_grad_(flag)
 
     # ----------------- view toggle -----------------
 

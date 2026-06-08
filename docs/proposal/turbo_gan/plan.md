@@ -169,6 +169,16 @@ Idea 1 is greenlit, and prove it's a bit-exact no-op when `return_block_features
 (invariant test: compiled + eager forward unchanged vs. `main`). 3.2 (full scheduler
 abstraction) is explicitly **out of scope** / not-now.
 
+**Status: 3.1 LANDED.** `forward_mini_train_dit` now takes
+`return_block_features: set[int] | None` + `return_features_early: bool`
+(`_run_blocks` gained `capture_blocks` / `feature_sink` / `stop_after_block`); both
+default off → bit-exact no-op (`tests/test_feature_tap.py`). Idea 1's GAN forwards
+now use it instead of the external block hook: the grad-bearing **generator** forward
+early-exits at the deepest tap, so only `blocks[0..k]` run and retain activations —
+this is what fixed the GAN OOM (the full-stack grad forward was the culprit).
+Unsupported with block swap (raises) — the Turbo teacher is resident, so that never
+fires in practice.
+
 ---
 
 ## Sequencing
