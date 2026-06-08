@@ -64,7 +64,9 @@ import torch.nn.functional as F
 from bench._common import make_run_dir, write_result  # noqa: E402
 from library.log import setup_logging  # noqa: E402
 from networks import attention_dispatch as anima_attention  # noqa: E402
-from networks.methods.easycontrol import _ExtendedSelfAttnLSEFunc  # noqa: E402
+from networks.methods.easycontrol_attention import (  # noqa: E402
+    _ExtendedSelfAttnLSEFunc,
+)
 
 setup_logging()
 logger = logging.getLogger(__name__)

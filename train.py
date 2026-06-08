@@ -1752,6 +1752,18 @@ class AnimaTrainer:
                 mode=getattr(args, "compile_inductor_mode", None),
                 n_token_families=n_token_families,
             )
+            # EasyControl's patched Block.forward routes the active cond path
+            # through _two_stream_inner, bypassing the just-compiled
+            # block._forward — so compile_blocks never reaches the cond stream
+            # (incl. the cond LoRA projections / use_custom_down_autograd).
+            # Compile it explicitly, same backend/mode, preserving the
+            # compile-after-apply order (apply_to already ran above).
+            if hasattr(network, "compile_cond_stream"):
+                network.compile_cond_stream(
+                    args.dynamo_backend,
+                    mode=getattr(args, "compile_inductor_mode", None),
+                    n_token_families=n_token_families,
+                )
 
         return NetworkBundle(
             network=network,
