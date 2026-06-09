@@ -47,7 +47,7 @@ def _base_test_args(*, lora_default: bool = True) -> list[str]:
       exclusive with ``SPECTRUM=1`` (both replace the denoise loop).
     - ``MOD=1`` appends ``--pooled_text_proj <latest>``.
     - ``DAVE=1`` appends the DAVE DC-attenuation flags (``--dave auto``); tune via
-      ``DAVE_STRENGTH=`` and ``DAVE_SIGMA='lo,hi'``.
+      ``DAVE_STRENGTH=``, ``DAVE_SIGMA='lo,hi'`` and ``DAVE_TAU=`` (early-step cutoff).
     """
     args = list(INFERENCE_BASE)
     nolora_env = os.environ.get("NOLORA")
@@ -73,14 +73,17 @@ def _base_test_args(*, lora_default: bool = True) -> list[str]:
 
 
 def _dave_flags() -> list[str]:
-    """DAVE DC-attenuation (training-free diversity). ``DAVE_STRENGTH`` and
-    ``DAVE_SIGMA='lo,hi'`` tune the live knobs; both optional."""
+    """DAVE DC-attenuation (training-free diversity). ``DAVE_STRENGTH``,
+    ``DAVE_SIGMA='lo,hi'`` and ``DAVE_TAU`` tune the live knobs; all optional.
+    ``DAVE_TAU`` (the paper's early-step cutoff, e.g. 0.15) overrides ``DAVE_SIGMA``."""
     flags = ["--dave", "auto"]
     if s := os.environ.get("DAVE_STRENGTH", "").strip():
         flags += ["--dave_strength", s]
     if win := os.environ.get("DAVE_SIGMA", "").strip():
         lo, hi = (x.strip() for x in win.split(","))
         flags += ["--dave_sigma_lo", lo, "--dave_sigma_hi", hi]
+    if tau := os.environ.get("DAVE_TAU", "").strip():
+        flags += ["--dave_tau", tau]
     if blk := os.environ.get("DAVE_BLOCKS", "").strip():
         lo, hi = (x.strip() for x in blk.split(","))
         flags += ["--dave_block_lo", lo, "--dave_block_hi", hi]

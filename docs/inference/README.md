@@ -1,6 +1,6 @@
 # Inference stacks
 
-Training-free runtime methods — sampler acceleration and sampler-boundary corrections that ride on top of any checkpoint. None of these need training (mod-guidance is the exception — its `pooled_text_proj` head is distilled, but it *applies* at inference). They compose at the sampler boundary; read the relevant doc before touching one.
+Training-free runtime methods — sampler acceleration, sampler-boundary corrections, and representation edits that ride on top of any checkpoint. None of these need training (mod-guidance is the exception — its `pooled_text_proj` head is distilled, but it *applies* at inference). Most compose at the sampler boundary (DAVE is the exception — a block-forward hook); read the relevant doc before touching one.
 
 The DiT operates on 5D latents `(B, C, T=1, H, W)`; sampler-boundary plug-ins here receive 5D — match `ndim` against any 4D reference latent they blend against (see root `CLAUDE.md` §"The DiT operates on 5D latents").
 
@@ -20,6 +20,14 @@ The DiT operates on 5D latents `(B, C, T=1, H, W)`; sampler-boundary plug-ins he
 | [smc_cfg.md](smc_cfg.md) | α-adaptive sliding-mode CFG correction in velocity space (λ=5, α=0.2). | `--smc_cfg` | Paper's fixed k was ~14× off; ships `sign()` only (tanh ε removed). |
 | [cns.md](cns.md) | SDE noise recolorer — per-step injected noise is `sqrt(1−γ)`-shaped toward unresolved freq bands, RMS-renormalized (zero-sum). | `--sampler er_sde --cns auto` | **er_sde-only** (no-op on euler/lcm); faithful to paper Alg. 1. |
 | [mod-guidance.md](mod-guidance.md) | Text-conditioned AdaLN via a learned `pooled_text_proj` MLP, distilled with `make distill-mod`. | `make test MOD=1` | Global-tone lever, not a content lever (σ-FiLM probe was a geometric ceiling). |
+
+## Representation edits
+
+Edit intermediate block features inside the forward (a hook), not the sampler boundary.
+
+| Doc | What it is | Flag | Load-bearing gotcha |
+|-----|-----------|------|---------------------|
+| [dave.md](dave.md) | Same-prompt **diversity** recovery — per-block post-`forward` hook attenuates the cross-seed-shared DC (spatial mean) during the early steps, freeing the seed-specific AC. Flat 8–18 pool. | `--dave auto` / `make test DAVE=1` | Text/hand damage tracks **window width** not dose — defaults `τ0.10·s0.3`; baked `≤18` cap forecloses the patch-grid dots. Block-hook (survives `compile_blocks`), no sampler-boundary compose yet (v0). |
 
 ## Other
 

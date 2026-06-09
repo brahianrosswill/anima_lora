@@ -59,7 +59,7 @@ text_keep_copyright = true
 [training]
 network_dim = 32
 network_alpha = 32
-target_res = [1024]
+target_res = [896, 1024]
 network_args = [
     "b_cond_init=-6.0",
     "cond_scale=1.0",

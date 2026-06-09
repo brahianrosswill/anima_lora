@@ -33,13 +33,17 @@ from anima_lora import (  # noqa: E402
 from bench._anima import DEFAULT_NEG as DEFAULT_NEGATIVE  # noqa: E402
 from bench._anima import DEFAULT_PROMPT  # noqa: E402
 
-# (label, dave-on, strength, block_lo, block_hi). block_hi=-1 → last block.
+# (label, dave-on, strength, block_lo, block_hi, tau). block_hi=-1 → last block.
+# tau>0 = DAVE paper's early-step cutoff (overrides the σ window); 0 = full schedule.
+# The shipped mask is now the flat statistical pool (blocks 8–18, final-stage 19–27
+# baked to 0), so block_lo/hi=-1 already excludes the dot blocks. These configs
+# validate the production defaults and probe the headroom the cap opened up.
 CONFIGS = [
-    ("baseline", False, 0.0, 0, -1),
-    ("s0.05_all", True, 0.05, 0, -1),
-    ("s0.10_all", True, 0.10, 0, -1),
-    ("s0.10_mid9-18", True, 0.10, 9, 18),
-    ("s0.20_mid9-18", True, 0.20, 9, 18),
+    # Tighter early-window (first ~10% of steps only), flat pool 8–18. Gentle vs hot
+    # dose: does τ0.10 hold diversity with less text/hand cost, and does s0.80 stay
+    # coherent once the window is this tight? (baseline/default already characterized.)
+    ("tau0.10_s0.30", True, 0.30, 0, -1, 0.10),
+    ("tau0.10_s0.80", True, 0.80, 0, -1, 0.10),
 ]
 
 
@@ -95,7 +99,7 @@ def main() -> None:
     shared = {"model": anima}
 
     for seed in opts.seeds:
-        for label, on, strength, blo, bhi in CONFIGS:
+        for label, on, strength, blo, bhi, tau in CONFIGS:
             args.seed = seed
             args.dave = "auto" if on else None
             args.dave_strength = strength
@@ -103,6 +107,7 @@ def main() -> None:
             args.dave_block_hi = bhi
             args.dave_sigma_lo = 0.0
             args.dave_sigma_hi = 1.0
+            args.dave_tau = tau  # >0 → setup_dave converts to the early-σ window
             print(f"[eyeball] seed={seed} {label}")
             latent = generate(
                 args,

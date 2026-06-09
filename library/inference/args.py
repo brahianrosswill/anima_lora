@@ -541,11 +541,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dave_strength",
         type=float,
-        default=0.1,
+        default=0.3,
         help="DC attenuation strength: per-block (1−α) = strength·w(ℓ). 0 = off, "
-        "1 = fully remove the DC of the most-implicated block. The late blocks' "
-        "DC carries the bulk of the image energy, so >~0.2 collapses output to a "
-        "grid; sweep up from a small value to eyeball the diversity/quality knee.",
+        "1 = fully remove the pooled blocks' DC. Default 0.3 (α≈0.7), a conservative "
+        "dose that keeps text/hands clean. The shipped flat mask pools blocks 8–18 "
+        "only (final-stage 19–27 excluded, so the patch-grid dot artifact can't "
+        "appear). With the default --dave_tau 0.10 window the safe ceiling is high — "
+        "strength 0.8 still holds legible text + clean hands while diversifying "
+        "harder (incl. scene/season changes), so 0.3–0.8 are all usable; pick by how "
+        "much recomposition you want. (At the looser τ0.15, stay ≤0.3.)",
     )
     parser.add_argument(
         "--dave_block_lo",
@@ -575,6 +579,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="High σ bound of the DAVE active window. Default 1 (all σ). Late-only "
         "(σ<0.45, where DC energy grows) = --dave_sigma_hi 0.45; early-only = "
         "--dave_sigma_lo 0.45.",
+    )
+    parser.add_argument(
+        "--dave_tau",
+        type=float,
+        default=0.10,
+        help="DAVE paper's temporal cutoff τ: attenuate ONLY the first τ fraction "
+        "of denoising steps (the early lock-in window). Default 0.10 — tighter than "
+        "the paper's 0.15 because on Anima the text/hand damage scales with how many "
+        "steps the dose touches, not the dose magnitude: at τ0.10 even strength 0.8 "
+        "holds legible text + clean hands, whereas at τ0.15 strength 0.5 already "
+        "garbles them. So τ0.10 strictly dominates τ0.15 at equal dose. Converted to "
+        "a σ_lo against the live --infer_steps/--flow_shift schedule, so it tracks "
+        "the actual step grid (not a hand-guessed σ). Overrides --dave_sigma_lo/hi "
+        "when >0. τ>~0.2 tips into posterization. 0 = off (use the σ window).",
     )
 
     # arguments for batch and interactive modes

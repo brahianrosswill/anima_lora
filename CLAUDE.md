@@ -128,7 +128,7 @@ The DiT forward (and `PatchEmbed`, which `assert x.dim() == 5`) takes a **5D** l
 
 Adapter families (training methods) below — one-line orientation plus the load-bearing gotcha; read the linked deep-dive before working on one.
 
-**Training-free inference stacks** (Spectrum, SPD, DCW, SMC-CFG, CNS, mod-guidance, channel-scaling, embedding inversion) are documented separately under [`docs/inference/`](docs/inference/README.md) — read the relevant doc when you touch one rather than carrying their details here. They ride on the sampler boundary and compose with any checkpoint.
+**Training-free inference stacks** (Spectrum, SPD, DCW, SMC-CFG, CNS, mod-guidance, channel-scaling, embedding inversion, DAVE) are documented separately under [`docs/inference/`](docs/inference/README.md) — read the relevant doc when you touch one rather than carrying their details here. Most ride on the sampler boundary and compose with any checkpoint (DAVE is the exception — a block-forward hook for same-prompt diversity).
 
 | Method | What it is | Gotcha / pointer |
 |---|---|---|

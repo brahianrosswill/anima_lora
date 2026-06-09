@@ -112,6 +112,34 @@ def setup_dave(
     sigma_lo = float(getattr(args, "dave_sigma_lo", 0.0))
     sigma_hi = float(getattr(args, "dave_sigma_hi", 1.0))
 
+    # Temporal cutoff τ (the DAVE paper's lever): attenuate only the first τ
+    # fraction of denoising steps. We reconstruct the *live* σ schedule and pick
+    # the σ boundary between the last active and first inactive step, so the
+    # window tracks --infer_steps/--flow_shift instead of a hand-guessed σ. This
+    # overrides the σ window (the more specific intent wins).
+    tau = float(getattr(args, "dave_tau", 0.0))
+    if tau > 0.0:
+        from library.inference.sampling import get_timesteps_sigmas
+
+        n_steps = int(getattr(args, "infer_steps"))
+        _, sched = get_timesteps_sigmas(
+            n_steps,
+            float(getattr(args, "flow_shift")),
+            torch.device("cpu"),
+            tail_power=float(getattr(args, "sigma_tail_power", 1.0)),
+        )
+        # k = number of leading steps to keep active (steps 0..k-1); σ decreases
+        # monotonically, so the active window is σ ≥ boundary.
+        k = max(1, min(n_steps, round(tau * n_steps)))
+        if k >= n_steps:
+            sigma_lo = 0.0  # τ covers the whole schedule → all σ
+        else:
+            sigma_lo = 0.5 * (float(sched[k - 1]) + float(sched[k]))
+        sigma_hi = 1.0
+        logger.info(
+            f"DAVE τ={tau}: first {k}/{n_steps} steps active → σ∈[{sigma_lo:.3f}, 1.0]"
+        )
+
     # Block-range cap: spare blocks outside [lo, hi] (e.g. the final content
     # blocks whose DC IS the image). hi=-1 means the last block.
     blk_lo = int(getattr(args, "dave_block_lo", 0))
