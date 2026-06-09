@@ -1736,14 +1736,22 @@ class AnimaTrainer:
         if args.torch_compile:
             target_res = getattr(args, "target_res", None)
             n_token_families = None
+            seq_range = None
             if target_res:
-                from library.datasets.buckets import token_count_families
+                from library.datasets.buckets import (
+                    token_count_families,
+                    token_count_range,
+                )
 
                 n_token_families = token_count_families(target_res)
+                seq_range = token_count_range(target_res)
+            dynamic_seq = bool(getattr(args, "compile_dynamic_seq", False))
             unet.compile_blocks(
                 args.dynamo_backend,
                 mode=getattr(args, "compile_inductor_mode", None),
                 n_token_families=n_token_families,
+                dynamic_seq=dynamic_seq,
+                seq_range=seq_range,
             )
             # EasyControl's patched Block.forward routes the active cond path
             # through _two_stream_inner, bypassing the just-compiled
@@ -1756,6 +1764,8 @@ class AnimaTrainer:
                     args.dynamo_backend,
                     mode=getattr(args, "compile_inductor_mode", None),
                     n_token_families=n_token_families,
+                    dynamic_seq=dynamic_seq,
+                    seq_range=seq_range,
                 )
 
         return NetworkBundle(
@@ -2513,7 +2523,9 @@ def _cleanup_short_log_dir(args) -> None:
         if os.path.isdir(log_dir):
             shutil.rmtree(log_dir)
     except Exception as e:
-        print(f"warn: could not remove short-run log dir {log_dir}: {e}", file=sys.stderr)
+        print(
+            f"warn: could not remove short-run log dir {log_dir}: {e}", file=sys.stderr
+        )
 
 
 def setup_parser() -> argparse.ArgumentParser:

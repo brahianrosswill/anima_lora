@@ -15,12 +15,12 @@
 # Single phase: both pools, both routers, and shared A train jointly under
 # the denoise loss + per-pool balance loss. T-LoRA's mask is applied to
 # the content branch only (the freq branch keeps full rank at every t).
-target_res = [896, 1024]
-network_alpha = 64
-network_dim = 64
+
+network_alpha = 32
+network_dim = 32
 
 learning_rate = 2e-5
-max_train_epochs = 12
+max_train_epochs = 4
 save_every_n_epochs = 4
 checkpointing_epochs = 4
 
@@ -31,12 +31,12 @@ caption_dropout_rate = 0.1
 # CMMD val (PE-Core MMD²) is the primary val signal.
 # use_cmmd = true
 
-output_name = "anima_chimera-0608-64"
+output_name = "anima_chimera-0609-64"
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 use_ortho_init = true
 use_timestep_mask = true
-min_rank = 32
+min_rank = 1
 alpha_rank_scale = 1.0
 blocks_to_swap=0
 
@@ -49,7 +49,7 @@ blocks_to_swap=0
 # path.
 
 use_chimera_hydra = true
-num_experts_content = 8
+num_experts_content = 4
 num_experts_freq = 2
 
 balance_loss_warmup_ratio = 0.02

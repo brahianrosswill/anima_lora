@@ -173,16 +173,17 @@ def apply_rotary_pos_emb_qk(
     rope_cos_sin: tuple[torch.Tensor, torch.Tensor],
     tensor_format: str = "sbhd",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply RoPE to q and k using precomputed (cos, sin) tensors."""
-    cos_, sin_ = rope_cos_sin
-    max_seq_len = cos_.shape[0]
-    cur_seq_len = q.shape[1] if tensor_format == "bshd" else q.shape[0]
+    """Apply RoPE to q and k using precomputed (cos, sin) tensors.
 
-    assert cur_seq_len <= max_seq_len, (
-        f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    )
-    cos_ = cos_[:cur_seq_len]
-    sin_ = sin_[:cur_seq_len]
+    RoPE is always generated from the same shape as the ``q`` it is applied to
+    (``pos_embedder`` builds cos/sin at the exact ``T*H*W`` of the current latent;
+    the EasyControl cond path builds its cond rope at the cond's native shape),
+    so ``cos_.shape[0] == q``'s seq length in every path — no length trim needed.
+    Dropping the old ``cos_[:cur_seq_len]`` slice also keeps the seq axis a clean
+    single symbol under ``compile_dynamic_seq``'s ``mark_dynamic`` (no symbolic
+    indexing op in the compiled block).
+    """
+    cos_, sin_ = rope_cos_sin
 
     if tensor_format == "bshd":
         cos_ = cos_.transpose(0, 1)
@@ -698,7 +699,15 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
         if not _compiling:
             if h_ntk_factor is None and w_ntk_factor is None and t_ntk_factor is None:
                 fps_val = None if fps is None else fps[:1].item()
-                scaled_key = ("scaled", T, H, W, fps_val, float(h_scale), float(w_scale))
+                scaled_key = (
+                    "scaled",
+                    T,
+                    H,
+                    W,
+                    fps_val,
+                    float(h_scale),
+                    float(w_scale),
+                )
                 cached = self._cos_sin_cache.get(scaled_key)
                 if cached is not None:
                     return cached
@@ -1336,6 +1345,14 @@ class Anima(nn.Module):
         # reshape — bit-exact to the flattened path, slightly cheaper.
         self._native_flatten: bool = False
 
+        # Dynamic-seq compile (compile_dynamic_seq): when True, compile_blocks
+        # keeps dynamic=False but _run_blocks marks the seq-length axis dynamic
+        # via torch._dynamo.mark_dynamic, collapsing the per-token-count graphs
+        # to one. _dynamic_seq_range is the (min, max) token-count bound passed to
+        # mark_dynamic. Both stay inert (False / None) on the static + eager paths.
+        self._dynamic_seq: bool = False
+        self._dynamic_seq_range: Optional[tuple] = None
+
         self.build_patch_embed()
         self.build_pos_embed()
         self.use_adaln_lora = use_adaln_lora
@@ -1522,6 +1539,8 @@ class Anima(nn.Module):
         backend: str = "inductor",
         mode: Optional[str] = None,
         n_token_families: Optional[int] = None,
+        dynamic_seq: bool = False,
+        seq_range: Optional[tuple] = None,
     ):
         """Enable native-shape flattening and torch.compile each block's _forward.
 
@@ -1553,6 +1572,24 @@ class Anima(nn.Module):
 
         ``mode`` maps to torch.compile's inductor preset (e.g. ``reduce-overhead``
         to enable per-block CUDAGraphs). ``None`` leaves it unset (inductor default).
+
+        ``dynamic_seq`` collapses the N-graph compile cascade (each graph loads
+        its own inductor kernel module + flash/cuBLAS workspaces into the CUDA
+        context — the ``nvidia-smi``-visible cold-compile VRAM transient) down to
+        a single block graph. Mechanism: keep ``dynamic=False`` (force static
+        specialization by default) and let ``_run_blocks`` annotate *only* the
+        seq-length axis via ``torch._dynamo.mark_dynamic``. Under
+        ``native_flatten`` the in-block latent is ``(B, 1, seq_len, 1, D)`` (T=1,
+        W=1), so ``seq_len`` is the *only* varying axis; B / D / head-dim / text-len
+        stay statically specialized. This is deliberately tighter than blanket
+        ``dynamic=True`` (which marks every dim of every input symbolic and can
+        over-generalize into worse kernels). ``seq_range`` bounds the symbolic
+        axis (min/max token count over the active tiers) so inductor guards
+        against a real range, not ``[2, ∞)``; ``None`` derives it from the
+        canonical 1024 table (4032/4200). Off by default; the static path stays
+        the trusted one until benched (graph count via ``TORCH_LOGS=recompiles``,
+        peak via ``mem_get_info``, step time, bit-exactness vs eager). See
+        [[project_compile_context_vram_climb]].
         """
         self._native_flatten = True
 
@@ -1582,13 +1619,33 @@ class Anima(nn.Module):
         # without pinning the canonical .default.
         limit = pin_dynamo_limit("recompile_limit", 2 * n + 8)
 
+        # dynamic_seq does NOT use torch.compile(dynamic=True). Compile static and
+        # let _run_blocks mark only the seq axis dynamic (see docstring). Derive the
+        # (min, max) seq bound for that mark: passed-in seq_range (multi-tier) or the
+        # canonical 1024 table's token counts.
+        self._dynamic_seq = dynamic_seq
+        if dynamic_seq:
+            if seq_range is not None:
+                self._dynamic_seq_range = (int(seq_range[0]), int(seq_range[1]))
+            else:
+                counts = {
+                    (h // self.patch_spatial) * (w // self.patch_spatial)
+                    for h, w in CONSTANT_TOKEN_BUCKETS
+                }
+                self._dynamic_seq_range = (min(counts), max(counts))
+
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
             compile_kwargs["mode"] = mode
         for block in self.blocks:
             block._forward = torch.compile(block._forward, **compile_kwargs)
+        graph_mode = (
+            f"dynamic-seq mark_dynamic seq∈{self._dynamic_seq_range} (1 graph)"
+            if dynamic_seq
+            else f"static ({n} graphs)"
+        )
         print(
-            f"Anima: native_flatten on, {n} token-count families "
+            f"Anima: native_flatten on, {n} token-count families, {graph_mode} "
             f"(recompile_limit={limit}); compiled "
             f"{len(self.blocks)} block._forward with backend={backend}, mode={mode}"
         )
@@ -1801,7 +1858,32 @@ class Anima(nn.Module):
         # the loop were ever traced per-block. requires_grad_(True) is a no-op
         # under torch.no_grad().
         x = x_padded.requires_grad_()
+
+        # compile_dynamic_seq: mark the seq-length axis dynamic so the per-block
+        # graph is symbolic in seq_len only (one graph for all token-count
+        # buckets), instead of dynamic=True's mark-everything sledgehammer. RoPE
+        # rides on seq_len too — its cos/sin are (seq_len, 1, 1, D_head); if left
+        # static-shaped dynamo guards on their concrete seq_len and recompiles per
+        # bucket anyway, so the collapse is inert unless they're marked as well.
+        # Mark RoPE once (same tensor object handed to every block) AFTER the
+        # outer forward's one-time dtype cast — the cast in `forward` returns fresh
+        # objects, so marking the pre-cast cache would be lost. No-op on the static
+        # and eager paths (_dynamic_seq stays False there).
+        mark_seq = self._native_flatten and self._dynamic_seq
+        if mark_seq:
+            lo, hi = self._dynamic_seq_range
+            rc, rs = block_kwargs.get("rope_cos_sin", (None, None))
+            if rc is not None:
+                torch._dynamo.mark_dynamic(rc, 0, min=lo, max=hi)
+                torch._dynamo.mark_dynamic(rs, 0, min=lo, max=hi)
+
         for block_idx, block in enumerate(self.blocks):
+            # x is a fresh tensor each block (block N's output), so the dynamic
+            # annotation (_dynamo_dynamic_indices) doesn't carry — re-mark dim 2
+            # every iteration or block N+1 re-specializes static.
+            if mark_seq:
+                torch._dynamo.mark_dynamic(x, 2, min=lo, max=hi)
+
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(block_idx)
 

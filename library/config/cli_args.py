@@ -301,6 +301,19 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "across steps and is incompatible with block swap.",
     )
     parser.add_argument(
+        "--compile_dynamic_seq",
+        action="store_true",
+        help="Marks the sequence-length axis dynamic (torch._dynamo.mark_dynamic), "
+        "keeping all other dims static, instead of one static graph per "
+        "token-count family. Under native_flatten the only varying in-block dim "
+        "is seq_len (x dim 2 + the RoPE cos/sin), so a single graph symbolic in "
+        "seq_len alone covers every token bucket (4032/4200/3024/3000/...) — "
+        "tighter than blanket dynamic=True. Collapses the N-graph compile cascade "
+        "— and its CUDA-context VRAM peak — to one graph. Off by default; bench "
+        "graph-count / mem_get_info peak / step-time / bit-exactness before "
+        "trusting it on a new config.",
+    )
+    parser.add_argument(
         "--vae", type=str, default=None, help="path to checkpoint of vae to replace"
     )
 

@@ -83,6 +83,7 @@ import random
 from typing import Optional
 
 import torch
+import torch._dynamo  # noqa: F401  (mark_dynamic for compile_dynamic_seq)
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -388,6 +389,14 @@ class EasyControlNetwork(AdapterNetworkBase):
         # this None — every step needs the cond LoRA's gradient.
         self._cond_kv_cache: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None
 
+        # compile_dynamic_seq: when True (set by compile_cond_stream), the patched
+        # block forward marks the target/cond seq axes dynamic via mark_dynamic so
+        # the two-stream inner compiles one graph instead of one per
+        # (target × cond) token-count pair. _dynamic_seq_range bounds the marks.
+        # Mirrors the DiT-side mechanism in library/anima/models.py::_run_blocks.
+        self._dynamic_seq: bool = False
+        self._dynamic_seq_range: Optional[tuple] = None
+
         if self.use_custom_down_autograd:
             n_hits = 0
             for m in self.modules():
@@ -455,6 +464,8 @@ class EasyControlNetwork(AdapterNetworkBase):
         backend: str = "inductor",
         mode: Optional[str] = None,
         n_token_families: Optional[int] = None,
+        dynamic_seq: bool = False,
+        seq_range: Optional[tuple] = None,
     ):
         """torch.compile each block's two-stream cond forward.
 
@@ -473,6 +484,22 @@ class EasyControlNetwork(AdapterNetworkBase):
         — that's fine: the cond LoRA projections sit in their own compiled
         subgraphs, which is exactly where the lever must be live. Call AFTER
         apply_to (the compile-after-apply invariant).
+
+        ``dynamic_seq`` collapses the per-(target × cond) token-count graph
+        cascade to one, the same way compile_blocks does for the DiT — but here
+        BOTH seq axes vary (target self-attn seq AND the cond stream's own seq),
+        so the patched forward wraps the compiled inner in an eager mark_dynamic
+        prologue (marks x dim 2 + cond_x dim 1 + both RoPE tables) that becomes
+        the checkpointed callable — so the marks re-apply on the grad-checkpoint
+        backward RECOMPUTE too, not just the forward (else detach_variable strips
+        the latent marks but keeps the RoPE-tuple marks and dynamo raises a
+        ConstraintViolationError). We keep ``dynamic=False`` and scope the
+        symbolic axes via ``mark_dynamic`` rather than blanket ``dynamic=True``
+        (mirrors the DiT path, library/anima/models.py::_run_blocks).
+        ``seq_range`` bounds the marks; ``None`` falls back to the canonical 1024
+        table (4032/4200). The flash graph-break around ``_ExtendedSelfAttnLSEFunc``
+        splits the inner into pre/post subgraphs, each symbolic in the seq axes —
+        both collapse.
         """
         if not self._patched:
             raise RuntimeError("compile_cond_stream requires apply_to() first")
@@ -505,6 +532,18 @@ class EasyControlNetwork(AdapterNetworkBase):
             "accumulated_recompile_limit", len(self._block_modules) * per_obj
         )
 
+        # dynamic_seq does NOT use torch.compile(dynamic=True); compile static and
+        # let the patched forward mark the target/cond seq axes (see the inner
+        # dispatch). Derive the (min, max) seq bound for those marks.
+        self._dynamic_seq = dynamic_seq
+        if dynamic_seq:
+            if seq_range is not None:
+                self._dynamic_seq_range = (int(seq_range[0]), int(seq_range[1]))
+            else:
+                from library.datasets.buckets import token_count_range
+
+                self._dynamic_seq_range = token_count_range([1024])
+
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
             compile_kwargs["mode"] = mode
@@ -515,6 +554,7 @@ class EasyControlNetwork(AdapterNetworkBase):
         logger.info(
             f"EasyControl: compiled two-stream cond forward on "
             f"{len(self._block_modules)} blocks (backend={backend}, mode={mode}, "
+            f"dynamic_seq={dynamic_seq} seq∈{self._dynamic_seq_range}, "
             f"recompile_limit pinned to {per_obj})"
         )
 
@@ -1286,6 +1326,59 @@ def _make_patched_block_forward(
         # mirrors compile_blocks, which compiles _forward (the inner), never the
         # checkpoint wrapper (unsloth_checkpoint is @torch._disable_dynamo).
         inner = block._easycontrol_two_stream_inner
+
+        # compile_dynamic_seq: mark the two varying seq axes dynamic. This MUST be
+        # the checkpointed callable itself (an eager wrapper around the compiled
+        # inner), not a one-shot mark before dispatch: the unsloth/torch
+        # checkpoint recomputes the inner in BACKWARD via detach_variable, which
+        # detaches the top-level tensor args (x / cond_x) into fresh tensors that
+        # LOSE the dynamic mark — while the RoPE *tuples* are passed through
+        # unchanged (detach_variable skips non-tensors) and KEEP it. That
+        # asymmetry (rope hard-dynamic, q specialized constant) is the
+        # ConstraintViolationError. Marking inside the recomputed callable
+        # re-applies the marks to the detached inputs each pass, so forward and
+        # backward agree. Two independent symbols: target self-attn seq (x dim 2,
+        # fake-5D (B,1,seq,1,D) under native_flatten — guaranteed on when
+        # _dynamic_seq is set) and the cond stream's own seq (cond_x dim 1); each
+        # RoPE table rides dim 0. Marking is idempotent across blocks.
+        if ec_net._dynamic_seq:
+            _compiled_inner = inner
+            _lo, _hi = ec_net._dynamic_seq_range
+
+            def inner(
+                x_,
+                emb_,
+                crossattn_,
+                attn_params_,
+                rope_,
+                adaln_,
+                cond_x_,
+                cond_emb_,
+                cond_adaln_,
+                cond_rope_,
+                _ci=_compiled_inner,
+                _lo=_lo,
+                _hi=_hi,
+            ):
+                torch._dynamo.mark_dynamic(x_, 2, min=_lo, max=_hi)
+                torch._dynamo.mark_dynamic(cond_x_, 1, min=_lo, max=_hi)
+                for _r in (rope_, cond_rope_):
+                    if _r is not None:
+                        torch._dynamo.mark_dynamic(_r[0], 0, min=_lo, max=_hi)
+                        torch._dynamo.mark_dynamic(_r[1], 0, min=_lo, max=_hi)
+                return _ci(
+                    x_,
+                    emb_,
+                    crossattn_,
+                    attn_params_,
+                    rope_,
+                    adaln_,
+                    cond_x_,
+                    cond_emb_,
+                    cond_adaln_,
+                    cond_rope_,
+                )
+
         if block.training and block.gradient_checkpointing:
             if block.unsloth_offload_checkpointing:
                 from library.anima.models import unsloth_checkpoint

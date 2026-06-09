@@ -46,7 +46,7 @@ output_name = "anima_channel_ortho"
 # -------------
 # Ortho-lora
 
-use_ortho = true
+use_ortho_init = true
 
 # -------------
 # OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).

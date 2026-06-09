@@ -187,6 +187,16 @@ def token_count_families(target_res) -> int:
     return len({(w // 16) * (h // 16) for w, h in buckets_for_edges(target_res)})
 
 
+def token_count_range(target_res) -> tuple[int, int]:
+    """(min, max) token count across the active tiers.
+
+    Bounds the ``mark_dynamic`` seq-length hint in ``compile_blocks`` (so inductor
+    guards against a real range, not ``[2, ∞)``). 1024 alone → (4032, 4200).
+    """
+    counts = {(w // 16) * (h // 16) for w, h in buckets_for_edges(target_res)}
+    return min(counts), max(counts)
+
+
 def _nearest_aspect_bucket(width: int, height: int, table) -> tuple[int, int]:
     """The bucket in ``table`` whose aspect ratio is closest to the image's —
     same selection rule as ``BucketManager.select_bucket`` (argmin |Δ aspect|)."""
