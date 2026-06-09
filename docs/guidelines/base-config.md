@@ -120,7 +120,7 @@ during `make preprocess`, then training reads only the caches.
 | Key | Default | What it controls |
 |---|---|---|
 | `torch_compile` | `true` | Enable `torch.compile` via `compile_blocks()` — the blessed path (bit-exact, lowers memory). It flips on native-shape bucketing and keys the dynamo graph on token-count families derived from `target_res`. **Enable this first on OOM**, before gradient checkpointing. |
-| `attn_mode` | `flash` | Attention backend for training: `flash` (FA2), `torch` (SDPA), `xformers`, `sageattn`, `flex`. Falls back gracefully if unavailable. |
+| `attn_mode` | `flash` | Attention backend for training: `flash` (FA2), `torch` (SDPA), `sageattn`, `flex`. Falls back to `torch` (SDPA) if unavailable. |
 | `save_precision` | `bf16` | Dtype for saved adapter weights. Stored params stay bf16 even though LoRA/Hydra bottleneck matmuls always accumulate in fp32. |
 
 ## Memory & throughput knobs

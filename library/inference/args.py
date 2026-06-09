@@ -217,7 +217,6 @@ def build_parser() -> argparse.ArgumentParser:
             "torch",
             "sageattn",
             "flex",
-            "xformers",
             "sdpa",
         ],  #  "sdpa" for backward compatibility
         help="attention mode",

@@ -375,10 +375,8 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         q, k, v = self.compute_qkv(x, context, rope_cos_sin=rope_cos_sin)
         if q.dtype != v.dtype:
-            if (
-                not attn_params.supports_fp32 or attn_params.requires_same_dtype
-            ) and torch.is_autocast_enabled():
-                # FlashAttention requires fp16/bf16, xformers require same dtype; only cast when autocast is active.
+            if not attn_params.supports_fp32 and torch.is_autocast_enabled():
+                # FlashAttention requires fp16/bf16; only cast when autocast is active.
                 target_dtype = v.dtype  # v has fp16/bf16 dtype
                 q = q.to(target_dtype)
                 k = k.to(target_dtype)

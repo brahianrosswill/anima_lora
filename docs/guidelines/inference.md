@@ -187,7 +187,7 @@ the CFG=1 scalar is wrong-sign there. The Spectrum ComfyUI node ships `+0.01`.
 | `--guidance_scale` | 3.5 | Text CFG (4.0 via `make test`) |
 | `--flow_shift` | 3.0 | Flow-matching schedule shift |
 | `--sampler` | `euler` | `euler` / `er_sde` / `lcm` |
-| `--attn_mode` | `torch` | `torch` / `flash` / `flex` / `sageattn` / `xformers` (`sdpa`→`torch`) |
+| `--attn_mode` | `torch` | `torch` / `flash` / `flex` / `sageattn` (`sdpa`→`torch`) |
 | `--image_size` | 1024 1024 | H W |
 | `--seed` | random | Eval seed |
 | `--negative_prompt` | "" | — |

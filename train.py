@@ -577,8 +577,6 @@ class AnimaTrainer:
         loading_device = "cpu" if self.is_swapping_blocks else accelerator.device
 
         attn_mode = "torch"
-        if args.xformers:
-            attn_mode = "xformers"
         if args.attn_mode is not None:
             attn_mode = args.attn_mode
 
@@ -587,7 +585,7 @@ class AnimaTrainer:
             raise RuntimeError(
                 "attn_mode='flash4' is not supported yet -- the flash-attention-sm120 "
                 "kernel is disabled in this build. Use 'flash', 'torch', 'flex', "
-                "'sageattn', or 'xformers' instead."
+                "or 'sageattn' instead."
             )
         elif attn_mode == "flash":
             from networks.attention_dispatch import flash_attn, flash_attn_func

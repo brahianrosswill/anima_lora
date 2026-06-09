@@ -219,13 +219,10 @@ class ConfigSanitizer:
     # options handled by argparse but not handled by user config
     ARGPARSE_SPECIFIC_SCHEMA = {
         "debug_dataset": bool,
-        "max_token_length": Any(None, int),
         "prior_loss_weight": Any(float, int),
     }
     # for handling default None value of argparse
-    ARGPARSE_NULLABLE_OPTNAMES = [
-        "face_crop_aug_range",
-    ]
+    ARGPARSE_NULLABLE_OPTNAMES = []
     # prepare map because option name may differ among argparse and user config
     ARGPARSE_OPTNAME_TO_CONFIG_OPTNAME = {
         "train_batch_size": "batch_size",

@@ -16,7 +16,7 @@ Pluggable adapter implementations selected at runtime via the `network_module` c
 | `methods/easycontrol.py` | EasyControl: per-block cond LoRA on self-attn (q/k/v/o) + FFN + scalar `b_cond` logit-bias gate; two-stream block forward at training, KV-cache prefill at inference. |
 | `methods/turbo_dmd.py` | Turbo Anima DP-DMD distillation harness — owns student + fake `LoRANetwork` instances on one frozen DiT; output is a normal LoRA. See `docs/experimental/dpdmd.md`. |
 | `methods/soft_tokens.py`, `methods/ip_adapter_pe_lora.py` | Soft tokens (SoftREPA parameterization) + the PE-LoRA delta path used by IP-Adapter / Anima Tagger. |
-| `attention_dispatch.py` | Unified `dispatch_attention()` — backend router (SDPA / xformers / FA2 / FA3 / sageattn / flex). |
+| `attention_dispatch.py` | Unified `dispatch_attention()` — backend router (SDPA / FA2 / FA3 / sageattn / flex). |
 | `spectrum.py` | Spectrum inference acceleration (Chebyshev feature forecasting). See root CLAUDE.md §Spectrum and `docs/inference/spectrum.md`. |
 | `spd.py` | Spectral Progressive Diffusion — training-free inference acceleration (grow spatial resolution along the trajectory, spectral noise-expansion handoff). Sampler-level runner registered like Spectrum. See `docs/inference/spd.md`. |
 | `dcw.py` | DCW post-step correction for SNR-t bias on flow-matching DiTs at the sampler boundary. See `docs/inference/dcw.md`. |
@@ -76,7 +76,7 @@ Training-loop call: `train.py` fires `network.set_fei(noisy_model_input)` at the
 
 ## Attention dispatch
 
-`attention_dispatch.py::dispatch_attention()` routes to the active backend (torch SDPA, xformers, flash-attn v2/v3, sageattn, flex attention). **Tensor layout differs by backend** — BHLD for SDPA/sageattn, BLHD for xformers/flash-attn — so callers must hand tensors to the dispatcher in a known layout and the dispatcher transposes as needed. Check the backend branches before adding new attention call sites.
+`attention_dispatch.py::dispatch_attention()` routes to the active backend (torch SDPA, flash-attn v2/v3, sageattn, flex attention). **Tensor layout differs by backend** — BHLD for SDPA/sageattn, BLHD for flash-attn — so callers must hand tensors to the dispatcher in a known layout and the dispatcher transposes as needed. Check the backend branches before adding new attention call sites.
 
 FA4 (flash-attention-sm120) was evaluated and is currently disabled — see `docs/optimizations/fa4.md`. The KV-trim + LSE-correction path that depended on FA4 was removed (the `crossattn_full_len` field and `trim_crossattn_kv` flag are gone as of 2026-05-20); only the `flash4` branch stub remains in the dispatcher. See fa4.md for what re-enabling FA4 would entail.
 

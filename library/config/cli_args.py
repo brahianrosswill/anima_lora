@@ -64,16 +64,6 @@ def add_optimizer_arguments(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
-        "--use_8bit_adam",
-        action="store_true",
-        help="use 8bit AdamW optimizer (requires bitsandbytes)",
-    )
-    parser.add_argument(
-        "--use_lion_optimizer",
-        action="store_true",
-        help="use Lion optimizer (requires lion-pytorch)",
-    )
-    parser.add_argument(
         "--learning_rate", type=float, default=2.0e-6, help="learning rate"
     )
     parser.add_argument(
@@ -263,13 +253,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="batch size for training",
     )
     parser.add_argument(
-        "--max_token_length",
-        type=int,
-        default=None,
-        choices=[None, 150, 225],
-        help="max token length of text encoder (default for 75, 150 or 225)",
-    )
-    parser.add_argument(
         "--profile_steps",
         type=str,
         default=None,
@@ -304,21 +287,10 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--dynamo_backend",
         type=str,
         default="inductor",
-        choices=[
-            "eager",
-            "aot_eager",
-            "inductor",
-            "aot_ts_nvfuser",
-            "nvprims_nvfuser",
-            "cudagraphs",
-            "ofi",
-            "fx2trt",
-            "onnxrt",
-            "tensort",
-            "ipex",
-            "tvm",
-        ],
-        help="dynamo backend type (default is inductor)",
+        choices=["eager", "inductor"],
+        help="torch.compile backend. 'inductor' (default) is the production path; "
+        "'eager' disables compilation for debugging. (The wider Accelerate backend "
+        "list was never used on Anima.)",
     )
     parser.add_argument(
         "--compile_inductor_mode",
@@ -334,14 +306,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="Inductor preset forwarded as torch.compile(..., mode=...). "
         "'reduce-overhead' enables CUDAGraphs — requires stable tensor addresses "
         "across steps and is incompatible with block swap.",
-    )
-    parser.add_argument(
-        "--xformers", action="store_true", help="use xformers for CrossAttention"
-    )
-    parser.add_argument(
-        "--sdpa",
-        action="store_true",
-        help="use sdpa for CrossAttention (requires PyTorch 2.0)",
     )
     parser.add_argument(
         "--vae", type=str, default=None, help="path to checkpoint of vae to replace"
@@ -451,9 +415,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help="specify WandB API key to log in before starting training (optional).",
     )
     parser.add_argument(
-        "--log_config", action="store_true", help="log training configuration"
-    )
-    parser.add_argument(
         "--log_every_n_steps",
         type=int,
         default=1,
@@ -461,23 +422,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "Validation and epoch logs are unaffected. Useful for long W&B runs.",
     )
 
-    parser.add_argument(
-        "--noise_offset",
-        type=float,
-        default=None,
-        help="enable noise offset with this value (if enabled, around 0.1 is recommended)",
-    )
-    parser.add_argument(
-        "--noise_offset_random_strength",
-        action="store_true",
-        help="use random strength between 0~noise_offset for noise offset.",
-    )
-    parser.add_argument(
-        "--multires_noise_iterations",
-        type=int,
-        default=None,
-        help="enable multires noise with this number of iterations (if enabled, around 6-10 is recommended)",
-    )
     parser.add_argument(
         "--ip_noise_gamma",
         type=float,
@@ -488,30 +432,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--ip_noise_gamma_random_strength",
         action="store_true",
         help="Use random strength between 0~ip_noise_gamma for input perturbation noise.",
-    )
-    parser.add_argument(
-        "--multires_noise_discount",
-        type=float,
-        default=0.3,
-        help="set discount value for multires noise",
-    )
-    parser.add_argument(
-        "--adaptive_noise_scale",
-        type=float,
-        default=None,
-        help="add `latent mean absolute value * this value` to noise_offset (disabled if None, default)",
-    )
-    parser.add_argument(
-        "--min_timestep",
-        type=int,
-        default=None,
-        help="set minimum time step for U-Net training (0~999, default is 0)",
-    )
-    parser.add_argument(
-        "--max_timestep",
-        type=int,
-        default=None,
-        help="set maximum time step for U-Net training (1~1000, default is 1000)",
     )
     parser.add_argument(
         "--t_min",
@@ -593,31 +513,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=None,
         help="file for prompts to generate sample images",
     )
-    parser.add_argument(
-        "--sample_sampler",
-        type=str,
-        default="ddim",
-        choices=[
-            "ddim",
-            "pndm",
-            "lms",
-            "euler",
-            "euler_a",
-            "heun",
-            "dpm_2",
-            "dpm_2_a",
-            "dpmsolver",
-            "dpmsolver++",
-            "dpmsingle",
-            "k_lms",
-            "k_euler",
-            "k_euler_a",
-            "k_dpm_2",
-            "k_dpm_2_a",
-        ],
-        help="sampler (scheduler) type for sample images",
-    )
-
     parser.add_argument(
         "--config_file",
         type=str,
@@ -982,39 +877,6 @@ def add_train_misc_arguments(parser: argparse.ArgumentParser):
     )
 
 
-def get_sanitized_config_or_none(args: argparse.Namespace):
-    if not args.log_config:
-        return None
-
-    sensitive_args = ["wandb_api_key", "huggingface_token"]
-    sensitive_path_args = [
-        "pretrained_model_name_or_path",
-        "vae",
-        "tokenizer_cache_dir",
-        "train_data_dir",
-        "reg_data_dir",
-        "output_dir",
-        "logging_dir",
-    ]
-    filtered_args = {}
-    for k, v in vars(args).items():
-        if k not in sensitive_args + sensitive_path_args:
-            if (
-                v is None
-                or isinstance(v, bool)
-                or isinstance(v, str)
-                or isinstance(v, float)
-                or isinstance(v, int)
-            ):
-                filtered_args[k] = v
-            elif isinstance(v, list):
-                filtered_args[k] = f"{v}"
-            elif isinstance(v, object):
-                filtered_args[k] = f"{v}"
-
-    return filtered_args
-
-
 def verify_command_line_training_args(args: argparse.Namespace):
     wandb_enabled = args.log_with is not None and args.log_with != "tensorboard"
     if not wandb_enabled:
@@ -1069,9 +931,6 @@ def verify_training_args(args: argparse.Namespace):
         args.use_text_cache
     )
 
-    if args.adaptive_noise_scale is not None and args.noise_offset is None:
-        raise ValueError("adaptive_noise_scale requires noise_offset")
-
     if args.sample_every_n_epochs is not None and args.sample_every_n_epochs <= 0:
         logger.warning(
             "sample_every_n_epochs is less than or equal to 0, so it will be disabled"
@@ -1115,46 +974,6 @@ def add_dataset_arguments(
         help="extension of caption files (backward compatibility)",
     )
     parser.add_argument(
-        "--keep_tokens",
-        type=int,
-        default=0,
-        help="keep heading N tokens when shuffling caption tokens",
-    )
-    parser.add_argument(
-        "--keep_tokens_separator",
-        type=str,
-        default="",
-        help="A custom separator to divide the caption into fixed and flexible parts.",
-    )
-    parser.add_argument(
-        "--secondary_separator",
-        type=str,
-        default=None,
-        help="a secondary separator for caption.",
-    )
-    parser.add_argument(
-        "--enable_wildcard", action="store_true", help="enable wildcard for caption"
-    )
-    parser.add_argument(
-        "--caption_prefix", type=str, default=None, help="prefix for caption text"
-    )
-    parser.add_argument(
-        "--caption_suffix", type=str, default=None, help="suffix for caption text"
-    )
-    parser.add_argument(
-        "--color_aug", action="store_true", help="enable weak color augmentation"
-    )
-    parser.add_argument(
-        "--flip_aug", action="store_true", help="enable horizontal flip augmentation"
-    )
-    parser.add_argument(
-        "--face_crop_aug_range",
-        type=str,
-        default=None,
-        help="enable face-centered crop augmentation and its range (e.g. 2.0,4.0)",
-    )
-    parser.add_argument("--random_crop", action="store_true", help="enable random crop")
-    parser.add_argument(
         "--debug_dataset",
         action="store_true",
         help="show images for debugging (do not train)",
@@ -1190,20 +1009,6 @@ def add_dataset_arguments(
             "area",
         ],
         help="Resize interpolation",
-    )
-    parser.add_argument(
-        "--token_warmup_min", type=int, default=1, help="start learning at N tags"
-    )
-    parser.add_argument(
-        "--token_warmup_step",
-        type=float,
-        default=0,
-        help="tag length reaches maximum on N steps",
-    )
-    parser.add_argument(
-        "--alpha_mask",
-        action="store_true",
-        help="use alpha channel as mask for training",
     )
     parser.add_argument(
         "--dataset_class",
