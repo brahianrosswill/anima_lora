@@ -477,15 +477,32 @@ class EasyControlNetwork(AdapterNetworkBase):
         if not self._patched:
             raise RuntimeError("compile_cond_stream requires apply_to() first")
 
-        import torch._dynamo as _dynamo
+        from library.runtime.dynamo import pin_dynamo_limit
 
-        # Graph count keys on the (target × cond) token-count product. Default
-        # to the canonical 2 full-res families (4032/4200) → cover the product
-        # plus requires_grad/stride specializations and flash graph-break
-        # segments. max() so a multi-resolution caller's wider budget survives.
+        # The two-stream inner needs MANY more graphs than the target-only
+        # block._forward compile_blocks() handles:
+        #   - the (target × cond) token-count product (up to n² where the
+        #     target-only path is just n),
+        #   - times grad-on / grad-off GLOBAL_STATE (the inner is recompute'd
+        #     under non-reentrant checkpoint → dynamo guards on grad_mode),
+        #   - plus requires_grad/stride/num_threads specializations and the
+        #     flash graph-break segments around _ExtendedSelfAttnLSEFunc.
+        # That blows past the dynamo recompile_limit *default of 8* — and a
+        # plain `config.cache_size_limit = …` (== recompile_limit alias) is a
+        # context-local ContextVar override that REVERTS to 8 in the backward
+        # compile context where the grad-bearing inner is actually traced (see
+        # pin_dynamo_limit). So the budget was silently 8 here and the cond
+        # stream spilled to eager mid-warmup — the recompile storm. Pin the
+        # canonical `.default` so the raise survives every context. The
+        # target-only block._forward never hit this only because n full-res
+        # families (2) sits under 8; the cond product does not.
         n = n_token_families if n_token_families is not None else 2
-        _dynamo.config.cache_size_limit = max(
-            _dynamo.config.cache_size_limit, 4 * n + 16
+        per_obj = 4 * n + 16
+        pin_dynamo_limit("recompile_limit", per_obj)
+        # accumulated_recompile_limit is the cross-code-object ceiling; every
+        # block owns its own compiled inner, so budget for all of them.
+        pin_dynamo_limit(
+            "accumulated_recompile_limit", len(self._block_modules) * per_obj
         )
 
         compile_kwargs = {"backend": backend, "dynamic": False}
@@ -498,7 +515,7 @@ class EasyControlNetwork(AdapterNetworkBase):
         logger.info(
             f"EasyControl: compiled two-stream cond forward on "
             f"{len(self._block_modules)} blocks (backend={backend}, mode={mode}, "
-            f"cache_size_limit={_dynamo.config.cache_size_limit})"
+            f"recompile_limit pinned to {per_obj})"
         )
 
     def remove_from(self):
@@ -606,7 +623,16 @@ class EasyControlNetwork(AdapterNetworkBase):
             )
 
         # Flatten cond_x to [B, S_c, D] at cond's (possibly reduced) token count.
-        cond_x = cond_x_5d.flatten(1, 3)
+        # Pin to cond_latent's dtype (== weight_dtype, set by the trainer at
+        # prime time). The patch-embed runs in the prime hook *outside* the
+        # forward's autocast scope, so without this the dtype of cond_x tracks
+        # the surrounding context (fp32 in the train forward vs bf16 under the
+        # no_grad val/sample autocast) and flip-flops — which makes the compiled
+        # two-stream inner specialize a *second* copy of every (token-count ×
+        # is_last) graph keyed on cond_x's dtype. Pinning collapses that axis.
+        # Numerically safe: cond_q/k/v are re-cast to the target stream's dtype
+        # for flash downstream, and the whole forward runs under bf16 autocast.
+        cond_x = cond_x_5d.flatten(1, 3).to(cond_latent.dtype)
 
         return cond_x, cond_rope
 

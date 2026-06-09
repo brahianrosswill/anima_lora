@@ -381,11 +381,11 @@ def compile_dit_blocks(
     """
     if not enabled:
         return
-    import torch._dynamo as _dynamo
+    from library.runtime.dynamo import pin_dynamo_limit
 
-    _dynamo.config.cache_size_limit = max(
-        _dynamo.config.cache_size_limit, cache_size_limit
-    )
+    # Pin the canonical .default (not a context-local override) so the wider
+    # distillation-pool budget survives into the backward compile context.
+    pin_dynamo_limit("recompile_limit", cache_size_limit)
     anima.compile_blocks(backend, mode=mode)
 
 

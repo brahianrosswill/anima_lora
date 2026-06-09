@@ -1560,9 +1560,8 @@ class Anima(nn.Module):
 
         # Local import: library.datasets.buckets does not import models, so
         # importing it here (rather than at module top) avoids a circular import.
-        import torch._dynamo as _dynamo
-
         from library.datasets.buckets import CONSTANT_TOKEN_BUCKETS
+        from library.runtime.dynamo import pin_dynamo_limit
 
         # Number of distinct token-count families (== compiled block graphs).
         # Defaults to the canonical single-scale 1024 table (2: 4032/4200);
@@ -1577,9 +1576,13 @@ class Anima(nn.Module):
                     for h, w in CONSTANT_TOKEN_BUCKETS
                 }
             )
-        _dynamo.config.cache_size_limit = max(
-            _dynamo.config.cache_size_limit, 2 * n + 8
-        )
+        # pin_dynamo_limit (not a plain ``config.recompile_limit = …``): the
+        # budget is a ContextVar override that reverts to the default 8 in the
+        # backward compile context where the grad-bearing block._forward is
+        # traced. Single-scale (n=2 → 12) sits under 8 either way, but a wide
+        # multi-scale run (n large → >8 graphs) would silently spill to eager
+        # without pinning the canonical .default.
+        limit = pin_dynamo_limit("recompile_limit", 2 * n + 8)
 
         compile_kwargs = {"backend": backend, "dynamic": False}
         if mode is not None:
@@ -1588,7 +1591,7 @@ class Anima(nn.Module):
             block._forward = torch.compile(block._forward, **compile_kwargs)
         print(
             f"Anima: native_flatten on, {n} token-count families "
-            f"(cache_size_limit={_dynamo.config.cache_size_limit}); compiled "
+            f"(recompile_limit={limit}); compiled "
             f"{len(self.blocks)} block._forward with backend={backend}, mode={mode}"
         )
 
