@@ -29,14 +29,10 @@ lora_cache_dir = "post_image_dataset/lora"
 # Same blueprint applies to validation enumeration.
 path_pattern = "*"
 
-# Multi-scale constant-token tiers. Each image is preprocessed into the tier that
-# resizes it the LEAST (nearest bucket by scale — see library/datasets/buckets.py
-# choose_edge), giving v1.0-style diverse-resolution training from a mixed
-# dataset. Allowed edges: 512 768 1024 1280 1536 (tokens 1024+1008 / 2160 / 4032+
-# 4200 / 6300 / 8640). `[1024]` (the default) = single ~1MP tier
-# Override per-run:
-#   make preprocess ARGS="--target_res 1024 1536"
-target_res = [896, 1024]
+# Multi-scale constant-token tiers (`target_res`) live in configs/preprocess.toml.
+# It's a preprocess knob that training mirrors, and — unlike this file — it is
+# preserved across `make update` (base.toml rides the code-file path and is
+# overwritten so new infra keys ship). Set your resolution tiers there.
 
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"

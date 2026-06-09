@@ -6,12 +6,15 @@ temp dir, then merges over the working tree using a 3-way reconciliation
 of (baseline / user / new) sha256 hashes:
 
   - Datasets, outputs, models, caches, .venv: never touched.
-  - Configs in configs/methods/, configs/gui-methods/, configs/base.toml,
+  - Configs in configs/methods/, configs/gui-methods/,
     configs/preprocess.toml, configs/presets.toml, configs/sam_mask.yaml: prompt on conflict
     (keep yours / overwrite / backup-and-overwrite / show diff).
-  - Code files (library/, scripts/, train.py, etc.): overwritten silently
-    when unmodified; user-modified versions are copied to
-    .anima-update-backups/<timestamp>/ before being overwritten.
+  - Code files (library/, scripts/, train.py, etc.) AND configs/base.toml:
+    overwritten silently when unmodified; user-modified versions are copied to
+    .anima-update-backups/<timestamp>/ before being overwritten. base.toml is
+    deliberately treated as code — it's shared infrastructure, so new keys added
+    upstream must always reach the user (even under --keep-conflicts), with the
+    user's prior copy preserved in the backup dir.
 
 The baseline manifest lives at .anima_release.json. If it doesn't exist
 (first run after upgrading from a release that predates this script), every
@@ -90,10 +93,13 @@ PRESERVE_FILES: tuple[str, ...] = (
 
 # Files that prompt on conflict instead of silent overwrite. Globs match
 # the path relative to ROOT with forward slashes.
+# NB: configs/base.toml is intentionally NOT here. It's shared infrastructure
+# (model paths, the dataset blueprint, compile/cache contract) — new keys added
+# upstream must always be delivered, so it rides the code-file path (always
+# overwrite, backing up a user-modified copy) rather than honoring --keep-conflicts.
 CONFLICT_GLOBS: tuple[str, ...] = (
     "configs/methods/*.toml",
     "configs/gui-methods/*.toml",
-    "configs/base.toml",
     "configs/preprocess.toml",
     "configs/presets.toml",
     "configs/sam_mask.yaml",

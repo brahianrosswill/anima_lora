@@ -448,6 +448,20 @@ def load_method_preset(
     merged: dict = {}
     provenance: dict[str, str] = {}
 
+    # `target_res` is the one preprocess.toml knob train.py also needs (it builds
+    # the bucket table + sizes the compile cache), so it lives in preprocess.toml
+    # — which survives `make update` — rather than base.toml. Seed it here as the
+    # lowest-priority layer so preset/method/CLI still override per-run. Only this
+    # key is pulled in; the other preprocess-only scalars (source_image_dir, …)
+    # are never read by training.
+    preprocess_path = os.path.join(configs_dir, "preprocess.toml")
+    if os.path.exists(preprocess_path):
+        with open(preprocess_path, "r", encoding="utf-8") as f:
+            pp_raw = toml.load(f)
+        if "target_res" in pp_raw:
+            merged["target_res"] = pp_raw["target_res"]
+            provenance["target_res"] = _display_path(preprocess_path)
+
     with open(base_path, "r", encoding="utf-8") as f:
         base_raw = toml.load(f)
     base_flat = _flatten_toml(base_raw, source=base_path, strict=strict)
