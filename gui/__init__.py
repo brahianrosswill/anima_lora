@@ -255,7 +255,6 @@ _GROUPS = {
         "torch_compile",
         "cache_llm_adapter_outputs",
         "masked_loss",
-        "mixed_precision",
         "vae_chunk_size",
         "vae_disable_cache",
         "use_vae_cache",

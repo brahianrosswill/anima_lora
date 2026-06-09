@@ -175,13 +175,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "--resume_from_huggingface", action="store_true", help="resume from huggingface"
     )
     parser.add_argument(
-        "--save_precision",
-        type=str,
-        default=None,
-        choices=[None, "float", "fp16", "bf16"],
-        help="precision in saving",
-    )
-    parser.add_argument(
         "--save_every_n_epochs",
         type=int,
         default=None,
@@ -360,20 +353,6 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         default=1,
         help="Number of updates steps to accumulate before performing a backward/update pass",
     )
-    parser.add_argument(
-        "--mixed_precision",
-        type=str,
-        default="bf16",
-        choices=["no", "fp16", "bf16"],
-        help="use mixed precision (Anima trains in bf16; fp16/no are untested)",
-    )
-    parser.add_argument(
-        "--full_fp16", action="store_true", help="fp16 training including gradients"
-    )
-    parser.add_argument(
-        "--full_bf16", action="store_true", help="bf16 training including gradients"
-    )
-
     parser.add_argument(
         "--logging_dir",
         type=str,

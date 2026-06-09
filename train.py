@@ -63,7 +63,6 @@ from library.datasets import (
 )
 from library.datasets import base as _datasets_base
 from library.runtime.accelerator import (
-    patch_accelerator_for_fp16_training,
     prepare_accelerator,
     prepare_dtype,
     resolve_run_log_dir,
@@ -1200,10 +1199,6 @@ class AnimaTrainer:
                         ),
                         input_ids,
                     )
-                if args.full_fp16:
-                    encoded_text_encoder_conds = [
-                        c.to(weight_dtype) for c in encoded_text_encoder_conds
-                    ]
 
             if len(text_encoder_conds) == 0:
                 text_encoder_conds = encoded_text_encoder_conds
@@ -1906,20 +1901,6 @@ class AnimaTrainer:
         cache_latents,
     ) -> AcceleratedBundle:
         """Cast model dtypes, run accelerator.prepare, flip train/eval, optional torch.compile."""
-        # full fp16/bf16 training
-        if args.full_fp16:
-            assert args.mixed_precision == "fp16", (
-                "full_fp16 requires mixed precision='fp16'"
-            )
-            accelerator.print("enable full fp16 training.")
-            network.to(weight_dtype)
-        elif args.full_bf16:
-            assert args.mixed_precision == "bf16", (
-                "full_bf16 requires mixed precision='bf16'"
-            )
-            accelerator.print("enable full bf16 training.")
-            network.to(weight_dtype)
-
         unet_weight_dtype = te_weight_dtype = weight_dtype
 
         unet.requires_grad_(False)
@@ -1994,10 +1975,6 @@ class AnimaTrainer:
             vae.requires_grad_(False)
             vae.eval()
             vae.to(accelerator.device, dtype=vae_dtype)
-
-        # patch for fp16 grad scale
-        if args.full_fp16:
-            patch_accelerator_for_fp16_training(accelerator)
 
         return AcceleratedBundle(
             network=network,

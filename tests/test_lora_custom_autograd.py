@@ -112,7 +112,7 @@ def test_dispatch_helper_routes_correctly():
 
 
 def test_bf16_weight_storage_returns_correct_grad_dtype():
-    """Under full_bf16, lora_down.weight is bf16. grad_weight must come back
+    """When lora_down.weight is stored in bf16, grad_weight must come back
     in that dtype (matching the existing path's implicit cast)."""
     torch.manual_seed(0)
     x = torch.randn(1, 8, 16, dtype=torch.bfloat16, requires_grad=True)

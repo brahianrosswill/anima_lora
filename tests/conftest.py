@@ -41,7 +41,6 @@ def tiny_args() -> argparse.Namespace:
     return argparse.Namespace(
         method="lora",
         preset="default",
-        mixed_precision="bf16",
         learning_rate=1e-4,
         network_dim=4,
         network_alpha=4,
