@@ -10,6 +10,7 @@ from networks.lora_modules.hydra import HydraLoRAModule, _sigma_sinusoidal_featu
 from networks.lora_modules.lora import LoRAModule
 from networks.lora_modules.ortho import (
     OrthoHydraLoRAModule,
+    OrthoInitLoRAModule,
     OrthoLoRAModule,
 )
 from networks.lora_modules.stacked_experts import StackedExpertsLoRAModule
@@ -22,6 +23,7 @@ __all__ = [
     "HydraLoRAModule",
     "LoRAModule",
     "OrthoHydraLoRAModule",
+    "OrthoInitLoRAModule",
     "OrthoLoRAModule",
     "StackedExpertsLoRAModule",
     "StepExpertLoRAModule",

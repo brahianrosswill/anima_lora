@@ -36,7 +36,7 @@ path_pattern = "*"
 # 4200 / 6300 / 8640). `[1024]` (the default) = single ~1MP tier
 # Override per-run:
 #   make preprocess ARGS="--target_res 1024 1536"
-target_res = [768, 1024]
+target_res = [896, 1024]
 
 optimizer_type = "AdamW"
 lr_scheduler = "cosine"

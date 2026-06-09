@@ -1,5 +1,6 @@
-# OrthoLoRA variants: Cayley-parameterized orthogonal low-rank adapters,
-# plus the OrthoHydra MoE combination.
+# OrthoLoRA variants: Cayley-parameterized orthogonal low-rank adapters
+# (OrthoLoRA + OrthoHydra MoE), plus OrthoInit — top-r SVD of W0 as a
+# *trainable* init (no frozen-subspace cap; full LoRA expressivity).
 
 from typing import Dict, List, Optional
 
@@ -220,6 +221,166 @@ class OrthoLoRAModule(BaseLoRAModule):
             for suffix in ("S_p", "S_q", "lambda_layer", "P_basis", "Q_basis"):
                 state_dict.pop(f"{prefix}.{suffix}", None)
             # inv_scale stays — shared buffer, not an ortho-exp-only key.
+
+            state_dict[f"{prefix}.lora_up.weight"] = lora_up
+            state_dict[f"{prefix}.lora_down.weight"] = lora_down
+            if alpha is not None:
+                state_dict[f"{prefix}.alpha"] = alpha
+
+
+class OrthoInitLoRAModule(BaseLoRAModule):
+    """OrthoInit: top-r SVD of W₀ as *initialization only* — trainable, uncapped.
+
+    OrthoLoRA freezes the top-r SVD basis and only Cayley-rotates *within* it,
+    so ``colspace(ΔW) ⊆ top-r(W₀)`` for the whole run — the rotation can never
+    leave the principal subspace, which is what makes T-LoRA+ortho / chimera-
+    ortho feel weak. OrthoInit keeps the same three-factor ``P diag(λ) Q`` shape
+    but makes ``P_init`` / ``Q_init`` **trainable Parameters** seeded from the
+    SVD (no frozen buffer, no Cayley). ΔW can then reach *any* rank-r subspace
+    (full LoRA expressivity) while still getting the W₀-aligned warm start.
+
+        out = x @ Q_init^T @ diag(λ) @ P_init^T
+
+    λ zero-init keeps ΔW=0 at step 0. Because ∂L/∂P, ∂L/∂Q ∝ λ, the magnitudes
+    fit first along the principal directions, then the bases rotate off-subspace
+    as the loss demands — SVD as a *starting point*, not a cage.
+
+    Saved as standard LoRA (sqrt-split λ into ``lora_down`` / ``lora_up``), so the
+    on-disk format, merge path, and inference loader are identical to a distilled
+    OrthoLoRA. The ``lambda_layer`` + ``_timestep_mask`` factor is preserved at
+    train time so T-LoRA's per-rank schedule still gates the singular values.
+    """
+
+    def __init__(
+        self,
+        lora_name,
+        org_module: torch.nn.Module,
+        multiplier=1.0,
+        lora_dim=4,
+        alpha=1,
+        dropout=None,
+        rank_dropout=None,
+        module_dropout=None,
+        channel_scale=None,
+    ):
+        super().__init__(
+            lora_name,
+            org_module,
+            multiplier=multiplier,
+            lora_dim=lora_dim,
+            alpha=alpha,
+            dropout=dropout,
+            rank_dropout=rank_dropout,
+            module_dropout=module_dropout,
+        )
+
+        # SVD-informed init (same randomized low-rank as OrthoLoRA), but the
+        # bases become trainable rather than frozen subspace buffers.
+        init_device = "cuda" if torch.cuda.is_available() else "cpu"
+        W = org_module.weight.data.float().to(init_device)
+        q = min(lora_dim + 6, min(W.shape))
+        U, _S_vals, V = torch.svd_lowrank(W, q=q, niter=2)
+        P_init = U[:, :lora_dim].clone().contiguous()  # (out, r)
+        Q_init = V[:, :lora_dim].T.clone().contiguous()  # (r, in)
+        del U, _S_vals, V, W
+
+        # Trainable factors. fp32 master (Adam state precision); cast to the
+        # activation dtype at the matmul boundary in forward — same convention
+        # as ``lambda_layer``. No Cayley, no frozen P_basis/Q_basis buffers.
+        self.P_init = torch.nn.Parameter(P_init.cpu())
+        self.Q_init = torch.nn.Parameter(Q_init.cpu())
+        # ΔW = 0 at init; also gates ∂L/∂P, ∂L/∂Q off until λ ramps.
+        self.lambda_layer = torch.nn.Parameter(torch.zeros(1, lora_dim))
+
+        # Absorb channel scale into the input-side Q_init while still fp32
+        # (mutates ``.data`` in place; output unchanged, gradient rebalanced).
+        self._register_channel_scale(self.Q_init.data, channel_scale)
+
+        # Down-proj is a full-width trainable matmul, identical in shape to a
+        # plain-LoRA ``lora_down`` — so it gets the same opt-in memory lever
+        # (save bf16 ``x`` instead of fp32 ``x_lora`` for backward). The factory
+        # flips this to True when ``use_custom_down_autograd`` is set.
+        self.use_custom_down_autograd = False
+
+    def forward(self, x):
+        org_forwarded = self.org_forward(x)
+
+        if not self.training:
+            # bf16 fast path (mirrors LoRAModule). Distilled checkpoints infer
+            # as plain LoRA; this branch only fires for sample-during-training.
+            x_lora = self._rebalance(x)
+            lx = torch.nn.functional.linear(x_lora, self.Q_init.to(x.dtype))
+            lx = lx * self.lambda_layer.to(x.dtype) * self._timestep_mask.to(x.dtype)
+            lx = torch.nn.functional.linear(lx, self.P_init.to(x.dtype))
+            return org_forwarded + lx * self.multiplier * self.scale
+
+        if self._skip_module():
+            return org_forwarded
+
+        # Training: fp32 bottleneck matmuls (recovers mantissa precision bf16
+        # sheds across the in_dim accumulation — same rationale as LoRAModule),
+        # bf16 storage. Custom-down folds inv_scale + saves bf16 x for backward.
+        if self.use_custom_down_autograd:
+            inv_scale = self.inv_scale if self._has_channel_scale else None
+            lx = lora_down_project(x, self.Q_init, inv_scale)  # fp32 out
+        else:
+            x_lora = self._rebalance(x)
+            lx = torch.nn.functional.linear(x_lora.float(), self.Q_init.float())
+
+        # λ + T-LoRA mask gate the rank latent (fp32 here). λ is a fp32 master
+        # Parameter; the mask is the default all-ones buffer unless T-LoRA binds it.
+        lx = lx * self.lambda_layer.float() * self._timestep_mask
+
+        if self.dropout is not None:
+            lx = torch.nn.functional.dropout(lx, p=self.dropout)
+
+        lx, scale = self._apply_rank_dropout(lx)
+
+        lx = torch.nn.functional.linear(lx, self.P_init.float())
+        return org_forwarded + (lx * self.multiplier * scale).to(org_forwarded.dtype)
+
+    @classmethod
+    def distill_save_state_dict(
+        cls,
+        state_dict: Dict[str, torch.Tensor],
+        dtype: Optional[torch.dtype],
+    ) -> None:
+        """OrthoInit → standard LoRA: ``P_init`` / ``Q_init`` / λ → down/up.
+
+        Mutates ``state_dict`` in place. Discriminator: ``.P_init`` keys (no
+        other variant uses that name). Sqrt-splits λ between the two factors so
+        the on-disk product ``ΔW = P_init @ diag(λ) @ Q_init`` is preserved
+        bit-exactly under the ``(lora_down, lora_up)`` factorization.
+        """
+        prefixes = set()
+        for key in state_dict.keys():
+            if key.endswith(".P_init"):
+                prefixes.add(key[: -len(".P_init")])
+
+        for prefix in prefixes:
+            P = state_dict[f"{prefix}.P_init"].float()  # (out, r)
+            Q = state_dict[f"{prefix}.Q_init"].float()  # (r, in)
+            lam = state_dict[f"{prefix}.lambda_layer"]  # (1, r)
+            alpha = state_dict.get(f"{prefix}.alpha")
+            save_dtype = (
+                dtype if dtype is not None else state_dict[f"{prefix}.P_init"].dtype
+            )
+
+            lam_1d = lam.squeeze(0).float()
+            lam_abs = lam_1d.abs()
+            lam_sign = lam_1d.sign()
+            lam_sqrt = lam_abs.sqrt()
+            lora_up = (
+                (P * (lam_sqrt * lam_sign).unsqueeze(0))
+                .to(save_dtype)
+                .cpu()
+                .contiguous()
+            )
+            lora_down = (Q * lam_sqrt.unsqueeze(1)).to(save_dtype).cpu().contiguous()
+
+            for suffix in ("P_init", "Q_init", "lambda_layer"):
+                state_dict.pop(f"{prefix}.{suffix}", None)
+            # inv_scale stays — shared buffer, not an orthoinit-only key.
 
             state_dict[f"{prefix}.lora_up.weight"] = lora_up
             state_dict[f"{prefix}.lora_down.weight"] = lora_down

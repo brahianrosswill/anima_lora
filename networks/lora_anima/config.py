@@ -271,6 +271,10 @@ class LoRANetworkCfg:
     # (``OrthoLoRA`` / ``OrthoHydra``) and this field is informational.
     use_ortho: bool = False
     ortho_init_std: float = 0.02
+    # OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
+    # Selects ``OrthoInitLoRAModule`` via ``resolve_network_spec``; mutually
+    # exclusive with ``use_ortho`` (validated in the resolver). Non-MoE only.
+    use_ortho_init: bool = False
 
     # σ-conditional router parameters (consumed when ``router_source="sigma"``).
     # Layer scope is shared with Hydra and FEI via ``router_targets`` above.
@@ -526,6 +530,7 @@ class LoRANetworkCfg:
 
         use_ortho = _as_bool(kwargs.get("use_ortho"))
         ortho_init_std = float(kwargs.get("ortho_init_std", 0.02))
+        use_ortho_init = _as_bool(kwargs.get("use_ortho_init"))
 
         # FECL knobs. Default off; turning it on requires `num_bands >= 3`
         # to be a meaningful objective (see compute_fecl docstring).
@@ -723,6 +728,7 @@ class LoRANetworkCfg:
             router_tau=router_tau,
             use_ortho=use_ortho,
             ortho_init_std=ortho_init_std,
+            use_ortho_init=use_ortho_init,
             fera_fecl_weight=fera_fecl_weight,
             fera_num_bands=fera_num_bands,
             use_chimera_hydra=use_chimera_hydra,

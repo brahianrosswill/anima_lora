@@ -73,9 +73,15 @@ class BucketBatchSampler(torch.utils.data.Sampler):
     ``shuffle=False`` preserves the deterministic largest-first bucket order.
     """
 
-    def __init__(self, batches, largest_idx, *, shuffle=True, seed=0):
+    def __init__(self, batches, warmup_idxs, *, shuffle=True, seed=0):
         self._batches = batches  # list[list[int]]
-        self._largest_idx = largest_idx  # index into _batches, or None
+        # Batch indices pinned to the front, largest-token first (one per
+        # token-count family). Accepts a single int / None for back-compat.
+        if warmup_idxs is None:
+            warmup_idxs = []
+        elif isinstance(warmup_idxs, int):
+            warmup_idxs = [warmup_idxs]
+        self._warmup_idxs = list(warmup_idxs)
         self._shuffle = shuffle
         self._seed = seed
         self._epoch = 0
@@ -88,9 +94,11 @@ class BucketBatchSampler(torch.utils.data.Sampler):
         if self._shuffle:
             random.Random(self._seed + self._epoch).shuffle(order)
             self._epoch += 1
-            if self._largest_idx is not None:
-                order.remove(self._largest_idx)
-                order.insert(0, self._largest_idx)
+            # Insert smallest-first at position 0 so the largest family ends up
+            # at step 0 (worst-case graph + peak allocation first).
+            for idx in reversed(self._warmup_idxs):
+                order.remove(idx)
+                order.insert(0, idx)
         for bi in order:
             yield self._batches[bi]
 
@@ -275,14 +283,17 @@ class CachedDataset(torch.utils.data.Dataset):
 
         Pass to ``DataLoader(batch_sampler=...)`` (not ``batch_size=``). Each
         batch is one resolution; ``shuffle`` reshuffles batch order per epoch
-        while keeping the largest-token bucket first. See ``BucketBatchSampler``.
+        while pinning one batch of every token-count family to the front
+        (largest first) so all torch.compile graphs warm up in the first few
+        steps. See ``BucketBatchSampler`` and [[project_compile_context_vram_climb]].
         """
-        largest = (
-            max(range(len(self._batches)), key=lambda i: self._batch_tok[i])
-            if self._batches
-            else None
-        )
-        return BucketBatchSampler(self._batches, largest, shuffle=shuffle, seed=seed)
+        # One representative batch per distinct token count, largest first —
+        # each token family is a separate compiled block graph.
+        first_by_tok: dict[int, int] = {}
+        for i in range(len(self._batches)):
+            first_by_tok.setdefault(self._batch_tok[i], i)
+        warmup = [first_by_tok[t] for t in sorted(first_by_tok, reverse=True)]
+        return BucketBatchSampler(self._batches, warmup, shuffle=shuffle, seed=seed)
 
     def __getitem__(self, idx):
         latent_path, te_path = self.samples[idx]

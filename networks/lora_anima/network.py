@@ -24,6 +24,7 @@ from networks.lora_modules import (
     HydraLoRAModule,
     LoRAModule,
     OrthoHydraLoRAModule,
+    OrthoInitLoRAModule,
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
     StepExpertLoRAModule,
@@ -409,6 +410,8 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                     extra_kwargs["step_expert_K"] = cfg.step_expert_K
                 elif effective_module_class == OrthoLoRAModule:
                     pass  # no extra kwargs — SVD init reads from org_module directly
+                elif effective_module_class == OrthoInitLoRAModule:
+                    pass  # no extra kwargs — SVD init reads from org_module directly
                 elif effective_module_class == ChimeraHydraLoRAModule:
                     # Pool split is the chimera's only constructor surface;
                     # σ/FEI feature dims are 0 by design (the network-level
@@ -572,6 +575,7 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         skipped_te = []
         if text_encoders is not None and module_class not in (
             OrthoLoRAModule,
+            OrthoInitLoRAModule,
             OrthoHydraLoRAModule,
             ChimeraHydraLoRAModule,
             ChimeraHydraInferenceModule,
@@ -1924,6 +1928,12 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         # it back into the runtime HydraLoRAModule combine for inference parity.
         if getattr(self.cfg, "ortho_centered_gate", False):
             metadata["ss_ortho_centered_gate"] = "true"
+
+        # OrthoInit provenance. The checkpoint distills to standard LoRA (no
+        # special loader path), so this stamp is informational only — it records
+        # that the trained adapter used the trainable-SVD-init parameterization.
+        if getattr(self.cfg, "use_ortho_init", False):
+            metadata["ss_use_ortho_init"] = "true"
 
         # FEI router params (router-source-specific scalars the loader needs
         # to size the router input). Stamped for both per-Linear and global

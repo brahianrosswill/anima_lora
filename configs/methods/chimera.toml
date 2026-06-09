@@ -15,14 +15,14 @@
 # Single phase: both pools, both routers, and shared A train jointly under
 # the denoise loss + per-pool balance loss. T-LoRA's mask is applied to
 # the content branch only (the freq branch keeps full rank at every t).
-target_res = [768, 1024]
+target_res = [896, 1024]
 network_alpha = 64
 network_dim = 64
 
 learning_rate = 2e-5
-max_train_epochs = 18
-save_every_n_epochs = 6
-checkpointing_epochs = 6
+max_train_epochs = 12
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -73,7 +73,7 @@ content_router_layer_norm = true   # parameterless LN on the pooled input
 # 1/K_c and a ~1e-4-scale ΔW perturbation at init (negligible); bump to 0.05 if
 # content_margin stays flat. (content_input_var reaches ~0.2 by ~100 steps, so
 # the per-prompt content signal is real — this is a true plateau-kick.)
-content_router_init_std = 1e-3
+content_router_init_std = 1e-4
 
 # Freq-pool routing mode.
 #   "fei"     — hardwire π_f = normalize(FEI ** (1/freq_router_tau)) directly.

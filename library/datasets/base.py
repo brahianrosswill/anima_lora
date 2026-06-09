@@ -568,31 +568,47 @@ class BaseDataset(torch.utils.data.Dataset):
         self._largest_bucket_first()
 
     def _largest_bucket_first(self):
-        """Pin one batch of the highest-token-count bucket to the front of the
-        epoch order.
+        """Pin one batch of EACH token-count family to the front of the epoch
+        order, largest-token-first.
 
-        With native-shape buckets each distinct token count traces its own
-        ``torch.compile`` block graph, and the largest
-        bucket also carries the biggest activations. Front-loading it forces
-        that worst-case graph compile + peak allocation onto step 0, so a
-        too-tight VRAM budget fails fast at start instead of OOMing mid-epoch
-        when the big bucket happens to come up in the shuffle. Only the first
-        batch is reordered; the rest of the epoch stays randomly shuffled.
+        Under native-shape bucketing each distinct token count traces its own
+        ``torch.compile`` block graph. The first time a graph runs it both peaks
+        the caching-allocator activations AND loads its inductor kernel module +
+        cuBLAS/cuDNN/flash workspaces into the CUDA context (the latter is
+        ``nvidia-smi``-visible but invisible to ``torch.cuda.memory_reserved``).
+        Front-loading only the single biggest bucket warms one graph; the others
+        compile lazily as the shuffle reaches them, so context VRAM ramps up
+        ~mid-epoch then plateaus. Warming one batch of every family up front
+        forces all graphs to compile in the first few steps — peak (allocator +
+        context) lands at start, so a too-tight budget fails fast instead of
+        creeping up mid-run. See [[project_compile_context_vram_climb]].
+
+        Equal token count ⟺ equal pixel area (each native bucket exactly fills
+        its count), so distinct areas == distinct graph families. Only the
+        leading batches are reordered; the rest of the epoch stays shuffled.
         """
         if not self.buckets_indices:
             return
-        # resos are (W, H); pixel area is the token-count proxy.
-        if getattr(self, "_largest_bucket_index", None) is None:
+        # resos are (W, H); pixel area uniquely keys each token-count family.
+        if getattr(self, "_warmup_bucket_indices", None) is None:
             resos = self.bucket_manager.resos
-            present = {bbi.bucket_index for bbi in self.buckets_indices}
-            self._largest_bucket_index = max(
-                present, key=lambda bi: resos[bi][0] * resos[bi][1]
-            )
-        for i, bbi in enumerate(self.buckets_indices):
-            if bbi.bucket_index == self._largest_bucket_index:
-                if i:
-                    self.buckets_indices.insert(0, self.buckets_indices.pop(i))
-                return
+            by_area: dict[int, int] = {}
+            for bbi in self.buckets_indices:
+                bi = bbi.bucket_index
+                area = resos[bi][0] * resos[bi][1]
+                by_area.setdefault(area, bi)  # one representative per family
+            # Largest-token (largest-area) family first.
+            self._warmup_bucket_indices = [
+                by_area[a] for a in sorted(by_area, reverse=True)
+            ]
+        # Move one batch of each family to the front. Iterate smallest-first and
+        # insert at 0 so the largest family ends up at index 0 (worst case first).
+        for target in reversed(self._warmup_bucket_indices):
+            for i, bbi in enumerate(self.buckets_indices):
+                if bbi.bucket_index == target:
+                    if i:
+                        self.buckets_indices.insert(0, self.buckets_indices.pop(i))
+                    break
 
     def is_latent_cacheable(self):
         return all(

@@ -16,6 +16,9 @@ Ordering of the conversion pipeline is load-bearing:
      (gated on 3-D ``.S_p`` AND 2-D ``.S_q``)
   4. ``OrthoLoRAModule.distill_save_state_dict``
      (gated on 2-D ``.S_p``)
+  4b. ``OrthoInitLoRAModule.distill_save_state_dict``
+     (gated on ``.P_init`` — a name no other variant uses, so order vs the
+     ``.S_p``-keyed steps above is independent; placed here for readability)
   5. legacy sig-type OrthoLoRA → standard LoRA
      (gated on ``.base_lambda``; kept here because it touches the
      deprecated ``lora_deprecated.OrthoLoRAModule`` save layout that no
@@ -41,6 +44,7 @@ from networks.lora_modules import (
     ChimeraHydraLoRAModule,
     HydraLoRAModule,
     OrthoHydraLoRAModule,
+    OrthoInitLoRAModule,
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
 )
@@ -166,6 +170,7 @@ def save_network_weights(
     StackedExpertsLoRAModule.distill_save_state_dict(state_dict, dtype)
     OrthoHydraLoRAModule.distill_save_state_dict(state_dict, dtype)
     OrthoLoRAModule.distill_save_state_dict(state_dict, dtype)
+    OrthoInitLoRAModule.distill_save_state_dict(state_dict, dtype)
     _convert_legacy_ortho_to_lora(state_dict, dtype)
 
     # Variant dispatch.
@@ -201,9 +206,7 @@ def save_network_weights(
 
     if is_chimera_variant:
         chimera_file = os.path.splitext(file)[0] + "_chimera.safetensors"
-        chimera_sd = ChimeraHydraLoRAModule.build_moe_state_dict(
-            state_dict, dtype
-        )
+        chimera_sd = ChimeraHydraLoRAModule.build_moe_state_dict(state_dict, dtype)
         from safetensors.torch import save_file as sf_save
 
         sf_save(chimera_sd, chimera_file, metadata or {})
@@ -235,9 +238,7 @@ def save_network_weights(
 
         if metadata is None:
             metadata = {}
-        model_hash, legacy_hash = precalculate_safetensors_hashes(
-            state_dict, metadata
-        )
+        model_hash, legacy_hash = precalculate_safetensors_hashes(state_dict, metadata)
         metadata["sshs_model_hash"] = model_hash
         metadata["sshs_legacy_hash"] = legacy_hash
 

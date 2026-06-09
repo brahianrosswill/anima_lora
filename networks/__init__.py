@@ -11,6 +11,7 @@ Flag precedence (evaluated top to bottom, first match wins):
     use_moe_style="independent_A"        → stacked_experts_global_fei
     use_moe_style="shared_A" + use_ortho → ortho_hydra
     use_moe_style="shared_A"             → hydra
+    use_ortho_init                       → ortho_init
     use_ortho                            → ortho
     (none)                               → lora
 
@@ -30,6 +31,7 @@ from networks.lora_modules import (
     HydraLoRAModule,
     LoRAModule,
     OrthoHydraLoRAModule,
+    OrthoInitLoRAModule,
     OrthoLoRAModule,
     StackedExpertsLoRAModule,
     StepExpertLoRAModule,
@@ -100,6 +102,9 @@ SHARED_KWARG_FLAGS: Tuple[str, ...] = (
     "use_custom_down_autograd",
     # Variant selectors (read by resolve_network_spec)
     "use_ortho",
+    # OrthoInit: top-r SVD of W0 as trainable init (no frozen-subspace cap).
+    # Mutually exclusive with use_ortho; non-MoE / non-chimera only for now.
+    "use_ortho_init",
     # PSOFT-style Cayley-init magnitude (consumed by OrthoHydra +
     # StackedExperts in ortho mode).
     "ortho_init_std",
@@ -243,6 +248,15 @@ NETWORK_REGISTRY: Dict[str, NetworkSpec] = {
         module_class=OrthoLoRAModule,
         save_variant="ortho_to_lora",
     ),
+    # OrthoInit: top-r SVD of W0 as *trainable* init (no Cayley, no frozen
+    # subspace). Full LoRA expressivity with a W0-aligned warm start; distills
+    # to standard LoRA at save time (sqrt-split λ → down/up), so the on-disk
+    # form is identical to a distilled OrthoLoRA. See OrthoInitLoRAModule.
+    "ortho_init": NetworkSpec(
+        name="ortho_init",
+        module_class=OrthoInitLoRAModule,
+        save_variant="ortho_to_lora",
+    ),
     "hydra": NetworkSpec(
         name="hydra",
         module_class=HydraLoRAModule,
@@ -342,7 +356,19 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
     a single ``num_experts`` — the user only sets the chimera flag.
     """
     use_ortho = _parse_bool_flag(kwargs, "use_ortho")
+    use_ortho_init = _parse_bool_flag(kwargs, "use_ortho_init")
     use_chimera = _parse_bool_flag(kwargs, "use_chimera_hydra")
+    if use_ortho and use_ortho_init:
+        raise ValueError(
+            "use_ortho and use_ortho_init are mutually exclusive: ortho freezes "
+            "the SVD basis (Cayley-rotates within it); ortho_init trains the SVD "
+            "basis (no cap). Pick one."
+        )
+    if use_ortho_init and use_chimera:
+        raise NotImplementedError(
+            "use_ortho_init does not yet compose with use_chimera_hydra — the "
+            "orthoinit chimera pool is a separate family member (not implemented)."
+        )
     if use_chimera:
         return NETWORK_REGISTRY["chimera_hydra"]
 
@@ -369,12 +395,19 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
             f"use_moe_style={raw_moe!r}: expected False, 'shared_A', or 'independent_A'."
         )
 
+    if use_ortho_init and moe_style:
+        raise NotImplementedError(
+            "use_ortho_init does not yet compose with use_moe_style — the "
+            "orthoinit MoE pool is a separate family member (not implemented)."
+        )
     if moe_style == "independent_A":
         return NETWORK_REGISTRY["stacked_experts_global_fei"]
     if moe_style == "shared_A":
         return (
             NETWORK_REGISTRY["ortho_hydra"] if use_ortho else NETWORK_REGISTRY["hydra"]
         )
+    if use_ortho_init:
+        return NETWORK_REGISTRY["ortho_init"]
     if use_ortho:
         return NETWORK_REGISTRY["ortho"]
     return NETWORK_REGISTRY["lora"]

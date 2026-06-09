@@ -21,8 +21,8 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 
-network_alpha = 48
-network_dim = 48
+network_alpha = 32
+network_dim = 32
 
 learning_rate = 2e-5
 max_train_epochs = 6
@@ -46,19 +46,26 @@ output_name = "anima_channel"
 # -------------
 # Ortho-lora
 
-use_ortho = true
+# use_ortho = true
+
+# -------------
+# OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
+# Full LoRA expressivity with a W0-aligned warm start — drop-in replacement for
+# `use_ortho` when ortho/T-LoRA-ortho feels too weak. Mutually exclusive with
+# use_ortho; non-MoE / non-chimera only. To use: comment out `use_ortho` above.
+use_ortho_init = true
 
 # -------------
 # Timestep mask
 
 use_timestep_mask = true
-min_rank = 16
+min_rank = 1
 alpha_rank_scale = 1.0
 
 
 # ---
-sample_every_n_epochs = 1
-sample_prompts= "masterpiece, best quality, score_7, safe. An anime girl wearing a black tank-top and denim shorts is standing outdoors. She's holding a rectangular sign out in front of her that reads \"ANIMA\". She 's looking at the viewer with a smile. The background features some trees and blue sky with clouds."
+# sample_every_n_epochs = 1
+# sample_prompts= "masterpiece, best quality, score_7, safe. An anime girl wearing a black tank-top and denim shorts is standing outdoors. She's holding a rectangular sign out in front of her that reads \"ANIMA\". She 's looking at the viewer with a smile. The background features some trees and blue sky with clouds."
 # -------------
 # "shared_A" and route_per_layer=false -> hydralora
 
