@@ -36,7 +36,7 @@ caption_dropout_rate = 0.1
 
 output_name = "anima_channel_ortho"
 # sigmoid_bias = 0.5
-# path_pattern = "channel_(caststation)/*"
+path_pattern = "channel_(caststation)/*"
 
 # vr_loss_weight = 1.0
 # vr_fei_sigma_low_div = 4.0

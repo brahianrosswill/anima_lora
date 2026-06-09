@@ -23,7 +23,7 @@ tag_any = ["speech bubble", "thought bubble", "blank speech bubble", "spoken tex
 image_dirs = ["{CAPTION_CORPUS_DIR}/retrieved"]
 # Stage/threshold knobs (any --flag dest works here, e.g. grid, ratio, geom_check):
 sim_min = 0.85
-match_frac_min = 0.4
+match_frac_min = 0.3
 cell_match_min = 0.9
 max_extra_diff = 25
 
@@ -50,7 +50,7 @@ qwen3 = 'models/text_encoders/qwen_3_06b_base.safetensors'
 dit = 'models/diffusion_models/anima-base-v1.0.safetensors'
 caption_shuffle_variants = 4
 caption_tag_dropout_rate = 0.1
-target_res = [896]
+target_res = [896, 1024]
 
 # Training overrides for `make easycontrol EASYADAPTER=near_twin` (optional).
 # Each key is folded in as a `--key value` CLI override on top of
@@ -63,7 +63,7 @@ target_res = [896]
 network_dim = 32
 network_alpha = 32
 masked_loss=false
-target_res = [896]
+target_res = [896, 1024]
 
 network_args = [
     "b_cond_init=-4.0",
@@ -73,17 +73,14 @@ network_args = [
     "use_custom_down_autograd=true",
 ]
 
-blocks_to_swap = 26
 learning_rate = 2e-5
 max_train_epochs = 12
 save_every_n_epochs = 12
 checkpointing_epochs = 12
-# Removal task: the _tags reference is the structural source of truth, so keep
-# the cond clean (no training-time perturbation) for faithful reconstruction.
+
 easycontrol_cond_noise_max = 0.0
 caption_dropout_rate = 1.0
 easycontrol_drop_p=0.0
-
 
 [general]
 caption_extension = '.txt'

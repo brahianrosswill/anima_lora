@@ -80,6 +80,7 @@ import logging
 import math
 import os
 import random
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -90,6 +91,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from library.log import setup_logging
 from library.training.method_adapter import MethodAdapter, SetupCtx, StepCtx
+from networks.lora_modules.base import _absorb_channel_scale
 from networks.lora_modules.custom_autograd import lora_down_project
 from networks.methods.base import AdapterNetworkBase
 from networks.methods.easycontrol_attention import _extended_target_attention
@@ -110,6 +112,63 @@ DEFAULT_B_COND_INIT = -10.0
 DEFAULT_COND_RES_SCALE = 1.0  # 1.0 = native cond res (bit-exact to pre-PAI path)
 
 
+# ---- cond-stream channel scaling (SmoothQuant-style per-input rebalance) ----
+# Absorbs a per-input-channel scale into each cond LoRA down-projection (rebalances
+# per-column gradient magnitudes; output-preserving). Uses a COND-SPECIFIC
+# calibration — the LoRA-family main-stream file does NOT transfer to the cond
+# stream (post-GELU mlp.layer2 inputs diverge; xfer_eff ~0.06). Measured by
+# bench/channel_stats/cond_stream_profile.py; keyed by the same lora_unet_*
+# convention as networks/calibration/channel_stats.safetensors.
+_COND_CHANNEL_STATS_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "calibration"
+    / "cond_channel_stats.safetensors"
+)
+
+# kind -> (state_dict ModuleList attr, in_dim selector). The four cond LoRA
+# down-projections channel scaling rebalances.
+_COND_LORA_KINDS = {
+    "qkv": ("cond_lora_qkv", "hidden"),
+    "o": ("cond_lora_o", "hidden"),
+    "ffn1": ("cond_lora_ffn1", "hidden"),
+    "ffn2": ("cond_lora_ffn2", "ffn"),
+}
+
+
+def _cond_lora_calib_key(kind: str, idx: int) -> str:
+    """Calibration key for a cond LoRA down-proj — names the DiT Linear it
+    shadows, in the lora_unet_* convention the calibration file is keyed by."""
+    suffix = {
+        "qkv": "self_attn_qkv_proj",
+        "o": "self_attn_output_proj",
+        "ffn1": "mlp_layer1",
+        "ffn2": "mlp_layer2",
+    }[kind]
+    return f"lora_unet_blocks_{idx}_{suffix}"
+
+
+def _load_cond_channel_scales(alpha: float) -> Optional[dict]:
+    """mean|x| calibration -> per-channel scale ``s``, replicating
+    ``lora_anima/factory._load_channel_scales`` exactly (``s = clamp_min(1e-6)^alpha``
+    normalized to mean 1). Returns None when scaling is off (``alpha <= 0``)."""
+    if alpha <= 0.0:
+        return None
+    if not _COND_CHANNEL_STATS_PATH.is_file():
+        raise FileNotFoundError(
+            f"cond channel calibration missing at {_COND_CHANNEL_STATS_PATH}. "
+            "Regenerate via `bench/channel_stats/cond_stream_profile.py "
+            "--dump_cond_stats ...`, or set channel_scaling_alpha=0 to disable."
+        )
+    from safetensors.torch import load_file
+
+    raw = load_file(str(_COND_CHANNEL_STATS_PATH))
+    out = {}
+    for name, mean_abs in raw.items():
+        s = mean_abs.float().clamp_min(1e-6).pow(alpha)
+        out[name] = s / s.mean().clamp_min(1e-12)
+    return out
+
+
 class _LoRAProj(nn.Module):
     """Plain LoRA-style D->r->out_dim projection with up zero-init.
 
@@ -118,7 +177,14 @@ class _LoRAProj(nn.Module):
     added by the caller; this module just produces the delta.
     """
 
-    def __init__(self, in_dim: int, out_dim: int, r: int, alpha: float):
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        r: int,
+        alpha: float,
+        channel_scale: Optional[torch.Tensor] = None,
+    ):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -131,6 +197,17 @@ class _LoRAProj(nn.Module):
         # is exactly zero at step 0.
         nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_up.weight)
+        # Per-channel input scaling (SmoothQuant-style). Absorbs s into lora_down
+        # (W[:,c] *= s_norm[c]) and stores inv_scale = 1/s_norm; forward applies
+        # ``x * inv_scale`` so the output is unchanged but per-column gradients are
+        # rebalanced. Persistent buffer — the absorbed weight and inv_scale are
+        # saved/loaded together, so train/resume/inference stay self-consistent.
+        # See _absorb_channel_scale + bench/channel_stats/cond_stream_profile.py.
+        self._has_channel_scale = False
+        if channel_scale is not None:
+            inv_scale = _absorb_channel_scale(self.lora_down.weight.data, channel_scale)
+            self.register_buffer("inv_scale", inv_scale, persistent=True)
+            self._has_channel_scale = True
         # When True, the fp32 down-projection saves the bf16 input and recomputes
         # the cast in backward instead of retaining the fp32-cast activation —
         # the dominant activation cost on the cond stream. Set by the owning
@@ -140,11 +217,18 @@ class _LoRAProj(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # fp32 bottleneck for bf16 numerical stability (matches LoRAModule policy).
         if self.use_custom_down_autograd and self.training:
-            # Unscaled variant (no per-channel calibration here) — bitwise
-            # identical to F.linear(x.float(), w.float()) in forward.
-            h = lora_down_project(x, self.lora_down.weight, None)
+            # The scaled Function folds inv_scale into the (absorbed) weight at
+            # the matmul — equivalent to F.linear(x * inv_scale, lora_down) up to
+            # fp32 rounding order; None when channel scaling is off.
+            inv = self.inv_scale if self._has_channel_scale else None
+            h = lora_down_project(x, self.lora_down.weight, inv)
         else:
-            h = F.linear(x.float(), self.lora_down.weight.float())
+            x_lora = x.float()
+            if self._has_channel_scale:
+                x_lora = x_lora * self.inv_scale.to(
+                    device=x.device, dtype=torch.float32
+                )
+            h = F.linear(x_lora, self.lora_down.weight.float())
         h = F.linear(h, self.lora_up.weight.float())
         return (h * self.scale).to(x.dtype)
 
@@ -180,6 +264,14 @@ def create_network(
     else:
         use_custom_down_autograd = bool(raw_cda)
 
+    # Cond-stream channel scaling. Honors the same `channel_scaling_alpha` knob as
+    # the LoRA family (inherited from base.toml), but loads the COND-SPECIFIC
+    # calibration — the main-stream file does not transfer (see helper). alpha<=0
+    # (or a missing knob) disables it. The cond-LoRA down-projections then absorb
+    # the per-channel rebalance at build time.
+    channel_scaling_alpha = float(kwargs.get("channel_scaling_alpha", 0.0) or 0.0)
+    channel_scales = _load_cond_channel_scales(channel_scaling_alpha)
+
     num_blocks = (
         getattr(unet, "num_blocks", DEFAULT_NUM_BLOCKS)
         if unet is not None
@@ -210,6 +302,8 @@ def create_network(
         cond_res_scale=cond_res_scale,
         multiplier=multiplier,
         use_custom_down_autograd=use_custom_down_autograd,
+        channel_scaling_alpha=channel_scaling_alpha,
+        channel_scales=channel_scales,
     )
 
 
@@ -252,6 +346,26 @@ def create_network_from_weights(
         kwargs.get("cond_res_scale")
         or metadata.get("ss_cond_res_scale", DEFAULT_COND_RES_SCALE)
     )
+    channel_scaling_alpha = float(metadata.get("ss_channel_scaling_alpha", 0.0))
+
+    # If the checkpoint was trained with channel scaling, every absorbed
+    # lora_down rides with a persistent ``inv_scale`` buffer. We must allocate a
+    # matching buffer on each such module BEFORE load (load is strict=False — an
+    # unallocated inv_scale would be silently dropped, leaving the absorbed
+    # W·s loaded without the 1/s rebalance → wrong output). We don't need the
+    # calibration file here: pass placeholder ones (identity absorb) for exactly
+    # the modules whose inv_scale is in the checkpoint; load overwrites both the
+    # absorbed weight and inv_scale with the real values.
+    present_inv = {k for k in (weights_sd or {}) if k.endswith(".inv_scale")}
+    channel_scales = None
+    if present_inv:
+        ffn_dim = int(hidden_size * mlp_ratio)
+        channel_scales = {}
+        for kind, (mlname, dim_sel) in _COND_LORA_KINDS.items():
+            in_dim = hidden_size if dim_sel == "hidden" else ffn_dim
+            for idx in range(num_blocks):
+                if f"{mlname}.{idx}.inv_scale" in present_inv:
+                    channel_scales[_cond_lora_calib_key(kind, idx)] = torch.ones(in_dim)
 
     network = EasyControlNetwork(
         num_blocks=num_blocks,
@@ -265,6 +379,8 @@ def create_network_from_weights(
         apply_ffn_lora=apply_ffn_lora,
         cond_res_scale=cond_res_scale,
         multiplier=multiplier,
+        channel_scaling_alpha=channel_scaling_alpha,
+        channel_scales=channel_scales,
     )
     return network, weights_sd
 
@@ -288,6 +404,8 @@ class EasyControlNetwork(AdapterNetworkBase):
         cond_res_scale: float = DEFAULT_COND_RES_SCALE,
         multiplier: float = 1.0,
         use_custom_down_autograd: bool = False,
+        channel_scaling_alpha: float = 0.0,
+        channel_scales: Optional[dict] = None,
     ):
         super().__init__()
         if hidden_size % num_heads != 0:
@@ -324,23 +442,45 @@ class EasyControlNetwork(AdapterNetworkBase):
         r = cond_lora_dim
         a = cond_lora_alpha
 
+        # Per-channel input rebalance per cond LoRA down-proj. None when off, or
+        # for any module whose calibration key is absent (e.g. the last block's
+        # o/ffn — dead compute, never measured): that module trains unscaled.
+        self.channel_scaling_alpha = float(channel_scaling_alpha)
+
+        def _cs(kind: str, idx: int):
+            if channel_scales is None:
+                return None
+            return channel_scales.get(_cond_lora_calib_key(kind, idx))
+
         # Per-block cond LoRA on self_attn:
         # qkv: fused D -> 3D delta (matches frozen Attention.qkv_proj layout).
         # o:   D -> D delta on the output projection.
         self.cond_lora_qkv = nn.ModuleList(
-            [_LoRAProj(D, 3 * D, r, a) for _ in range(num_blocks)]
+            [
+                _LoRAProj(D, 3 * D, r, a, channel_scale=_cs("qkv", i))
+                for i in range(num_blocks)
+            ]
         )
         self.cond_lora_o = nn.ModuleList(
-            [_LoRAProj(D, D, r, a) for _ in range(num_blocks)]
+            [
+                _LoRAProj(D, D, r, a, channel_scale=_cs("o", i))
+                for i in range(num_blocks)
+            ]
         )
 
         # Per-block cond LoRA on FFN (GPT2FeedForward layer1: D -> 4D, layer2: 4D -> D).
         if apply_ffn_lora:
             self.cond_lora_ffn1 = nn.ModuleList(
-                [_LoRAProj(D, self.ffn_dim, r, a) for _ in range(num_blocks)]
+                [
+                    _LoRAProj(D, self.ffn_dim, r, a, channel_scale=_cs("ffn1", i))
+                    for i in range(num_blocks)
+                ]
             )
             self.cond_lora_ffn2 = nn.ModuleList(
-                [_LoRAProj(self.ffn_dim, D, r, a) for _ in range(num_blocks)]
+                [
+                    _LoRAProj(self.ffn_dim, D, r, a, channel_scale=_cs("ffn2", i))
+                    for i in range(num_blocks)
+                ]
             )
         else:
             self.cond_lora_ffn1 = None
@@ -408,12 +548,19 @@ class EasyControlNetwork(AdapterNetworkBase):
                 f"cond-LoRA projections"
             )
 
+        n_scaled = sum(
+            1
+            for m in self.modules()
+            if isinstance(m, _LoRAProj) and m._has_channel_scale
+        )
         total = sum(p.numel() for p in self.parameters())
         logger.info(
             f"EasyControlNetwork: blocks={num_blocks}, hidden={hidden_size}/{num_heads}h, "
             f"r={cond_lora_dim} alpha={cond_lora_alpha}, ffn_lora={apply_ffn_lora}, "
             f"b_cond_init={b_cond_init}, cond_scale={cond_scale}, "
             f"cond_res_scale={self.cond_res_scale}, "
+            f"channel_scaling_alpha={self.channel_scaling_alpha} "
+            f"({n_scaled} cond projections rebalanced), "
             f"params={total / 1e6:.1f}M"
         )
 
@@ -896,6 +1043,7 @@ class EasyControlNetwork(AdapterNetworkBase):
             "ss_cond_scale": str(self.cond_scale),
             "ss_apply_ffn_lora": str(int(self.apply_ffn_lora)),
             "ss_cond_res_scale": str(self.cond_res_scale),
+            "ss_channel_scaling_alpha": str(self.channel_scaling_alpha),
         }
 
     def load_weights(self, file):
