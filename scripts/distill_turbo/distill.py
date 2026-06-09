@@ -348,7 +348,28 @@ def main():
     # the ordering invariant hold by construction, not by the absence of a
     # warmup forward. native-shape flatten, one graph per token count; the pool
     # spans more than the 2 CONSTANT_TOKEN_BUCKETS families.
-    compile_dit_blocks(model, enabled=cfg.torch_compile, mode="")
+    # compile_dynamic_seq (mirrors the LoRA-training path): when on, collapse the
+    # per-token-count block graphs to one symbolic-seq graph (mark_dynamic on the
+    # seq axis only). Size the seq bound + dynamo cache over the active tiers when
+    # --target_res is given, else fall back to the canonical 1024 table.
+    n_token_families = None
+    seq_range = None
+    if cfg.compile_dynamic_seq and cfg.target_res:
+        from library.datasets.buckets import (
+            token_count_families,
+            token_count_range,
+        )
+
+        n_token_families = token_count_families(cfg.target_res)
+        seq_range = token_count_range(cfg.target_res)
+    compile_dit_blocks(
+        model,
+        enabled=cfg.torch_compile,
+        mode="",
+        dynamic_seq=cfg.compile_dynamic_seq,
+        n_token_families=n_token_families,
+        seq_range=seq_range,
+    )
     # Refine the recompile budget now that the model exists: re-assert the
     # per-frame limit (already raised at the top of main(), kept here so the
     # runtime value is logged next to the compile) and size

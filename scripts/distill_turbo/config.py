@@ -239,6 +239,24 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Compile block._forward. Off by default — multiple forwards per step "
         "are not yet validated under cudagraphs; turn on once Phase 0 is green.",
     )
+    parser.add_argument(
+        "--compile_dynamic_seq",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Mirror the LoRA-training compile_dynamic_seq path: collapse the "
+        "per-token-count block graphs to a single graph by marking only the "
+        "seq-length axis dynamic (mark_dynamic). Sentinel None → TOML "
+        "(compile_dynamic_seq, default true). Only matters when --torch_compile.",
+    )
+    parser.add_argument(
+        "--target_res",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Active multi-scale tier edges (e.g. 1024 768 1280). Sizes the "
+        "compile_dynamic_seq seq bound + dynamo cache budget over those tiers. "
+        "Unset → canonical 1024 table (4032/4200).",
+    )
     parser.add_argument("--save_every", type=int, default=-1)
     parser.add_argument("--log_interval", type=int, default=-1)
     parser.add_argument("--log_dir", type=str, default=None)
@@ -478,6 +496,8 @@ class TurboConfig:
     blocks_to_swap: int
     grad_ckpt: bool
     torch_compile: bool
+    compile_dynamic_seq: bool  # single symbolic-seq block graph (mark_dynamic)
+    target_res: list[int] | None  # active tier edges; None → canonical 1024 table
     dynamo_recompile_limit: int  # per-_forward dynamo graph budget
 
 
@@ -911,6 +931,14 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         blocks_to_swap=int(args.blocks_to_swap),
         grad_ckpt=bool(args.grad_ckpt),
         torch_compile=bool(args.torch_compile),
+        compile_dynamic_seq=bool(
+            _pick(args.compile_dynamic_seq, cfg, "compile_dynamic_seq", True)
+        ),
+        target_res=(
+            [int(e) for e in args.target_res]
+            if args.target_res is not None
+            else (_flatten(cfg, "target_res", None))
+        ),
         dynamo_recompile_limit=int(_flatten(cfg, "dynamo_recompile_limit", 64)),
     )
 

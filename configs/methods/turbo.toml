@@ -30,6 +30,15 @@ unsloth_offload_checkpointing = false
 # spill to eager; 64 gives ample headroom. Logged at startup.
 dynamo_recompile_limit = 64
 
+# Collapse the per-token-count block graphs to a single symbolic-seq graph by
+# marking only the seq-length axis dynamic (mark_dynamic) — the same path LoRA
+# training takes via base.toml's compile_dynamic_seq. Only matters when
+# torch_compile is on. Set target_res below (the active tier edges) to bound the
+# symbolic axis + dynamo budget over a multi-scale pool; unset → canonical 1024
+# table (4032/4200).
+compile_dynamic_seq = true
+# target_res = [1024]  # or e.g. [1024, 768, 1280] for a multi-scale pool
+
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
 # student, which dpdmd structurally can't produce). Pair "dmd" with [gad] to

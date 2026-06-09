@@ -364,6 +364,9 @@ def compile_dit_blocks(
     cache_size_limit: int = 64,
     backend: str = "inductor",
     mode: Optional[str] = None,
+    dynamic_seq: bool = False,
+    n_token_families: Optional[int] = None,
+    seq_range: Optional[tuple] = None,
 ) -> None:
     """``torch.compile`` each ``Block._forward`` for a distillation/training run.
 
@@ -374,6 +377,13 @@ def compile_dit_blocks(
     the dynamo cache to ``cache_size_limit`` (``compile_blocks``' own ``max()``
     won't lower it) so each shape traces instead of falling back to eager
     mid-warmup. No-op when ``enabled`` is False.
+
+    ``dynamic_seq`` (mirrors the LoRA-training ``--compile_dynamic_seq`` path)
+    collapses the per-token-count block graphs to a single graph by marking only
+    the seq-length axis dynamic. ``seq_range`` bounds that symbolic axis and
+    ``n_token_families`` sizes the dynamo cache budget over the active tiers;
+    both default to the canonical 1024 table inside ``compile_blocks`` when
+    ``None``.
 
     COMPILE LAST — install the adapter / network monkey-patches first, or
     torch.compile traces the wrong forward (the invariant ``build_anima``
@@ -386,7 +396,13 @@ def compile_dit_blocks(
     # Pin the canonical .default (not a context-local override) so the wider
     # distillation-pool budget survives into the backward compile context.
     pin_dynamo_limit("recompile_limit", cache_size_limit)
-    anima.compile_blocks(backend, mode=mode)
+    anima.compile_blocks(
+        backend,
+        mode=mode,
+        n_token_families=n_token_families,
+        dynamic_seq=dynamic_seq,
+        seq_range=seq_range,
+    )
 
 
 def enable_training_grad_ckpt(anima: object, *, enabled: bool) -> None:
