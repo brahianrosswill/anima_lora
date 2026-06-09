@@ -128,6 +128,49 @@ def unsloth_checkpoint(function, *args):
     return UnslothOffloadedGradientCheckpointer.apply(function, *args)
 
 
+def _make_dynamic_seq_forward(compiled_inner, lo, hi):
+    """Wrap a compiled ``Block._forward`` in an eager ``mark_dynamic`` prologue.
+
+    compile_dynamic_seq collapses the per-token-count block graphs to one by
+    marking the seq axis dynamic. The marks MUST live inside the checkpointed
+    callable, not in a one-shot prologue before ``Block.forward`` dispatches:
+    under grad checkpointing the inner is recomputed in BACKWARD via
+    ``detach_variable``, which detaches the tensor args (``x``) into fresh
+    tensors that LOSE the dynamic mark — while the ``rope_cos_sin`` *tuple* is
+    passed through unchanged (``detach_variable`` skips non-tensors) and KEEPS
+    it. That asymmetry (rope hard-dynamic, x specialized to a constant token
+    count) is the ``ConstraintViolationError``. Marking inside the recomputed
+    callable re-applies the marks to the detached inputs every pass, so forward
+    and backward agree. Mirrors the EasyControl two-stream fix
+    (networks/methods/easycontrol.py). ``x`` is fake-5D ``(B,1,seq,1,D)`` under
+    native_flatten (guaranteed on when compile_blocks set dynamic_seq), so the
+    seq axis is dim 2; each RoPE table rides dim 0. Marking is idempotent.
+    """
+
+    def marked_forward(
+        x_B_T_H_W_D,
+        emb_B_T_D,
+        crossattn_emb,
+        attn_params,
+        rope_cos_sin=None,
+        adaln_lora_B_T_3D=None,
+    ):
+        torch._dynamo.mark_dynamic(x_B_T_H_W_D, 2, min=lo, max=hi)
+        if rope_cos_sin is not None:
+            torch._dynamo.mark_dynamic(rope_cos_sin[0], 0, min=lo, max=hi)
+            torch._dynamo.mark_dynamic(rope_cos_sin[1], 0, min=lo, max=hi)
+        return compiled_inner(
+            x_B_T_H_W_D,
+            emb_B_T_D,
+            crossattn_emb,
+            attn_params,
+            rope_cos_sin,
+            adaln_lora_B_T_3D,
+        )
+
+    return marked_forward
+
+
 @torch.compiler.disable(recursive=True)
 def _unflatten_native_shape(x, flatten_info):
     """Restore the fake-5D flattened sequence back to (B, T, H, W, D).
@@ -1638,7 +1681,16 @@ class Anima(nn.Module):
         if mode is not None:
             compile_kwargs["mode"] = mode
         for block in self.blocks:
-            block._forward = torch.compile(block._forward, **compile_kwargs)
+            compiled_inner = torch.compile(block._forward, **compile_kwargs)
+            if dynamic_seq:
+                # Mark the seq axis dynamic INSIDE the checkpointed callable (an
+                # eager wrapper around the compiled inner) so the marks re-apply
+                # on the grad-checkpoint backward recompute, not just the forward.
+                # _run_blocks no longer marks — see _make_dynamic_seq_forward.
+                lo, hi = self._dynamic_seq_range
+                block._forward = _make_dynamic_seq_forward(compiled_inner, lo, hi)
+            else:
+                block._forward = compiled_inner
         graph_mode = (
             f"dynamic-seq mark_dynamic seq∈{self._dynamic_seq_range} (1 graph)"
             if dynamic_seq
@@ -1859,31 +1911,15 @@ class Anima(nn.Module):
         # under torch.no_grad().
         x = x_padded.requires_grad_()
 
-        # compile_dynamic_seq: mark the seq-length axis dynamic so the per-block
-        # graph is symbolic in seq_len only (one graph for all token-count
-        # buckets), instead of dynamic=True's mark-everything sledgehammer. RoPE
-        # rides on seq_len too — its cos/sin are (seq_len, 1, 1, D_head); if left
-        # static-shaped dynamo guards on their concrete seq_len and recompiles per
-        # bucket anyway, so the collapse is inert unless they're marked as well.
-        # Mark RoPE once (same tensor object handed to every block) AFTER the
-        # outer forward's one-time dtype cast — the cast in `forward` returns fresh
-        # objects, so marking the pre-cast cache would be lost. No-op on the static
-        # and eager paths (_dynamic_seq stays False there).
-        mark_seq = self._native_flatten and self._dynamic_seq
-        if mark_seq:
-            lo, hi = self._dynamic_seq_range
-            rc, rs = block_kwargs.get("rope_cos_sin", (None, None))
-            if rc is not None:
-                torch._dynamo.mark_dynamic(rc, 0, min=lo, max=hi)
-                torch._dynamo.mark_dynamic(rs, 0, min=lo, max=hi)
+        # compile_dynamic_seq: the seq-length axis is marked dynamic INSIDE each
+        # compiled block._forward (the eager prologue installed by compile_blocks
+        # via _make_dynamic_seq_forward) — both x dim 2 and the RoPE cos/sin dim 0.
+        # It lives there, not here, so the marks re-apply on the grad-checkpoint
+        # backward RECOMPUTE (detach_variable strips x's mark but keeps the RoPE
+        # tuple's; marking only here once would leave them disagreeing → dynamo
+        # ConstraintViolationError). No-op on the static/eager paths.
 
         for block_idx, block in enumerate(self.blocks):
-            # x is a fresh tensor each block (block N's output), so the dynamic
-            # annotation (_dynamo_dynamic_indices) doesn't carry — re-mark dim 2
-            # every iteration or block N+1 re-specializes static.
-            if mark_seq:
-                torch._dynamo.mark_dynamic(x, 2, min=lo, max=hi)
-
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(block_idx)
 
