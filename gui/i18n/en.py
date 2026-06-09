@@ -41,6 +41,7 @@ STRINGS: dict[str, str] = {
         "Pixel-count threshold for the low-res filter. 500000 = 0.5MP. "
         "Ignored when 'Drop low-resolution images' is unchecked."
     ),
+    "preprocess_target_res": "Resolution tiers (target_res):",
     "preprocess_text_caching": "Caching (VAE + text)",
     "preprocess_caption_shuffle_variants": "Shuffle variants per caption (N):",
     "preprocess_caption_shuffle_variants_tip": (

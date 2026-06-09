@@ -277,11 +277,14 @@ _GROUPS = {
         "path_pattern",
         "drop_lowres_images",
         "min_pixels",
-        "target_res",
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
-_SKIP = {"base_config", "dataset_config", "general", "datasets", "variant"}
+# target_res is a preprocess-time knob (dual-use: train.py only reads it to size
+# the compile cache) — it's edited in the Preprocess tab and seeded into the
+# training config from configs/preprocess.toml, so hide it from the config form
+# to keep a single source of truth and avoid the two surfaces silently drifting.
+_SKIP = {"base_config", "dataset_config", "general", "datasets", "variant", "target_res"}
 
 # Virtual keys appear in the form like normal fields but don't round-trip as
 # flat TOML keys — they're derived from / written into structured sections
@@ -314,7 +317,6 @@ _BASIC = {
     "path_pattern",
     "drop_lowres_images",
     "min_pixels",
-    "target_res",
     "use_valid",
     "validation_split_num",
     "sample_prompts",
@@ -904,7 +906,7 @@ def _image_dirs() -> dict[str, Path]:
 
 # Allowed multi-scale tiers — mirrors library.datasets.buckets.ALLOWED_TARGET_RES
 # (hardcoded so the GUI import stays light / library-free).
-_TARGET_RES_TIERS = (512, 768, 1024, 1280, 1536)
+_TARGET_RES_TIERS = (512, 768, 896, 1024, 1280, 1536)
 
 # High-cost tiers: large per-image token counts + an extra compiled block
 # graph each. Flagged in the GUI so users don't casually enable them.

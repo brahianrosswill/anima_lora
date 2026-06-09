@@ -44,7 +44,6 @@ engine = "gpu"
 # preprocess step runs its encode + text stages only, --skip_mangafy). The color
 # *target* latents + TE are reused from the shared LoRA cache — no target re-encode.
 [preprocess]
-target_res = [896, 1024]
 # Color-caption variants per image: v0 = full color set, v1+ = shuffled with
 # text_tag_dropout_rate of the color tags dropped (teaches partial-palette colorize).
 text_shuffle_variants = 3
@@ -60,7 +59,7 @@ text_keep_copyright = true
 [training]
 network_dim = 32
 network_alpha = 32
-target_res = [896, 1024]
+target_res = [1024]
 network_args = [
     "b_cond_init=-6.0",
     "cond_scale=1.0",

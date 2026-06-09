@@ -50,7 +50,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui import IMAGE_EXTS, ROOT, LazyTabMixin, count_preprocess_caches
+from gui import (
+    IMAGE_EXTS,
+    ROOT,
+    LazyTabMixin,
+    _TargetResWidget,
+    count_preprocess_caches,
+)
 from gui import daemon as gui_daemon
 from gui.explanations import preprocess_field_help, preprocess_guide
 from gui.i18n import t
@@ -67,6 +73,7 @@ SETTINGS_FILE = Path(__file__).resolve().parent.parent / "gui_settings.json"
 DEFAULT_SOURCE_IMAGE_DIR = "image_dataset"
 DEFAULT_DROP_LOWRES_IMAGES = True
 DEFAULT_MIN_PIXELS = 500000
+DEFAULT_TARGET_RES = [1024]
 DEFAULT_TE_SHUFFLE_VARIANTS = 4
 DEFAULT_TE_TAG_DROPOUT = 0.1
 DEFAULT_SAM_PROMPTS = ("speech bubble", "text bubble")
@@ -475,6 +482,18 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             self._field_label("min_pixels", t("preprocess_min_pixels")),
             self.min_pixels_spin,
         )
+
+        # Multi-scale constant-token tiers. Dual-use: preprocess resizes each
+        # image into the tier that resizes it the least, and train.py reads the
+        # same value back (via load_method_preset) to size the compile cache, so
+        # this is the single source of truth — the config form no longer shows it.
+        self.target_res_widget = _TargetResWidget(
+            pp_cfg.get("target_res", DEFAULT_TARGET_RES)
+        )
+        img_form.addRow(
+            self._field_label("target_res", t("preprocess_target_res")),
+            self.target_res_widget,
+        )
         img_box.setLayout(img_form)
         form_layout.addWidget(img_box)
 
@@ -758,6 +777,7 @@ class PreprocessingTab(LazyTabMixin, QWidget):
                 ),
                 "drop_lowres_images": self.drop_lowres_chk.isChecked(),
                 "min_pixels": int(self.min_pixels_spin.value()),
+                "target_res": self.target_res_widget.value(),
             }
         )
         _save_sam_yaml(rules, mask_path_pattern)
