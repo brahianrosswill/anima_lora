@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import sys
 from pathlib import Path
@@ -179,6 +180,19 @@ class ConfigTab(QWidget):
         # chains a Preprocess run first (see _start_training).
         self.train_btn.setEnabled(True)
         top.addWidget(self.train_btn)
+
+        self.queue_btn = QPushButton(t("queue"))
+        self._queue_idle_style = (
+            "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
+        )
+        self._queue_busy_style = (
+            "background:#7f8c8d;color:white;font-weight:bold;padding:4px 16px;"
+        )
+        self.queue_btn.setStyleSheet(self._queue_idle_style)
+        self.queue_btn.setToolTip(t("queue_tooltip"))
+        self.queue_btn.clicked.connect(self._queue_training)
+        self.queue_btn.setEnabled(True)
+        top.addWidget(self.queue_btn)
 
         self.test_btn = QPushButton(t("test"))
         self._test_idle_style = (
@@ -859,6 +873,7 @@ class ConfigTab(QWidget):
         self.test_btn.setStyleSheet(self._test_busy_style)
         self.test_btn.setEnabled(False)
         self.train_btn.setEnabled(False)
+        self.queue_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -873,6 +888,48 @@ class ConfigTab(QWidget):
         if not cache_dir.is_absolute():
             cache_dir = ROOT / cache_dir
         return cache_dir
+
+    def _queue_config_snapshot(
+        self, variant: str, merged: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Full config snapshot captured at GUI submit time."""
+        from library.config.io import load_dataset_config_from_base
+
+        snapshot = copy.deepcopy(
+            merged
+            if merged is not None
+            else merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)[0]
+        )
+        for key in (
+            "base_config",
+            "dataset_config",
+            "variant",
+            "method",
+            "preset",
+            "methods_subdir",
+            *_VIRTUAL_KEYS,
+        ):
+            snapshot.pop(key, None)
+
+        dataset_cfg = load_dataset_config_from_base(
+            overrides=snapshot,
+            method=variant,
+            methods_subdir="gui-methods",
+        )
+        if dataset_cfg:
+            snapshot["general"] = dataset_cfg.get("general", {})
+            snapshot["datasets"] = dataset_cfg.get("datasets", [])
+
+        def _clean(value):
+            if isinstance(value, dict):
+                return {k: _clean(v) for k, v in value.items() if v is not None}
+            if isinstance(value, list):
+                return [_clean(v) for v in value if v is not None]
+            if isinstance(value, Path):
+                return str(value)
+            return value
+
+        return _clean(snapshot)
 
     def _launch_preprocess(self, variant: str) -> None:
         """Submit the auto-chain preprocess step to the daemon (Phase 2).
@@ -893,6 +950,7 @@ class ConfigTab(QWidget):
         self.train_btn.setText(t("train_preprocessing"))
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
+        self.queue_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -923,6 +981,7 @@ class ConfigTab(QWidget):
             else None
         )
         try:
+            snapshot = self._queue_config_snapshot(variant)
             resp = gui_daemon.submit_command(
                 label="preprocess",
                 argv=["tasks.py", "preprocess"],
@@ -932,6 +991,7 @@ class ConfigTab(QWidget):
                     "PRESET": self._IMPLICIT_PRESET,
                 },
                 chain_train=chain_train,
+                config_snapshot=snapshot,
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
@@ -991,6 +1051,75 @@ class ConfigTab(QWidget):
         # Cache exists and user confirmed — go straight to training.
         self._launch_training(variant)
 
+    def _queue_training(self):
+        """Enqueue the current variant without attaching the GUI to that job.
+
+        This is the GUI equivalent of the CLI ``--queue`` path: the daemon owns
+        execution order, while the form stays usable so the user can select
+        another variant and queue it too.
+        """
+        if self._dirty:
+            self._save_preset(silent=True)
+
+        variant = self._current_variant()
+        cache_dir = self._resolve_cache_dir(variant)
+        decision = confirm_train_using_cache(self, cache_dir)
+        if decision is False:
+            return
+
+        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        if not confirm_resumable_checkpoint(self, merged):
+            return
+
+        self.queue_btn.setText(t("queue") + " ...")
+        self.queue_btn.setStyleSheet(self._queue_busy_style)
+        self.queue_btn.setEnabled(False)
+        self._log(t("queue_submitting", variant=variant) + "\n")
+        QApplication.processEvents()
+
+        try:
+            snapshot = self._queue_config_snapshot(variant, merged)
+            if decision is None:
+                resp = gui_daemon.submit_command(
+                    label="preprocess",
+                    argv=["tasks.py", "preprocess"],
+                    extra_env={
+                        "METHOD": variant,
+                        "METHODS_SUBDIR": "gui-methods",
+                        "PRESET": self._IMPLICIT_PRESET,
+                    },
+                    chain_train={
+                        "method": variant,
+                        "preset": self._IMPLICIT_PRESET,
+                        "methods_subdir": "gui-methods",
+                    },
+                    config_snapshot=snapshot,
+                )
+                queued_key = "queue_added_preprocess"
+            else:
+                resp = gui_daemon.submit_training(
+                    method=variant,
+                    preset=self._IMPLICIT_PRESET,
+                    methods_subdir="gui-methods",
+                    config_snapshot=snapshot,
+                )
+                queued_key = "queue_added_train"
+        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
+            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
+            self._restore_queue_button()
+            return
+
+        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        if not job_id:
+            QMessageBox.warning(
+                self, t("error"), t("daemon_submit_failed", err=str(resp))
+            )
+            self._restore_queue_button()
+            return
+
+        self._log(t(queued_key, variant=variant, job_id=job_id))
+        self._restore_queue_button()
+
     def _launch_training(self, variant: str) -> None:
         """Submit a training job to the local daemon (Phase 2).
 
@@ -1011,6 +1140,7 @@ class ConfigTab(QWidget):
         self.train_btn.setText(t("train") + " ...")
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
+        self.queue_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -1022,10 +1152,12 @@ class ConfigTab(QWidget):
         QApplication.processEvents()
 
         try:
+            snapshot = self._queue_config_snapshot(variant, merged)
             resp = gui_daemon.submit_training(
                 method=variant,
                 preset=self._IMPLICIT_PRESET,
                 methods_subdir="gui-methods",
+                config_snapshot=snapshot,
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
@@ -1103,6 +1235,7 @@ class ConfigTab(QWidget):
         )
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
+        self.queue_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -1193,12 +1326,20 @@ class ConfigTab(QWidget):
         self._progress_tracker.mark_starting(t("starting"))
         self._attach_to_job(job_id, replay_log=False, kind="train")
 
+    def _restore_queue_button(self):
+        self.queue_btn.setText(t("queue"))
+        self.queue_btn.setStyleSheet(self._queue_idle_style)
+        self.queue_btn.setEnabled(
+            self._proc.state() != QProcess.Running and self._job_id is None
+        )
+
     def _restore_idle_ui(self):
         """Return every control to its idle state (shared by the daemon-job and
         QProcess-error paths)."""
         self.train_btn.setText(t("train"))
         self.train_btn.setStyleSheet(self._train_idle_style)
         self.train_btn.setEnabled(True)
+        self._restore_queue_button()
         self.test_btn.setText(t("test"))
         self.test_btn.setStyleSheet(self._test_idle_style)
         self.test_btn.setEnabled(self._has_lora_output())

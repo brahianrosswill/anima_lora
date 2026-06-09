@@ -16,9 +16,12 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 from typing import Optional
+
+import toml
 
 from . import config, gpu, proc, tail
 from .jobs import (
@@ -108,8 +111,10 @@ class JobManager:
         method: str,
         preset: str,
         methods_subdir: Optional[str],
-        overrides: dict,
-        extra: list[str],
+        config_snapshot: Optional[dict] = None,
+        config_file: Optional[str] = None,
+        overrides: Optional[dict] = None,
+        extra: Optional[list[str]] = None,
         from_chain: bool = False,
     ) -> Job:
         job = Job(
@@ -121,6 +126,9 @@ class JobManager:
             extra=list(extra or []),
             from_chain=from_chain,
         )
+        self._attach_config_file(
+            job, config_snapshot=config_snapshot, config_file=config_file
+        )
         return self._register_and_queue(job)
 
     def submit_command(
@@ -130,6 +138,8 @@ class JobManager:
         argv: list[str],
         extra_env: Optional[dict] = None,
         chain_train: Optional[dict] = None,
+        config_snapshot: Optional[dict] = None,
+        config_file: Optional[str] = None,
     ) -> Job:
         """Enqueue a plain ``python <argv>`` task (preprocess / mask).
 
@@ -152,7 +162,36 @@ class JobManager:
             extra_env=dict(extra_env or {}),
             chain_train=dict(chain_train) if chain_train else None,
         )
+        self._attach_config_file(
+            job, config_snapshot=config_snapshot, config_file=config_file
+        )
+        if job.config_file:
+            job.extra_env["CONFIG_FILE"] = job.config_file
+            if job.chain_train is not None:
+                job.chain_train.setdefault("config_file", job.config_file)
         return self._register_and_queue(job)
+
+    def _attach_config_file(
+        self,
+        job: Job,
+        *,
+        config_snapshot: Optional[dict] = None,
+        config_file: Optional[str] = None,
+    ) -> None:
+        """Write/copy an immutable config snapshot into this job directory."""
+        if not config_snapshot and not config_file:
+            return
+        dst = config.job_dir(job.id) / "config.snapshot.toml"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if config_snapshot:
+            tmp = dst.with_suffix(dst.suffix + ".tmp")
+            tmp.write_text(toml.dumps(config_snapshot), encoding="utf-8")
+            tmp.replace(dst)
+        else:
+            src = os.path.abspath(str(config_file))
+            if os.path.abspath(str(dst)) != src:
+                shutil.copyfile(src, dst)
+        job.config_file = str(dst)
 
     def _register_and_queue(self, job: Job) -> Job:
         d = config.job_dir(job.id)
@@ -342,6 +381,8 @@ class JobManager:
                     method=ct.get("method"),
                     preset=ct.get("preset") or "default",
                     methods_subdir=ct.get("methods_subdir"),
+                    config_snapshot=ct.get("config_snapshot") or None,
+                    config_file=ct.get("config_file") or None,
                     overrides=ct.get("overrides") or {},
                     extra=ct.get("extra") or [],
                     from_chain=True,
@@ -473,18 +514,23 @@ class JobManager:
             if isinstance(val, bool):
                 if val:
                     extra.append(flag)
+            elif key == "target_res" and isinstance(val, (list, tuple)):
+                extra += [flag, *[str(v) for v in val]]
             else:
                 extra += [flag, str(val)]
         # Point the structured progress stream at the job dir so we always know
         # where it is, regardless of the method's output_name default.
         if "--progress_jsonl" not in extra:
             extra += ["--progress_jsonl", job.progress_path or ""]
-        args = build_method_args(
-            job.method,
-            preset=job.preset,
-            methods_subdir=job.methods_subdir,
-            extra=extra,
-        )
+        if job.config_file:
+            args = ["--config_file", job.config_file, *extra]
+        else:
+            args = build_method_args(
+                job.method,
+                preset=job.preset,
+                methods_subdir=job.methods_subdir,
+                extra=extra,
+            )
         # Windowless interpreter for the same reason as command jobs above: the
         # train.py worker (and, under ANIMA_ACCELERATE_LAUNCH, the accelerate
         # launcher parent + the workers it re-spawns via sys.executable) all run

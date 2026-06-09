@@ -63,14 +63,22 @@ def main() -> int:
         manager.shutdown(kill_jobs=False)
         return 3
 
-    proc.write_pidfile(config.PIDFILE, pid=os.getpid(), port=server.server_address[1])
+    proc.write_pidfile(
+        config.PIDFILE,
+        pid=os.getpid(),
+        port=server.server_address[1],
+        root=config.ROOT,
+    )
     # Mirror to a stable per-user path so a ComfyUI trainer node installed
     # *outside* this checkout can discover us (and our bound port) without
     # knowing the repo location. Best-effort: a read-only home dir shouldn't
     # stop the daemon from serving in-repo clients.
     try:
         proc.write_pidfile(
-            config.global_pidfile(), pid=os.getpid(), port=server.server_address[1]
+            config.global_pidfile(),
+            pid=os.getpid(),
+            port=server.server_address[1],
+            root=config.ROOT,
         )
     except OSError as exc:
         log.warning("could not write global pidfile mirror (%s)", exc)

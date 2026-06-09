@@ -150,13 +150,15 @@ def kill_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
 # --------------------------------------------------------------------------
 
 
-def write_pidfile(path: Path, *, pid: int, port: int) -> None:
+def write_pidfile(
+    path: Path, *, pid: int, port: int, root: Optional[Path] = None
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     ct = create_time(pid)
-    path.write_text(
-        json.dumps({"pid": pid, "create_time": ct, "port": port}),
-        encoding="utf-8",
-    )
+    data = {"pid": pid, "create_time": ct, "port": port}
+    if root is not None:
+        data["root"] = str(root)
+    path.write_text(json.dumps(data), encoding="utf-8")
 
 
 def read_pidfile(path: Path) -> Optional[dict]:

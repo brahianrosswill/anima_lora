@@ -69,13 +69,20 @@ def _path_overrides() -> dict:
     if _PATH_OVERRIDES_CACHE is not None:
         return _PATH_OVERRIDES_CACHE
     try:
-        from library.config.io import load_path_overrides
-
-        _PATH_OVERRIDES_CACHE = load_path_overrides(
-            preset=_preset(),
-            method=os.environ.get("METHOD") or None,
-            methods_subdir=os.environ.get("METHODS_SUBDIR") or "methods",
+        from library.config.io import (
+            load_path_overrides,
+            load_path_overrides_from_config,
         )
+
+        config_file = os.environ.get("CONFIG_FILE")
+        if config_file:
+            _PATH_OVERRIDES_CACHE = load_path_overrides_from_config(config_file)
+        else:
+            _PATH_OVERRIDES_CACHE = load_path_overrides(
+                preset=_preset(),
+                method=os.environ.get("METHOD") or None,
+                methods_subdir=os.environ.get("METHODS_SUBDIR") or "methods",
+            )
     except Exception as e:  # noqa: BLE001 — fall back silently to defaults
         print(f"warn: could not read base.toml path overrides: {e}", file=sys.stderr)
         _PATH_OVERRIDES_CACHE = {}

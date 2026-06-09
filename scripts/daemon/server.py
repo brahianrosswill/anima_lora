@@ -15,7 +15,7 @@ Endpoints
     POST /jobs/{id}/stop    → {job}
     GET  /jobs/{id}/logs    → SSE: tail of the job's stdout.log
     GET  /events            → SSE: daemon-level lifecycle events
-    GET  /health            → {ok, pid, port, active_job}
+    GET  /health            → {ok, pid, port, root, active_job}
     POST /shutdown          {kill_jobs} → {ok}
 """
 
@@ -128,6 +128,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "pid": os.getpid(),
                 "port": self.server.server_address[1],
+                "root": str(config.ROOT),
                 "active_job": active.id if active else None,
             }
         )
@@ -144,6 +145,8 @@ class _Handler(BaseHTTPRequestHandler):
                 argv=[str(a) for a in argv],
                 extra_env=body.get("extra_env") or {},
                 chain_train=body.get("chain_train") or None,
+                config_snapshot=body.get("config_snapshot") or None,
+                config_file=body.get("config_file") or None,
             )
             self._send_json({"job_id": job.id, "state": job.state}, 201)
             return
@@ -155,6 +158,8 @@ class _Handler(BaseHTTPRequestHandler):
             method=method,
             preset=body.get("preset") or "default",
             methods_subdir=body.get("methods_subdir"),
+            config_snapshot=body.get("config_snapshot") or None,
+            config_file=body.get("config_file") or None,
             overrides=body.get("overrides") or {},
             extra=body.get("extra") or [],
         )

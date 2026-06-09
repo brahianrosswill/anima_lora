@@ -142,6 +142,34 @@ def _read_dataset_sections(toml_path: str) -> dict:
     return {k: v for k, v in raw.items() if k in _DATASET_CONFIG_SECTIONS}
 
 
+def _normalize_config_path(config_file: str) -> str:
+    return config_file if config_file.endswith(".toml") else config_file + ".toml"
+
+
+def _is_scalar_list(v) -> bool:
+    """A list of plain scalars (e.g. ``target_res = [768, 1024]``)."""
+    return isinstance(v, list) and all(not isinstance(e, (dict, list)) for e in v)
+
+
+def _flat_scalars(d: dict) -> dict:
+    """Top-level flat values usable by preprocess path overrides."""
+    return {
+        k: v
+        for k, v in d.items()
+        if k not in _NON_FLAT_SECTIONS
+        and (not isinstance(v, (dict, list)) or _is_scalar_list(v))
+    }
+
+
+def load_path_overrides_from_config(config_file: str) -> dict:
+    """Top-level scalar keys from one immutable config file."""
+    path = _normalize_config_path(str(config_file))
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return _flat_scalars(toml.load(f))
+
+
 def _apply_dataset_overrides(blueprint: dict, override: dict) -> None:
     """Shallow-merge override sections into ``blueprint`` in place.
 
@@ -186,6 +214,7 @@ def load_dataset_config_from_base(
     *,
     method: Optional[str] = None,
     methods_subdir: str = "methods",
+    config_file: Optional[str] = None,
 ) -> Optional[dict]:
     """Extract the dataset blueprint (``[general]`` + ``[[datasets]]``) from
     ``configs/base.toml``. Returns ``None`` if no dataset sections are present,
@@ -208,11 +237,25 @@ def load_dataset_config_from_base(
         return None
     with open(base_path, "r", encoding="utf-8") as f:
         raw = toml.load(f)
+    source_raw = raw
     sections = {k: v for k, v in raw.items() if k in _DATASET_CONFIG_SECTIONS}
+
+    if config_file:
+        cfg_path = _normalize_config_path(str(config_file))
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg_raw = toml.load(f)
+            cfg_sections = {
+                k: v for k, v in cfg_raw.items() if k in _DATASET_CONFIG_SECTIONS
+            }
+            if cfg_sections.get("datasets"):
+                sections = cfg_sections
+                source_raw = cfg_raw
+
     if not sections.get("datasets"):
         return None
 
-    if method is not None:
+    if method is not None and not config_file:
         method_path = os.path.join(configs_dir, methods_subdir, f"{method}.toml")
         method_override = _read_dataset_sections(method_path)
         if method_override:
@@ -220,7 +263,7 @@ def load_dataset_config_from_base(
 
     ctx = {
         k: v
-        for k, v in raw.items()
+        for k, v in source_raw.items()
         if k not in _DATASET_CONFIG_SECTIONS and isinstance(v, str)
     }
     if overrides:
@@ -252,22 +295,6 @@ def load_path_overrides(
     """
     configs_dir = str(resolve_under_home(configs_dir))
     out: dict = {}
-
-    def _is_scalar_list(v) -> bool:
-        """A list of plain scalars (e.g. ``target_res = [768, 1024]``) — a flat
-        config value, unlike ``[[datasets]]`` which is a list of tables."""
-        return isinstance(v, list) and all(not isinstance(e, (dict, list)) for e in v)
-
-    def _flat_scalars(d: dict) -> dict:
-        """Pluck top-level flat values — plain scalars and scalar lists —
-        skipping non-flat sections (``[general]`` / ``[[datasets]]`` /
-        ``[variant]``) and any other table/list-of-tables."""
-        return {
-            k: v
-            for k, v in d.items()
-            if k not in _NON_FLAT_SECTIONS
-            and (not isinstance(v, (dict, list)) or _is_scalar_list(v))
-        }
 
     # Preprocess-only knobs (source_image_dir, drop_lowres_images, min_pixels)
     # were split out of base.toml into configs/preprocess.toml. Read it FIRST,

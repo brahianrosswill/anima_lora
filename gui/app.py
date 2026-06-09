@@ -39,6 +39,7 @@ from gui.tabs.image_tab import ImageViewerTab
 from gui.tabs.merge_tab import MergeTab
 from gui.tabs.methods_tab import MethodsTab
 from gui.tabs.preprocess_tab import PreprocessingTab
+from gui.tabs.queue_tab import QueueTab
 from gui.tensorboard import TensorBoardTab
 from gui.system_dialog import (
     GITHUB_ISSUES_URL,
@@ -318,6 +319,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
+        self.tabs.addTab(QueueTab(), t("tab_queue"))
 
         # Experimental set: a unified Methods picker + image-conditioning
         # adapters. MethodsTab folds every trainable experimental method behind

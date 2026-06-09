@@ -39,4 +39,5 @@ logs
 node.zip
 _archive/
 gui/gui_settings.json
+configs/gui-methods/custom/
 near_twins_temp.toml

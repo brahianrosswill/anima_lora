@@ -38,6 +38,7 @@ class Job:
     method: str
     preset: str
     methods_subdir: Optional[str] = None
+    config_file: Optional[str] = None
     overrides: dict = field(default_factory=dict)
     extra: list[str] = field(default_factory=list)
 

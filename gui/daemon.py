@@ -23,9 +23,21 @@ from scripts.daemon import client as _client
 from scripts.daemon import config as _cfg
 from scripts.daemon.jobs import STATE_ERROR, STATE_STOPPED, TERMINAL_STATES
 
-# Re-export so callers don't reach into scripts.daemon themselves.
-ensure_daemon = _client.ensure_daemon
-is_running = _client.is_running
+
+def _current_health() -> Optional[dict]:
+    health = _client.DaemonClient().health()
+    if health and _client.daemon_matches_root(health, _cfg.ROOT):
+        return health
+    return None
+
+
+def ensure_daemon(*, timeout: float = 60.0):
+    """Return a daemon client for this checkout, never a sibling checkout."""
+    return _client.ensure_daemon(timeout=timeout, expected_root=_cfg.ROOT)
+
+
+def is_running() -> bool:
+    return _current_health() is not None
 
 
 def ensure_daemon_quietly(*, timeout: float = 20.0) -> bool:
@@ -49,6 +61,9 @@ def submit_training(
     method: str,
     preset: str,
     methods_subdir: Optional[str],
+    config_snapshot: Optional[dict] = None,
+    config_file: Optional[str] = None,
+    overrides: Optional[dict] = None,
     extra: Optional[list[str]] = None,
 ) -> dict:
     """Auto-start the daemon if needed and enqueue a training job.
@@ -62,6 +77,9 @@ def submit_training(
         method=method,
         preset=preset,
         methods_subdir=methods_subdir,
+        config_snapshot=config_snapshot or None,
+        config_file=config_file,
+        overrides=overrides or {},
         extra=extra or [],
     )
 
@@ -72,6 +90,8 @@ def submit_command(
     argv: list[str],
     extra_env: Optional[dict] = None,
     chain_train: Optional[dict] = None,
+    config_snapshot: Optional[dict] = None,
+    config_file: Optional[str] = None,
 ) -> dict:
     """Auto-start the daemon if needed and enqueue a plain task job.
 
@@ -90,6 +110,8 @@ def submit_command(
         argv=list(argv),
         extra_env=extra_env or {},
         chain_train=chain_train or None,
+        config_snapshot=config_snapshot or None,
+        config_file=config_file,
     )
 
 
@@ -98,13 +120,18 @@ def stop_job(job_id: str) -> dict:
     return _client.DaemonClient().stop(job_id)
 
 
+def list_jobs() -> list:
+    """Return all daemon jobs for this checkout, starting the daemon if needed."""
+    return ensure_daemon(timeout=20.0).list_jobs()
+
+
 def active_job_id() -> Optional[str]:
     """The daemon's currently-running job id, or ``None`` (daemon down/idle).
 
     Used on tab construction to re-attach the UI to a job that's still running
     from a previous GUI session (or that the ComfyUI node / CLI submitted).
     """
-    health = _client.DaemonClient().health()
+    health = _current_health()
     return health.get("active_job") if health else None
 
 

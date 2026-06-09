@@ -1512,9 +1512,19 @@ class AnimaTrainer:
                     overrides=vars(args),
                     method=getattr(args, "method", None),
                     methods_subdir=getattr(args, "methods_subdir", None) or "methods",
+                    config_file=(
+                        getattr(args, "config_file", None)
+                        if getattr(args, "method", None) is None
+                        else None
+                    ),
                 )
                 if base_ds is not None:
-                    logger.info("Loading dataset config from configs/base.toml")
+                    if getattr(args, "method", None) is None and getattr(
+                        args, "config_file", None
+                    ):
+                        logger.info("Loading dataset config from config_file")
+                    else:
+                        logger.info("Loading dataset config from configs/base.toml")
                     user_config = base_ds
                     use_user_config = True
                 elif use_dreambooth_method:
