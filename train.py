@@ -1663,10 +1663,10 @@ class AnimaTrainer:
 
         # Forward known network-arg keys from top-level config (TOML) to net_kwargs.
         # CLI --network_args take precedence over top-level config keys.
-        # Source of truth: `networks.all_network_kwargs()` (union of
-        # `SHARED_KWARG_FLAGS` and each `NetworkSpec.kwarg_flags`), plus a
-        # small tail of top-level training args the network modules still
-        # want to read (e.g. postfix contrastive's step-boundary window).
+        # Source of truth: `networks.all_network_kwargs()` (the flat
+        # `NETWORK_KWARGS` allowlist), plus a small tail of top-level training
+        # args the network modules still want to read (e.g. postfix
+        # contrastive's step-boundary window).
         for key in NETWORK_KWARG_ALLOWLIST + _EXTRA_FORWARDED_TOP_LEVEL_ARGS:
             if (
                 key not in net_kwargs
@@ -2568,9 +2568,9 @@ from networks import all_network_kwargs as _all_network_kwargs  # noqa: E402
 
 # Network-module-consumed flags (networks.lora_anima / networks.methods.*).
 # These don't flow through argparse directly because `create_network` reads
-# them from ``kwargs``. Derived from the registry in ``networks/__init__.py``
-# (``SHARED_KWARG_FLAGS`` ∪ per-``NetworkSpec.kwarg_flags``) so adding a new
-# kwarg to a variant spec automatically registers it here.
+# them from ``kwargs``. Sourced from the flat ``NETWORK_KWARGS`` allowlist in
+# ``networks/__init__.py`` so adding a key there automatically registers it
+# here.
 NETWORK_KWARG_ALLOWLIST: tuple[str, ...] = _all_network_kwargs()
 
 # Top-level training args that aren't network kwargs but still flow through

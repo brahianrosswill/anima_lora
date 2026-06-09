@@ -308,22 +308,11 @@ def load_path_overrides(
         with open(preprocess_path, "r", encoding="utf-8") as f:
             out.update(_flat_scalars(toml.load(f)))
 
-    base_path = os.path.join(configs_dir, "base.toml")
-    if os.path.exists(base_path):
-        with open(base_path, "r", encoding="utf-8") as f:
-            out.update(_flat_scalars(toml.load(f)))
-
-    try:
-        section, _path, _tag = _resolve_preset(preset, configs_dir)
-        out.update(_flat_scalars(section))
-    except (KeyError, FileNotFoundError, ValueError):
-        pass
-
-    if method:
-        method_path = os.path.join(configs_dir, methods_subdir, f"{method}.toml")
-        if os.path.exists(method_path):
-            with open(method_path, "r", encoding="utf-8") as f:
-                out.update(_flat_scalars(toml.load(f)))
+    # base → preset → method, each projected to its flat scalars (later wins).
+    for _kind, _path, _tag, raw in _iter_method_preset_layers(
+        preset, configs_dir, methods_subdir, method, require_files=False
+    ):
+        out.update(_flat_scalars(raw))
 
     return out
 
@@ -415,6 +404,61 @@ def load_preset_section(preset: str, configs_dir: str = "configs") -> dict:
     return section
 
 
+def _iter_method_preset_layers(
+    preset: str,
+    configs_dir: str,
+    methods_subdir: str,
+    method: Optional[str],
+    *,
+    require_files: bool,
+):
+    """Yield ``(kind, path, tag, raw_dict)`` for the base → preset → method
+    merge spine, in lowest→highest priority order.
+
+    ``kind`` ∈ {``"base"``, ``"preset"``, ``"method"``}. ``path`` is the actual
+    file on disk (used as the ``_flatten_toml`` validation source); ``tag`` is
+    the human-readable provenance label. ``raw_dict`` is the un-flattened TOML
+    so each caller applies its own projection — ``load_method_preset`` flattens
+    + validates + tracks provenance, ``load_path_overrides`` takes flat scalars.
+
+    ``preprocess.toml`` is intentionally NOT yielded here: the two callers layer
+    it with different policies (``load_method_preset`` seeds only ``target_res``;
+    ``load_path_overrides`` takes every scalar), so each prepends it itself.
+
+    Error policy follows ``require_files``: True (training path) raises
+    ``FileNotFoundError`` on a missing base/method TOML and lets an unknown
+    preset raise; False (lightweight preprocess path) skips missing files and
+    unknown presets silently.
+    """
+    base_path = os.path.join(configs_dir, "base.toml")
+    method_path = (
+        os.path.join(configs_dir, methods_subdir, f"{method}.toml") if method else None
+    )
+    if require_files:
+        for p in (base_path, method_path):
+            if p and not os.path.exists(p):
+                raise FileNotFoundError(f"Config file not found: {p}")
+
+    if os.path.exists(base_path):
+        with open(base_path, "r", encoding="utf-8") as f:
+            yield "base", base_path, _display_path(base_path), toml.load(f)
+
+    if require_files:
+        section, preset_path, tag = _resolve_preset(preset, configs_dir)
+        yield "preset", preset_path, tag, section
+    else:
+        try:
+            section, preset_path, tag = _resolve_preset(preset, configs_dir)
+        except (KeyError, FileNotFoundError, ValueError):
+            pass
+        else:
+            yield "preset", preset_path, tag, section
+
+    if method_path and os.path.exists(method_path):
+        with open(method_path, "r", encoding="utf-8") as f:
+            yield "method", method_path, _display_path(method_path), toml.load(f)
+
+
 def load_method_preset(
     method: str,
     preset: str = "default",
@@ -439,11 +483,6 @@ def load_method_preset(
     ``"configs/presets.toml[default]"``).
     """
     configs_dir = str(resolve_under_home(configs_dir))
-    base_path = os.path.join(configs_dir, "base.toml")
-    method_path = os.path.join(configs_dir, methods_subdir, f"{method}.toml")
-    for p in (base_path, method_path):
-        if not os.path.exists(p):
-            raise FileNotFoundError(f"Config file not found: {p}")
 
     merged: dict = {}
     provenance: dict[str, str] = {}
@@ -462,29 +501,16 @@ def load_method_preset(
             merged["target_res"] = pp_raw["target_res"]
             provenance["target_res"] = _display_path(preprocess_path)
 
-    with open(base_path, "r", encoding="utf-8") as f:
-        base_raw = toml.load(f)
-    base_flat = _flatten_toml(base_raw, source=base_path, strict=strict)
-    base_tag = _display_path(base_path)
-    for k, v in base_flat.items():
-        merged[k] = v
-        provenance[k] = base_tag
-
-    preset_section, preset_path, preset_tag = _resolve_preset(preset, configs_dir)
-    preset_flat = _flatten_toml(
-        {preset: preset_section}, source=preset_path, strict=strict
-    )
-    for k, v in preset_flat.items():
-        merged[k] = v
-        provenance[k] = preset_tag
-
-    with open(method_path, "r", encoding="utf-8") as f:
-        method_raw = toml.load(f)
-    method_flat = _flatten_toml(method_raw, source=method_path, strict=strict)
-    method_tag = _display_path(method_path)
-    for k, v in method_flat.items():
-        merged[k] = v
-        provenance[k] = method_tag
+    for kind, path, tag, raw in _iter_method_preset_layers(
+        preset, configs_dir, methods_subdir, method, require_files=True
+    ):
+        # Preset sections are flat scalar tables, so wrap them as
+        # ``{preset: section}`` to mirror base/method top-level section tables —
+        # ``_flatten_toml`` then descends one level into the section contents.
+        to_flatten = {preset: raw} if kind == "preset" else raw
+        for k, v in _flatten_toml(to_flatten, source=path, strict=strict).items():
+            merged[k] = v
+            provenance[k] = tag
 
     if return_provenance:
         return merged, provenance

@@ -5,7 +5,16 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
+# Force CPU-only test runs unless explicitly opted into GPU. Several code paths
+# select their device from ``torch.cuda.is_available()`` (LoRA / chimera SVD
+# init, network assembly, …), so a card present on the box silently pulls
+# tensors onto the GPU. Hiding the device here — before torch is imported
+# anywhere — keeps the suite deterministic and identical with or without a GPU.
+# Set ANIMA_TEST_GPU=1 to allow the GPU back in.
+if os.environ.get("ANIMA_TEST_GPU") != "1":
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+import pytest  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:

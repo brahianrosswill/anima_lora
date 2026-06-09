@@ -17,8 +17,8 @@ import torch
 from safetensors.torch import load_file
 
 from networks import (
+    NETWORK_KWARGS,
     NETWORK_REGISTRY,
-    SHARED_KWARG_FLAGS,
     NetworkSpec,
     all_network_kwargs,
     resolve_network_spec,
@@ -47,31 +47,24 @@ def test_registry_has_expected_variants():
         assert spec.name == name
 
 
-def test_all_network_kwargs_is_union_of_shared_and_specs():
-    """`all_network_kwargs()` must cover every kwarg any variant declares.
+def test_all_network_kwargs_matches_allowlist():
+    """`all_network_kwargs()` must be exactly the sorted ``NETWORK_KWARGS`` set.
 
-    Guards against the drift mode that previously silently dropped
-    `router_targets` (originally a trio of `hydra_router_layers` /
-    `sigma_router_layers` / `fei_router_layers` before they were
-    consolidated): a kwarg declared on a NetworkSpec but missing from the
-    forwarding list.
+    The two were unified (the per-variant ``kwarg_flags`` split was collapsed
+    into one flat allowlist); this pins them together so the forwarding list
+    and the schema-validation set never drift apart.
     """
-    all_kw = set(all_network_kwargs())
-    assert set(SHARED_KWARG_FLAGS).issubset(all_kw)
-    for spec in NETWORK_REGISTRY.values():
-        assert set(spec.kwarg_flags).issubset(all_kw), (
-            f"{spec.name}.kwarg_flags has keys missing from all_network_kwargs(): "
-            f"{set(spec.kwarg_flags) - all_kw}"
-        )
+    assert set(all_network_kwargs()) == set(NETWORK_KWARGS)
+    assert list(all_network_kwargs()) == sorted(NETWORK_KWARGS)
 
 
 def test_hydra_router_kwargs_registered():
     """Regression pin: the bug that motivated the M2 finish.
 
-    `router_targets` + σ-conditional router kwargs must be registered on
-    the hydra / ortho_hydra specs so they flow through argparse schema
-    and into `create_network`. If these drop off the spec, the router
-    silently defaults to uniform MoE over every target module.
+    `router_targets` + σ-conditional router kwargs must stay in the allowlist
+    so they flow through the argparse schema and into `create_network`. If any
+    drops off, the router silently defaults to uniform MoE over every target
+    module.
     """
     must_have = {
         "router_targets",
@@ -82,12 +75,8 @@ def test_hydra_router_kwargs_registered():
         "balance_loss_weight",
         "balance_loss_warmup_ratio",
     }
-    for variant in ("hydra", "ortho_hydra"):
-        flags = set(NETWORK_REGISTRY[variant].kwarg_flags)
-        missing = must_have - flags
-        assert not missing, f"{variant} spec missing kwarg_flags: {missing}"
-    # and the union exposes them
-    assert must_have.issubset(set(all_network_kwargs()))
+    missing = must_have - set(NETWORK_KWARGS)
+    assert not missing, f"allowlist missing hydra router kwargs: {missing}"
 
 
 # ---------------------------------------------------------------------------

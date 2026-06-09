@@ -171,7 +171,7 @@ def create_network(
 
     # Activation-memory lever: recompute the fp32 down-projection cast in
     # backward instead of retaining it. Arrives as a string "true"/"false" via
-    # the TOML allowlist (networks/__init__.py SHARED_KWARG_FLAGS); also accept
+    # the TOML allowlist (networks/__init__.py NETWORK_KWARGS); also accept
     # a real bool.
     raw_cda = kwargs.get("use_custom_down_autograd", False)
     if isinstance(raw_cda, str):
