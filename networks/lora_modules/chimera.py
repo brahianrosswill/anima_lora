@@ -423,16 +423,18 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         # to the per-pool calls — see
         # ``test_chimera_down_proj_rank_cat_matches_separate``.
         #
-        # GEMMs run in the activation dtype (``comp``): under the trainer's
-        # autocast(bf16) this is bit-identical to the retired fp32-bottleneck
-        # path, whose ``.float()`` inputs autocast re-cast to bf16 before
-        # every GEMM anyway (see bench/lora_fp32_bottleneck). On the OrthoInit
-        # branch the fp32 master bases are cast here at the boundary, exactly
-        # where autocast cast them before.
-        comp = x.dtype
+        # GEMMs run in the adapter compute dtype (``work``: bf16 for the Cayley
+        # frozen-basis path, fp32 for OrthoInit's trainable master bases) — NOT
+        # ``x.dtype``. ``x`` arrives fp32 from the AdaLN LayerNorm under
+        # autocast(bf16), so keying off it upcast the down GEMM + ``_rebalance``
+        # activation (``inv_scale``) to fp32 and OOMed; autocast re-casts the
+        # GEMM to bf16 regardless. Bit-identical to the retired fp32-bottleneck
+        # path under autocast (see bench/lora_fp32_bottleneck); OrthoInit still
+        # gets its intended fp32 bottleneck via ``work``.
+        comp = work
         r = self.lora_dim
         Q_eff_cat = torch.cat([Q_eff_c, Q_eff_f], dim=0)  # (2r, in)
-        x_lora = self._rebalance(x)
+        x_lora = self._rebalance(x.to(comp))
         lx_down_cat = torch.nn.functional.linear(x_lora, Q_eff_cat.to(comp))
         lx_c = lx_down_cat[..., :r]
         lx_f = lx_down_cat[..., r:]

@@ -88,17 +88,20 @@ def create_network(
 
     # Deprecated 2026-06-10 (accepted so old snapshot TOMLs replay): the
     # fp32-bottleneck down-projection autograd was removed. Training GEMMs now
-    # run in the activation dtype — bit-identical to what the trainer's
-    # autocast(bf16) already produced (autocast re-cast the custom Function's
-    # ``.float()`` inputs back to bf16 before every GEMM, so the fp32 path
-    # never executed and only cost cast traffic). See bench/lora_fp32_bottleneck.
+    # run in the model compute dtype (``org_forwarded.dtype`` = the frozen base's
+    # bf16 output) — bit-identical to what the trainer's autocast(bf16) already
+    # produced (autocast re-cast the custom Function's ``.float()`` inputs back to
+    # bf16 before every GEMM, so the fp32 path never executed and only cost cast
+    # traffic). Keying it off ``x.dtype`` was wrong: AdaLN hands these Linears
+    # fp32, which silently upcast the rank path + ``_rebalance`` and OOMed. See
+    # bench/lora_fp32_bottleneck.
     if str(kwargs.get("use_custom_down_autograd", "false")).strip().lower() in (
         "true",
         "1",
     ):
         logger.info(
             "use_custom_down_autograd is deprecated and ignored "
-            "(fp32-bottleneck path removed; activation-dtype GEMMs are "
+            "(fp32-bottleneck path removed; compute-dtype GEMMs are "
             "bit-identical under the trainer's autocast)"
         )
 

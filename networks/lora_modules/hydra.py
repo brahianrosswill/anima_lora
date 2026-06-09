@@ -407,9 +407,17 @@ class HydraLoRAModule(BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        comp = x.dtype if self.training else torch.float32
-        x_lora = self._rebalance(x)
-        lx = torch.nn.functional.linear(x_lora.to(comp), self.lora_down.weight.to(comp))
+        # Training: compute in the model COMPUTE dtype (``org_forwarded.dtype`` =
+        # the frozen base's output = the autocast/model dtype), not x.dtype.
+        # ``x`` arrives fp32 from the AdaLN LayerNorm under autocast(bf16), so
+        # ``comp = x.dtype`` left the rank path fp32 and let ``_rebalance``
+        # allocate a fp32 activation (``inv_scale``) — OOM for no numeric gain
+        # (autocast re-casts the GEMM to bf16 anyway). LoRA params are fp32
+        # master, so cast x + weights DOWN to the base dtype. Inference keeps
+        # fp32. See bench/lora_fp32_bottleneck.
+        comp = org_forwarded.dtype if self.training else torch.float32
+        x_lora = self._rebalance(x.to(comp))
+        lx = torch.nn.functional.linear(x_lora, self.lora_down.weight.to(comp))
 
         # Gate from rank-R signal pre-mask/dropout — those are training-time
         # perturbations and the gate must behave identically at inference.

@@ -2,7 +2,15 @@
 
 2026-06-10: the fp32-bottleneck matmul policy (``F.linear(x.float(),
 w.float())`` + the custom down-projection autograd) was removed. Training
-GEMMs now run in the activation dtype. The justification, measured in
+GEMMs now run in the adapter PARAMETER dtype (bf16; fp32 only for OrthoInit's
+trainable master bases). The first cut keyed the GEMM dtype off the *activation*
+(``x.dtype`` / ``weight.to(x_lora.dtype)``); that silently upcast, because the
+AdaLN ``nn.LayerNorm`` feeding the adapted Linears emits fp32 under
+autocast(bf16), so ``x`` arrives fp32 — materializing a full fp32 weight copy
+AND (with per-channel scaling on) a fresh fp32 activation out of ``_rebalance``
+(``inv_scale``), OOMing for zero numeric gain. The modules now cast ``x`` DOWN
+to the param dtype before the rank GEMMs (mirroring OrthoLoRAModule), pinned by
+``test_*_fp32_activation_no_upcast`` below. The justification, measured in
 ``bench/lora_fp32_bottleneck``:
 
   * ``train.py`` wraps the training forward in ``accelerator.autocast()``
@@ -246,6 +254,78 @@ def test_training_forward_is_autocast_independent():
         y_ac = module.forward(x)
     y_plain = module.forward(x)
     assert torch.equal(y_ac, y_plain)
+
+
+def _fp32_activation_no_upcast(make, *, in_dim=32):
+    """The AdaLN ``nn.LayerNorm`` feeding the adapted Linears emits fp32 under
+    autocast(bf16), so ``x`` arrives fp32 in training. The forward must compute
+    the rank path in the model's bf16 compute dtype (``org_forwarded.dtype``) —
+    NOT key it off ``x.dtype`` and run fp32, which (with per-channel scaling on)
+    allocated a full fp32 activation out of ``_rebalance`` and OOMed.
+
+    Pin it: under autocast, feeding the fp32 activation must give the SAME result
+    as feeding its bf16 rounding — i.e. the LoRA params (incl. the ``inv_scale``
+    multiply, which autocast does NOT downcast) ran at bf16, not fp32. The
+    retired ``x.dtype`` policy applied ``inv_scale`` in fp32 for the fp32 input
+    and diverged."""
+    base, module = make()
+    module.train()
+    torch.manual_seed(2)
+    x_fp32 = torch.randn(2, 8, in_dim, dtype=torch.float32)
+    x_bf16 = x_fp32.to(torch.bfloat16)  # same values, bf16 dtype
+    with _autocast():
+        y_from_fp32 = module.forward(x_fp32)
+        y_from_bf16 = module.forward(x_bf16)
+    assert torch.equal(y_from_fp32, y_from_bf16), (
+        "fp32 activation diverges from its bf16 rounding — the rank path "
+        "(inv_scale) ran in fp32 instead of the bf16 compute dtype (silent "
+        "upcast regression)"
+    )
+
+
+def test_lora_fp32_activation_no_upcast():
+    from networks.lora_modules.lora import LoRAModule
+
+    cs = _make_channel_scale(32)  # inv_scale ON — the path that OOMed
+
+    def make():
+        torch.manual_seed(0)
+        base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
+        base.weight.requires_grad_(False)
+        module = LoRAModule(
+            "m", base, multiplier=1.0, lora_dim=4, alpha=4, channel_scale=cs
+        )
+        with torch.no_grad():
+            module.lora_up.weight.copy_(torch.randn_like(module.lora_up.weight) * 0.1)
+        module.apply_to()
+        return base, module
+
+    _fp32_activation_no_upcast(make)
+
+
+def test_hydra_fp32_activation_no_upcast():
+    from networks.lora_modules.hydra import HydraLoRAModule
+
+    cs = _make_channel_scale(32)  # inv_scale ON
+
+    def make():
+        torch.manual_seed(0)
+        base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
+        module = HydraLoRAModule(
+            "h",
+            base,
+            multiplier=1.0,
+            lora_dim=4,
+            alpha=4,
+            num_experts=3,
+            channel_scale=cs,
+        )
+        with torch.no_grad():
+            module.lora_up_weight.copy_(torch.randn_like(module.lora_up_weight) * 0.1)
+        module.apply_to()
+        return base, module
+
+    _fp32_activation_no_upcast(make)
 
 
 def test_hydra_inference_keeps_fp32_compute():

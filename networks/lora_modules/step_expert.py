@@ -113,14 +113,19 @@ class StepExpertLoRAModule(BaseLoRAModule):
             lx = up(self.lora_down(x_lora))
             return org_forwarded + lx * self.multiplier * self.scale
 
-        # Training: rank GEMMs in the activation dtype (mirrors LoRAModule —
-        # bit-identical under the trainer's autocast(bf16) to the retired
-        # fp32-bottleneck path; see bench/lora_fp32_bottleneck).
+        # Training: rank GEMMs in the model COMPUTE dtype (``org_forwarded.dtype``
+        # = the frozen base's output = the autocast/model dtype), mirroring
+        # LoRAModule. ``x`` arrives fp32 from the AdaLN LayerNorm under
+        # autocast(bf16); keying the GEMM dtype off it left the rank path fp32 +
+        # allocated a fp32 ``_rebalance`` activation and OOMed. The LoRA params
+        # are fp32 master weights, so cast x + weights DOWN to the base dtype.
+        # Bit-identical under autocast; see bench/lora_fp32_bottleneck.
         if self._skip_module():
             return org_forwarded
 
-        x_lora = self._rebalance(x)
-        lx = torch.nn.functional.linear(x_lora, self.lora_down.weight.to(x_lora.dtype))
+        work = org_forwarded.dtype
+        x_lora = self._rebalance(x.to(work))
+        lx = torch.nn.functional.linear(x_lora, self.lora_down.weight.to(work))
 
         lx = lx * self._timestep_mask
 
@@ -129,5 +134,5 @@ class StepExpertLoRAModule(BaseLoRAModule):
 
         lx, scale = self._apply_rank_dropout(lx)
 
-        lx = torch.nn.functional.linear(lx.to(x_lora.dtype), up.weight.to(x_lora.dtype))
+        lx = torch.nn.functional.linear(lx.to(work), up.weight.to(work))
         return org_forwarded + (lx * self.multiplier * scale).to(org_forwarded.dtype)
