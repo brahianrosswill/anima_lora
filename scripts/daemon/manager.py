@@ -237,12 +237,21 @@ class JobManager:
             if job is None or job.state in TERMINAL_STATES:
                 return job
             job.stop_requested = True
-            job.persist()
             state = job.state
+            if state == STATE_QUEUED:
+                # Finalize the queued job *now* (under the lock — _finalize takes
+                # the RLock reentrantly) so its cancellation is visible to clients
+                # immediately, instead of whenever the worker happens to dequeue
+                # it. While another job is running the worker is blocked monitoring
+                # it and would never reach this id, so the old lazy path left a
+                # stopped-but-still-"queued" entry the UI couldn't clear. The
+                # worker skips any dequeued id whose state isn't QUEUED, so the
+                # stale FIFO entry is harmless.
+                self._finalize(job, STATE_STOPPED, detail="cancelled while queued")
+                return job
+            job.persist()
         if state == STATE_RUNNING:
             self._kill_job_tree(job)
-        # A queued job is finalized lazily when the worker dequeues it and sees
-        # stop_requested — no need to surgically remove it from the FIFO.
         return job
 
     # ----- worker -----

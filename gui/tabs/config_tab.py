@@ -1120,6 +1120,26 @@ class ConfigTab(QWidget):
         self._log(t(queued_key, variant=variant, job_id=job_id))
         self._restore_queue_button()
 
+        # When the tab is idle, surface this job's progress right here: on an
+        # empty daemon queue it starts running immediately, so the user expects
+        # to see it in the main tab's bar (not just the Queue tab). The form stays
+        # usable (Queue + combos remain live, see _attach_to_job), so more
+        # variants can still be stacked behind it. When a job is already attached,
+        # the new one just queues silently behind it — visible in the Queue tab —
+        # rather than hijacking the bar.
+        if self._job_id is None and self._proc.state() != QProcess.Running:
+            self.log.clear()
+            self._reset_progress()
+            self._progress_tracker.mark_starting(t("starting"))
+            if queued_key == "queue_added_preprocess":
+                # Mirror the Train auto-chain: follow this preprocess into the
+                # training the daemon will enqueue after it.
+                self._chain_train_after_preprocess = True
+                self._chain_variant = variant
+                self._attach_to_job(job_id, replay_log=False, kind="preprocess")
+            else:
+                self._attach_to_job(job_id, replay_log=False, kind="train")
+
     def _launch_training(self, variant: str) -> None:
         """Submit a training job to the local daemon (Phase 2).
 
@@ -1235,11 +1255,16 @@ class ConfigTab(QWidget):
         )
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
-        self.queue_btn.setEnabled(False)
+        # Keep Queue + the variant pickers live while a job is attached: the user
+        # can select another variant and Queue it behind the running one. Only
+        # Train (foreground attach) and Test (local GPU) are blocked. The running
+        # job uses an immutable config snapshot captured at submit, so editing the
+        # form afterward can't disturb it.
+        self.queue_btn.setEnabled(True)
         self.test_btn.setEnabled(False)
-        self.method_combo.setEnabled(False)
-        self.variant_combo.setEnabled(False)
-        self.new_variant_btn.setEnabled(False)
+        self.method_combo.setEnabled(True)
+        self.variant_combo.setEnabled(True)
+        self.new_variant_btn.setEnabled(True)
         self.stop_btn.setEnabled(True)
         self._job_timer.start()
 
@@ -1329,9 +1354,11 @@ class ConfigTab(QWidget):
     def _restore_queue_button(self):
         self.queue_btn.setText(t("queue"))
         self.queue_btn.setStyleSheet(self._queue_idle_style)
-        self.queue_btn.setEnabled(
-            self._proc.state() != QProcess.Running and self._job_id is None
-        )
+        # Queue stays usable even while a daemon job is attached/running, so the
+        # user can keep stacking variants behind it — that's the whole point of a
+        # queue (and what the button's tooltip promises). Only a local foreground
+        # QProcess (a Test run, which holds the GPU itself) blocks it.
+        self.queue_btn.setEnabled(self._proc.state() != QProcess.Running)
 
     def _restore_idle_ui(self):
         """Return every control to its idle state (shared by the daemon-job and

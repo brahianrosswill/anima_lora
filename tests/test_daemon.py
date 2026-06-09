@@ -232,6 +232,31 @@ def test_stop_running_job(daemon):
     assert _wait_until(lambda: not psutil.pid_exists(pid), timeout=5)
 
 
+def test_stop_queued_job_finalizes_immediately(daemon):
+    """Cancelling a job that's still queued behind a running one finalizes it
+    *now* (not lazily when the worker eventually dequeues it), so a UI watching
+    the job list sees it leave the queue right away."""
+    cl, _ = daemon
+    # j1 holds the worker for a while; j2 stays queued behind it.
+    j1 = cl.submit(method="lora", overrides={"duration": 60.0})["job_id"]
+    j2 = cl.submit(method="lora", overrides={"duration": 60.0})["job_id"]
+    assert _wait_until(lambda: cl.get(j1)["state"] == "running", timeout=10)
+    assert cl.get(j2)["state"] == "queued"
+
+    cl.stop(j2)
+    # Finalized immediately while j1 is still running — no need to wait for the
+    # worker to reach j2.
+    assert _wait_until(lambda: cl.get(j2)["state"] == "stopped", timeout=3)
+    assert cl.get(j1)["state"] == "running"  # the running job is untouched
+
+    # The stale FIFO entry is harmless: when the worker eventually dequeues j2's
+    # id it skips it (state != queued), never relaunching it.
+    cl.stop(j1)
+    assert _wait_until(lambda: cl.get(j1)["state"] == "stopped", timeout=10)
+    time.sleep(0.5)
+    assert cl.get(j2)["state"] == "stopped"
+
+
 def test_reconcile_orphan_requeue_adopt(tmp_path, monkeypatch):
     """Boot sweep: dead `running` → orphaned error; `queued` → re-enqueued;
     live `running` → adopted for monitoring."""
