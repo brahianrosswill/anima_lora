@@ -125,7 +125,6 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 |---|---|---|---|
 | top | `output_name` | `anima_turbo_I` | output stem under `output/ckpt/` |
 | top | `iterations` | `2000` | |
-| top | `use_custom_down_autograd` | `true` | keeps activation memory down so swap can stay 0 (see [[project_custom_down_autograd_distill_lever]]) |
 | top | `use_masked_loss` | `true` | **student-only** mask on the DMD grad; fake/critic stays full-frame |
 | `[network]` | `student_rank` / `fake_rank` | `64` / `64` | `fake_rank ≥ student_rank` (fake is a score *tracker*, capacity ceiling on DM strength) |
 | `[dmd]` | `student_steps` (N) | `2` | Euler steps the student rolls; inference matches (`--infer_steps 2`) |
@@ -291,7 +290,7 @@ forwards). **Decision gate 1:** A/B `weight_gen` 0 vs 0.03 at fixed seed/data/st
   forwards per step (multi-forward); the offloader desyncs on a 2nd DiT forward
   ([[project_blockswap_extra_forwards_gradcache]]). The loop calls
   `prepare_block_swap_before_forward(free_cache=False)` before each forward, but the
-  default path keeps `blocks_to_swap=0` (`use_custom_down_autograd=true` keeps
+  default path keeps `blocks_to_swap=0` (activation-dtype LoRA GEMMs keep
   activation memory low enough to run full-res on 16 GB without swap). Audit the
   multi-forward offloader path before turning swap on.
 

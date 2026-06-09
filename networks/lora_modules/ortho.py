@@ -7,7 +7,6 @@ from typing import Dict, List, Optional
 import torch
 
 from networks.lora_modules.base import BaseLoRAModule
-from networks.lora_modules.custom_autograd import lora_down_project
 from networks.lora_modules.router_state import (
     _apply_sigma_band_mask,
     _clear_fei_feature_cache,
@@ -96,9 +95,6 @@ class OrthoLoRAModule(BaseLoRAModule):
         self.P_basis = self.P_basis.to(torch.bfloat16)
         self.Q_basis = self.Q_basis.to(torch.bfloat16)
 
-        # Q_eff projection only; P_eff input is already rank-sized.
-        self.use_custom_down_autograd = False
-
         # Pre-allocated identity for the batched Cayley solve (avoids ~2
         # small kernels per module per step from a fresh torch.eye).
         self.register_buffer(
@@ -137,15 +133,8 @@ class OrthoLoRAModule(BaseLoRAModule):
         R_p = R[1].to(work)
         Q_eff = R_q @ self.Q_basis  # bf16
 
-        if self.use_custom_down_autograd and self.training:
-            inv_scale = self.inv_scale if self._has_channel_scale else None
-            # ``lora_down_project`` runs its matmul in fp32 internally; cast
-            # the output back to ``work`` so the saved-for-backward ``lx``
-            # downstream is bf16.
-            lx = lora_down_project(x, Q_eff, inv_scale).to(work)
-        else:
-            x_lora = self._rebalance(x.to(work))
-            lx = torch.nn.functional.linear(x_lora, Q_eff)
+        x_lora = self._rebalance(x.to(work))
+        lx = torch.nn.functional.linear(x_lora, Q_eff)
         # λ stays a fp32 Parameter (Adam state precision); cast at multiply
         # so the chain remains bf16. Same for the timestep mask buffer.
         lx = lx * self.lambda_layer.to(work) * self._timestep_mask.to(work)
@@ -296,12 +285,6 @@ class OrthoInitLoRAModule(BaseLoRAModule):
         # (mutates ``.data`` in place; output unchanged, gradient rebalanced).
         self._register_channel_scale(self.Q_init.data, channel_scale)
 
-        # Down-proj is a full-width trainable matmul, identical in shape to a
-        # plain-LoRA ``lora_down`` — so it gets the same opt-in memory lever
-        # (save bf16 ``x`` instead of fp32 ``x_lora`` for backward). The factory
-        # flips this to True when ``use_custom_down_autograd`` is set.
-        self.use_custom_down_autograd = False
-
     def forward(self, x):
         org_forwarded = self.org_forward(x)
 
@@ -317,17 +300,18 @@ class OrthoInitLoRAModule(BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        # Training: fp32 bottleneck matmuls (recovers mantissa precision bf16
-        # sheds across the in_dim accumulation — same rationale as LoRAModule),
-        # bf16 storage. Custom-down folds inv_scale + saves bf16 x for backward.
-        if self.use_custom_down_autograd:
-            inv_scale = self.inv_scale if self._has_channel_scale else None
-            lx = lora_down_project(x, self.Q_init, inv_scale)  # fp32 out
-        else:
-            x_lora = self._rebalance(x)
-            lx = torch.nn.functional.linear(x_lora.float(), self.Q_init.float())
+        # Training: rank GEMMs in the activation dtype — bit-identical under
+        # the trainer's autocast(bf16) to the retired fp32-bottleneck path
+        # (autocast re-cast its ``.float()`` inputs back to bf16 before every
+        # GEMM; see bench/lora_fp32_bottleneck). The fp32 master ``Q_init`` /
+        # ``P_init`` are cast at the matmul boundary, exactly where autocast
+        # cast them before.
+        work = x.dtype
+        x_lora = self._rebalance(x)
+        lx = torch.nn.functional.linear(x_lora, self.Q_init.to(work))
 
-        # λ + T-LoRA mask gate the rank latent (fp32 here). λ is a fp32 master
+        # λ + T-LoRA mask gate the rank latent in fp32 pointwise (cheap, and
+        # the same dtype chain autocast produced). λ is a fp32 master
         # Parameter; the mask is the default all-ones buffer unless T-LoRA binds it.
         lx = lx * self.lambda_layer.float() * self._timestep_mask
 
@@ -336,7 +320,7 @@ class OrthoInitLoRAModule(BaseLoRAModule):
 
         lx, scale = self._apply_rank_dropout(lx)
 
-        lx = torch.nn.functional.linear(lx, self.P_init.float())
+        lx = torch.nn.functional.linear(lx.to(work), self.P_init.to(work))
         return org_forwarded + (lx * self.multiplier * scale).to(org_forwarded.dtype)
 
     @classmethod
@@ -523,9 +507,6 @@ class OrthoHydraLoRAModule(BaseLoRAModule):
         self.P_bases = self.P_bases.to(torch.bfloat16)
         self.Q_basis = self.Q_basis.to(torch.bfloat16)
 
-        # Q_eff projection only; router + P_eff paths are rank/expert-sized.
-        self.use_custom_down_autograd = False
-
         self._last_gate = None
         # See router_state.py + HydraLoRAModule for the always-a-Tensor +
         # pointer-stable buffer protocol that drops the compile guards.
@@ -644,12 +625,8 @@ class OrthoHydraLoRAModule(BaseLoRAModule):
         R_p = R[1:].to(work)
         Q_eff = R_q @ self.Q_basis  # bf16
 
-        if self.use_custom_down_autograd and self.training:
-            inv_scale = self.inv_scale if self._has_channel_scale else None
-            lx = lora_down_project(x, Q_eff, inv_scale).to(work)
-        else:
-            x_lora = self._rebalance(x.to(work))
-            lx = torch.nn.functional.linear(x_lora, Q_eff)
+        x_lora = self._rebalance(x.to(work))
+        lx = torch.nn.functional.linear(x_lora, Q_eff)
 
         # Pool pre-λ (zero-init λ would zero the router input at step 0).
         gate = self._compute_gate(lx)  # (B, E) — fp32 from the router

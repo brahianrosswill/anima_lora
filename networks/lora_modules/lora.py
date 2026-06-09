@@ -9,7 +9,6 @@ import torch
 
 from networks.attn_fuse import match_fused_spec
 from networks.lora_modules.base import BaseLoRAModule
-from networks.lora_modules.custom_autograd import lora_down_project
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +63,6 @@ class LoRAModule(BaseLoRAModule):
 
         self._register_channel_scale(self.lora_down.weight.data, channel_scale)
 
-        # Opt-in (Linear-only): save bf16 x instead of fp32 x_lora for backward.
-        # Set by the network factory.
-        self.use_custom_down_autograd = False
-
         # List wrapping prevents nn.Module from registering org_module as a
         # submodule (would double-count params). apply_to() deletes
         # self.org_module after rerouting forward, leaving this as the only
@@ -86,22 +81,28 @@ class LoRAModule(BaseLoRAModule):
             lx = self.lora_up(self.lora_down(x_lora))
             return org_forwarded + lx * self.multiplier * self.scale
 
-        # Training: bf16 storage, fp32 bottleneck matmuls — recovers mantissa
-        # precision that bf16 sheds across the large-embed_dim accumulation.
+        # Training: rank GEMMs in the activation dtype. Under the trainer's
+        # autocast(bf16) this is exactly what the retired fp32-bottleneck path
+        # already ran — autocast re-cast its ``.float()`` inputs back to bf16
+        # before every GEMM, so the fp32 matmuls never executed (bit-identical,
+        # minus the dead cast traffic). cuBLAS accumulates bf16 GEMMs in fp32
+        # internally, so the only cost vs a true fp32 GEMM is the final
+        # rounding of the rank-R bottleneck — invisible to training in the
+        # 200-step Adam probe. See bench/lora_fp32_bottleneck.
         if self._skip_module():
             return org_forwarded
 
-        if self.use_custom_down_autograd and isinstance(
-            self.lora_down, torch.nn.Linear
-        ):
-            inv_scale = self.inv_scale if self._has_channel_scale else None
-            lx = lora_down_project(x, self.lora_down.weight, inv_scale)
-        else:
-            x_lora = self._rebalance(x)
+        x_lora = self._rebalance(x)
+        if isinstance(self.lora_down, torch.nn.Linear):
             lx = torch.nn.functional.linear(
-                x_lora.float(), self.lora_down.weight.float()
+                x_lora, self.lora_down.weight.to(x_lora.dtype)
             )
+        else:
+            lx = self.lora_down(x_lora)  # Conv2d
 
+        # fp32 mask buffer promotes lx; the binary T-LoRA mask is exact in
+        # either dtype and the up GEMM below casts back — the same dtype chain
+        # autocast produced before.
         lx = lx * self._timestep_mask
 
         if self.dropout is not None:
@@ -109,7 +110,12 @@ class LoRAModule(BaseLoRAModule):
 
         lx, scale = self._apply_rank_dropout(lx)
 
-        lx = torch.nn.functional.linear(lx, self.lora_up.weight.float())
+        if isinstance(self.lora_up, torch.nn.Linear):
+            lx = torch.nn.functional.linear(
+                lx.to(x_lora.dtype), self.lora_up.weight.to(x_lora.dtype)
+            )
+        else:
+            lx = self.lora_up(lx.to(x_lora.dtype))  # Conv2d
         return org_forwarded + (lx * self.multiplier * scale).to(org_forwarded.dtype)
 
     def get_weight(self, multiplier=None):

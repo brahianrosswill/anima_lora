@@ -44,7 +44,6 @@ import torch
 
 from networks.attn_fuse import match_fused_spec
 from networks.lora_modules.base import BaseLoRAModule, _absorb_channel_scale
-from networks.lora_modules.custom_autograd import lora_down_project
 from networks.lora_modules.lora import defuse_standard_qkv
 
 logger = logging.getLogger(__name__)
@@ -345,13 +344,6 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
             self.P_bases_c = self.P_bases_c.to(torch.bfloat16)
             self.P_bases_f = self.P_bases_f.to(torch.bfloat16)
 
-        # Default off; the factory flips this to True when
-        # ``use_custom_down_autograd=true`` is in the config (see
-        # ``factory.py``). Forward branches on the flag — when on, both
-        # pools' down-projects go through ``lora_down_project`` and the
-        # rebalanced ``x_lora`` (B, L, in) is not materialized per Linear.
-        self.use_custom_down_autograd = False
-
         # Pre-allocated identity for the batched Cayley solve. (E_c + E_f
         # + 2) skew-symmetric matrices share one fp32 LU+TRSM call. OrthoInit
         # has no Cayley solve, so the buffer is skipped entirely.
@@ -425,25 +417,23 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         # the same input ``x`` but have distinct ``Q_eff``; running them as
         # two separate matmuls makes backward materialize TWO ``(B, L, in)``
         # ``grad_x`` tensors that autograd then sums. On wide-input Linears
-        # (``mlp.layer2``, in=8192) that doubled fp32 transient cost ~62 MiB
-        # /module → ~1.7 GiB across 28 blocks. Concatenating ``Q_eff`` along
-        # the rank axis computes ``grad_x`` ONCE; the split is a free view.
-        # Bit-identical to the per-pool calls — see
+        # (``mlp.layer2``, in=8192) that doubled transient cost ~31 MiB/module
+        # → ~0.9 GiB across 28 blocks. Concatenating ``Q_eff`` along the rank
+        # axis computes ``grad_x`` ONCE; the split is a free view. Bit-identical
+        # to the per-pool calls — see
         # ``test_chimera_down_proj_rank_cat_matches_separate``.
+        #
+        # GEMMs run in the activation dtype (``comp``): under the trainer's
+        # autocast(bf16) this is bit-identical to the retired fp32-bottleneck
+        # path, whose ``.float()`` inputs autocast re-cast to bf16 before
+        # every GEMM anyway (see bench/lora_fp32_bottleneck). On the OrthoInit
+        # branch the fp32 master bases are cast here at the boundary, exactly
+        # where autocast cast them before.
+        comp = x.dtype
         r = self.lora_dim
         Q_eff_cat = torch.cat([Q_eff_c, Q_eff_f], dim=0)  # (2r, in)
-        if self.use_custom_down_autograd and self.training:
-            # ``ScaledLoRADownProjectFn`` folds ``inv_scale`` into ``Q_eff_cat``
-            # at the fp32 matmul (both pools share the same per-input-channel
-            # ``inv_scale``), so no rebalanced ``(B, L, in)`` bf16 activation is
-            # materialized; saved-for-backward aliases the same ``x`` the
-            # original Linear already pinned. See the allclose contract in
-            # ``test_chimera_channel_scale_flag_on_matches_legacy_gradients``.
-            inv = self.inv_scale if self._has_channel_scale else None
-            lx_down_cat = lora_down_project(x, Q_eff_cat, inv).to(work)
-        else:
-            x_lora = self._rebalance(x.to(work))
-            lx_down_cat = torch.nn.functional.linear(x_lora, Q_eff_cat)
+        x_lora = self._rebalance(x)
+        lx_down_cat = torch.nn.functional.linear(x_lora, Q_eff_cat.to(comp))
         lx_c = lx_down_cat[..., :r]
         lx_f = lx_down_cat[..., r:]
 
@@ -482,13 +472,15 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
             P_eff_c = self.P_bases_c @ R_p_c  # (K_c, out, r)
             P_eff_f = self.P_bases_f @ R_p_f  # (K_f, out, r)
 
-        pi_c_w = pi_c.to(work)
-        pi_f_w = self._center(self._freq_gate_raw(lx_c.shape[0]), K_f).to(work)
+        pi_c_w = pi_c.to(comp)
+        pi_f_w = self._center(self._freq_gate_raw(lx_c.shape[0]), K_f).to(comp)
 
-        P_combined_c = torch.einsum("bc,cor->bor", pi_c_w, P_eff_c)
-        P_combined_f = torch.einsum("bf,for->bor", pi_f_w, P_eff_f)
+        P_combined_c = torch.einsum("bc,cor->bor", pi_c_w, P_eff_c.to(comp))
+        P_combined_f = torch.einsum("bf,for->bor", pi_f_w, P_eff_f.to(comp))
 
-        out = self._combine_up(lx_c, lx_f, P_combined_c, P_combined_f, scale_c)
+        out = self._combine_up(
+            lx_c.to(comp), lx_f.to(comp), P_combined_c, P_combined_f, scale_c
+        )
 
         return org_forwarded + (out * self.multiplier).to(org_forwarded.dtype)
 

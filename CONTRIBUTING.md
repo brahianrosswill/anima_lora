@@ -147,7 +147,7 @@ These sit between Tier 1 and Tier 2: no new paper or new docs page is required, 
    - For a schedule revision: a test that the new schedule reduces to the old one under a documented config flag, so the change can be A/B'd.
    - For a memory optimization: an assertion on peak allocator usage on a small fixture, if feasible.
 
-   Add the test to `tests/`, following the patterns in `test_network_registry.py` and `test_lora_custom_autograd.py`. If exact equivalence is impossible (e.g. a deliberately different algorithm), state the tolerance and what would constitute a regression.
+   Add the test to `tests/`, following the patterns in `test_network_registry.py` and `test_lora_dtype_policy.py`. If exact equivalence is impossible (e.g. a deliberately different algorithm), state the tolerance and what would constitute a regression.
 
 3. **Documentation update.** Update the relevant `docs/methods/<name>.md`, `docs/optimizations/<name>.md`, or section of `CLAUDE.md` to reflect the new behavior. No new top-level doc unless the change introduces a user-visible flag that warrants one.
 

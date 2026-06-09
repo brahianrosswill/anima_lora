@@ -11,7 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_M_NOGAD"
+output_name = "anima_turbo_N"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -19,8 +19,9 @@ output_dir = "output/ckpt"
 iterations = 1000
 batch_size = 1
 seed = 42
-use_custom_down_autograd = true
 use_masked_loss = true
+
+channel_scaling_alpha = 0.5
 
 gradient_checkpointing = false
 unsloth_offload_checkpointing = false
@@ -37,7 +38,7 @@ dynamo_recompile_limit = 64
 # symbolic axis + dynamo budget over a multi-scale pool; unset → canonical 1024
 # table (4032/4200).
 compile_dynamic_seq = true
-# target_res = [1024]  # or e.g. [1024, 768, 1280] for a multi-scale pool
+target_res = [1024, 768]  # or e.g. [1024, 768, 1280] for a multi-scale pool
 
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step

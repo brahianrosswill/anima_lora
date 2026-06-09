@@ -521,14 +521,6 @@ def main():
     patch = model.patch_spatial
 
     # --- Plain LoRA adapter (paper-faithful: no MoE / ortho / T-LoRA) ---
-    # use_custom_down_autograd: save the bf16 lora_down input and recompute the
-    # fp32 cast in backward instead of stashing the fp32 copy. Bitwise-identical
-    # on the no-channel-scale path (the default); when channel_scaling_alpha>0 the
-    # per-Linear inv_scale is folded into the recomputed down-project (lora.py:97),
-    # so it stays correct, just no longer bit-identical to the alpha=0 baseline.
-    # Trims LoRA-branch activation memory and avoids a per-Linear bf16 intermediate
-    # getting pinned in the CUDA-Graph pool under reduce-overhead. See
-    # custom_autograd.py and project-custom-down-autograd-distill-lever.
     if channel_scaling_alpha:
         logger.info(
             "channel_scaling enabled (alpha=%.3g); inv_scale baked at save",
@@ -541,7 +533,6 @@ def main():
         vae=None,
         text_encoders=[],
         unet=model,
-        use_custom_down_autograd=True,
         channel_scaling_alpha=channel_scaling_alpha,
     )
     network.apply_to(

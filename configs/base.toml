@@ -53,7 +53,6 @@ vae_disable_cache = true
 masked_loss = true
 torch_compile = true
 attn_mode = "flash"
-use_custom_down_autograd = true
 compile_dynamic_seq = true
 log_every_n_steps=2
 dataloader_pin_memory = true

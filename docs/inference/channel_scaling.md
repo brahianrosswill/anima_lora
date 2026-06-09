@@ -31,8 +31,8 @@ At network build (`networks/lora_anima/factory.py::_load_channel_scales`):
 At forward (`networks/lora_modules/{lora,ortho,hydra,chimera,stacked_experts}.py`):
 
 ```python
-lx = lora_down_project(x, self.lora_down.weight, self.inv_scale)
-# equivalent to F.linear(x * inv_scale, weight), in fp32
+x_lora = self._rebalance(x)   # x * inv_scale, in the activation dtype
+lx = F.linear(x_lora, self.lora_down.weight.to(x_lora.dtype))
 ```
 
 Output is bit-equivalent at init (because `(x · s^-1) · (down · s) == x · down`), but the per-column gradient becomes uniform across channels:
@@ -101,8 +101,7 @@ Anima's default 12-epoch OrthoLoRA + T-LoRA stack on diverse multi-artist data s
 ## Code
 
 - `networks/lora_anima/factory.py::_load_channel_scales` — calibration load + α-exponentiation.
-- `networks/lora_modules/base.py::_absorb_channel_scale` — in-place column scaling + `inv_scale` registration.
-- `networks/lora_modules/custom_autograd.py::ScaledLoRADownProjectFn` — fp32 down-projection that folds `inv_scale` into the weight at the matmul (avoids a bf16 `x * inv_scale` activation).
+- `networks/lora_modules/base.py::_absorb_channel_scale` — in-place column scaling + `inv_scale` registration; `_rebalance` applies `x * inv_scale` at forward.
 - `networks/lora_anima/loading.py` — q/k/v split/refuse handling for `inv_scale`.
 - `tests/test_per_channel_scaling_roundtrip.py` — save → load → rebuild forward-equality check.
 - `bench/channel_stats/` — calibration script, README, dominance analysis, historical results.

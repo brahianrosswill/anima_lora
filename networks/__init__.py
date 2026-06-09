@@ -101,7 +101,8 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         # 0.0 disables; 0.5 = sqrt balance; 1.0 fully flattens. Calibration is
         # vendored at `networks/calibration/channel_stats.safetensors`.
         "channel_scaling_alpha",
-        # Memory-saving down-projection autograd (classic LoRA only; bitwise-equal grads)
+        # DEPRECATED no-op (fp32-bottleneck path removed 2026-06-10); kept so
+        # old snapshot TOMLs replay. The factory logs and ignores it.
         "use_custom_down_autograd",
         # Variant selectors (read by resolve_network_spec)
         "use_ortho",

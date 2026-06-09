@@ -17,7 +17,6 @@ import math
 import torch
 
 from networks.lora_modules.base import BaseLoRAModule
-from networks.lora_modules.custom_autograd import lora_down_project
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +86,6 @@ class StepExpertLoRAModule(BaseLoRAModule):
 
         self._register_channel_scale(self.lora_down.weight.data, channel_scale)
 
-        # Opt-in (set by the network factory): save bf16 x instead of fp32
-        # x_lora for the down-proj backward.
-        self.use_custom_down_autograd = False
-
         # Hard step-index selection. Plain Python int (not a buffer): the LoRA
         # forward is monkey-patched into the compiled DiT block, so reading a
         # tensor + ``.item()`` here would force a graph break. As a guarded int,
@@ -118,20 +113,14 @@ class StepExpertLoRAModule(BaseLoRAModule):
             lx = up(self.lora_down(x_lora))
             return org_forwarded + lx * self.multiplier * self.scale
 
-        # Training: bf16 storage, fp32 bottleneck matmuls (mirrors LoRAModule).
+        # Training: rank GEMMs in the activation dtype (mirrors LoRAModule —
+        # bit-identical under the trainer's autocast(bf16) to the retired
+        # fp32-bottleneck path; see bench/lora_fp32_bottleneck).
         if self._skip_module():
             return org_forwarded
 
-        if self.use_custom_down_autograd and isinstance(
-            self.lora_down, torch.nn.Linear
-        ):
-            inv_scale = self.inv_scale if self._has_channel_scale else None
-            lx = lora_down_project(x, self.lora_down.weight, inv_scale)
-        else:
-            x_lora = self._rebalance(x)
-            lx = torch.nn.functional.linear(
-                x_lora.float(), self.lora_down.weight.float()
-            )
+        x_lora = self._rebalance(x)
+        lx = torch.nn.functional.linear(x_lora, self.lora_down.weight.to(x_lora.dtype))
 
         lx = lx * self._timestep_mask
 
@@ -140,5 +129,5 @@ class StepExpertLoRAModule(BaseLoRAModule):
 
         lx, scale = self._apply_rank_dropout(lx)
 
-        lx = torch.nn.functional.linear(lx, up.weight.float())
+        lx = torch.nn.functional.linear(lx.to(x_lora.dtype), up.weight.to(x_lora.dtype))
         return org_forwarded + (lx * self.multiplier * scale).to(org_forwarded.dtype)

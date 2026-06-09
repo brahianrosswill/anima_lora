@@ -276,10 +276,9 @@ def test_ortho_init_module_zero_delta_and_distill_fidelity():
     assert torch.allclose(up @ down, expected_dW, atol=1e-5)
 
 
-def test_ortho_init_custom_down_autograd_matches_plain():
-    """The custom-down memory lever must be wired into OrthoInit's forward
-    (not an inert flag) and produce the same output + grads as the plain path.
-    """
+def test_ortho_init_training_grads_flow():
+    """OrthoInit's training forward (activation-dtype GEMMs) must deliver
+    gradient to the trainable SVD bases, λ, and the input."""
     from networks.lora_modules import OrthoInitLoRAModule
 
     torch.manual_seed(1)
@@ -292,24 +291,13 @@ def test_ortho_init_custom_down_autograd_matches_plain():
     mod.train()
 
     x = torch.randn(2, 5, in_dim, requires_grad=True)
+    y = mod.forward(x)
+    y.sum().backward()
 
-    mod.use_custom_down_autograd = False
-    y_plain = mod.forward(x)
-    y_plain.sum().backward()
-    g_plain = (mod.Q_init.grad.clone(), mod.P_init.grad.clone(), x.grad.clone())
-
-    mod.Q_init.grad = None
-    mod.P_init.grad = None
-    x.grad = None
-
-    mod.use_custom_down_autograd = True
-    y_custom = mod.forward(x)
-    y_custom.sum().backward()
-
-    assert torch.allclose(y_plain, y_custom, atol=1e-5)
-    assert torch.allclose(g_plain[0], mod.Q_init.grad, atol=1e-5)
-    assert torch.allclose(g_plain[1], mod.P_init.grad, atol=1e-5)
-    assert torch.allclose(g_plain[2], x.grad, atol=1e-5)
+    assert mod.Q_init.grad is not None and mod.Q_init.grad.abs().sum() > 0
+    assert mod.P_init.grad is not None and mod.P_init.grad.abs().sum() > 0
+    assert mod.lambda_layer.grad is not None
+    assert x.grad is not None
 
 
 def test_save_hydra_moe_roundtrip(tmp_path: Path):

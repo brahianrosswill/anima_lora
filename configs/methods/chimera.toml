@@ -20,9 +20,9 @@ network_alpha = 32
 network_dim = 32
 
 learning_rate = 2e-5
-max_train_epochs = 4
-save_every_n_epochs = 4
-checkpointing_epochs = 4
+max_train_epochs = 12
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -49,7 +49,7 @@ blocks_to_swap=0
 # path.
 
 use_chimera_hydra = true
-num_experts_content = 4
+num_experts_content = 6
 num_experts_freq = 2
 
 balance_loss_warmup_ratio = 0.02
@@ -61,7 +61,7 @@ balance_loss_weight = 1.0
 # denoise ~0.1) so it shapes usage rather than forcing flat uniformity — the
 # symmetry-break now comes mainly from content_router_init_std below. Raise
 # toward 1e-3 if experts still die; lower if usage pins uniform with margin flat.
-balance_w_content = 5e-4
+balance_w_content = 1e-4
 network_content_router_lr_scale = 10.0
 
 # Content routing is always the network-level ContentRouter fed the pooled

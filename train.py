@@ -1756,7 +1756,7 @@ class AnimaTrainer:
             # EasyControl's patched Block.forward routes the active cond path
             # through _two_stream_inner, bypassing the just-compiled
             # block._forward — so compile_blocks never reaches the cond stream
-            # (incl. the cond LoRA projections / use_custom_down_autograd).
+            # (incl. the cond LoRA projections).
             # Compile it explicitly, same backend/mode, preserving the
             # compile-after-apply order (apply_to already ran above).
             if hasattr(network, "compile_cond_stream"):

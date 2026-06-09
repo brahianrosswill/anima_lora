@@ -103,13 +103,22 @@ def build_argparser() -> argparse.ArgumentParser:
         "--use_custom_down_autograd",
         action="store_true",
         default=None,
-        help="Memory-saving down-projection autograd (skips fp32 input save). "
-        "Default: read from TOML (top-level scalar), else off.",
+        help="DEPRECATED no-op (fp32-bottleneck path removed 2026-06-10; "
+        "training GEMMs run in the activation dtype). Accepted so old "
+        "snapshots/commands replay.",
     )
     parser.add_argument(
         "--no_use_custom_down_autograd",
         dest="use_custom_down_autograd",
         action="store_false",
+    )
+    parser.add_argument(
+        "--channel_scaling_alpha",
+        type=float,
+        default=-1.0,
+        help="Per-input-channel rebalance absorbed into lora_down (student + "
+        "fake). 0.0 = off, 0.5 = sqrt-balance. Default: read from TOML "
+        "(top-level scalar), else 0.0 (off).",
     )
     parser.add_argument(
         "--use_masked_loss",
@@ -430,6 +439,11 @@ class TurboConfig:
     fake_alpha: float
     attn_mode: str
     use_custom_down_autograd: bool
+    # SmoothQuant-style per-input-channel rebalance on each lora_down (student +
+    # fake). 0.0 = off (default; preserves pre-2026-06-09 turbo runs), 0.5 =
+    # sqrt-balance. Bit-equivalent at init, merges out — a free gradient-
+    # conditioning lever, not an inference correction.
+    channel_scaling_alpha: float
     # Per-step expert (dual-B-head student). When on, step_expert_K is derived
     # = student_steps; head k serves denoise step k. Off → single-head student.
     per_step_expert: bool
@@ -544,6 +558,12 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         )
     else:
         use_custom_down_autograd = bool(args.use_custom_down_autograd)
+    # channel_scaling_alpha — top-level TOML scalar (mirrors base.toml's LoRA
+    # family layout); CLI override wins. Defaults off so existing turbo
+    # snapshots reproduce bit-for-bit.
+    channel_scaling_alpha = float(
+        _pick(args.channel_scaling_alpha, cfg, "channel_scaling_alpha", 0.0)
+    )
 
     # Masked loss
     if args.use_masked_loss is None:
@@ -885,6 +905,7 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         fake_alpha=fake_alpha,
         attn_mode=attn_mode,
         use_custom_down_autograd=use_custom_down_autograd,
+        channel_scaling_alpha=channel_scaling_alpha,
         per_step_expert=per_step_expert,
         step_expert_K=step_expert_K,
         use_masked_loss=use_masked_loss,
@@ -986,6 +1007,7 @@ def tb_config_text(c: TurboConfig) -> str:
         "flow_shift": c.flow_shift,
         "student_rank": c.student_rank,
         "fake_rank": c.fake_rank,
+        "channel_scaling_alpha": c.channel_scaling_alpha,
         "student_steps": c.student_steps,
         "teacher_cfg": c.teacher_cfg,
         "fake_warmup_steps": c.fake_warmup_steps,

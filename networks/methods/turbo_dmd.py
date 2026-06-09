@@ -191,6 +191,7 @@ class TurboDMDNetwork:
         student_alpha: float | None = None,
         fake_alpha: float | None = None,
         use_custom_down_autograd: bool = False,
+        channel_scaling_alpha: float = 0.0,
         student_step_expert_K: int = 0,
         gan_feature_indices: set[int] | None = None,
         gan_disc_hidden: int | None = None,
@@ -198,6 +199,14 @@ class TurboDMDNetwork:
         self.unet = unet
         self.student_rank = int(student_rank)
         self.fake_rank = int(fake_rank)
+        # SmoothQuant-style per-input-channel rebalance absorbed into each
+        # ``lora_down`` (bit-equivalent at init, merges out cleanly). 0.0 = off,
+        # 0.5 = sqrt-balance. Applied to both student and fake — it only
+        # conditions the LoRA gradient on the DiT's outlier-DC input channels,
+        # so it leaves the DP-DMD objective untouched. The shipped calibration
+        # (networks/calibration/channel_stats.safetensors) is σ-insensitive, so
+        # it transfers to the student's 2-step grid and the fake's random τ.
+        self.channel_scaling_alpha = float(channel_scaling_alpha)
         # Per-step expert: when > 1 the student's adapted Linears become
         # StepExpertLoRAModule (shared down + K step-indexed up-heads); head k
         # is trained only by step-k's gradient (see set_student_step + the
@@ -214,13 +223,13 @@ class TurboDMDNetwork:
         # every student contribution per forward, making the 28→4 step trajectory
         # remap harder to bake without buying any stability we don't already
         # get from α-warmup + grad-clip + LR.
-        # ``use_custom_down_autograd`` is forwarded as a ``**kwargs`` key because
-        # ``create_network``'s positional surface doesn't include it — the factory
-        # reads it out of ``kwargs`` and flips each module's flag post-construction.
-        # ``step_expert_K`` is forwarded as a ``**kwargs`` key (like
-        # ``use_custom_down_autograd``); >1 flips ``resolve_network_spec`` to the
-        # step_expert variant so the student uses ``StepExpertLoRAModule``. Only
-        # the student gets heads — the fake never sees it.
+        # ``use_custom_down_autograd`` is still forwarded for config compat but
+        # is a deprecated no-op in the factory (fp32-bottleneck path removed
+        # 2026-06-10 — see bench/lora_fp32_bottleneck).
+        # ``step_expert_K`` is forwarded as a ``**kwargs`` key; >1 flips
+        # ``resolve_network_spec`` to the step_expert variant so the student
+        # uses ``StepExpertLoRAModule``. Only the student gets heads — the
+        # fake never sees it.
         _student_kwargs: dict = {}
         if self.student_step_expert_K > 1:
             _student_kwargs["step_expert_K"] = self.student_step_expert_K
@@ -234,6 +243,7 @@ class TurboDMDNetwork:
             text_encoders=[],
             unet=unet,
             use_custom_down_autograd=use_custom_down_autograd,
+            channel_scaling_alpha=self.channel_scaling_alpha,
             **_student_kwargs,
         )
         self.fake: LoRANetwork = create_network(
@@ -244,6 +254,7 @@ class TurboDMDNetwork:
             text_encoders=[],
             unet=unet,
             use_custom_down_autograd=use_custom_down_autograd,
+            channel_scaling_alpha=self.channel_scaling_alpha,
         )
 
         # Apply order matters for the forward chain. We pick student-first so

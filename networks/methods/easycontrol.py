@@ -92,7 +92,6 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from library.log import setup_logging
 from library.training.method_adapter import MethodAdapter, SetupCtx, StepCtx
 from networks.lora_modules.base import _absorb_channel_scale
-from networks.lora_modules.custom_autograd import lora_down_project
 from networks.methods.base import AdapterNetworkBase
 from networks.methods.easycontrol_attention import _extended_target_attention
 
@@ -208,27 +207,26 @@ class _LoRAProj(nn.Module):
             inv_scale = _absorb_channel_scale(self.lora_down.weight.data, channel_scale)
             self.register_buffer("inv_scale", inv_scale, persistent=True)
             self._has_channel_scale = True
-        # When True, the fp32 down-projection saves the bf16 input and recomputes
-        # the cast in backward instead of retaining the fp32-cast activation —
-        # the dominant activation cost on the cond stream. Set by the owning
-        # EasyControlNetwork from the `use_custom_down_autograd` cfg knob.
-        self.use_custom_down_autograd = False
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # fp32 bottleneck for bf16 numerical stability (matches LoRAModule policy).
-        if self.use_custom_down_autograd and self.training:
-            # The scaled Function folds inv_scale into the (absorbed) weight at
-            # the matmul — equivalent to F.linear(x * inv_scale, lora_down) up to
-            # fp32 rounding order; None when channel scaling is off.
-            inv = self.inv_scale if self._has_channel_scale else None
-            h = lora_down_project(x, self.lora_down.weight, inv)
-        else:
-            x_lora = x.float()
+        if self.training:
+            # Activation-dtype GEMMs: bit-identical under the trainer's
+            # autocast(bf16) to the retired fp32-bottleneck path (autocast
+            # re-cast its ``.float()`` inputs back to bf16 before every GEMM
+            # — see bench/lora_fp32_bottleneck), minus the dead cast traffic.
+            # Channel-scale rebalance follows the LoRA-family convention
+            # (``base._rebalance``): applied to x in the activation dtype.
+            x_lora = x
             if self._has_channel_scale:
-                x_lora = x_lora * self.inv_scale.to(
-                    device=x.device, dtype=torch.float32
-                )
-            h = F.linear(x_lora, self.lora_down.weight.float())
+                x_lora = x * self.inv_scale.to(device=x.device, dtype=x.dtype)
+            h = F.linear(x_lora, self.lora_down.weight.to(x.dtype))
+            h = F.linear(h, self.lora_up.weight.to(x.dtype))
+            return (h * self.scale).to(x.dtype)
+        # Inference (the KV-cache prefill runs without autocast): keep the
+        # historical fp32 compute so cond-stream outputs are unchanged.
+        x_lora = x.float()
+        if self._has_channel_scale:
+            x_lora = x_lora * self.inv_scale.to(device=x.device, dtype=torch.float32)
+        h = F.linear(x_lora, self.lora_down.weight.float())
         h = F.linear(h, self.lora_up.weight.float())
         return (h * self.scale).to(x.dtype)
 
@@ -254,15 +252,19 @@ def create_network(
     apply_ffn_lora = bool(int(kwargs.get("apply_ffn_lora", 1)))
     cond_res_scale = float(kwargs.get("cond_res_scale", DEFAULT_COND_RES_SCALE))
 
-    # Activation-memory lever: recompute the fp32 down-projection cast in
-    # backward instead of retaining it. Arrives as a string "true"/"false" via
-    # the TOML allowlist (networks/__init__.py NETWORK_KWARGS); also accept
-    # a real bool.
-    raw_cda = kwargs.get("use_custom_down_autograd", False)
-    if isinstance(raw_cda, str):
-        use_custom_down_autograd = raw_cda.strip().lower() == "true"
-    else:
-        use_custom_down_autograd = bool(raw_cda)
+    # Deprecated 2026-06-10 (accepted so old snapshot TOMLs replay): the
+    # fp32-bottleneck down-projection autograd was removed — training GEMMs
+    # run in the activation dtype, which is what the trainer's autocast(bf16)
+    # already produced. See bench/lora_fp32_bottleneck.
+    if str(kwargs.get("use_custom_down_autograd", "false")).strip().lower() in (
+        "true",
+        "1",
+    ):
+        logger.info(
+            "EasyControl: use_custom_down_autograd is deprecated and ignored "
+            "(fp32-bottleneck path removed; activation-dtype GEMMs are "
+            "bit-identical under the trainer's autocast)"
+        )
 
     # Cond-stream channel scaling. Honors the same `channel_scaling_alpha` knob as
     # the LoRA family (inherited from base.toml), but loads the COND-SPECIFIC
@@ -301,7 +303,6 @@ def create_network(
         apply_ffn_lora=apply_ffn_lora,
         cond_res_scale=cond_res_scale,
         multiplier=multiplier,
-        use_custom_down_autograd=use_custom_down_autograd,
         channel_scaling_alpha=channel_scaling_alpha,
         channel_scales=channel_scales,
     )
@@ -403,7 +404,6 @@ class EasyControlNetwork(AdapterNetworkBase):
         apply_ffn_lora: bool,
         cond_res_scale: float = DEFAULT_COND_RES_SCALE,
         multiplier: float = 1.0,
-        use_custom_down_autograd: bool = False,
         channel_scaling_alpha: float = 0.0,
         channel_scales: Optional[dict] = None,
     ):
@@ -436,7 +436,6 @@ class EasyControlNetwork(AdapterNetworkBase):
             cond_res_scale = 1.0
         self.cond_res_scale = cond_res_scale
         self.multiplier = multiplier
-        self.use_custom_down_autograd = bool(use_custom_down_autograd)
 
         D = hidden_size
         r = cond_lora_dim
@@ -537,17 +536,6 @@ class EasyControlNetwork(AdapterNetworkBase):
         self._dynamic_seq: bool = False
         self._dynamic_seq_range: Optional[tuple] = None
 
-        if self.use_custom_down_autograd:
-            n_hits = 0
-            for m in self.modules():
-                if isinstance(m, _LoRAProj):
-                    m.use_custom_down_autograd = True
-                    n_hits += 1
-            logger.info(
-                f"EasyControl: use_custom_down_autograd enabled on {n_hits} "
-                f"cond-LoRA projections"
-            )
-
         n_scaled = sum(
             1
             for m in self.modules()
@@ -619,11 +607,8 @@ class EasyControlNetwork(AdapterNetworkBase):
         compile_blocks() only reaches the DiT's own ``block._forward``; the
         active (cond-on) training path routes through ``_two_stream_inner``
         instead (see _make_patched_block_forward), so without this the entire
-        cond stream — every cond LoRA projection, where
-        ``use_custom_down_autograd`` lives — runs eager and ``torch_compile`` is
-        a no-op for EasyControl training. The custom-down-autograd lever only
-        pays off under compile (it overrides inductor's min-cut, which would
-        otherwise pin the fp32 down-cast); eager it's ~net-zero. So this is what
+        cond stream — every cond LoRA projection — runs eager and
+        ``torch_compile`` is a no-op for EasyControl training. So this is what
         makes both torch_compile AND the lever earn their keep here.
 
         Mirrors compile_blocks: ``backend=inductor``, ``dynamic=False``, same
@@ -1406,10 +1391,10 @@ def _make_patched_block_forward(
     # can swap in a torch.compile'd version. compile_blocks() only reaches the
     # DiT's own block._forward, which the active (cond-on) training path
     # bypasses — patched_forward calls this inner directly. Without the swap the
-    # whole cond stream (incl. every cond LoRA projection, where
-    # use_custom_down_autograd lives) runs eager and torch_compile is a no-op
-    # for EasyControl training. patched_forward reads the attribute per call so
-    # the compiled version takes effect immediately once swapped.
+    # whole cond stream (incl. every cond LoRA projection) runs eager and
+    # torch_compile is a no-op for EasyControl training. patched_forward reads
+    # the attribute per call so the compiled version takes effect immediately
+    # once swapped.
     block._easycontrol_two_stream_inner = _two_stream_inner
 
     def patched_forward(
