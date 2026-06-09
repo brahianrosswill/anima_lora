@@ -9,7 +9,8 @@ ordering layer that calls them and writes the resulting file(s).
 Ordering of the conversion pipeline is load-bearing:
 
   1. ``ChimeraHydraLoRAModule.distill_save_state_dict``
-     (gated on co-located ``.S_q_c`` + ``.S_q_f``)
+     (gated on co-located ``.Q_basis_c`` + ``.Q_basis_f`` — covers both the
+     Cayley and OrthoInit chimera parameterizations)
   2. ``StackedExpertsLoRAModule.distill_save_state_dict``
      (gated on 3-D ``.S_p`` AND 3-D ``.S_q``)
   3. ``OrthoHydraLoRAModule.distill_save_state_dict``

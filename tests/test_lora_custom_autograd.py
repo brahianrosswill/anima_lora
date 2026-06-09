@@ -808,3 +808,170 @@ def test_chimera_down_proj_rank_cat_matches_separate_unscaled():
 
 def test_chimera_down_proj_rank_cat_matches_separate_scaled():
     _check_down_proj_rank_cat_matches_separate(scaled=True)
+
+
+# ---------------------------------------------------------------------------
+# OrthoInit chimera: trainable SVD-seeded bases (no Cayley). The pool layout,
+# routing, and on-disk distilled form are identical to the Cayley chimera —
+# only the train-time parameterization differs.
+# ---------------------------------------------------------------------------
+
+
+def _cpu_only():
+    """Force the chimera SVD init onto CPU (``init_device`` reads
+    ``torch.cuda.is_available()``) so these tests are deterministic and run
+    identically with or without a GPU present."""
+    from unittest import mock
+
+    return mock.patch("torch.cuda.is_available", return_value=False)
+
+
+def _fresh_base(seed=0):
+    torch.manual_seed(seed)
+    base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
+    base.weight.requires_grad_(False)
+    return base
+
+
+def _make_ortho_init_chimera(channel_scale=None, *, K_c=3, K_f=2, seed=0):
+    from networks.lora_modules.chimera import ChimeraHydraLoRAModule
+
+    base = _fresh_base(seed)
+    with _cpu_only():
+        module = ChimeraHydraLoRAModule(
+            "c",
+            base,
+            multiplier=1.0,
+            lora_dim=4,
+            alpha=4,
+            num_experts_content=K_c,
+            num_experts_freq=K_f,
+            lambda_init=0.1,
+            channel_scale=channel_scale,
+            use_ortho_init=True,
+        )
+    module.apply_to()
+    # The trainable bases must be Parameters; no Cayley skew, no _eye_r.
+    assert isinstance(module.Q_basis_c, torch.nn.Parameter)
+    assert isinstance(module.P_bases_f, torch.nn.Parameter)
+    assert not hasattr(module, "S_q_c") and not hasattr(module, "_eye_r")
+    return base, module
+
+
+def test_chimera_ortho_init_zero_at_init():
+    """ΔW=0 at construction comes from the centered UNIFORM gate, not the
+    basis — so an OrthoInit chimera with default (uniform) gates must leave
+    the base forward untouched even though λ_init > 0 and the bases are
+    nonzero. (Cayley parity: same invariant the frozen path relies on.)"""
+    _base, module = _make_ortho_init_chimera()
+    module.eval()
+    torch.manual_seed(1)
+    x = torch.randn(2, 8, 32, dtype=torch.bfloat16)
+    # org_forward is the captured clean Linear (apply_to rebinds base.forward
+    # to the adapter). Uniform default gates ⇒ centered gate is 0 ⇒ no-op.
+    assert torch.equal(module.forward(x), module.org_forward(x))
+
+
+def test_chimera_ortho_init_custom_down_flag_matches():
+    """``use_custom_down_autograd`` toggle is forward/grad-bitwise-identical on
+    the OrthoInit path too (both pools' fp32 down-projects route through
+    ``lora_down_project``)."""
+
+    def run(use_custom: bool):
+        base, module = _make_ortho_init_chimera()
+        module.train()
+        module.use_custom_down_autograd = use_custom
+        with torch.no_grad():
+            module.lambda_c.copy_(torch.randn_like(module.lambda_c) * 0.1)
+            module.lambda_f.copy_(torch.randn_like(module.lambda_f) * 0.1)
+        module.set_content_routing_weights(torch.tensor([[0.5, 0.3, 0.2]]))
+        module.set_freq_routing_weights(torch.tensor([[0.6, 0.4]]))
+        torch.manual_seed(1)
+        x = torch.randn(2, 8, 32, dtype=torch.bfloat16, requires_grad=True)
+        out = base.forward(x)
+        out.sum().backward()
+        return out.detach().clone(), _named_trainable_grads(module), x.grad.clone()
+
+    o_legacy, g_legacy, gx_legacy = run(False)
+    o_custom, g_custom, gx_custom = run(True)
+    assert torch.equal(o_legacy, o_custom), "OrthoInit chimera forward differs"
+    _assert_grads_equal(g_legacy, g_custom, "OrthoInit chimera")
+    assert torch.equal(gx_legacy, gx_custom), "OrthoInit chimera grad_x differs"
+    # The bases themselves carry gradient (the whole point of OrthoInit).
+    assert g_legacy["Q_basis_c"].abs().sum() > 0
+    assert g_legacy["P_bases_f"].abs().sum() > 0
+
+
+def _ortho_init_distill_roundtrip(channel_scale):
+    """An OrthoInit chimera distills (R=I) to the same free-form layout as the
+    Cayley path, and the resulting ``*_chimera.safetensors`` tensors loaded into
+    ``ChimeraHydraInferenceModule`` reproduce the trained forward — proving the
+    on-disk / inference path needs no OrthoInit awareness."""
+    from networks.lora_modules.chimera import (
+        ChimeraHydraInferenceModule,
+        ChimeraHydraLoRAModule,
+    )
+
+    K_c, K_f = 3, 2
+    _base, module = _make_ortho_init_chimera(
+        channel_scale=channel_scale, K_c=K_c, K_f=K_f
+    )
+    with torch.no_grad():
+        module.lambda_c.copy_(torch.randn_like(module.lambda_c) * 0.3)
+        module.lambda_f.copy_(torch.randn_like(module.lambda_f) * 0.3)
+    gate_c = torch.tensor([[0.5, 0.3, 0.2]])
+    gate_f = torch.tensor([[0.6, 0.4]])
+    module.set_content_routing_weights(gate_c)
+    module.set_freq_routing_weights(gate_f)
+    module.eval()
+
+    torch.manual_seed(2)
+    x = torch.randn(2, 8, 32, dtype=torch.bfloat16)
+    o_train = module.forward(x).detach()
+
+    # Distill (R=I) — prefix keys so the ``.Q_basis_c`` discriminator fires.
+    sd = {f"m.{k}": v.clone() for k, v in module.state_dict().items()}
+    ChimeraHydraLoRAModule.distill_save_state_dict(sd, dtype=None)
+    assert "m.lora_down_c.weight" in sd and "m.lora_up_c_weight" in sd
+    assert not any(k.endswith(".Q_basis_c") for k in sd)  # bases consumed
+
+    # Fresh base with identical weights — ``module.apply_to`` rebound the
+    # shared base's forward, so the inference twin needs its own clean Linear.
+    base_inf = _fresh_base(seed=0)
+    inf = ChimeraHydraInferenceModule(
+        "c",
+        base_inf,
+        multiplier=1.0,
+        lora_dim=4,
+        alpha=4,
+        num_experts_content=K_c,
+        num_experts_freq=K_f,
+        channel_scale=channel_scale,
+    )
+    inf.apply_to()
+    with torch.no_grad():
+        inf.lora_down_c.weight.copy_(sd["m.lora_down_c.weight"])
+        inf.lora_down_f.weight.copy_(sd["m.lora_down_f.weight"])
+        inf.lora_up_c_weight.copy_(sd["m.lora_up_c_weight"])
+        inf.lora_up_f_weight.copy_(sd["m.lora_up_f_weight"])
+        if channel_scale is not None:
+            # distill keeps inv_scale on the down side; the inference module
+            # re-derives its own from channel_scale at construction, so the
+            # down weights above are already pre-scaled identically.
+            pass
+    inf.set_content_routing_weights(gate_c)
+    inf.set_freq_routing_weights(gate_f)
+    inf.eval()
+    o_inf = inf.forward(x).detach()
+
+    assert torch.allclose(o_train, o_inf, atol=_CS_ATOL, rtol=_CS_RTOL), (
+        "OrthoInit chimera distilled inference forward diverges from training"
+    )
+
+
+def test_chimera_ortho_init_distill_roundtrip_unscaled():
+    _ortho_init_distill_roundtrip(channel_scale=None)
+
+
+def test_chimera_ortho_init_distill_roundtrip_scaled():
+    _ortho_init_distill_roundtrip(channel_scale=_make_channel_scale(32))

@@ -125,12 +125,18 @@ def test_ortho_and_ortho_init_mutually_exclusive():
     [
         {"use_ortho_init": "true", "use_moe_style": "shared_A"},
         {"use_ortho_init": "true", "use_moe_style": "independent_A"},
-        {"use_ortho_init": "true", "use_chimera_hydra": "true"},
     ],
 )
-def test_ortho_init_rejects_moe_and_chimera(kwargs):
+def test_ortho_init_rejects_moe(kwargs):
     with pytest.raises(NotImplementedError):
         resolve_network_spec(kwargs)
+
+
+def test_ortho_init_composes_with_chimera():
+    """OrthoInit now rides the chimera_hydra spec (trainable bases threaded via
+    cfg.use_ortho_init); it resolves rather than raising."""
+    spec = resolve_network_spec({"use_ortho_init": "true", "use_chimera_hydra": "true"})
+    assert spec.name == "chimera_hydra"
 
 
 # ---------------------------------------------------------------------------

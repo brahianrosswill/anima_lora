@@ -421,6 +421,10 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                     extra_kwargs["num_experts_content"] = cfg.num_experts_content
                     extra_kwargs["num_experts_freq"] = cfg.num_experts_freq
                     extra_kwargs["lambda_init"] = cfg.chimera_lambda_init
+                    # OrthoInit swaps each pool's frozen-basis + Cayley for
+                    # trainable SVD-seeded bases (distills to the same on-disk
+                    # form, so the inference twin needs no flag).
+                    extra_kwargs["use_ortho_init"] = cfg.use_ortho_init
                 elif effective_module_class == ChimeraHydraInferenceModule:
                     # Inference (free-form) twin of the chimera training
                     # class. Same constructor surface — both pool sizes

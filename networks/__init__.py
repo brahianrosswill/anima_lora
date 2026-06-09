@@ -364,12 +364,12 @@ def resolve_network_spec(kwargs: Mapping[str, Any]) -> NetworkSpec:
             "the SVD basis (Cayley-rotates within it); ortho_init trains the SVD "
             "basis (no cap). Pick one."
         )
-    if use_ortho_init and use_chimera:
-        raise NotImplementedError(
-            "use_ortho_init does not yet compose with use_chimera_hydra — the "
-            "orthoinit chimera pool is a separate family member (not implemented)."
-        )
     if use_chimera:
+        # OrthoInit composes with chimera: ``use_ortho_init=True`` swaps each
+        # pool's frozen-basis + Cayley parameterization for trainable SVD-seeded
+        # bases (threaded to ``ChimeraHydraLoRAModule`` via ``cfg.use_ortho_init``
+        # in ``network.py``). Same chimera_hydra spec — it distills to the
+        # identical free-form ``*_chimera.safetensors`` layout either way.
         return NETWORK_REGISTRY["chimera_hydra"]
 
     # Step-expert (turbo per-step head split) short-circuits when step_expert_K

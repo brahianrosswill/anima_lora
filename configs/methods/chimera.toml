@@ -34,7 +34,7 @@ caption_dropout_rate = 0.1
 output_name = "anima_chimera-0608-64"
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
-use_ortho = true
+use_ortho_init = true
 use_timestep_mask = true
 min_rank = 32
 alpha_rank_scale = 1.0

@@ -114,6 +114,12 @@ This is **strictly stronger** than the previous 1-A version, which gave only out
 
 **Narrow-layer fallback.** When `min(out, in) < max(K_c+K_f, 2)·r` (rare on Anima's mlp.layer1/2 targets — `in≈3072`, `(K_c+K_f)·r = 192` at default), both pools fall back to replicating the top-r singular slice. Pool-orthogonality is lost; pools start identical and rely on Cayley divergence.
 
+### OrthoInit option (`use_ortho_init=true`)
+
+Cayley keeps `colspace(ΔW) ⊆ top-2r(W₀)` for the whole run — the "chimera-ortho feels weak" cap (see [[project_orthoinit_variant]]). Setting `use_ortho_init=true` alongside the chimera flag flips each pool's `Q_basis_{c,f}` / `P_bases_{c,f}` from **frozen buffers + Cayley skew** to **trainable fp32 Parameters** (no `S_*`, no `_eye_r`, fp32 master kept for Adam). ΔW can then leave the principal 2r-subspace — full LoRA expressivity per pool — while keeping the W₀-aligned warm start. Pool orthogonality holds *at init* (same SVD partition above) and is free to drift thereafter; this is the per-pool trainable-basis route, **not** a joint Stiefel on `[P_c|P_f]`.
+
+`ΔW=0` at init is unaffected — it comes from the centered uniform gate (`π − 1/K`), not the basis, so `λ_init > 0` is fine. Save distills with `R = I` to the **identical** `*_chimera.safetensors` free-form layout (the save discriminator keys on `.Q_basis_c`, covering both parameterizations), so inference / loading / merge / ComfyUI need no OrthoInit awareness. Implemented as a flag-branch inside `ChimeraHydraLoRAModule` (forward, `__init__`, `distill_save_state_dict`); threaded `resolver → chimera_hydra spec → cfg.use_ortho_init → network.py`. Tests: `tests/test_lora_custom_autograd.py::test_chimera_ortho_init_*`.
+
 ## T-LoRA per-half composition
 
 `use_timestep_mask = true` applies the rank mask `mask_t(σ)` to the **content half only**. The freq half keeps full rank at every t.

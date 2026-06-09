@@ -178,10 +178,19 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
     B_c[*].col_space ⊥ B_f[*].col_space, structurally, at step 0. Cayley
     rotates each within its assigned subspace.
 
+    ``use_ortho_init=True`` swaps each pool's frozen-basis + Cayley
+    parameterization for **trainable** fp32 SVD-seeded bases (``Q_basis_*`` /
+    ``P_bases_*`` become Parameters, ``S_*`` and the Cayley solve drop out). ΔW
+    is then uncapped — it can leave the principal 2r-subspace, the fix for
+    "chimera-ortho feels weak" — while keeping the W₀-aligned warm start.
+    Pool orthogonality holds at init and is free to drift thereafter. ΔW=0 at
+    init is unaffected (it comes from the centered uniform gate, not the basis).
+
     Save distills Cayley → free-form per pool (see
-    :meth:`distill_save_state_dict` / :meth:`build_moe_state_dict` below);
-    load rebuilds a ``ChimeraHydraInferenceModule`` rather than
-    re-instantiating this class.
+    :meth:`distill_save_state_dict` / :meth:`build_moe_state_dict` below); the
+    OrthoInit path is the same distill with R = I. Either way load rebuilds a
+    ``ChimeraHydraInferenceModule`` rather than re-instantiating this class —
+    the on-disk ``*_chimera.safetensors`` layout is identical.
     """
 
     def __init__(
@@ -198,6 +207,7 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         num_experts_freq: int = 3,
         channel_scale=None,
         lambda_init: float = 0.0,
+        use_ortho_init: bool = False,
     ):
         super().__init__(
             lora_name,
@@ -276,19 +286,33 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
             P_bases_f_init = P_shared.unsqueeze(0).expand(K_f, -1, -1).contiguous()
         del U, _S_vals, V, W
         self._disjoint_basis = disjoint
+        self.use_ortho_init = bool(use_ortho_init)
 
-        # Frozen subspace bases (one per pool).
-        self.register_buffer("Q_basis_c", Q_basis_c.cpu())
-        self.register_buffer("Q_basis_f", Q_basis_f.cpu())
-        self.register_buffer("P_bases_c", P_bases_c_init.cpu())  # (K_c, out, r)
-        self.register_buffer("P_bases_f", P_bases_f_init.cpu())  # (K_f, out, r)
+        if self.use_ortho_init:
+            # OrthoInit: the SVD bases become TRAINABLE fp32 parameters (no
+            # frozen buffer, no Cayley). ΔW can leave the principal 2r-subspace
+            # — the fix for "chimera-ortho feels weak" (the Cayley path caps
+            # colspace(ΔW) ⊆ top-2r(W₀)) — while keeping the W₀-aligned warm
+            # start. ΔW=0 at init still holds via the centered uniform gate
+            # (so λ_c/λ_f need not be 0). Pool orthogonality holds at init and
+            # is then free to drift, exactly as OrthoInitLoRAModule intends.
+            self.Q_basis_c = torch.nn.Parameter(Q_basis_c.cpu().float())
+            self.Q_basis_f = torch.nn.Parameter(Q_basis_f.cpu().float())
+            self.P_bases_c = torch.nn.Parameter(P_bases_c_init.cpu().float())
+            self.P_bases_f = torch.nn.Parameter(P_bases_f_init.cpu().float())
+        else:
+            # Frozen subspace bases (one per pool).
+            self.register_buffer("Q_basis_c", Q_basis_c.cpu())
+            self.register_buffer("Q_basis_f", Q_basis_f.cpu())
+            self.register_buffer("P_bases_c", P_bases_c_init.cpu())  # (K_c, out, r)
+            self.register_buffer("P_bases_f", P_bases_f_init.cpu())  # (K_f, out, r)
 
-        # Cayley(0) = I → at init each effective basis equals its frozen
-        # buffer. Per-pool S parameters are independent.
-        self.S_q_c = torch.nn.Parameter(torch.zeros(r, r))
-        self.S_q_f = torch.nn.Parameter(torch.zeros(r, r))
-        self.S_p_c = torch.nn.Parameter(torch.zeros(K_c, r, r))
-        self.S_p_f = torch.nn.Parameter(torch.zeros(K_f, r, r))
+            # Cayley(0) = I → at init each effective basis equals its frozen
+            # buffer. Per-pool S parameters are independent.
+            self.S_q_c = torch.nn.Parameter(torch.zeros(r, r))
+            self.S_q_f = torch.nn.Parameter(torch.zeros(r, r))
+            self.S_p_c = torch.nn.Parameter(torch.zeros(K_c, r, r))
+            self.S_p_f = torch.nn.Parameter(torch.zeros(K_f, r, r))
 
         # Per-pool λ: independent magnitudes through training (no shared
         # scaling). Centered-gate starts λ at ``lambda_init`` (>0): the
@@ -304,16 +328,22 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         # _scale handles Q_basis_c + registers inv_scale; we then manually
         # apply the same column-scale to Q_basis_f.
         if channel_scale is not None:
-            self._register_channel_scale(self.Q_basis_c, channel_scale)
-            _absorb_channel_scale(self.Q_basis_f, channel_scale)
+            # ``.data`` for the OrthoInit Parameters (in-place column rescale);
+            # the buffers in the frozen path pass through directly.
+            q_c = self.Q_basis_c.data if self.use_ortho_init else self.Q_basis_c
+            q_f = self.Q_basis_f.data if self.use_ortho_init else self.Q_basis_f
+            self._register_channel_scale(q_c, channel_scale)
+            _absorb_channel_scale(q_f, channel_scale)
 
-        # Frozen bases → bf16 (saved-for-backward halved). Cayley solve
-        # stays fp32 (orthogonality invariant: R^T R = I to ~1e-7 fp32 vs
-        # ~1e-2 bf16 per OrthoLoRA rationale).
-        self.Q_basis_c = self.Q_basis_c.to(torch.bfloat16)
-        self.Q_basis_f = self.Q_basis_f.to(torch.bfloat16)
-        self.P_bases_c = self.P_bases_c.to(torch.bfloat16)
-        self.P_bases_f = self.P_bases_f.to(torch.bfloat16)
+        if not self.use_ortho_init:
+            # Frozen bases → bf16 (saved-for-backward halved). Cayley solve
+            # stays fp32 (orthogonality invariant: R^T R = I to ~1e-7 fp32 vs
+            # ~1e-2 bf16 per OrthoLoRA rationale). OrthoInit keeps the fp32
+            # master (Adam state precision) — the bases are trained directly.
+            self.Q_basis_c = self.Q_basis_c.to(torch.bfloat16)
+            self.Q_basis_f = self.Q_basis_f.to(torch.bfloat16)
+            self.P_bases_c = self.P_bases_c.to(torch.bfloat16)
+            self.P_bases_f = self.P_bases_f.to(torch.bfloat16)
 
         # Default off; the factory flips this to True when
         # ``use_custom_down_autograd=true`` is in the config (see
@@ -323,12 +353,14 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         self.use_custom_down_autograd = False
 
         # Pre-allocated identity for the batched Cayley solve. (E_c + E_f
-        # + 2) skew-symmetric matrices share one fp32 LU+TRSM call.
-        self.register_buffer(
-            "_eye_r",
-            torch.eye(r, dtype=torch.float32),
-            persistent=False,
-        )
+        # + 2) skew-symmetric matrices share one fp32 LU+TRSM call. OrthoInit
+        # has no Cayley solve, so the buffer is skipped entirely.
+        if not self.use_ortho_init:
+            self.register_buffer(
+                "_eye_r",
+                torch.eye(r, dtype=torch.float32),
+                persistent=False,
+            )
 
         self._register_routing_buffers(K_c, K_f)
 
@@ -355,30 +387,39 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        work = self.P_bases_c.dtype  # bf16
-
-        # One batched (2 + K_c + K_f, r, r) Cayley solve covers both A's
-        # and both B-pools' rotations. Single LU+TRSM kernel launch.
-        skew = torch.cat(
-            [
-                self.S_q_c.unsqueeze(0),
-                self.S_q_f.unsqueeze(0),
-                self.S_p_c,
-                self.S_p_f,
-            ],
-            dim=0,
-        )
-        A = skew - skew.transpose(-2, -1)
-        R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
         K_c = self.num_experts_content
         K_f = self.num_experts_freq
-        R_q_c = R[0].to(work)
-        R_q_f = R[1].to(work)
-        R_p_c = R[2 : 2 + K_c].to(work)
-        R_p_f = R[2 + K_c : 2 + K_c + K_f].to(work)
+        # bf16 for the Cayley (frozen-basis) path; fp32 for OrthoInit, whose
+        # trainable bases are the fp32 master (mantissa-precise bottleneck,
+        # mirroring OrthoInitLoRAModule).
+        work = self.P_bases_c.dtype
 
-        Q_eff_c = R_q_c @ self.Q_basis_c  # (r, in)
-        Q_eff_f = R_q_f @ self.Q_basis_f  # (r, in)
+        if self.use_ortho_init:
+            # Trainable bases, no rotation: A_eff/B_eff ARE the parameters.
+            Q_eff_c = self.Q_basis_c  # (r, in)
+            Q_eff_f = self.Q_basis_f  # (r, in)
+            R_p_c = R_p_f = None  # P_eff read straight from the bases below
+        else:
+            # One batched (2 + K_c + K_f, r, r) Cayley solve covers both A's
+            # and both B-pools' rotations. Single LU+TRSM kernel launch.
+            skew = torch.cat(
+                [
+                    self.S_q_c.unsqueeze(0),
+                    self.S_q_f.unsqueeze(0),
+                    self.S_p_c,
+                    self.S_p_f,
+                ],
+                dim=0,
+            )
+            A = skew - skew.transpose(-2, -1)
+            R = torch.linalg.solve(self._eye_r + A, self._eye_r - A)
+            R_q_c = R[0].to(work)
+            R_q_f = R[1].to(work)
+            R_p_c = R[2 : 2 + K_c].to(work)
+            R_p_f = R[2 + K_c : 2 + K_c + K_f].to(work)
+
+            Q_eff_c = R_q_c @ self.Q_basis_c  # (r, in)
+            Q_eff_f = R_q_f @ self.Q_basis_f  # (r, in)
 
         # Single rank-cat down-projection for both pools. The two pools share
         # the same input ``x`` but have distinct ``Q_eff``; running them as
@@ -434,8 +475,12 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         # Per-pool gate-weighted P_combined; one bmm per pool over the
         # B/L axis. Cast π at the einsum boundary so bf16 × fp32 doesn't
         # promote P_combined back to fp32 (would inflate saved activation).
-        P_eff_c = self.P_bases_c @ R_p_c  # (K_c, out, r)
-        P_eff_f = self.P_bases_f @ R_p_f  # (K_f, out, r)
+        if self.use_ortho_init:
+            P_eff_c = self.P_bases_c  # (K_c, out, r)
+            P_eff_f = self.P_bases_f  # (K_f, out, r)
+        else:
+            P_eff_c = self.P_bases_c @ R_p_c  # (K_c, out, r)
+            P_eff_f = self.P_bases_f @ R_p_f  # (K_f, out, r)
 
         pi_c_w = pi_c.to(work)
         pi_f_w = self._center(self._freq_gate_raw(lx_c.shape[0]), K_f).to(work)
@@ -448,8 +493,10 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         return org_forwarded + (out * self.multiplier).to(org_forwarded.dtype)
 
     def regularization(self):
-        """No-op: Cayley guarantees orthogonality structurally on both A's."""
-        zero = torch.tensor(0.0, device=self.S_p_c.device)
+        """No-op on both paths: Cayley guarantees orthogonality structurally,
+        and OrthoInit deliberately leaves the bases unconstrained (SVD as a
+        warm start, not a cage). ``P_bases_c`` exists under either layout."""
+        zero = torch.tensor(0.0, device=self.P_bases_c.device)
         return zero, zero
 
     # ------------------------------------------------------------------
@@ -476,20 +523,23 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         per-pool ups into per-expert ``.lora_ups_{c,f}.{i}.weight`` keys
         and per-component q/k/v splits.
         """
+        # Discriminator: co-located ``.Q_basis_c`` + ``.Q_basis_f`` (the ``_c``/
+        # ``_f`` suffix pair is chimera-only — OrthoLoRA fallbacks use a bare
+        # ``.Q_basis``). Covers BOTH the Cayley path (frozen bf16 buffers +
+        # ``.S_q_c``) and the OrthoInit path (trainable fp32 bases, no ``S_*``).
         prefixes = set()
         for key in list(state_dict.keys()):
-            if not key.endswith(".S_q_c"):
+            if not key.endswith(".Q_basis_c"):
                 continue
-            prefix = key[: -len(".S_q_c")]
-            if state_dict.get(f"{prefix}.S_q_f") is None:
+            prefix = key[: -len(".Q_basis_c")]
+            if state_dict.get(f"{prefix}.Q_basis_f") is None:
                 continue
             prefixes.add(prefix)
 
         for prefix in prefixes:
-            S_q_c = state_dict[f"{prefix}.S_q_c"]
-            S_q_f = state_dict[f"{prefix}.S_q_f"]
-            S_p_c = state_dict[f"{prefix}.S_p_c"]  # (K_c, r, r)
-            S_p_f = state_dict[f"{prefix}.S_p_f"]  # (K_f, r, r)
+            # OrthoInit chimera carries no Cayley skew params; its trainable
+            # bases ARE the effective factors (R = I).
+            ortho_init = state_dict.get(f"{prefix}.S_q_c") is None
             Q_basis_c = state_dict[f"{prefix}.Q_basis_c"]
             Q_basis_f = state_dict[f"{prefix}.Q_basis_f"]
             P_bases_c = state_dict[f"{prefix}.P_bases_c"]  # (K_c, out, r)
@@ -499,14 +549,24 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
             alpha = state_dict.get(f"{prefix}.alpha")
             save_dtype = dtype if dtype is not None else P_bases_c.dtype
 
-            R_q_c = cls._cayley(S_q_c.float())
-            R_q_f = cls._cayley(S_q_f.float())
-            R_p_c = cls._cayley(S_p_c.float())
-            R_p_f = cls._cayley(S_p_f.float())
-            Q_eff_c = R_q_c @ Q_basis_c.float()  # (r, in)
-            Q_eff_f = R_q_f @ Q_basis_f.float()
-            P_eff_c = P_bases_c.float() @ R_p_c  # (K_c, out, r)
-            P_eff_f = P_bases_f.float() @ R_p_f
+            if ortho_init:
+                Q_eff_c = Q_basis_c.float()  # (r, in)
+                Q_eff_f = Q_basis_f.float()
+                P_eff_c = P_bases_c.float()  # (K_c, out, r)
+                P_eff_f = P_bases_f.float()
+            else:
+                S_q_c = state_dict[f"{prefix}.S_q_c"]
+                S_q_f = state_dict[f"{prefix}.S_q_f"]
+                S_p_c = state_dict[f"{prefix}.S_p_c"]  # (K_c, r, r)
+                S_p_f = state_dict[f"{prefix}.S_p_f"]  # (K_f, r, r)
+                R_q_c = cls._cayley(S_q_c.float())
+                R_q_f = cls._cayley(S_q_f.float())
+                R_p_c = cls._cayley(S_p_c.float())
+                R_p_f = cls._cayley(S_p_f.float())
+                Q_eff_c = R_q_c @ Q_basis_c.float()  # (r, in)
+                Q_eff_f = R_q_f @ Q_basis_f.float()
+                P_eff_c = P_bases_c.float() @ R_p_c  # (K_c, out, r)
+                P_eff_f = P_bases_f.float() @ R_p_f
 
             def _split(P_eff, Q_eff, lam):
                 lam_1d = lam.squeeze(0).float()
