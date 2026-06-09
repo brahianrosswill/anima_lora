@@ -1,8 +1,9 @@
-"""HuggingFace Accelerate setup and BF16 plumbing.
+"""HuggingFace Accelerate setup and FP16/BF16 plumbing.
 
 Wraps the ``Accelerator`` construction so training scripts can stay out of the
 logging-backend plumbing. Also hosts the state-resume helper (local dir or HF
-repo) and the dtype resolver (weights and checkpoints are always bf16).
+repo) and the dtype resolver that maps ``--mixed_precision`` and
+``--save_precision`` flags to torch dtypes.
 """
 
 from __future__ import annotations
@@ -146,7 +147,7 @@ def prepare_accelerator(args: argparse.Namespace):
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision="bf16",  # Anima trains in bf16, always
+        mixed_precision=args.mixed_precision,
         log_with=log_with,
         project_dir=logging_dir,
         dynamo_backend=dynamo_backend,
@@ -156,6 +157,18 @@ def prepare_accelerator(args: argparse.Namespace):
 
 
 def prepare_dtype(args: argparse.Namespace):
-    # Anima trains and saves in bf16, always.
-    weight_dtype = save_dtype = torch.bfloat16
+    weight_dtype = torch.float32
+    if args.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif args.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
+    save_dtype: Optional[torch.dtype] = None
+    if args.save_precision == "fp16":
+        save_dtype = torch.float16
+    elif args.save_precision == "bf16":
+        save_dtype = torch.bfloat16
+    elif args.save_precision == "float":
+        save_dtype = torch.float32
+
     return weight_dtype, save_dtype

@@ -522,6 +522,14 @@ def build_launch_cmd(*args: str, python_exe: str | None = None) -> list[str]:
     py = python_exe or PY
     if not os.environ.get("ANIMA_ACCELERATE_LAUNCH"):
         return [py, "train.py", *args]
+    # Forward the user's --mixed_precision to the launcher so it matches the
+    # Accelerator() train.py builds (defaults to bf16 when unset on the CLI).
+    mixed_precision = "bf16"
+    for i, a in enumerate(args):
+        if a == "--mixed_precision" and i + 1 < len(args):
+            mixed_precision = args[i + 1]
+        elif a.startswith("--mixed_precision="):
+            mixed_precision = a.split("=", 1)[1]
     return [
         py,
         "-m",
@@ -530,7 +538,7 @@ def build_launch_cmd(*args: str, python_exe: str | None = None) -> list[str]:
         "--num_cpu_threads_per_process",
         "3",
         "--mixed_precision",
-        "bf16",
+        mixed_precision,
         "train.py",
         *args,
     ]

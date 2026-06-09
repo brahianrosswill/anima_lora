@@ -95,7 +95,7 @@ def build_training_metadata(
         "ss_network_dim": args.network_dim,
         "ss_network_alpha": args.network_alpha,
         "ss_network_dropout": args.network_dropout,
-        "ss_mixed_precision": "bf16",
+        "ss_mixed_precision": args.mixed_precision,
         "ss_base_model_version": model_version,
         "ss_cache_latents": bool(args.cache_latents),
         "ss_seed": args.seed,

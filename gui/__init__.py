@@ -255,6 +255,7 @@ _GROUPS = {
         "torch_compile",
         "cache_llm_adapter_outputs",
         "masked_loss",
+        "mixed_precision",
         "vae_chunk_size",
         "vae_disable_cache",
         "use_vae_cache",
@@ -283,7 +284,14 @@ _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
 # the compile cache) — it's edited in the Preprocess tab and seeded into the
 # training config from configs/preprocess.toml, so hide it from the config form
 # to keep a single source of truth and avoid the two surfaces silently drifting.
-_SKIP = {"base_config", "dataset_config", "general", "datasets", "variant", "target_res"}
+_SKIP = {
+    "base_config",
+    "dataset_config",
+    "general",
+    "datasets",
+    "variant",
+    "target_res",
+}
 
 # Virtual keys appear in the form like normal fields but don't round-trip as
 # flat TOML keys — they're derived from / written into structured sections
