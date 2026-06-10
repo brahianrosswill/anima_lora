@@ -36,6 +36,7 @@
   "attn_mode": "注意力后端。flash4：FlashAttention-4（Linux，最快）。flash：FlashAttention-2。flex：PyTorch flex注意力（跨平台）。",
   "gradient_checkpointing": "反向传播时重计算激活值而非存储。用计算换显存。低显存环境必备。",
   "unsloth_offload_checkpointing": "将梯度检查点卸载到CPU RAM。以速度换取额外的显存节省。需要gradient_checkpointing=true。",
+  "activation_memory_budget": "torch.compile 激活内存预算（0-1）：分区器在开始重算之前可保留用于反向传播的激活比例。越低越省显存、重算越多。0.99 ≈ 不重算；0.85 ≈ 相同步时下的旧峰值。当 gradient_checkpointing=true 时自动跳过（不兼容/冗余）。",
   "blocks_to_swap": "GPU与CPU间交换的DiT块数量。0：全部在GPU。越高CPU卸载越多，适合低显存。",
   "torch_compile": "为前向传播启用torch.compile。初始编译后训练速度加快。以原生形状编译每个DiT块 — 每个令牌数桶系列一张计算图，无静态填充。",
   "cache_llm_adapter_outputs": "将LLM适配器层输出缓存到磁盘。避免每轮重新计算文本编码器投影。",

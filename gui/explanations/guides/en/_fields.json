@@ -36,6 +36,7 @@
   "attn_mode": "Attention backend. flash4: FlashAttention-4 (Linux, fastest). flash: FlashAttention-2. flex: PyTorch flex attention (cross-platform).",
   "gradient_checkpointing": "Recompute activations during backward pass instead of storing them. Trades compute for VRAM. Essential for low-VRAM setups.",
   "unsloth_offload_checkpointing": "Offload gradient checkpoints to CPU RAM. Further VRAM reduction at cost of speed. Requires gradient_checkpointing=true.",
+  "activation_memory_budget": "torch.compile activation-memory budget (0-1): fraction of activations the partitioner may keep saved-for-backward before it starts recomputing. Lower = less VRAM, more recompute. 0.99 ≈ no recompute; 0.85 ≈ old peak at matched step time. Auto-skipped when gradient_checkpointing=true (incompatible/redundant).",
   "blocks_to_swap": "Number of DiT blocks to swap between GPU and CPU. 0: all on GPU. Higher values = more CPU offloading for low VRAM.",
   "torch_compile": "Enable torch.compile for the forward pass. Faster training after initial compilation. Compiles each DiT block at native shapes — one graph per token-count bucket family, no static padding.",
   "cache_llm_adapter_outputs": "Cache the LLM adapter layer outputs to disk. Avoids recomputing text encoder projections each epoch.",

@@ -36,6 +36,7 @@
   "attn_mode": "어텐션 백엔드. flash4: FlashAttention-4 (Linux, 최속). flash: FlashAttention-2. flex: PyTorch flex attention (크로스 플랫폼).",
   "gradient_checkpointing": "역전파 시 활성값을 저장 대신 재계산. 연산으로 VRAM 절약. 저사양 필수.",
   "unsloth_offload_checkpointing": "그레이디언트 체크포인트를 CPU RAM으로 오프로드. 속도 감소 대신 VRAM 추가 절약. gradient_checkpointing=true 필요.",
+  "activation_memory_budget": "torch.compile 활성화 메모리 예산(0-1): 파티셔너가 재계산을 시작하기 전에 backward용으로 저장해 둘 수 있는 활성화의 비율. 낮을수록 VRAM 절약, 재계산 증가. 0.99 ≈ 재계산 없음, 0.85 ≈ 동일 스텝 시간에서 기존 피크. gradient_checkpointing=true일 때 자동 생략(호환 불가/중복).",
   "blocks_to_swap": "GPU와 CPU 간 스왑할 DiT 블록 수. 0: 전부 GPU. 높을수록 더 많이 CPU로 오프로드.",
   "torch_compile": "포워드 패스에 torch.compile 활성화. 초기 컴파일 후 학습 속도 향상. 각 DiT 블록을 네이티브 형상으로 컴파일 — 토큰 수 버킷 패밀리당 하나의 그래프, 정적 패딩 없음.",
   "cache_llm_adapter_outputs": "LLM 어댑터 레이어 출력을 디스크에 캐싱. 매 에폭 텍스트 인코더 투영 재계산 회피.",

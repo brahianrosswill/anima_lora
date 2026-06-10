@@ -251,6 +251,7 @@ _GROUPS = {
         "attn_mode",
         "gradient_checkpointing",
         "unsloth_offload_checkpointing",
+        "activation_memory_budget",
         "blocks_to_swap",
         "torch_compile",
         "cache_llm_adapter_outputs",
