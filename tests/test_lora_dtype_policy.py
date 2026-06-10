@@ -303,6 +303,31 @@ def test_lora_fp32_activation_no_upcast():
     _fp32_activation_no_upcast(make)
 
 
+def test_ortho_init_fp32_activation_no_upcast():
+    # OrthoInit is the live ``use_ortho_init=true`` variant; it was MISSED by
+    # 8c2005c (which only fixed lora/hydra/chimera/step_expert/stacked_experts)
+    # and kept ``work = x.dtype`` — so the fp32 AdaLN activation + on-by-default
+    # channel scaling materialized a full fp32 ``_rebalance`` activation per
+    # module and OOMed. This pins the bf16 compute dtype.
+    from networks.lora_modules.ortho import OrthoInitLoRAModule
+
+    cs = _make_channel_scale(32)  # inv_scale ON — the path that OOMed
+
+    def make():
+        torch.manual_seed(0)
+        base = torch.nn.Linear(32, 24, bias=False).to(torch.bfloat16)
+        base.weight.requires_grad_(False)
+        module = OrthoInitLoRAModule(
+            "o", base, multiplier=1.0, lora_dim=4, alpha=4, channel_scale=cs
+        )
+        with torch.no_grad():
+            module.lambda_layer.copy_(torch.randn_like(module.lambda_layer) * 0.1)
+        module.apply_to()
+        return base, module
+
+    _fp32_activation_no_upcast(make)
+
+
 def test_hydra_fp32_activation_no_upcast():
     from networks.lora_modules.hydra import HydraLoRAModule
 

@@ -300,19 +300,26 @@ class OrthoInitLoRAModule(BaseLoRAModule):
         if self._skip_module():
             return org_forwarded
 
-        # Training: rank GEMMs in the activation dtype — bit-identical under
-        # the trainer's autocast(bf16) to the retired fp32-bottleneck path
-        # (autocast re-cast its ``.float()`` inputs back to bf16 before every
-        # GEMM; see bench/lora_fp32_bottleneck). The fp32 master ``Q_init`` /
-        # ``P_init`` are cast at the matmul boundary, exactly where autocast
-        # cast them before.
-        work = x.dtype
-        x_lora = self._rebalance(x)
+        # Training: rank GEMMs in the model COMPUTE dtype (``org_forwarded.dtype``
+        # — the frozen bf16 base's output = the autocast/model dtype), NOT the
+        # activation dtype. ``x`` arrives fp32: the AdaLN ``nn.LayerNorm`` feeding
+        # this Linear emits fp32 under autocast(bf16). Keying the GEMM off
+        # ``x.dtype`` left the whole rank path in fp32 — and ``_rebalance`` then
+        # allocated a fresh full-size fp32 activation (``x * inv_scale``, per
+        # channel scaling), saved for backward across all 196 modules → OOM, for
+        # zero numeric gain (autocast re-casts the GEMM to bf16 regardless). The
+        # fp32 master ``Q_init`` / ``P_init`` are cast DOWN to ``work`` at the
+        # matmul boundary, exactly where autocast cast them before. Bit-identical
+        # to the retired fp32-bottleneck path under autocast. Mirrors the lora.py
+        # fix (8c2005c); see bench/lora_fp32_bottleneck.
+        work = org_forwarded.dtype
+        x_lora = self._rebalance(x.to(work))
         lx = torch.nn.functional.linear(x_lora, self.Q_init.to(work))
 
-        # λ + T-LoRA mask gate the rank latent in fp32 pointwise (cheap, and
-        # the same dtype chain autocast produced). λ is a fp32 master
-        # Parameter; the mask is the default all-ones buffer unless T-LoRA binds it.
+        # λ + T-LoRA mask gate the rank latent. λ is a fp32 master Parameter;
+        # the mask is the default all-ones buffer unless T-LoRA binds it. lx is
+        # (B, L, r=32) here — tiny — so the fp32 promotion is negligible and the
+        # up GEMM below casts back to ``work``.
         lx = lx * self.lambda_layer.float() * self._timestep_mask
 
         if self.dropout is not None:
