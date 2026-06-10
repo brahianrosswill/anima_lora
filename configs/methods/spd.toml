@@ -22,6 +22,16 @@ batch_size = 1
 seed = 42
 # compile_inductor_mode = "reduce-overhead"
 
+# torch.compile knobs (only active with --torch_compile, on by default).
+# compile_dynamic_seq: collapse the per-(stage x bucket) block graphs into ONE
+# symbolic-seq graph (mark_dynamic on the seq axis), bounded by the *downsampled*
+# stage token counts. Trades a handful of warmup recompiles for a single graph.
+compile_dynamic_seq = true
+# activation_memory_budget: partitioner saved-activation fraction (<1.0 recomputes
+# cheap intermediates in backward to cut peak VRAM). 1.0 = off. Ignored under
+# --grad_ckpt. 0.85 is the train.py default trade-off.
+activation_memory_budget = 1.0
+
 [network]
 rank = 64
 alpha = 64

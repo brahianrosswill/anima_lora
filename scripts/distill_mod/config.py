@@ -116,6 +116,30 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Inductor preset, e.g. 'reduce-overhead' for CUDAGraphs",
     )
     parser.add_argument(
+        "--compile_dynamic_seq",
+        action="store_true",
+        default=True,
+        help="Collapse the per-token-count block graphs into ONE symbolic-seq "
+        "graph (mark_dynamic on the seq axis), bounded by the token counts present "
+        "in the cached pool (data_dir + synth_data_dir). Mirrors the LoRA-training "
+        "compile_dynamic_seq path. Only matters with --torch_compile (default on).",
+    )
+    parser.add_argument(
+        "--no_compile_dynamic_seq",
+        dest="compile_dynamic_seq",
+        action="store_false",
+        help="Disable dynamic-seq: trace one static graph per distinct token count.",
+    )
+    parser.add_argument(
+        "--activation_memory_budget",
+        type=float,
+        default=1.0,
+        help="torch.compile partitioner saved-activation fraction (<1.0 recomputes "
+        "cheap intermediates in backward to cut peak VRAM; mirrors train.py). "
+        "1.0 = off. Ignored under gradient checkpointing (CheckpointError otherwise; "
+        "redundant there since ckpt already minimizes saved activations).",
+    )
+    parser.add_argument(
         "--grad_ckpt",
         action="store_true",
         help="Enable gradient checkpointing with CPU offload (default on)",
@@ -337,6 +361,8 @@ class ModConfig:
     sigmoid_scale: float
     torch_compile: bool
     compile_inductor_mode: str
+    compile_dynamic_seq: bool
+    activation_memory_budget: float
     grad_ckpt: bool
 
     # Validation
@@ -403,6 +429,8 @@ def resolve_config(args: argparse.Namespace) -> ModConfig:
         sigmoid_scale=float(args.sigmoid_scale),
         torch_compile=bool(args.torch_compile),
         compile_inductor_mode=args.compile_inductor_mode,
+        compile_dynamic_seq=bool(args.compile_dynamic_seq),
+        activation_memory_budget=float(args.activation_memory_budget),
         grad_ckpt=bool(args.grad_ckpt),
         validation_split=float(args.validation_split),
         validation_seed=int(args.validation_seed),

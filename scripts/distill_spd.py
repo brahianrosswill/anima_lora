@@ -50,6 +50,7 @@ from library.training.schedulers import make_warmup_cosine_scheduler  # noqa: E4
 from networks.lora_anima.factory import create_network  # noqa: E402
 from networks.lora_save import save_network_weights  # noqa: E402
 from networks.spd import (  # noqa: E402
+    _snap,
     dct_lowpass_init,
     spd_rollout_to_stage,
     spd_schedule_bands,
@@ -171,6 +172,25 @@ def main():
         default=None,
         help="torch.compile inductor preset (e.g. 'reduce-overhead'). "
         "Incompatible with --blocks_to_swap (CUDAGraphs need stable addresses).",
+    )
+    parser.add_argument(
+        "--compile_dynamic_seq",
+        default=None,
+        action=argparse.BooleanOptionalAction,
+        help="Collapse the per-(stage x bucket) block graphs into ONE symbolic-seq "
+        "graph (mark_dynamic on the seq axis only), mirroring the LoRA-training "
+        "compile_dynamic_seq path. The dynamic axis is bounded by the *downsampled* "
+        "stage token counts (not just the on-disk full-res latents). Only matters "
+        "with --torch_compile. Sentinel None -> TOML (compile_dynamic_seq, default true).",
+    )
+    parser.add_argument(
+        "--activation_memory_budget",
+        type=float,
+        default=-1.0,
+        help="torch.compile partitioner saved-activation fraction (<1.0 recomputes "
+        "cheap intermediates in backward to cut peak VRAM; mirrors train.py). "
+        "Ignored under --grad_ckpt (CheckpointError otherwise; redundant there). "
+        "Sentinel -1 -> TOML (activation_memory_budget, default 1.0 = off).",
     )
     parser.add_argument("--save_every", type=int, default=-1)
     parser.add_argument("--log_interval", type=int, default=-1)
@@ -294,6 +314,14 @@ def main():
     )
     compile_inductor_mode = pick(
         args.compile_inductor_mode, "compile_inductor_mode", None
+    )
+    compile_dynamic_seq = bool(
+        args.compile_dynamic_seq
+        if args.compile_dynamic_seq is not None
+        else _flatten(cfg, "compile_dynamic_seq", True)
+    )
+    activation_memory_budget = float(
+        pick(args.activation_memory_budget, "activation_memory_budget", 1.0)
     )
     if (
         args.torch_compile
@@ -561,35 +589,76 @@ def main():
         len(network.unet_loras),
     )
 
-    # --- Per-shape block compile ---
-    # Compile each block's _forward (dynamic=False) and let torch.compile
-    # recompile once per distinct (stage x aspect-bucket) shape on the flash
-    # backend — each at its real token count, no padding/masking. Raise the
-    # dynamo cache limit to cover every (stage x bucket) specialization plus its
-    # backward graph so none falls back to eager. Recompiles are a one-time
-    # warmup cost, not a correctness issue.
+    # --- Block compile ---
+    # SPD runs each stage at a DOWNSAMPLED resolution not in CONSTANT_TOKEN_BUCKETS
+    # (dct_lowpass_init snaps each latent dim to _snap(dim*scale, patch)), so the
+    # real forward token counts span far more than the 2 full-res families and run
+    # *below* them. Enumerate every (stage × on-disk bucket) token count so both the
+    # static and the dynamic-seq paths size themselves to the true shape set.
     if args.torch_compile:
-        # SPD runs each stage at a downsampled resolution NOT in
-        # CONSTANT_TOKEN_BUCKETS, so distinct shapes = stages × buckets — far more
-        # than the 2 full-res families compile_blocks budgets for internally.
-        # Size the dynamo cache to cover every (stage x bucket) shape; fwd+bwd
-        # entries share the one `_forward` bytecode, so give headroom.
-        n_buckets = len({get_latent_resolution(npz) for npz, _te in dataset.samples})
-        n_shapes = len(stages) * max(1, n_buckets)
+        stage_bucket_tokens: set[int] = set()
+        for npz, _te in dataset.samples:
+            w_lat, h_lat = (int(v) for v in get_latent_resolution(npz).split("x"))
+            for s in stages:
+                h = min(_snap(h_lat * s, patch), h_lat) if s < 1.0 else h_lat
+                w = min(_snap(w_lat * s, patch), w_lat) if s < 1.0 else w_lat
+                stage_bucket_tokens.add((h // patch) * (w // patch))
+        n_shapes = max(1, len(stage_bucket_tokens))
+        if compile_dynamic_seq:
+            # ONE symbolic-seq graph for every shape: mark_dynamic on the seq axis,
+            # bounded by the *downsampled* token range (NOT the on-disk full-res
+            # min) so stage-0's small forwards stay inside the guarded interval and
+            # don't trigger range-violation recompiles.
+            n_token_families = n_shapes
+            seq_range = (min(stage_bucket_tokens), max(stage_bucket_tokens))
+        else:
+            # Static path: one graph per (stage × bucket) shape, each at its real
+            # token count (no padding). Let compile_blocks key per token count.
+            n_token_families = None
+            seq_range = None
+        # Partitioner saved-activation cap (mirrors train.py / distill_turbo). Must
+        # be set BEFORE compile_dit_blocks — partitioning happens at first-forward
+        # compile and this is a plain module attr (no ContextVar revert). Skipped
+        # under grad_ckpt: the budget repartitions the joint graph, so checkpoint's
+        # recompute pass can pick a different graph than forward -> CheckpointError
+        # (torch #166926); ckpt already minimizes saved activations anyway.
+        if activation_memory_budget < 1.0 and not args.grad_ckpt:
+            import torch._functorch.config as _functorch_config
+
+            _functorch_config.activation_memory_budget = activation_memory_budget
+            logger.info(
+                "torch.compile activation_memory_budget = %.3g "
+                "(partitioner recomputes cheap intermediates in backward)",
+                activation_memory_budget,
+            )
+        elif activation_memory_budget < 1.0 and args.grad_ckpt:
+            logger.info(
+                "activation_memory_budget ignored: incompatible with grad_ckpt "
+                "(and redundant under it)"
+            )
         compile_dit_blocks(
             model,
             enabled=True,
             cache_size_limit=2 * n_shapes + 8,
             backend=args.dynamo_backend,
             mode=compile_inductor_mode,
+            dynamic_seq=compile_dynamic_seq,
+            n_token_families=n_token_families,
+            seq_range=seq_range,
         )
         logger.info(
-            "torch_compile: %d block._forward compiled (backend=%s, mode=%s); "
-            "up to %d (stage x bucket) shapes recompile over the first steps.",
+            "torch_compile: %d block._forward compiled (backend=%s, mode=%s, "
+            "dynamic_seq=%s); %d distinct (stage x bucket) token counts in %s.",
             len(model.blocks),
             args.dynamo_backend,
             compile_inductor_mode,
+            compile_dynamic_seq,
             n_shapes,
+            (
+                f"seq_range={seq_range} (one symbolic graph)"
+                if compile_dynamic_seq
+                else "static per-shape graphs"
+            ),
         )
 
     # --- Optimizer + warmup→cosine ---

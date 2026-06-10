@@ -49,6 +49,11 @@ from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
 from library.datasets.cache import make_cached_collate  # noqa: E402
 from library.datasets.distill import CachedDataset  # noqa: E402
+from library.io.cache import (  # noqa: E402
+    LATENT_CACHE_SUFFIX,
+    discover_cached_pairs,
+    get_latent_resolution,
+)
 from library.runtime.harness import (  # noqa: E402
     compile_dit_blocks,
     enable_training_grad_ckpt,
@@ -79,6 +84,36 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+
+def _pool_token_counts(cfg, patch: int) -> set[int]:
+    """Distinct DiT token counts in the cached training pool.
+
+    Self-describing compile budget (mirrors ``train.py::_derive_token_budget`` /
+    ``distill_turbo``): the on-disk caches are the source of truth for which tiers
+    the pool spans. Unlike SPD, the mod head trains at each latent's *native*
+    resolution (no per-stage downsampling), so the token count is just
+    ``(h_lat // patch) * (w_lat // patch)``. When ``--synth_data_dir`` is set the
+    real latents are swapped for the synth pool (``CachedDataset`` remap), so union
+    both dirs' resolutions to bound the symbolic seq axis correctly.
+    """
+    import glob
+
+    res_strs: set[str] = {
+        get_latent_resolution(img.npz_path)
+        for img in discover_cached_pairs(cfg.data_dir)
+    }
+    if cfg.synth_data_dir is not None:
+        for npz in glob.glob(
+            os.path.join(cfg.synth_data_dir, "**", f"*{LATENT_CACHE_SUFFIX}"),
+            recursive=True,
+        ):
+            res_strs.add(get_latent_resolution(npz))
+    counts: set[int] = set()
+    for res in res_strs:
+        a, b = (int(v) for v in res.split("x"))  # latent dims (order-agnostic)
+        counts.add((a // patch) * (b // patch))
+    return counts
 
 
 def _draw_gad_pair(
@@ -201,10 +236,65 @@ def main():
 
     # Block swap for VRAM efficiency (two forwards per step), then compile each
     # block._forward (native-shape flatten → no flash pad-leak into the target).
-    # This pool's latents span more than the 2 CONSTANT_TOKEN_BUCKETS families,
-    # so bump the dynamo cache to trace every distinct token count.
+    # This pool's latents span more than the 2 CONSTANT_TOKEN_BUCKETS families.
     place_dit_for_training(model, device, blocks_to_swap=cfg.blocks_to_swap)
-    compile_dit_blocks(model, enabled=cfg.torch_compile, mode=cfg.compile_inductor_mode)
+    if cfg.torch_compile:
+        # Self-describing compile budget: derive the distinct token counts from the
+        # cached pool (data_dir + synth_data_dir) rather than a fixed table.
+        token_counts = _pool_token_counts(cfg, model.patch_spatial)
+        n_shapes = max(1, len(token_counts))
+        if cfg.compile_dynamic_seq and token_counts:
+            # ONE symbolic-seq graph for the whole pool: mark_dynamic on the seq
+            # axis, bounded by the pool's real token range.
+            n_token_families = n_shapes
+            seq_range = (min(token_counts), max(token_counts))
+        else:
+            # Static path: one graph per distinct token count, each at its real
+            # token count (no padding). Let compile_blocks key per token count.
+            n_token_families = None
+            seq_range = None
+        # Partitioner saved-activation cap (mirrors train.py / distill_turbo). Must
+        # be set BEFORE compile_dit_blocks — partitioning happens at first-forward
+        # compile and this is a plain module attr (no ContextVar revert). Skipped
+        # under grad_ckpt: the budget repartitions the joint graph, so checkpoint's
+        # recompute pass can pick a different graph than forward → CheckpointError
+        # (torch #166926); ckpt already minimizes saved activations anyway.
+        if cfg.activation_memory_budget < 1.0 and not cfg.grad_ckpt:
+            import torch._functorch.config as _functorch_config
+
+            _functorch_config.activation_memory_budget = cfg.activation_memory_budget
+            logger.info(
+                "torch.compile activation_memory_budget = %.3g "
+                "(partitioner recomputes cheap intermediates in backward)",
+                cfg.activation_memory_budget,
+            )
+        elif cfg.activation_memory_budget < 1.0 and cfg.grad_ckpt:
+            logger.info(
+                "activation_memory_budget ignored: incompatible with grad_ckpt "
+                "(and redundant under it)"
+            )
+        compile_dit_blocks(
+            model,
+            enabled=True,
+            cache_size_limit=2 * n_shapes + 8,
+            mode=cfg.compile_inductor_mode,
+            dynamic_seq=cfg.compile_dynamic_seq,
+            n_token_families=n_token_families,
+            seq_range=seq_range,
+        )
+        logger.info(
+            "torch_compile: %d block._forward compiled (mode=%s, dynamic_seq=%s); "
+            "%d distinct token counts in pool, %s.",
+            len(model.blocks),
+            cfg.compile_inductor_mode,
+            cfg.compile_dynamic_seq,
+            n_shapes,
+            (
+                f"seq_range={seq_range} (one symbolic graph)"
+                if cfg.compile_dynamic_seq
+                else "static per-shape graphs"
+            ),
+        )
 
     # Gradient checkpointing recomputes block activations in backward (teacher
     # runs under no_grad, so only the student pass holds activations; peak ~12 GB

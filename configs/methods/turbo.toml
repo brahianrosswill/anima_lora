@@ -11,7 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_N"
+output_name = "anima_turbo_M_NOGAN"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -96,7 +96,7 @@ grad_step = "random"            # which rollout step carries gradient (BOTH base
 student_lr = 2e-5
 fake_lr = 2e-5
 fake_steps_per_student_step = 4
-fake_warmup_steps = 50          # fake (critic) head-start: number of fake-only gradient
+fake_warmup_steps = 50           # fake (critic) head-start: number of fake-only gradient
                                 # updates BEFORE the main loop, so the critic is calibrated
                                 # against the student's (init ≈ teacher) x_pred before the
                                 # student LR warmup (~40 steps) ramps to full strength —
@@ -183,7 +183,7 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 # (~3 GB) only to backprop into x_pred; `grad_ckpt` below recomputes them in
 # backward instead, so the GAN term costs ~one half-depth forward, not ~3 GB.
 [gan]
-weight_gen = 0.03               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
+weight_gen = 0.0               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
 feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
 disc_lr = 1e-5                  # discriminator AdamW LR
 disc_hidden = 0                 # disc MLP hidden width; 0 → inner_dim // 2
