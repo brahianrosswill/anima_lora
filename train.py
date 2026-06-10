@@ -1559,11 +1559,11 @@ class AnimaTrainer:
                 config_util.generate_dataset_group_by_blueprint(
                     blueprint.dataset_group,
                     # Native constant-token bucketing is the only mode: the sampler
-                    # buckets into the union of the requested tier tables so
-                    # compile_blocks' flatten keys on token count, not resolution.
-                    # target_res must list every preprocessed tier (also drives the
-                    # compile token-family budget) — else non-1024 caches are
-                    # AR-snapped into a 1024 bucket and never loaded.
+                    # buckets into the full native-shape catalog so compile_blocks'
+                    # flatten keys on token count, not resolution. target_res is
+                    # inert here (passed only for signature compat) — every cached
+                    # latent exact-matches its true (W, H), so the on-disk caches
+                    # decide which tiers are present, not this list.
                     constant_token_buckets=True,
                     target_res=getattr(args, "target_res", None),
                 )
@@ -1604,6 +1604,31 @@ class AnimaTrainer:
             use_user_config=use_user_config,
             use_dreambooth_method=use_dreambooth_method,
         )
+
+    def _derive_token_budget(self, train_group, val_group):
+        """(n_token_families, seq_range) from the buckets the datasets populate.
+
+        Reads each dataset's ``bucket_manager.resos`` (the buckets at least one
+        selected image landed in) and reduces to the set of distinct token counts.
+        This sizes ``compile_blocks``' dynamo cache to exactly the tiers on disk
+        for this run — independent of ``args.target_res``. Returns ``(None, None)``
+        when no bucketed resos are available (e.g. a MinimalDataset), leaving
+        compile_blocks on its own defaults.
+        """
+        from library.datasets.buckets import token_counts_for_resos
+
+        resos: set = set()
+        for group in (train_group, val_group):
+            if group is None:
+                continue
+            for dataset in getattr(group, "datasets", []):
+                bm = getattr(dataset, "bucket_manager", None)
+                if bm is not None:
+                    resos.update(bm.resos)
+        if not resos:
+            return None, None
+        counts = token_counts_for_resos(resos)
+        return len(counts), (min(counts), max(counts))
 
     def _create_and_apply_network(
         self,
@@ -1765,17 +1790,12 @@ class AnimaTrainer:
                     "activation_memory_budget ignored: incompatible with "
                     "gradient_checkpointing (and redundant under it)"
                 )
-            target_res = getattr(args, "target_res", None)
-            n_token_families = None
-            seq_range = None
-            if target_res:
-                from library.datasets.buckets import (
-                    token_count_families,
-                    token_count_range,
-                )
-
-                n_token_families = token_count_families(target_res)
-                seq_range = token_count_range(target_res)
+            # Token-family budget derived from the buckets the dataset actually
+            # populated (see _derive_token_budget) — not args.target_res, which is
+            # a preprocess-only knob and inert at train time.
+            n_token_families, seq_range = getattr(
+                self, "_compile_token_budget", (None, None)
+            )
             dynamic_seq = bool(getattr(args, "compile_dynamic_seq", False))
             unet.compile_blocks(
                 args.dynamo_backend,
@@ -2071,6 +2091,15 @@ class AnimaTrainer:
         collator = ds.collator
         use_user_config = ds.use_user_config
         use_dreambooth_method = ds.use_dreambooth_method
+
+        # Derive the torch.compile token-family budget from the buckets the
+        # selected (path_pattern-filtered) images actually populate — NOT from
+        # args.target_res. The on-disk caches are the source of truth for which
+        # tiers are present, so this can't drift from preprocess, and a filtered
+        # run sizes the dynamo cache to only the families it really uses.
+        self._compile_token_budget = self._derive_token_budget(
+            train_dataset_group, val_dataset_group
+        )
 
         if args.debug_dataset:
             train_dataset_group.set_current_strategies()  # dataset needs to know the strategies explicitly

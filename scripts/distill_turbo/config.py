@@ -262,9 +262,20 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         nargs="+",
         default=None,
-        help="Active multi-scale tier edges (e.g. 1024 768 1280). Sizes the "
-        "compile_dynamic_seq seq bound + dynamo cache budget over those tiers. "
-        "Unset → canonical 1024 table (4032/4200).",
+        help="Override the active multi-scale tier edges (e.g. 1024 768 1280) "
+        "used to size the compile_dynamic_seq seq bound + dynamo cache budget. "
+        "Unset (the default) → derived automatically from the token-count "
+        "families present in the cached pool (data_dir).",
+    )
+    parser.add_argument(
+        "--activation_memory_budget",
+        type=float,
+        default=None,
+        help="torch.compile partitioner saved-activation fraction (<1.0 → "
+        "recompute cheap intermediates in backward, mirrors the LoRA-training "
+        "knob in base.toml). Only applies when --torch_compile is on and "
+        "grad_ckpt is off (the two repartition the same graph and conflict). "
+        "Sentinel None → TOML (activation_memory_budget, default 1.0 = off).",
     )
     parser.add_argument("--save_every", type=int, default=-1)
     parser.add_argument("--log_interval", type=int, default=-1)
@@ -511,8 +522,11 @@ class TurboConfig:
     grad_ckpt: bool
     torch_compile: bool
     compile_dynamic_seq: bool  # single symbolic-seq block graph (mark_dynamic)
-    target_res: list[int] | None  # active tier edges; None → canonical 1024 table
+    target_res: list[int] | None  # override tier edges; None → derived from cached pool
     dynamo_recompile_limit: int  # per-_forward dynamo graph budget
+    activation_memory_budget: (
+        float  # compile partitioner saved-act fraction (<1 → recompute)
+    )
 
 
 def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
@@ -961,6 +975,9 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             else (_flatten(cfg, "target_res", None))
         ),
         dynamo_recompile_limit=int(_flatten(cfg, "dynamo_recompile_limit", 64)),
+        activation_memory_budget=float(
+            _pick(args.activation_memory_budget, cfg, "activation_memory_budget", 1.0)
+        ),
     )
 
 

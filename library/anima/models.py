@@ -1642,9 +1642,10 @@ class Anima(nn.Module):
         from library.runtime.dynamo import pin_dynamo_limit
 
         # Number of distinct token-count families (== compiled block graphs).
-        # Defaults to the canonical single-scale 1024 table (2: 4032/4200);
-        # multi-scale ``--target_res`` runs pass the wider count so the dynamo
-        # cache budget grows with the active tiers instead of recompile-storming.
+        # Defaults to the canonical single-scale 1024 table (2: 4032/4200); callers
+        # pass the count derived from the buckets the dataset actually populated
+        # (train.py::_derive_token_budget) so the dynamo cache budget grows with the
+        # tiers really on disk instead of recompile-storming.
         if n_token_families is not None:
             n = n_token_families
         else:

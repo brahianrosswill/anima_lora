@@ -34,11 +34,19 @@ dynamo_recompile_limit = 64
 # Collapse the per-token-count block graphs to a single symbolic-seq graph by
 # marking only the seq-length axis dynamic (mark_dynamic) — the same path LoRA
 # training takes via base.toml's compile_dynamic_seq. Only matters when
-# torch_compile is on. Set target_res below (the active tier edges) to bound the
-# symbolic axis + dynamo budget over a multi-scale pool; unset → canonical 1024
-# table (4032/4200).
+# torch_compile is on. The symbolic-axis bound + dynamo budget are sized
+# automatically from the token-count families present in the cached pool
+# (data_dir), so no target_res is needed here. (An explicit --target_res on the
+# CLI still overrides as an escape hatch.)
 compile_dynamic_seq = true
-target_res = [1024, 768]  # or e.g. [1024, 768, 1280] for a multi-scale pool
+
+# torch.compile partitioner saved-activation fraction (same lever as base.toml's
+# main-training knob). <1.0 makes the partitioner recompute cheap intermediates
+# in backward rather than save them — reclaims VRAM at ~equal step time, useful
+# when use_custom_down_autograd is off and torch_compile is on. Only applies when
+# torch_compile is on AND grad_ckpt is off (the two repartition the same joint
+# graph and conflict → CheckpointError). 1.0 = off (default; no behavior change).
+activation_memory_budget = 0.99
 
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
@@ -177,7 +185,7 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 [gan]
 weight_gen = 0.03               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
 feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
-disc_lr = 2e-5                  # discriminator AdamW LR
+disc_lr = 1e-5                  # discriminator AdamW LR
 disc_hidden = 0                 # disc MLP hidden width; 0 → inner_dim // 2
 r1_weight = 0.0                 # approximate-R1 (APT) disc regularizer weight. 0 = off
 r1_alpha = 0.1                  # perturbation scale for the R1 input

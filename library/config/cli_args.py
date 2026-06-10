@@ -177,7 +177,7 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
     parser.add_argument(
         "--save_precision",
         type=str,
-        default=None,
+        default="bf16",
         choices=[None, "float", "fp16", "bf16"],
         help="precision in saving (None → save in the training weight dtype)",
     )

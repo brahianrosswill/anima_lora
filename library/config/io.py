@@ -487,12 +487,13 @@ def load_method_preset(
     merged: dict = {}
     provenance: dict[str, str] = {}
 
-    # `target_res` is the one preprocess.toml knob train.py also needs (it builds
-    # the bucket table + sizes the compile cache), so it lives in preprocess.toml
-    # — which survives `make update` — rather than base.toml. Seed it here as the
-    # lowest-priority layer so preset/method/CLI still override per-run. Only this
-    # key is pulled in; the other preprocess-only scalars (source_image_dir, …)
-    # are never read by training.
+    # `target_res` is a preprocess-only knob (it decides what each image is
+    # resized to). Training is now self-describing: the bucket table is the full
+    # native-shape catalog and the compile cache is sized from the buckets the
+    # cached latents actually populate, so target_res is *inert* at train time.
+    # We still seed it here (lowest priority, preset/method/CLI override) so it
+    # shows up in the snapshot/provenance for the record. Only this key is pulled
+    # in; the other preprocess-only scalars (source_image_dir, …) aren't read.
     preprocess_path = os.path.join(configs_dir, "preprocess.toml")
     if os.path.exists(preprocess_path):
         with open(preprocess_path, "r", encoding="utf-8") as f:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -64,6 +65,29 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+# `{stem}_{W:04d}x{H:04d}_anima.npz` → pixel (W, H); token count = (W//16)*(H//16).
+_LATENT_RES_RE = re.compile(r"_(\d{3,4})x(\d{3,4})_anima\.npz$")
+
+
+def _cached_token_counts(data_dir: str) -> set:
+    """Distinct token counts present in the cached latents under ``data_dir``.
+
+    Self-describing compile budget (mirrors ``train.py::_derive_token_budget``):
+    the on-disk caches are the source of truth for which tiers the distillation
+    pool spans, so the dynamo cache is sized from what's really there rather than
+    from ``target_res``. Parses the pixel (W, H) out of each paired latent's
+    filename (no per-file I/O), so it tracks the actual training sample set.
+    """
+    from library.io.cache import discover_cached_pairs
+
+    counts: set = set()
+    for img in discover_cached_pairs(data_dir):
+        m = _LATENT_RES_RE.search(os.path.basename(img.npz_path))
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            counts.add((w // 16) * (h // 16))
+    return counts
 
 
 def _step_tag(step: int) -> str:
@@ -351,11 +375,13 @@ def main():
     # spans more than the 2 CONSTANT_TOKEN_BUCKETS families.
     # compile_dynamic_seq (mirrors the LoRA-training path): when on, collapse the
     # per-token-count block graphs to one symbolic-seq graph (mark_dynamic on the
-    # seq axis only). Size the seq bound + dynamo cache over the active tiers when
-    # --target_res is given, else fall back to the canonical 1024 table.
+    # seq axis only). Size the seq bound + dynamo cache from the token-count
+    # families actually present in the cached pool (self-describing, like
+    # train.py) — target_res is preprocess-only and inert here. An explicit
+    # cfg.target_res (CLI/TOML) still overrides as an escape hatch.
     n_token_families = None
     seq_range = None
-    if cfg.compile_dynamic_seq and cfg.target_res:
+    if cfg.target_res:
         from library.datasets.buckets import (
             token_count_families,
             token_count_range,
@@ -363,6 +389,32 @@ def main():
 
         n_token_families = token_count_families(cfg.target_res)
         seq_range = token_count_range(cfg.target_res)
+    else:
+        counts = _cached_token_counts(cfg.data_dir)
+        if counts:
+            n_token_families = len(counts)
+            seq_range = (min(counts), max(counts))
+    # Partitioner saved-activation cap (mirrors train.py). Removing
+    # custom_down_autograd grows saved-for-backward intermediates; budget<1.0
+    # makes the partitioner recompute the cheap ones in backward instead. Must be
+    # set BEFORE compile_dit_blocks (partitioning happens at first-forward compile,
+    # and this is a plain module attr — no ContextVar revert). Skipped under
+    # grad_ckpt: the budget repartitions the joint graph, so checkpoint's recompute
+    # pass can pick a different graph than forward → CheckpointError (torch #166926);
+    # ckpt already minimizes saved activations, so the cap buys nothing there.
+    if cfg.torch_compile and cfg.activation_memory_budget < 1.0 and not cfg.grad_ckpt:
+        import torch._functorch.config as _functorch_config
+
+        _functorch_config.activation_memory_budget = cfg.activation_memory_budget
+        logger.info(
+            f"torch.compile activation_memory_budget = {cfg.activation_memory_budget} "
+            "(partitioner recomputes cheap intermediates in backward)"
+        )
+    elif cfg.activation_memory_budget < 1.0 and cfg.grad_ckpt:
+        logger.info(
+            "activation_memory_budget ignored: incompatible with grad_ckpt "
+            "(and redundant under it)"
+        )
     compile_dit_blocks(
         model,
         enabled=cfg.torch_compile,
@@ -382,9 +434,7 @@ def main():
             "accumulated_recompile_limit",
             len(model.blocks) * cfg.dynamo_recompile_limit,
         )
-        logger.info(
-            f"dynamo recompile_limit={rl}, accumulated_recompile_limit={arl}"
-        )
+        logger.info(f"dynamo recompile_limit={rl}, accumulated_recompile_limit={arl}")
     # `model.training` gates grad-ckpt inside block.forward; toggled per
     # forward in `_forward` below so no_grad teacher/fake forwards don't
     # incur grad-ckpt setup cost. Initial state set by the first call.

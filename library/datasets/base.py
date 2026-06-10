@@ -441,10 +441,11 @@ class BaseDataset(torch.utils.data.Dataset):
         """Assign every image to its nearest bucket resolution.
 
         With ``constant_token_buckets`` (the only training mode) buckets come
-        from the union of the ``target_res`` tier tables — native shapes, no
-        padding. ``target_res`` must list every tier preprocessed on disk
-        (defaults to ``[1024]``); non-1024 caches are otherwise AR-snapped into
-        a 1024 bucket and their real npz is never loaded.
+        from the full native-shape catalog (``all_constant_token_buckets`` — every
+        tier), so every cached latent exact-matches its true (W, H) and nothing
+        AR-snaps. ``target_res`` is preprocess-only and inert here: the on-disk
+        caches decide which tiers are present, and the compile token-family budget
+        is derived from the populated buckets (train.py), not from this arg.
         """
         logger.info("loading image sizes.")
         for info in tqdm(self.image_data.values()):

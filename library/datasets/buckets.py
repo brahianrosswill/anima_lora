@@ -197,6 +197,33 @@ def token_count_range(target_res) -> tuple[int, int]:
     return min(counts), max(counts)
 
 
+def all_constant_token_buckets() -> list:
+    """Every preprocessed tier's buckets, deduped — the full native-shape catalog.
+
+    The train-time predefined bucket set. Because every cached latent sits, by
+    construction, at one of these resolutions, ``select_bucket`` always hits the
+    exact-match branch and keeps each latent at its true (W, H) — nothing ever
+    AR-snaps. So the *on-disk caches are the source of truth* for which tiers are
+    present; ``target_res`` is a preprocess-only knob and is inert at train time
+    (you can no longer silently drop a tier's caches by omitting it). The compile
+    token-family budget is derived from the buckets actually populated by the
+    selected (path_pattern-filtered) images — see ``token_counts_for_resos``.
+    """
+    seen: set = set()
+    out: list = []
+    for edge in ALLOWED_TARGET_RES:
+        for reso in CONSTANT_TOKEN_BUCKETS_BY_EDGE[edge]:
+            if reso not in seen:
+                seen.add(reso)
+                out.append(reso)
+    return out
+
+
+def token_counts_for_resos(resos) -> set:
+    """Distinct token counts ``(W//16)*(H//16)`` over a set of (W, H) resolutions."""
+    return {(w // 16) * (h // 16) for w, h in resos}
+
+
 def _nearest_aspect_bucket(width: int, height: int, table) -> tuple[int, int]:
     """The bucket in ``table`` whose aspect ratio is closest to the image's —
     same selection rule as ``BucketManager.select_bucket`` (argmin |Δ aspect|)."""
@@ -344,14 +371,15 @@ class BucketManager:
 
     def make_buckets(self, constant_token_buckets: bool = False, target_res=None):
         if constant_token_buckets:
-            # Union of every preprocessed tier's table (default [1024] reproduces
-            # the canonical single-scale list byte-for-byte). select_bucket hits
-            # the exact-match branch for any cached reso in this set, so a
-            # multi-tier dataset keeps each latent at its true (W, H) instead of
-            # AR-snapping non-1024 caches into a 1024 bucket. target_res MUST list
-            # every tier present on disk — it also drives the compile budget
-            # (token_count_families), so the two stay in sync.
-            resos = buckets_for_edges(target_res or DEFAULT_TARGET_RES)
+            # The full native-shape catalog (every tier), so select_bucket hits the
+            # exact-match branch for any cached reso and keeps each latent at its
+            # true (W, H) — a multi-tier dataset never AR-snaps non-1024 caches into
+            # a 1024 bucket. target_res is preprocess-only and inert here: the
+            # on-disk caches are the source of truth for which tiers are present,
+            # and the compile budget is derived from the buckets actually populated
+            # (train.py), not from this list. So omitting a tier at train time can
+            # no longer silently drop its caches.
+            resos = all_constant_token_buckets()
         else:
             resos = make_bucket_resolutions(
                 self.max_reso, self.min_size, self.max_size, self.reso_steps
