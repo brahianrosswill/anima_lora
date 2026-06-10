@@ -73,32 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
         "of the first n_layers DiT blocks via monkey-patched Block.forward.",
     )
     parser.add_argument(
-        "--ip_adapter_weight",
-        type=str,
-        default=None,
-        help="IP-Adapter weight path (networks.methods.ip_adapter .safetensors). "
-        "Requires --ip_image. Modifies DiT cross-attention via parallel image KV.",
-    )
-    parser.add_argument(
-        "--ip_image",
-        type=str,
-        default=None,
-        help="Reference image path for IP-Adapter conditioning. "
-        "Encoded by the encoder named in the IP-Adapter checkpoint metadata (PE-Core by default).",
-    )
-    parser.add_argument(
-        "--ip_scale",
-        type=float,
-        default=None,
-        help="Override IP-Adapter scale (default: use ss_ip_scale from the checkpoint, typically 1.0).",
-    )
-    parser.add_argument(
-        "--ip_image_match_size",
-        action="store_true",
-        help="Auto-pick --image_size from the closest CONSTANT_TOKEN_BUCKETS entry to the "
-        "reference image's aspect ratio (overrides --image_size). Only effective with --ip_image.",
-    )
-    parser.add_argument(
         "--easycontrol_weight",
         type=str,
         default=None,

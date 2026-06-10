@@ -83,7 +83,6 @@ Each has its own method TOML and `make` entrypoint:
 |--------|--------|--------------|
 | ChimeraHydra (dual-pool MoE) | `methods/chimera.toml` | `make exp-chimera` |
 | Postfix (free + cond+ortho) | `methods/postfix.toml` | `make exp-postfix` |
-| IP-Adapter | `methods/ip_adapter.toml` | `make exp-ip-adapter` |
 | EasyControl | `methods/easycontrol.toml` | `make easycontrol` |
 | Soft Tokens (SoftREPA) | `methods/soft_tokens.toml` | `make exp-soft-tokens` |
 
@@ -166,9 +165,9 @@ validation_seed = 42
 ```
 
 `cache_dir` redirects every VAE / TE / PE sidecar to a flat,
-stem-keyed location — used so IP-Adapter and EasyControl can keep their
-source dirs (`ip-adapter-dataset/`, `easycontrol-dataset/`) purely
-user-facing while caches all land under `post_image_dataset/`.
+stem-keyed location — used so EasyControl can keep its source dir
+(`easycontrol-dataset/`) purely user-facing while caches all land
+under `post_image_dataset/`.
 
 To shallow-override the blueprint, drop a `[general]` / `[[datasets]]` block
 into the method TOML — `_apply_dataset_overrides` in `library/config/io.py`

@@ -13,7 +13,7 @@ Examples:
     python tasks.py test                     # add NOLORA=1 to run against the bare DiT
     python tasks.py download-models
     python tasks.py exp-chimera              # experimental method
-    python tasks.py exp-test-ip ref.png      # experimental inference
+    python tasks.py exp-test-turbo           # experimental inference
 
 Command implementations live under ``scripts/tasks/`` (shipped methods) and
 ``scripts/experimental_tasks/`` (unstable methods exposed under ``exp-*``).
@@ -167,7 +167,7 @@ COMMANDS = {
     "preprocess-pe": (
         preprocess.cmd_preprocess_pe,
         "Cache PE-Core vision-encoder features into the LoRA cache dir. "
-        "Consumed by IP-Adapter live-disk mode and the DCW v4 fusion head.",
+        "Consumed by CMMD validation and the DCW v4 fusion head.",
     ),
     "caption-index": (
         preprocess.cmd_caption_index,
@@ -282,15 +282,6 @@ COMMANDS = {
         "[experimental] ChimeraHydra dual-pool additive routing "
         "(content + freq pools on OrthoHydra; configs/methods/chimera.toml)",
     ),
-    "exp-ip-adapter": (
-        exp_training.cmd_ip_adapter,
-        "[experimental] IP-Adapter training (decoupled image cross-attention)",
-    ),
-    "exp-ip-adapter-preprocess": (
-        exp_training.cmd_ip_adapter_preprocess,
-        "[experimental] Alias for `preprocess` + `preprocess-pe` (IP-Adapter "
-        "reuses the LoRA pipeline's caches under post_image_dataset/lora/).",
-    ),
     "exp-byg": (
         exp_training.cmd_byg,
         "[experimental] BYG unpaired instruction-editing training (plain LoRA, "
@@ -317,10 +308,6 @@ COMMANDS = {
         exp_inference.cmd_test_spd,
         "[experimental] Inference with latest SPD fine-tune LoRA on the SPD sampler "
         "at its trained schedule (read from safetensors metadata). cfg=4.0, Euler.",
-    ),
-    "exp-test-ip": (
-        exp_inference.cmd_test_ip,
-        "[experimental] Inference with latest IP-Adapter weight. Usage: exp-test-ip <ref_image> [--prompt ... --ip_scale ...]",
     ),
     "exp-test-byg": (
         exp_inference.cmd_test_byg,

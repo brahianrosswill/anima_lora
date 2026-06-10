@@ -30,6 +30,5 @@ _METHOD_ORDER = (
     "fera",
     "chimera",
     "soft_tokens",
-    "ip_adapter",
     "easycontrol",
 )

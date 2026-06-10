@@ -10,7 +10,6 @@ STRINGS: dict[str, str] = {
     # Window / tabs
     "window_title": "Anima LoRA",
     "tab_config": "训练配置",
-    "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
@@ -251,22 +250,10 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "变体 '{name}' 已存在。",
     "basic_section": "基本",
     "advanced_section": "高级 (点击展开)",
-    # AdapterTab (IP-Adapter / EasyControl)
-    "adapter_source_dir": "源数据集:",
-    "adapter_cache_dir": "缓存目录:",
-    "adapter_n_pairs": "{n} 张图像 / {c} 条标注配对",
-    "adapter_n_caches": "已缓存 {n} 项",
-    "adapter_preprocess": "预处理 (调整大小 + VAE + 文本)",
-    "adapter_preprocess_pe": "预处理 (调整大小 + VAE + 文本 + PE)",
-    "adapter_train": "训练",
-    "adapter_stop": "停止",
     # SPD / Turbo 蒸馏配置标签页 (gui/tabs/distill_tab.py)
     "distill_general_section": "通用",
     "distill_job_running": "此标签页已有任务正在运行。",
     "distill_config_missing": "无法读取配置文件: {err}",
-    "adapter_log_placeholder": "运行输出将显示在此处……",
-    "adapter_no_dataset": "源数据集目录不存在。请创建该目录并放入图像 + 标注配对。",
-    "adapter_open_dir": "打开目录",
     "n_images": "{n} 张图像",
     # ImageViewerTab
     "directory": "目录:",
@@ -329,7 +316,7 @@ STRINGS: dict[str, str] = {
     "ec_desc_group_top": "描述符",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "模型",
-    "models_btn_tooltip": "下载或重新下载模型检查点 (Anima 基础、SAM3、MIT、IP-Adapter 编码器)",
+    "models_btn_tooltip": "下载或重新下载模型检查点 (Anima 基础、SAM3、MIT、PE 视觉编码器)",
     "update_btn": "更新",
     "update_btn_tooltip": "从 GitHub 拉取最新 anima_lora 版本并运行 uv sync",
     "update_btn_available": "更新 ●",
@@ -337,7 +324,7 @@ STRINGS: dict[str, str] = {
     "report_issue": "提交问题",
     "report_issue_tooltip": "在浏览器中打开 GitHub 问题追踪",
     "experimental_features": "🧪 实验功能",
-    "experimental_features_tooltip": "打开 Postfix 和 IP-Adapter / EasyControl 选项卡 (图像条件方法)",
+    "experimental_features_tooltip": "打开 Postfix 和 EasyControl 选项卡 (图像条件方法)",
     "experimental_features_title": "实验功能",
     # Models dialog
     "models_title": "下载模型",
@@ -351,7 +338,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + 文本编码器 + VAE",
     "model_sam3": "SAM3 — 对话气泡蒙版",
     "model_mit": "MIT — 漫画文字蒙版",
-    "model_pe": "PE-Core-L14-336 — IP-Adapter 视觉编码器",
+    "model_pe": "PE-Core-L14-336 — 视觉编码器 (CMMD 验证 / DCW)",
     # HuggingFace 认证（模型对话框）
     "models_hf_token_placeholder": "粘贴你的 HuggingFace 令牌 (hf_…)",
     "models_hf_authenticate": "认证",

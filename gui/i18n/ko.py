@@ -6,7 +6,6 @@ STRINGS: dict[str, str] = {
     # Window / tabs
     "window_title": "Anima LoRA",
     "tab_config": "학습 설정",
-    "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
@@ -258,22 +257,10 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "Variant '{name}'이(가) 이미 존재합니다.",
     "basic_section": "기본 설정",
     "advanced_section": "고급 설정 (클릭하여 펼치기)",
-    # AdapterTab (IP-Adapter / EasyControl)
-    "adapter_source_dir": "소스 데이터셋:",
-    "adapter_cache_dir": "캐시 디렉토리:",
-    "adapter_n_pairs": "이미지 {n}개 / 캡션 {c}개 쌍",
-    "adapter_n_caches": "캐시 {n}개",
-    "adapter_preprocess": "전처리 (리사이즈 + VAE + 텍스트)",
-    "adapter_preprocess_pe": "전처리 (리사이즈 + VAE + 텍스트 + PE)",
-    "adapter_train": "학습",
-    "adapter_stop": "정지",
     # SPD / Turbo 증류 설정 탭 (gui/tabs/distill_tab.py)
     "distill_general_section": "일반",
     "distill_job_running": "이 탭에서 이미 작업이 실행 중입니다.",
     "distill_config_missing": "설정 파일을 읽을 수 없습니다: {err}",
-    "adapter_log_placeholder": "실행 출력이 여기에 표시됩니다...",
-    "adapter_no_dataset": "소스 데이터셋 디렉토리가 없습니다. 디렉토리를 만들고 이미지+캡션 쌍을 넣어주세요.",
-    "adapter_open_dir": "디렉토리 열기",
     "n_images": "이미지 {n}개",
     # ImageViewerTab
     "directory": "디렉토리:",
@@ -337,7 +324,7 @@ STRINGS: dict[str, str] = {
     "ec_desc_group_top": "디스크립터",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "모델",
-    "models_btn_tooltip": "모델 체크포인트 다운로드 / 재다운로드 (Anima 베이스, SAM3, MIT, IP-Adapter 인코더)",
+    "models_btn_tooltip": "모델 체크포인트 다운로드 / 재다운로드 (Anima 베이스, SAM3, MIT, PE 비전 인코더)",
     "update_btn": "업데이트",
     "update_btn_tooltip": "GitHub에서 최신 anima_lora 릴리스를 가져오고 uv sync를 실행합니다",
     "update_btn_available": "업데이트 ●",
@@ -345,7 +332,7 @@ STRINGS: dict[str, str] = {
     "report_issue": "이슈 신고",
     "report_issue_tooltip": "브라우저에서 GitHub 이슈 트래커 열기",
     "experimental_features": "🧪 실험 기능",
-    "experimental_features_tooltip": "Postfix 및 IP-Adapter / EasyControl 탭 열기 (이미지 조건부 방식)",
+    "experimental_features_tooltip": "Postfix 및 EasyControl 탭 열기 (이미지 조건부 방식)",
     "experimental_features_title": "실험 기능",
     # Models dialog
     "models_title": "모델 다운로드",
@@ -359,7 +346,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + 텍스트 인코더 + VAE",
     "model_sam3": "SAM3 — 말풍선 마스킹",
     "model_mit": "MIT — 만화 텍스트 마스킹",
-    "model_pe": "PE-Core-L14-336 — IP-Adapter 비전 인코더",
+    "model_pe": "PE-Core-L14-336 — 비전 인코더 (CMMD 검증 / DCW)",
     # HuggingFace 인증 (모델 다이얼로그)
     "models_hf_token_placeholder": "HuggingFace 토큰을 붙여넣으세요 (hf_…)",
     "models_hf_authenticate": "인증",

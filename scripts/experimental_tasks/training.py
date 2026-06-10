@@ -1,4 +1,4 @@
-"""Experimental training entry-points: ip-adapter, turbo, spd, chimera, byg.
+"""Experimental training entry-points: turbo, spd, chimera, byg.
 
 These are wired up under ``make exp-*`` / ``python tasks.py exp-*`` to keep
 the unstable methods visually separate from the shipped ones (lora family,
@@ -12,7 +12,6 @@ translates env vars + extra argv into the right ``train.py`` (via
 
 from __future__ import annotations
 
-from scripts.tasks import preprocess as _preprocess
 from scripts.tasks._common import (
     PY,
     _preset,
@@ -98,22 +97,6 @@ def cmd_chimera(extra):
     content branch only.
     """
     train("chimera", extra)
-
-
-def cmd_ip_adapter(extra):
-    train("ip_adapter", extra)
-
-
-def cmd_ip_adapter_preprocess(extra):
-    """Full IP-Adapter preprocess.
-
-    IP-Adapter shares the LoRA pipeline's data layout — source images live in
-    ``image_dataset/`` and caches in ``post_image_dataset/lora/``. This is just
-    a convenience alias for ``make preprocess`` + ``make preprocess-pe`` so the
-    GUI's IP-Adapter tab and ``make exp-ip-adapter-preprocess`` keep working.
-    """
-    _preprocess.cmd_preprocess(extra)
-    _preprocess.cmd_preprocess_pe(extra)
 
 
 def cmd_byg(extra):

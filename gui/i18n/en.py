@@ -6,7 +6,6 @@ STRINGS: dict[str, str] = {
     # Window / tabs
     "window_title": "Anima LoRA",
     "tab_config": "Training Config",
-    "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
@@ -270,22 +269,10 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "Variant '{name}' already exists.",
     "basic_section": "Basic",
     "advanced_section": "Advanced (click to expand)",
-    # AdapterTab (IP-Adapter / EasyControl)
-    "adapter_source_dir": "Source dataset:",
-    "adapter_cache_dir": "Cache directory:",
-    "adapter_n_pairs": "{n} image / {c} caption pairs",
-    "adapter_n_caches": "{n} cached",
-    "adapter_preprocess": "Preprocess (resize + VAE + text)",
-    "adapter_preprocess_pe": "Preprocess (resize + VAE + text + PE)",
-    "adapter_train": "Train",
-    "adapter_stop": "Stop",
     # SPD / Turbo distillation config tabs (gui/tabs/distill_tab.py)
     "distill_general_section": "general",
     "distill_job_running": "A job is already running on this tab.",
     "distill_config_missing": "Could not read the config file: {err}",
-    "adapter_log_placeholder": "Run output will appear here...",
-    "adapter_no_dataset": "Source dataset directory does not exist. Create it and drop in image+caption pairs.",
-    "adapter_open_dir": "Open directory",
     "n_images": "{n} images",
     # ImageViewerTab
     "directory": "Directory:",
@@ -349,7 +336,7 @@ STRINGS: dict[str, str] = {
     "ec_desc_group_top": "descriptor",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "Models",
-    "models_btn_tooltip": "Download or re-download model checkpoints (Anima base, SAM3, MIT, IP-Adapter encoders)",
+    "models_btn_tooltip": "Download or re-download model checkpoints (Anima base, SAM3, MIT, PE vision encoder)",
     "update_btn": "Update",
     "update_btn_tooltip": "Pull the latest anima_lora release from GitHub and run uv sync",
     "update_btn_available": "Update ●",
@@ -357,7 +344,7 @@ STRINGS: dict[str, str] = {
     "report_issue": "Report Issue",
     "report_issue_tooltip": "Open the GitHub issue tracker in your browser",
     "experimental_features": "🧪 Experimental",
-    "experimental_features_tooltip": "Open Postfix and IP-Adapter / EasyControl tabs (image-conditioning methods)",
+    "experimental_features_tooltip": "Open Postfix and EasyControl tabs (image-conditioning methods)",
     "experimental_features_title": "Experimental Features",
     # Models dialog
     "models_title": "Download Models",
@@ -375,7 +362,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + text encoder + VAE",
     "model_sam3": "SAM3 — text-bubble masking",
     "model_mit": "MIT — manga text masking",
-    "model_pe": "PE-Core-L14-336 — IP-Adapter vision encoder",
+    "model_pe": "PE-Core-L14-336 — vision encoder (CMMD validation / DCW)",
     # HuggingFace authentication (Models dialog)
     "models_hf_token_placeholder": "Paste your HuggingFace token (hf_…)",
     "models_hf_authenticate": "Authenticate",

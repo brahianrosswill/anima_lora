@@ -43,7 +43,6 @@ Wired and runnable, but not part of the default stack — may break or change.
 | Doc | Description |
 |-----|-------------|
 | [experimental/chimera-hydra.md](experimental/chimera-hydra.md) | ChimeraHydra — dual-pool additive MoE (content + freq routers) over disjoint SVD subspaces |
-| [experimental/ip-adapter.md](experimental/ip-adapter.md) | IP-Adapter — decoupled image cross-attention; frozen DiT, trains resampler + per-block `to_k_ip`/`to_v_ip` |
 | [experimental/easycontrol.md](experimental/easycontrol.md) | EasyControl — extended self-attn image conditioning; frozen DiT, per-block cond LoRA + scalar gate |
 | [experimental/soft_tokens.md](experimental/soft_tokens.md) | Soft Tokens — SoftREPA per-layer × per-t soft text tokens (~1M params); frozen DiT, optional B=1 contrastive |
 | [experimental/dpdmd.md](experimental/dpdmd.md) | DP-DMD (Turbo) — diversity-preserved few-step distillation of the CFG=4 teacher into an N-step LoRA student |

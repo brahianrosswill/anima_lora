@@ -74,8 +74,6 @@ class GenerationRequest:
     lora_weight: Optional[Sequence[str]] = None
     lora_multiplier: Optional[Union[float, Sequence[float]]] = None
     soft_tokens_weight: Optional[str] = None
-    ip_adapter_weight: Optional[str] = None
-    ip_image: Optional[str] = None
     easycontrol_weight: Optional[str] = None
     easycontrol_image: Optional[str] = None
     pooled_text_proj: Optional[str] = None
@@ -140,10 +138,6 @@ class GenerationRequest:
             argv += ["--vae_chunk_size", str(self.vae_chunk_size)]
         if self.soft_tokens_weight is not None:
             argv += ["--soft_tokens_weight", self.soft_tokens_weight]
-        if self.ip_adapter_weight is not None:
-            argv += ["--ip_adapter_weight", self.ip_adapter_weight]
-        if self.ip_image is not None:
-            argv += ["--ip_image", self.ip_image]
         if self.easycontrol_weight is not None:
             argv += ["--easycontrol_weight", self.easycontrol_weight]
         if self.easycontrol_image is not None:

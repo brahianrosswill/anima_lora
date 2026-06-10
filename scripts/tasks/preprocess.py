@@ -319,10 +319,10 @@ _CAPTION_INDEX_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
 
 
 def cmd_preprocess(extra):
-    # PE features are intentionally NOT cached here — only IP-Adapter / CMMD /
-    # DCW v4 need them, and those paths chain `preprocess-pe` explicitly (see
-    # `exp-ip-adapter-preprocess`). Leaving PE out keeps the default LoRA
-    # preprocess fast on machines that won't ever use the vision tower.
+    # PE features are intentionally NOT cached here — only CMMD validation /
+    # DCW v4 need them, and those paths chain `preprocess-pe` explicitly.
+    # Leaving PE out keeps the default LoRA preprocess fast on machines that
+    # won't ever use the vision tower.
     cmd_preprocess_resize(extra)
     # The VAE/TE steps read on-disk shapes — strip the low-res convenience flags
     # AND the resize-only --target_res so their argparse never sees an arg it

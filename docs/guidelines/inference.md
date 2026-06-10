@@ -57,7 +57,6 @@ Correction / conditioning test targets (each composes with `SPECTRUM`/`MOD`):
 | `make test-spectrum-dcw` / `make test-dcw-v4-spectrum` | Spectrum + DCW (scalar / v4) |
 | `make test-smc-cfg` | SMC-CFG velocity-space correction |
 | `make test-easycontrol REF_IMAGE=…` | EasyControl image conditioning |
-| `make exp-test-ip REF_IMAGE=…` | IP-Adapter image conditioning |
 | `make exp-test-directedit PROMPT='…'` | DirectEdit on a random source image |
 | `make exp-test-directedit-dry` | DirectEdit reconstruction sanity check |
 | `make exp-test-postfix` (`-exp`, `-func`) | Postfix-tuning probes |
@@ -144,7 +143,6 @@ python inference.py … --lora_weight turbo.safetensors --infer_steps 2 --guidan
 ### Condition on a reference image
 | Goal | Flags |
 |---|---|
-| IP-Adapter (decoupled image cross-attn) | `--ip_adapter_weight … --ip_image … [--ip_scale 1.0] [--ip_image_match_size]` |
 | EasyControl (extended self-attn) | `--easycontrol_weight … --easycontrol_image … [--easycontrol_scale 1.0] [--easycontrol_image_match_size]` |
 
 ### High-resolution output that won't fit the VAE

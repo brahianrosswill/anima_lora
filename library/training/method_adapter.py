@@ -226,10 +226,6 @@ def resolve_adapters(args, network) -> list[MethodAdapter]:
     Imports each adapter lazily so this module stays cheap to import.
     """
     adapters: list[MethodAdapter] = []
-    if getattr(args, "use_ip_adapter", False):
-        from networks.methods.ip_adapter import IPAdapterMethodAdapter
-
-        adapters.append(IPAdapterMethodAdapter())
     if getattr(args, "use_easycontrol", False):
         from networks.methods.easycontrol import EasyControlMethodAdapter
 

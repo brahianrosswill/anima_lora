@@ -2,8 +2,7 @@
 
 All variants share ``INFERENCE_BASE`` from ``_common`` and add method-specific
 flags. Experimental inference commands (exp-test-postfix*, exp-test-prefix,
-exp-test-ref, exp-test-ip) live in
-``scripts/experimental_tasks/inference.py``.
+exp-test-ref) live in ``scripts/experimental_tasks/inference.py``.
 """
 
 from __future__ import annotations

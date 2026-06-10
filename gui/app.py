@@ -32,7 +32,6 @@ from gui.i18n import (
     save_language,
     t,
 )
-from gui.tabs.adapter_tab import IPAdapterTab
 from gui.tabs.config_tab import ConfigTab
 from gui.tabs.easycontrol_tab import EasyControlTab
 from gui.tabs.image_tab import ImageViewerTab
@@ -299,8 +298,8 @@ class MainWindow(QMainWindow):
         # Standard set: the official adapter families — plain LoRA (with
         # hardware variants), T-LoRA (stacked with OrthoLoRA by default, plus
         # a low-VRAM sibling), and HydraLoRA. Postfix and the
-        # image-conditioning adapters (IP-Adapter / EasyControl) live behind
-        # the experimental toggle.
+        # image-conditioning adapter (EasyControl) live behind the
+        # experimental toggle.
         # The TensorBoard runs panel is a single shared instance (the run list
         # is method-agnostic). It's reached via the top-bar TensorBoard toggle
         # rather than a tab in each set. Both ConfigTab and MethodsTab keep a
@@ -325,13 +324,12 @@ class MainWindow(QMainWindow):
         # adapters. MethodsTab folds every trainable experimental method behind
         # one dropdown — FeRA / ChimeraHydra / Soft Tokens (flat train.py
         # methods) plus SPD / Turbo (bespoke distill loops) — so they no longer
-        # need a tab each. IP-Adapter and EasyControl have their own
-        # preprocess/dataset lifecycles, so they keep dedicated tabs.
+        # need a tab each. EasyControl has its own preprocess/dataset
+        # lifecycle, so it keeps a dedicated tab.
         self.experimental_tabs = QTabWidget()
         self.experimental_tabs.addTab(
             MethodsTab(tb_panel=self._tb_tab.panel), t("tab_methods")
         )
-        self.experimental_tabs.addTab(IPAdapterTab(), t("tab_ip_adapter"))
         self.experimental_tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
 
         self.tab_stack = QStackedWidget()

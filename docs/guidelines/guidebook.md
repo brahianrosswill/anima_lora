@@ -232,7 +232,7 @@ make preprocess              # Run all three steps (for LoRA / standard training
 make preprocess-resize       # 1) image_dataset/ → post_image_dataset/resized/
 make preprocess-vae          # 2) VAE latent caching → post_image_dataset/lora/
 make preprocess-te           # 3) Text encoder output caching → post_image_dataset/lora/
-make preprocess-pe           # (Optional) PE-Core vision encoder feature caching — IP-Adapter only
+make preprocess-pe           # (Optional) PE-Core vision encoder feature caching — CMMD validation / DCW v4 only
 ```
 
 > **⚠️ Caches are reused — they are never automatically deleted.**
@@ -264,7 +264,7 @@ make preprocess-pe           # (Optional) PE-Core vision encoder feature caching
 
 ### 6.4 PE Vision Feature Caching (Optional)
 
-- Only needed for IP-Adapter training (and the DCW v4 fusion head)
+- Only needed for CMMD validation and the DCW v4 fusion head
 - Pre-computes PE-Core-L14-336 vision encoder outputs so the vision encoder doesn't need to be loaded during training
 - Cache location: `post_image_dataset/lora/{stem}_anima_pe.safetensors`
 

@@ -170,7 +170,7 @@ validation_seed      = 42
 | `validation_split` | *(commented)* | **Fractional** alternative (e.g. `0.025`). Ignored when `validation_split_num > 0`. |
 | `validation_seed` | `42` | Seed for the deterministic shuffle before the split. |
 | `image_dir` | `{resized_image_dir}` | Subset image source. The `{…}` template resolves against the top-level path keys. |
-| `cache_dir` | `{lora_cache_dir}` | Redirects **every** VAE/TE/PE sidecar to a flat, stem-keyed location. IP-Adapter & EasyControl use this to keep their source dirs user-facing while caches land under `post_image_dataset/`. |
+| `cache_dir` | `{lora_cache_dir}` | Redirects **every** VAE/TE/PE sidecar to a flat, stem-keyed location. EasyControl uses this to keep its source dir user-facing while caches land under `post_image_dataset/`. |
 | `num_repeats` | `1` | How many times the subset is cycled per epoch. Usually leave at 1. |
 | `recursive` | `true` | Walk subfolders under `image_dir`. Caches/resized output stay flat, so **image stems must be unique across the whole tree** (the trainer enforces this). |
 

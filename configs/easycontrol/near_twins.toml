@@ -60,8 +60,8 @@ target_res = [896, 1024]
 # output_name defaults to anima_easycontrol_<name>; omit the table entirely to
 # train with the plain easycontrol method defaults.
 [training]
-network_dim = 32
-network_alpha = 32
+network_dim = 48
+network_alpha = 48
 masked_loss=false
 target_res = [896, 1024]
 
@@ -73,9 +73,9 @@ network_args = [
 ]
 
 learning_rate = 2e-5
-max_train_epochs = 24
-save_every_n_epochs = 24
-checkpointing_epochs = 24
+max_train_epochs = 12
+save_every_n_epochs = 12
+checkpointing_epochs = 12
 
 easycontrol_cond_noise_max = 0.0
 caption_dropout_rate = 1.0
@@ -87,6 +87,7 @@ easycontrol_drop_p=0.0
 # gradient on the edit instead of the copy-through the extended attention gives
 # for free. Knobs: cond_diff_loss_floor=0.2 / _blur=1.5 / _quantile=0.9.
 cond_diff_loss = true
+cond_diff_loss_floor = 0.01
 
 [general]
 caption_extension = '.txt'

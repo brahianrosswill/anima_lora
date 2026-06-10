@@ -6,7 +6,6 @@ STRINGS: dict[str, str] = {
     # Window / tabs
     "window_title": "Anima LoRA",
     "tab_config": "学習設定",
-    "tab_ip_adapter": "IP-Adapter",
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
@@ -260,22 +259,10 @@ STRINGS: dict[str, str] = {
     "new_variant_exists": "バリアント '{name}' は既に存在します。",
     "basic_section": "基本",
     "advanced_section": "詳細 (クリックして展開)",
-    # AdapterTab (IP-Adapter / EasyControl)
-    "adapter_source_dir": "ソースデータセット:",
-    "adapter_cache_dir": "キャッシュディレクトリ:",
-    "adapter_n_pairs": "{n} 枚の画像 / {c} 件のキャプションペア",
-    "adapter_n_caches": "{n} 件キャッシュ済み",
-    "adapter_preprocess": "前処理 (リサイズ + VAE + テキスト)",
-    "adapter_preprocess_pe": "前処理 (リサイズ + VAE + テキスト + PE)",
-    "adapter_train": "学習",
-    "adapter_stop": "停止",
     # SPD / Turbo 蒸留設定タブ (gui/tabs/distill_tab.py)
     "distill_general_section": "全般",
     "distill_job_running": "このタブでは既にジョブが実行中です。",
     "distill_config_missing": "設定ファイルを読み込めませんでした: {err}",
-    "adapter_log_placeholder": "実行出力がここに表示されます...",
-    "adapter_no_dataset": "ソースデータセットのディレクトリが存在しません。ディレクトリを作成して画像とキャプションのペアを配置してください。",
-    "adapter_open_dir": "ディレクトリを開く",
     "n_images": "{n} 枚の画像",
     # ImageViewerTab
     "directory": "ディレクトリ:",
@@ -338,7 +325,7 @@ STRINGS: dict[str, str] = {
     "ec_desc_group_top": "ディスクリプター",
     # Top-bar buttons (models / update / report issue)
     "models_btn": "モデル",
-    "models_btn_tooltip": "モデルチェックポイントをダウンロードまたは再ダウンロードします (Anima ベース、SAM3、MIT、IP-Adapter エンコーダー)",
+    "models_btn_tooltip": "モデルチェックポイントをダウンロードまたは再ダウンロードします (Anima ベース、SAM3、MIT、PE ビジョンエンコーダー)",
     "update_btn": "更新",
     "update_btn_tooltip": "GitHub から最新の anima_lora リリースを取得して uv sync を実行します",
     "update_btn_available": "更新 ●",
@@ -346,7 +333,7 @@ STRINGS: dict[str, str] = {
     "report_issue": "問題を報告",
     "report_issue_tooltip": "ブラウザで GitHub Issue トラッカーを開きます",
     "experimental_features": "🧪 実験的機能",
-    "experimental_features_tooltip": "Postfix および IP-Adapter / EasyControl タブを開きます (画像条件付け手法)",
+    "experimental_features_tooltip": "Postfix および EasyControl タブを開きます (画像条件付け手法)",
     "experimental_features_title": "実験的機能",
     # Models dialog
     "models_title": "モデルのダウンロード",
@@ -360,7 +347,7 @@ STRINGS: dict[str, str] = {
     "model_anima": "Anima — DiT + テキストエンコーダー + VAE",
     "model_sam3": "SAM3 — テキストバブルマスキング",
     "model_mit": "MIT — 漫画テキストマスキング",
-    "model_pe": "PE-Core-L14-336 — IP-Adapter ビジョンエンコーダー",
+    "model_pe": "PE-Core-L14-336 — ビジョンエンコーダー (CMMD 検証 / DCW)",
     # HuggingFace 認証 (モデルダイアログ)
     "models_hf_token_placeholder": "HuggingFace トークンを貼り付けてください (hf_…)",
     "models_hf_authenticate": "認証",

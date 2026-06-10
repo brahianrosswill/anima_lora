@@ -128,43 +128,13 @@ class BaseDataset(torch.utils.data.Dataset):
             "reverse_instruction",
         )
 
-        # IP-Adapter cached PE/vision features (sibling sidecars). Set via
-        # `dataset.ip_features_cache_to_disk = True; dataset.ip_features_encoder = "pe"`
-        # after construction. When enabled, __getitem__ loads
-        # ``{stem}_anima_{encoder}.safetensors`` for every image and exposes
-        # the stacked features as ``example["ip_features"]`` so train.py can
-        # skip live PE encoding (and the dataset can keep cache_latents=true).
-        self.ip_features_cache_to_disk: bool = False
-        self.ip_features_encoder: str = "pe"
-        # Force the cached-latent branches to ALSO load the source image into
-        # ``example["images"]`` (in addition to ``example["latents"]``). Used
-        # by IP-Adapter live PE encoding (PE-LoRA, or `cache_latents=true`
-        # alongside non-cached PE features) so VAE latents stay cached while
-        # the PE encoder gets a fresh image every step. Caller is responsible
-        # for ensuring `subset.random_crop=False` so the live image matches
-        # the deterministic crop baked into the cached latent.
-        self.force_load_images_for_ip: bool = False
-
-        # IP-Adapter distinct-pair (identity) training. When an
-        # IdentityPairSampler is attached via ``setup_identity_pairs`` the
-        # reference fed to the IP path (``example["ip_features"]``) is decoupled
-        # from the VAE target: with probability ``ip_pair_prob`` a *different*
-        # image of the target's identity supplies the PE features, removing the
-        # self-pair copy shortcut. ``self`` (no sampler) = bit-identical legacy
-        # behavior. See docs/proposal/ip-adapter-identity-pairs.md.
-        self.identity_pair_sampler = None  # IdentityPairSampler | None
-        self.ip_pair_prob: float = 0.8
-        self.ip_pair_caption_strip_p: float = 0.0
-        self.ip_pair_is_validation: bool = False
-        self._ip_pair_strip_warned: bool = False
-
         # Soft-tokens contrastive negatives. When a sampler is attached via
         # ``setup_contrastive_negatives`` each example carries
         # ``neg_crossattn_emb`` of shape (B, k, S, D): k cached text embeddings
         # of *unrelated* images, used as InfoNCE negatives. Reuses the
         # IdentityPairSampler's ``shuffled`` policy (Phase 1). Decoupled from the
-        # VAE target — same cached-feature-swap trick as IP-Adapter pairs, but
-        # the swapped feature is the text embedding, not the PE feature. See
+        # VAE target — an unrelated stem's cached feature replaces the target's,
+        # but the swapped feature is the text embedding, not a vision feature. See
         # docs/proposal/soft_tokens_contrastive.md.
         self.contrastive_neg_sampler = None  # IdentityPairSampler | None
         self.contrastive_neg_k: int = 1
@@ -1121,138 +1091,6 @@ class BaseDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._length
 
-    def _try_load_ip_features(self, image_abs_path: str) -> Optional[torch.Tensor]:
-        """Load ``{stem}_anima_{encoder}.safetensors`` produced by
-        ``scripts/preprocess/cache_pe_encoder.py``.
-
-        Looks first in the subset's ``cache_dir`` (when set) and falls back to
-        the legacy sidecar location next to the source image, so existing
-        datasets keep working unchanged.
-
-        Returns a ``[T_pe, d_enc]`` float tensor, or ``None`` if disabled. When
-        the flag is on but the file is missing, raises so the user gets a clear
-        pointer to re-run ``make preprocess-pe`` instead of silently training
-        with a partially-cached dataset.
-        """
-        if not self.ip_features_cache_to_disk:
-            return None
-        from safetensors.torch import load_file
-
-        stem = os.path.splitext(os.path.basename(image_abs_path))[0]
-        suffix = f"_anima_{self.ip_features_encoder}.safetensors"
-        subset = self.image_to_subset.get(image_abs_path)
-        cache_dir = getattr(subset, "cache_dir", None) if subset is not None else None
-        image_dir = getattr(subset, "image_dir", None) if subset is not None else None
-        candidates: list[str] = []
-        if cache_dir:
-            # Nested-mirror lookup first (image_dataset/charA/img1.png →
-            # cache_dir/charA/img1_anima_pe.safetensors); fall back to the
-            # legacy flat layout so caches written before nested support
-            # still resolve when the source image sits at the tree root.
-            from library.io.cache import resolve_cache_path
-
-            nested = resolve_cache_path(
-                image_abs_path, suffix, cache_dir=str(cache_dir), image_dir=image_dir
-            )
-            candidates.append(nested)
-            flat = os.path.join(str(cache_dir), stem + suffix)
-            if flat != nested:
-                candidates.append(flat)
-        candidates.append(os.path.join(os.path.dirname(image_abs_path), stem + suffix))
-        cache_path = next((c for c in candidates if os.path.exists(c)), None)
-        if cache_path is None:
-            raise FileNotFoundError(
-                f"PE feature cache missing for {image_abs_path}. "
-                f"Looked in: {candidates}. Run `make preprocess-pe`, or set "
-                f"ip_features_cache_to_disk=false to fall back to live PE encoding."
-            )
-        sd = load_file(cache_path)
-        feats = sd.get("image_features")
-        if feats is None:
-            raise KeyError(
-                f"Cache {cache_path} has no 'image_features' key; "
-                f"keys={list(sd.keys())}. Re-run `make preprocess-pe`."
-            )
-        # Hand back the on-disk dtype unchanged (bf16 by default; see
-        # scripts/preprocess/cache_pe_encoder.py --dtype). The IP-Adapter resampler
-        # runs in bf16, so upcasting to fp32 here only doubles CPU memory and
-        # H2D bandwidth before being cast right back down.
-        return feats
-
-    def setup_identity_pairs(
-        self,
-        index_path: str,
-        *,
-        mode: str,
-        prob: float,
-        min_level: str,
-        caption_strip_p: float,
-        is_validation: bool,
-    ) -> None:
-        """Attach an IdentityPairSampler so ``__getitem__`` draws a distinct
-        same-identity reference for the IP path. ``mode`` is one of
-        ``identity`` / ``identity_cross_artist`` (``self`` should not call
-        this). For training the candidate pool is restricted to this dataset's
-        registered stems (no validation-image leakage); for validation it spans
-        the whole index so each held-out target can reach its identity siblings
-        in the training pool (the deployment condition)."""
-        from library.datasets.identity_pairs import IdentityPairSampler
-
-        registered = {
-            os.path.splitext(os.path.basename(info.absolute_path))[0]
-            for info in self.image_data.values()
-        }
-        restrict = None if is_validation else registered
-        self.identity_pair_sampler = IdentityPairSampler(
-            index_path,
-            min_level=min_level,
-            cross_artist=(mode == "identity_cross_artist"),
-            restrict_stems=restrict,
-        )
-        self.ip_pair_prob = float(prob)
-        self.ip_pair_caption_strip_p = float(caption_strip_p)
-        self.ip_pair_is_validation = bool(is_validation)
-        n_missing = sum(1 for s in registered if not self.identity_pair_sampler.has(s))
-        if n_missing:
-            logger.warning(
-                f"[ip-pair] {n_missing}/{len(registered)} registered stems are "
-                f"absent from {index_path} (will self-pair). Re-run "
-                f"`make caption-index` if the dataset changed."
-            )
-
-    def _load_ip_features_for_stem(
-        self, stem: str, subset, rel_dir: str
-    ) -> Optional[torch.Tensor]:
-        """Load a *reference* stem's cached PE features by reconstructing its
-        nested cache path (``cache_dir/<rel_dir>/<stem>_anima_<enc>.safetensors``,
-        with a flat fallback). Unlike ``_try_load_ip_features`` this resolves a
-        stem that may not be a registered image of this dataset (the pair
-        partner often lives in a different subset/split)."""
-        if not self.ip_features_cache_to_disk:
-            return None
-        from safetensors.torch import load_file
-
-        suffix = f"_anima_{self.ip_features_encoder}.safetensors"
-        cache_dir = getattr(subset, "cache_dir", None) if subset is not None else None
-        candidates: list[str] = []
-        if cache_dir:
-            if rel_dir:
-                candidates.append(os.path.join(str(cache_dir), rel_dir, stem + suffix))
-            candidates.append(os.path.join(str(cache_dir), stem + suffix))
-        cache_path = next((c for c in candidates if os.path.exists(c)), None)
-        if cache_path is None:
-            raise FileNotFoundError(
-                f"PE feature cache missing for reference stem {stem!r}. "
-                f"Looked in: {candidates}. Run `make preprocess-pe`."
-            )
-        feats = load_file(cache_path).get("image_features")
-        if feats is None:
-            raise KeyError(
-                f"Cache {cache_path} has no 'image_features' key. "
-                f"Re-run `make preprocess-pe`."
-            )
-        return feats
-
     def _load_cond_latent(
         self, subset, image_info, flipped: bool
     ) -> Optional[torch.Tensor]:
@@ -1374,9 +1212,9 @@ class BaseDataset(torch.utils.data.Dataset):
         self, stem: str, subset, rel_dir: str
     ) -> Optional[torch.Tensor]:
         """Load a *negative* stem's cached text embedding (post-LLM-adapter
-        ``crossattn_emb``) by reconstructing its nested cache path. Mirrors
-        ``_load_ip_features_for_stem`` but swaps the PE feature for the TE
-        feature (``{stem}_anima_te.safetensors``). Returns ``(S, D)`` or None."""
+        ``crossattn_emb``) by reconstructing its nested cache path
+        (``cache_dir/<rel_dir>/<stem>_anima_te.safetensors``, with a flat
+        fallback). Returns ``(S, D)`` or None."""
         from safetensors import safe_open
 
         suffix = "_anima_te.safetensors"
@@ -1403,23 +1241,6 @@ class BaseDataset(torch.utils.data.Dataset):
             f"TE cache {cache_path} has no 'crossattn_emb' key — the negative "
             f"requires cache_llm_adapter_outputs=true. Re-run `make preprocess-te`."
         )
-
-    @staticmethod
-    def _strip_identity_tags(caption: str, meta: dict) -> str:
-        """Drop the target's character/copyright tags from a comma-separated
-        caption (case-insensitive), so identity must flow through the IP image
-        path rather than the text. Leaves all other tags (incl. artist) intact.
-        No-op when ``caption`` carries no comma structure or no identity tag
-        matches."""
-        drop = {
-            t.strip().lower()
-            for t in (meta.get("character", []) + meta.get("copyright", []))
-            if t.strip()
-        }
-        if not drop or "," not in caption:
-            return caption
-        kept = [tok for tok in caption.split(",") if tok.strip().lower() not in drop]
-        return ",".join(kept)
 
     def _try_load_inversion_runs(self, image_abs_path: str) -> Optional[torch.Tensor]:
         """Load <stem>_inverted_run{0..N-1}.safetensors from self.inversion_dir.
@@ -1508,33 +1329,6 @@ class BaseDataset(torch.utils.data.Dataset):
                 out[f"{role}_mask"] = mask
         return out
 
-    def _load_image_at_bucket(self, subset, image_info, flipped: bool) -> torch.Tensor:
-        """Reload the source image at bucket resolution for IP-Adapter live
-        PE encoding alongside cached latents.
-
-        Skips augmentation, alpha-mask, and face-crop logic — those are
-        already baked into the cached latent. PE will resize to its own
-        bucket on the GPU side, so we only need a tensor that matches the
-        latent's spatial alignment (resize to bucket + flip if the latent
-        is its flipped variant).
-        """
-        from library.datasets.image_utils import trim_and_resize_if_required
-
-        img, _, _, _, _ = self.load_image_with_face_info(
-            subset, image_info.absolute_path, subset.alpha_mask
-        )
-        img, _, _ = trim_and_resize_if_required(
-            False,  # force deterministic crop — must match the cached latent
-            img,
-            image_info.bucket_reso,
-            image_info.resized_size,
-            resize_interpolation=image_info.resize_interpolation,
-        )
-        if flipped:
-            img = img[:, ::-1, :].copy()
-        img = img[:, :, :3]
-        return self.image_transforms(img)
-
     def __getitem__(self, index):
         bucket = self.bucket_manager.buckets[self.buckets_indices[index].bucket_index]
         bucket_batch_size = self.buckets_indices[index].bucket_batch_size
@@ -1561,8 +1355,6 @@ class BaseDataset(torch.utils.data.Dataset):
         text_encoder_outputs_list = []
         custom_attributes = []
         inversion_runs_list: List[Optional[torch.Tensor]] = []
-        ip_features_list: List[Optional[torch.Tensor]] = []
-        ip_features_shuffled_list: List[Optional[torch.Tensor]] = []
         # Soft-tokens contrastive negatives: per-image (k, S, D) stack of cached
         # negative text embeddings, or None when no sampler is attached.
         neg_crossattn_list: List[Optional[torch.Tensor]] = []
@@ -1595,10 +1387,7 @@ class BaseDataset(torch.utils.data.Dataset):
                         else torch.flip(image_info.alpha_mask, [1])
                     )
 
-                if self.force_load_images_for_ip:
-                    image = self._load_image_at_bucket(subset, image_info, flipped)
-                else:
-                    image = None
+                image = None
             elif image_info.latents_npz is not None:
                 latents, original_size, crop_ltrb, flipped_latents, alpha_mask = (
                     self.latents_caching_strategy.load_latents_from_disk(
@@ -1615,10 +1404,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 if alpha_mask is not None:
                     alpha_mask = torch.FloatTensor(alpha_mask)
 
-                if self.force_load_images_for_ip:
-                    image = self._load_image_at_bucket(subset, image_info, flipped)
-                else:
-                    image = None
+                image = None
             else:
                 img, _, _, _, _ = self.load_image_with_face_info(
                     subset, image_info.absolute_path, subset.alpha_mask
@@ -1707,73 +1493,16 @@ class BaseDataset(torch.utils.data.Dataset):
             target_sizes_hw.append((int(target_size[1]), int(target_size[0])))
             flippeds.append(flipped)
 
-            # IP-Adapter distinct-pair resolution. Decide which stem's PE
-            # features feed the IP path (decoupled from this VAE target), and
-            # whether to strip the target's identity tokens from the caption so
-            # the identity has to flow through the image path, not the text.
-            ip_ref_stem, ip_ref_subset, ip_ref_reldir = (
-                None,
-                subset,
-                "",
-            )
-            ip_shuffled_stem = None
-            strip_identity = False
-            sampler = self.identity_pair_sampler
             target_stem = os.path.splitext(os.path.basename(image_info.absolute_path))[
                 0
             ]
-            if (
-                sampler is not None
-                and self.ip_features_cache_to_disk
-                and sampler.has(target_stem)
-            ):
-                if self.ip_pair_is_validation:
-                    # Deterministic per target so the matched/shuffled deltas
-                    # are stable across epochs (the held-out gate).
-                    drng = random.Random(self.seed ^ (hash(target_stem) & 0xFFFFFFFF))
-                    ip_ref_stem, _ = sampler.resolve(target_stem, drng)
-                    ip_shuffled_stem, _ = sampler.shuffled(target_stem, drng)
-                else:
-                    if random.random() < self.ip_pair_prob:
-                        ip_ref_stem, _ = sampler.resolve(target_stem, random)
-                    else:
-                        ip_ref_stem = target_stem  # self-pair in the mix
-                    strip_identity = (
-                        ip_ref_stem != target_stem
-                        and self.ip_pair_caption_strip_p > 0.0
-                        and random.random() < self.ip_pair_caption_strip_p
-                    )
-                if ip_ref_stem and ip_ref_stem != target_stem:
-                    ip_ref_reldir = sampler.rel_dir(ip_ref_stem)
 
             caption = image_info.caption
-            if strip_identity:
-                caption = self._strip_identity_tags(
-                    caption, sampler.image_meta.get(target_stem, {})
-                )
 
             tokenization_required = (
                 self.text_encoder_output_caching_strategy is None
                 or self.text_encoder_output_caching_strategy.is_partial
             )
-            # The caption-leakage strip only reaches the model when captions
-            # are tokenized live. With cached TE outputs the model reads the
-            # full (identity-bearing) embedding regardless, so the strip is
-            # inert — warn once instead of silently doing nothing.
-            if (
-                sampler is not None
-                and not self.ip_pair_is_validation
-                and self.ip_pair_caption_strip_p > 0.0
-                and not tokenization_required
-                and image_info.text_encoder_outputs_npz is not None
-                and not self._ip_pair_strip_warned
-            ):
-                self._ip_pair_strip_warned = True
-                logger.warning(
-                    "[ip-pair] ip_pair_caption_strip_p>0 but text-encoder "
-                    "outputs are cached — the strip is inert. Set "
-                    "cache_text_encoder_outputs=false for the guard to take effect."
-                )
             text_encoder_outputs = None
             input_ids = None
 
@@ -1809,29 +1538,6 @@ class BaseDataset(torch.utils.data.Dataset):
                 )
             else:
                 inversion_runs_list.append(None)
-
-            if ip_ref_stem is None or ip_ref_stem == target_stem:
-                ip_features_list.append(
-                    self._try_load_ip_features(image_info.absolute_path)
-                )
-            else:
-                ip_features_list.append(
-                    self._load_ip_features_for_stem(
-                        ip_ref_stem, ip_ref_subset, ip_ref_reldir
-                    )
-                )
-            if ip_shuffled_stem is not None and ip_shuffled_stem != target_stem:
-                ip_features_shuffled_list.append(
-                    self._load_ip_features_for_stem(
-                        ip_shuffled_stem, subset, sampler.rel_dir(ip_shuffled_stem)
-                    )
-                )
-            else:
-                ip_features_shuffled_list.append(
-                    self._try_load_ip_features(image_info.absolute_path)
-                    if ip_shuffled_stem is not None
-                    else None
-                )
 
             # Soft-tokens contrastive negatives: draw k unrelated stems and load
             # their cached text embeddings. Deterministic per target on the
@@ -2016,22 +1722,6 @@ class BaseDataset(torch.utils.data.Dataset):
         else:
             example["inversion_runs"] = None
             example["inversion_mask"] = None
-
-        # IP-Adapter cached PE features. All samples in a bucket share the
-        # training resolution and therefore the same PE bucket -> same T_pe,
-        # so a plain stack works.
-        if ip_features_list and ip_features_list[0] is not None:
-            example["ip_features"] = torch.stack(ip_features_list, dim=0)
-        else:
-            example["ip_features"] = None
-        # Validation-only shuffled (unrelated) reference for the
-        # IPAdapterMethodAdapter shuffled_ref baseline. None outside validation.
-        if ip_features_shuffled_list and ip_features_shuffled_list[0] is not None:
-            example["ip_features_shuffled"] = torch.stack(
-                ip_features_shuffled_list, dim=0
-            )
-        else:
-            example["ip_features_shuffled"] = None
 
         # Soft-tokens contrastive negatives: (B, k, S, D) cached text embeddings.
         # All cached crossattn_emb share the padded sequence length, so a plain

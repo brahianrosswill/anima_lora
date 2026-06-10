@@ -1,10 +1,10 @@
 """Experimental inference entry-points (exp-test-* commands).
 
-Covers the unstable methods kept under ``make exp-*``: soft tokens, IP-Adapter,
-plus the DirectEdit + postfix-tail inversion probes. Reference-image variants
-(exp-test-ip) accept REF_IMAGE env or first positional arg, copy the ref
-alongside the generated output. (EasyControl graduated to the shipped
-``test-easycontrol`` — see ``scripts/tasks/inference.py``.)
+Covers the unstable methods kept under ``make exp-*``: soft tokens, BYG, plus
+the DirectEdit + postfix-tail inversion probes. Reference-image variants accept
+REF_IMAGE env or first positional arg, copy the ref alongside the generated
+output. (EasyControl graduated to the shipped ``test-easycontrol`` — see
+``scripts/tasks/inference.py``; IP-Adapter was downgraded to ``bench/ip_adapter/``.)
 """
 
 from __future__ import annotations
@@ -212,76 +212,6 @@ def cmd_test_spd(extra):
     run([*cmd, *extra])
 
 
-def cmd_test_ip(extra):
-    """Inference with latest IP-Adapter weight.
-
-    Reference image is taken from REF_IMAGE env or the first positional arg.
-    Falls back to a random image from ``post_image_dataset/resized/`` (the
-    IP-Adapter source layout) when neither is supplied.
-    PROMPT, NEG, IP_SCALE env vars override defaults. Saves to output/tests/ip/
-    and copies the ref image alongside the generated output as ``<name>_ref.png``.
-
-    Examples:
-      python tasks.py exp-test-ip ref.png --prompt "a girl in a coffee shop"
-      REF_IMAGE=ref.png IP_SCALE=0.8 python tasks.py exp-test-ip
-      python tasks.py exp-test-ip                 # random ref from post_image_dataset/resized/
-    """
-    ref_image = os.environ.get("REF_IMAGE", "").strip()
-    if not ref_image and extra and not extra[0].startswith("-"):
-        ref_image = extra[0]
-        extra = extra[1:]
-    if not ref_image:
-        ref_image = _random_ref_image(ROOT / "post_image_dataset" / "resized") or ""
-    if not ref_image:
-        print(
-            "Usage: python tasks.py exp-test-ip <ref_image> [extra...]\n"
-            "   or: REF_IMAGE=path/to/ref.png python tasks.py exp-test-ip [extra...]\n"
-            "   (no ref given and post_image_dataset/resized/ is empty)",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    save_dir = ROOT / "output" / "tests" / "ip"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    args = [
-        *INFERENCE_BASE,
-        "--save_path",
-        str(save_dir),
-        "--ip_adapter_weight",
-        str(latest_output("anima_ip_adapter")),
-        "--ip_image",
-        ref_image,
-        "--ip_image_match_size",
-    ]
-    if scale := os.environ.get("IP_SCALE"):
-        args += ["--ip_scale", scale]
-    # Default is a coherent *target*-scene prompt with NO character/copyright
-    # tag, so any identity match must come through the IP image rather than the
-    # text path. (Distinct-pair training pairs the target's own caption with the
-    # denoised latent; identity flows from a *different* ref image's PE features.
-    # A thin prompt like "double peace" under-constrains the scene -> garbage.)
-    default_prompt = (
-        "masterpiece, best quality, score_7, safe. 1girl, solo, standing in a "
-        "cafe, holding a coffee cup, looking at viewer, smile, soft lighting."
-    )
-    args += ["--prompt", os.environ.get("PROMPT") or default_prompt]
-    if neg := os.environ.get("NEG"):
-        args += ["--negative_prompt", neg]
-    args += list(extra)
-    run(args)
-
-    pngs = sorted(
-        (p for p in save_dir.glob("*.png") if not p.name.endswith("_ref.png")),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if pngs:
-        ref_dst = pngs[0].with_name(pngs[0].stem + "_ref.png")
-        shutil.copy(ref_image, ref_dst)
-        print(f"  > Ref pasted: {ref_dst}")
-
-
 def cmd_test_directedit(extra):
     """DirectEdit on a random source image, seeded by wd-swinv2-tagger-v3.
 
@@ -305,7 +235,7 @@ def cmd_test_directedit(extra):
       REF_IMAGE=foo.png make exp-test-directedit PROMPT='glasses'
       python tasks.py exp-test-directedit foo.png --prompt 'smile'
     """
-    # 1. Resolve source image — same logic as cmd_test_ip / cmd_test_easycontrol.
+    # 1. Resolve source image — same logic as the other reference-image tests.
     ref_image = os.environ.get("REF_IMAGE", "").strip()
     if not ref_image and extra and not extra[0].startswith("-"):
         ref_image = extra[0]
