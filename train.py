@@ -2545,9 +2545,11 @@ class AnimaTrainer:
             accelerator.end_training()
             optimizer_eval_fn()
 
-            # Deferred sample decode: sample latents were stashed per epoch (the
-            # VAE was never brought to GPU mid-run, to avoid OOM). Decode them
-            # now that the loop has freed its activation / block-swap memory.
+            # Catch-all sample decode for any latents not already decoded inline
+            # (block-swapping runs defer the whole batch to here, and a latent
+            # that failed an inline decode is left on disk for retry). The VAE
+            # gets the full budget now that the loop has freed its activation /
+            # block-swap memory; no-op when inline decode already drained them.
             # Park the DiT on CPU first so the VAE decode gets the full budget.
             if is_main_process and args.sample_prompts:
                 try:

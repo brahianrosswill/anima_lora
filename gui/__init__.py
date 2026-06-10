@@ -246,6 +246,7 @@ _GROUPS = {
         "sample_prompts",
         "sample_every_n_epochs",
         "sample_at_first",
+        "sample_decode_inline",
     },
     "Performance": {
         "attn_mode",
@@ -330,6 +331,7 @@ _BASIC = {
     "sample_prompts",
     "sample_every_n_epochs",
     "sample_at_first",
+    "sample_decode_inline",
 }
 
 
@@ -517,6 +519,7 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
         ("sample_prompts", []),
         ("sample_every_n_epochs", 0),
         ("sample_at_first", False),
+        ("sample_decode_inline", "auto"),
     ):
         if _k not in merged:
             merged[_k] = _default
@@ -981,6 +984,15 @@ class _TargetResWidget(QWidget):
         return out or [1024]
 
 
+def _no_wheel(w: QWidget) -> QWidget:
+    """Stop a hovered combo/spin from changing value (and stealing focus) on
+    mouse-wheel scroll — otherwise scrolling the form silently edits whichever
+    dropdown the cursor passes over. The widget still works via click + keys."""
+    w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    w.wheelEvent = lambda e: e.ignore()
+    return w
+
+
 def _widget(v: Any, key: str = "") -> QWidget:
     if key == "target_res":
         sel = v if isinstance(v, (list, tuple)) else ([v] if v else [1024])
@@ -1006,7 +1018,26 @@ def _widget(v: Any, key: str = "") -> QWidget:
         idx = w.findText(str(v))
         if idx >= 0:
             w.setCurrentIndex(idx)
-        return w
+        return _no_wheel(w)
+    if key == "sample_decode_inline":
+        # Tri-state: stored as the literal string "auto" / "true" / "false"
+        # (all three are accepted by library.config.cli_args._optional_bool).
+        # Must precede the bool branch below so a bool value gets the combo,
+        # not a plain checkbox that can't express "auto".
+        w = QComboBox()
+        w.addItems(["auto", "true", "false"])
+        if v is None:
+            cur = "auto"
+        elif isinstance(v, bool):
+            cur = "true" if v else "false"
+        else:
+            cur = str(v).strip().lower()
+            if cur in ("", "none"):
+                cur = "auto"
+        idx = w.findText(cur)
+        if idx >= 0:
+            w.setCurrentIndex(idx)
+        return _no_wheel(w)
     if isinstance(v, bool):
         w = QCheckBox()
         w.setChecked(v)
@@ -1023,9 +1054,7 @@ def _widget(v: Any, key: str = "") -> QWidget:
         else:
             w.setRange(0, 10000)
         w.setValue(v)
-        w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        w.wheelEvent = lambda e: e.ignore()
-        return w
+        return _no_wheel(w)
     if isinstance(v, float):
         return QLineEdit(f"{v:g}")
     if isinstance(v, list):

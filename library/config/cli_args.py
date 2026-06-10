@@ -21,6 +21,23 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
+def _optional_bool(value):
+    """Parse a tri-state flag from the CLI: 'auto'/'' → None, else a bool.
+
+    TOML-sourced values arrive already typed (bool/None) and bypass this, so it
+    only needs to cope with the string forms argparse hands over on the CLI."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in ("", "auto", "none"):
+        return None
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true/false/auto, got {value!r}")
+
+
 def add_sd_models_arguments(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--pretrained_model_name_or_path",
@@ -533,6 +550,18 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         type=str,
         default=None,
         help="file for prompts to generate sample images",
+    )
+    parser.add_argument(
+        "--sample_decode_inline",
+        type=_optional_bool,
+        default=None,
+        help=(
+            "Decode each round of sample latents to PNG right after that "
+            "sampling event (per-epoch visibility) instead of batching the "
+            "decode to the end of training. true/false, or 'auto' (default): "
+            "auto decodes inline unless the run is block-swapping "
+            "(blocks_to_swap>0), where bringing the VAE to GPU mid-run risks OOM."
+        ),
     )
     parser.add_argument(
         "--config_file",

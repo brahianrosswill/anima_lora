@@ -183,6 +183,8 @@ STRINGS: dict[str, str] = {
     "no_lora_for_test": "output/ckpt/ に LoRA が見つかりません。先に学習を実行してください。",
     "test_output_title": "最新のテスト出力",
     "test_output_empty": "output/tests/ が空です。",
+    "sample_output_title": "最新の学習サンプル",
+    "sample_output_empty": "サンプルはまだありません — 学習が生成するにつれて出力ディレクトリの sample/ フォルダに表示されます。",
     "finished": "--- 完了 (終了コード {code}) ---",
     "starting": "起動中… (torch / accelerate を読み込んでいます)",
     "queue_submitting": "{variant} を学習デーモンキューに追加中…",

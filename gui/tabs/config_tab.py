@@ -631,6 +631,9 @@ class ConfigTab(QWidget):
     # ── Explanation panel ──
 
     def _show_explain_placeholder(self) -> None:
+        # Neutral state: the live sample poll (during training) may take the
+        # panel over with previews; a field click pins it back to help.
+        self._explain_mode = None
         # When the current method ships variant presets, the right-panel
         # default is the variant guide + Apply-semantics callout (replacing
         # the old collapsible box on the left-side form).
@@ -649,20 +652,14 @@ class ConfigTab(QWidget):
             f"<p style='color:#888; font-style:italic;'>{html.escape(t('click_field_for_help'))}</p>"
         )
 
-    def _show_test_output(self) -> None:
-        d = ROOT / "output" / "tests"
-        imgs: list = []
-        if d.is_dir():
-            imgs = sorted(
-                (p for p in d.iterdir() if p.suffix.lower() in IMAGE_EXTS),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )[:4]
-        title = html.escape(t("test_output_title"))
+    def _render_image_gallery(self, title_key: str, empty_key: str, imgs: list) -> None:
+        """Render the newest few images into the explanation panel as an HTML
+        ``<img>`` stack (shared by test-output and training-sample views)."""
+        title = html.escape(t(title_key))
         if not imgs:
             self._explain.setHtml(
                 f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"
-                f"<p style='color:#888; font-style:italic;'>{html.escape(t('test_output_empty'))}</p>"
+                f"<p style='color:#888; font-style:italic;'>{html.escape(t(empty_key))}</p>"
             )
             return
         parts = [f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"]
@@ -676,9 +673,55 @@ class ConfigTab(QWidget):
             )
         self._explain.setHtml("".join(parts))
 
+    @staticmethod
+    def _newest_images(d: Path, limit: int = 4) -> list:
+        if not d.is_dir():
+            return []
+        return sorted(
+            (p for p in d.iterdir() if p.suffix.lower() in IMAGE_EXTS),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+
+    def _show_test_output(self) -> None:
+        self._explain_mode = "test"
+        imgs = self._newest_images(ROOT / "output" / "tests")
+        self._render_image_gallery("test_output_title", "test_output_empty", imgs)
+
+    def _resolve_sample_dir(self) -> Path:
+        """Absolute ``<output_dir>/sample`` for the current variant — where
+        training-time previews land (see library/anima/training.sample_images)."""
+        try:
+            merged, _ = merged_gui_variant_preset(
+                self._current_variant(), self._IMPLICIT_PRESET
+            )
+            out = merged.get("output_dir") or "output/ckpt"
+        except Exception:
+            out = "output/ckpt"
+        d = Path(out)
+        if not d.is_absolute():
+            d = ROOT / d
+        return d / "sample"
+
+    def _show_sample_output(self, *, announce: bool = False) -> None:
+        """Show the newest training sample previews in the explanation panel,
+        mirroring the test-output gallery. ``announce=False`` is a no-op when no
+        samples exist yet (used by the live poll so it never clobbers field help
+        with an empty placeholder); ``announce=True`` always renders, including
+        the empty message, and is used when a training job finishes."""
+        sample_dir = getattr(self, "_sample_dir", None) or self._resolve_sample_dir()
+        imgs = self._newest_images(sample_dir)
+        if not imgs and not announce:
+            return
+        self._explain_mode = "sample"
+        self._render_image_gallery("sample_output_title", "sample_output_empty", imgs)
+
     def _show_explain(
         self, field: str, help_text: str | None, notes: tuple[str, ...]
     ) -> None:
+        # User clicked a field label — pin the panel to help so the live sample
+        # poll (during training) stops refreshing over what they're reading.
+        self._explain_mode = "help"
         parts = [
             f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{html.escape(field)}</h2>"
         ]
@@ -1243,6 +1286,10 @@ class ConfigTab(QWidget):
         self._job_id = job_id
         self._job_kind = kind
         self._running_mode = kind
+        # Cache the running job's sample dir once so the 400ms live-preview poll
+        # doesn't re-merge the config chain every tick (resolved from the
+        # submitted variant; output_dir is per-variant). None for non-train jobs.
+        self._sample_dir = self._resolve_sample_dir() if kind == "train" else None
         self._stdout_buf = ""
         self._jsonl_reader.watch(gui_daemon.progress_path(job_id))
         self._stdout_tailer.watch(gui_daemon.stdout_path(job_id))
@@ -1294,6 +1341,16 @@ class ConfigTab(QWidget):
             return
         self._jsonl_reader.poll()
         self._drain_job_stdout()
+        # Live training-sample preview: refresh the gallery as new per-epoch
+        # samples land on disk, but only while the panel isn't pinned to field
+        # help (mode None or already showing samples). _show_sample_output is a
+        # no-op until the first sample exists, so it won't clobber the guide
+        # before there's anything to show.
+        if self._job_kind == "train" and getattr(self, "_explain_mode", None) in (
+            None,
+            "sample",
+        ):
+            self._show_sample_output()
         state = gui_daemon.read_job_state(self._job_id)
         if gui_daemon.is_terminal(state):
             self._on_job_finished(state)
@@ -1338,6 +1395,11 @@ class ConfigTab(QWidget):
                         lambda jid=chained: self._reattach_chained_training(jid),
                     )
                     return  # stay busy — training is starting
+        # Show the final training samples on success, mirroring how a finished
+        # Test run surfaces its output (announce=True so an empty run still
+        # explains where samples would appear).
+        if kind == "train" and state == "done":
+            self._show_sample_output(announce=True)
         self._restore_idle_ui()
 
     def _reattach_chained_training(self, job_id: str) -> None:

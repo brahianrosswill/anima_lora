@@ -177,6 +177,8 @@ STRINGS: dict[str, str] = {
     "no_lora_for_test": "output/ckpt/ 中没有可测试的 LoRA。请先运行训练。",
     "test_output_title": "最新测试输出",
     "test_output_empty": "output/tests/ 为空。",
+    "sample_output_title": "最新训练样本",
+    "sample_output_empty": "暂无样本 —— 随着训练生成，它们会出现在输出目录的 sample/ 文件夹中。",
     "finished": "--- 完成 (退出码 {code}) ---",
     "starting": "启动中…… (加载 torch / accelerate)",
     "queue_submitting": "正在将 {variant} 加入训练守护进程队列……",

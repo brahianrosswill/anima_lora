@@ -1036,6 +1036,43 @@ def sample_images(
         # Letting the caching allocator hold its blocks keeps usage flat (peak
         # settles at max(training, sampling) and stays there).
 
+    # Decode this round's stashed latents to PNG right away so each epoch's
+    # samples are viewable as soon as they're generated, rather than only after
+    # the whole run finishes. Skipped (latents left for the end-of-training
+    # decode_pending_samples in train.py) when block-swapping — bringing the VAE
+    # to GPU mid-run alongside swapped blocks is the OOM risk the deferral was
+    # built to avoid; see _should_decode_inline. Main process only, mirroring
+    # the end-of-training decode.
+    if accelerator.is_main_process and _should_decode_inline(args):
+        decode_pending_samples(accelerator, args, vae)
+
+
+def _should_decode_inline(args) -> bool:
+    """Whether to decode sample latents to PNG right after each sampling event
+    (per-epoch visibility) vs. deferring the whole batch to end of training.
+
+    Explicit ``--sample_decode_inline`` wins; otherwise auto — inline when the
+    run isn't block-swapping (``blocks_to_swap == 0`` ⇒ the card has headroom
+    for the resident DiT plus the VAE decode), deferred when it is (tight card,
+    where co-resident VAE + swapped blocks is the OOM risk deferral avoids)."""
+    explicit = getattr(args, "sample_decode_inline", None)
+    if isinstance(explicit, str):
+        s = explicit.strip().lower()
+        explicit = (
+            None
+            if s in ("", "auto", "none")
+            else s
+            in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        )
+    if explicit is not None:
+        return bool(explicit)
+    return not getattr(args, "blocks_to_swap", 0)
+
 
 def _sample_image_inference(
     accelerator,

@@ -181,6 +181,8 @@ STRINGS: dict[str, str] = {
     "no_lora_for_test": "테스트할 LoRA가 output/ckpt/에 없습니다. 먼저 학습을 실행하세요.",
     "test_output_title": "최신 테스트 출력",
     "test_output_empty": "output/tests/가 비어 있습니다.",
+    "sample_output_title": "최신 학습 샘플",
+    "sample_output_empty": "아직 샘플이 없습니다 — 학습이 생성하면 출력 디렉터리의 sample/ 폴더에 나타납니다.",
     "finished": "--- 완료 (종료 코드 {code}) ---",
     "starting": "시작 중… (torch / accelerate 로딩)",
     "queue_submitting": "{variant}을(를) 학습 daemon 큐에 추가 중…",

@@ -185,6 +185,8 @@ STRINGS: dict[str, str] = {
     "no_lora_for_test": "No LoRA in output/ckpt/ to test. Run training first.",
     "test_output_title": "Latest test output",
     "test_output_empty": "output/tests/ is empty.",
+    "sample_output_title": "Latest training samples",
+    "sample_output_empty": "No samples yet — they appear under the output dir's sample/ folder as training generates them.",
     "finished": "--- Finished (exit code {code}) ---",
     "starting": "Starting… (loading torch / accelerate)",
     # Daemon-backed training (Phase 2 — training survives GUI close)
