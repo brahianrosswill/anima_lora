@@ -106,9 +106,113 @@ class _ResizeDataset(Dataset):
             return stem, None, f"{type(e).__name__}: {e}"
 
 
-def _identity_collate(batch):
-    # batch_size=1 — buckets vary per image so we can't stack.
-    return batch[0]
+def _bucket_collate(batch):
+    """Stack a shape-homogeneous batch, filtering decode failures.
+
+    The :func:`_bucket_batches` sampler guarantees every item in a batch
+    shares an aspect bucket, so the surviving tensors stack cleanly into
+    ``[B, C, H, W]``. Returns ``(stems_ok, stacked | None, errs)`` where
+    ``errs`` carries ``(stem, msg)`` for items that failed to decode.
+    """
+    stems_ok: list[str] = []
+    tensors: list[torch.Tensor] = []
+    errs: list[tuple[str, str]] = []
+    for stem, tensor, err in batch:
+        if tensor is None:
+            errs.append((stem, err))
+        else:
+            stems_ok.append(stem)
+            tensors.append(tensor)
+    stacked = torch.stack(tensors, dim=0) if tensors else None
+    return stems_ok, stacked, errs
+
+
+def _bucket_batches(
+    image_paths: Sequence[Path], spec: BucketSpec, batch_size: int
+) -> tuple[list[list[int]], list[tuple[int, str]]]:
+    """Group image indices by aspect bucket, then chunk into batches.
+
+    Reads only each image's header (``PIL.Image.size`` — no pixel decode) to
+    pick its bucket, so images that resize to the same pixel grid land in the
+    same batch and can share one encoder forward. Returns the batch list (each
+    a list of dataset indices) plus ``(index, msg)`` for unreadable headers,
+    which the caller logs and skips.
+    """
+    by_bucket: Dict[tuple, List[int]] = defaultdict(list)
+    header_errs: list[tuple[int, str]] = []
+    for i, path in enumerate(image_paths):
+        try:
+            with Image.open(path) as im:
+                w, h = im.size
+            key = pick_bucket(h, w, spec)
+        except Exception as e:
+            header_errs.append((i, f"{type(e).__name__}: {e}"))
+            continue
+        by_bucket[key].append(i)
+
+    batches: list[list[int]] = []
+    for idxs in by_bucket.values():
+        for j in range(0, len(idxs), batch_size):
+            batches.append(idxs[j : j + batch_size])
+    return batches, header_errs
+
+
+def _run_pe_cache(
+    *,
+    stems: Sequence[str],
+    image_paths: Sequence[Path],
+    spec: BucketSpec,
+    bundle: VisionEncoderBundle,
+    num_workers: int,
+    batch_size: int,
+    save_one,
+    desc: str,
+) -> int:
+    """Bucket-batched encode loop shared by the feature / token builders.
+
+    Groups the (already-filtered-to-missing) ``stems`` by aspect bucket, runs
+    one batched ``encode_pe_from_imageminus1to1(..., same_bucket=True)`` forward
+    per batch, and hands each ``[T, d_enc]`` result to ``save_one(stem, feats)``.
+    Per-image decode / save failures are logged and skipped. Returns the count
+    of entries written.
+    """
+    batches, header_errs = _bucket_batches(image_paths, spec, batch_size)
+    for i, err in header_errs:
+        logger.warning("failed to read %s: %s", stems[i], err)
+
+    ds = _ResizeDataset(stems=stems, image_paths=image_paths, spec=spec)
+    loader = DataLoader(
+        ds,
+        batch_sampler=batches,
+        num_workers=num_workers,
+        prefetch_factor=2 if num_workers > 0 else None,
+        collate_fn=_bucket_collate,
+        pin_memory=False,
+        persistent_workers=(num_workers > 0 and len(batches) > 1),
+    )
+
+    n_done = 0
+    for stems_ok, img_batch, errs in tqdm(
+        loader, desc=desc, unit="batch", total=len(batches)
+    ):
+        for stem, err in errs:
+            logger.warning("failed to decode %s: %s", stem, err)
+        if img_batch is None:
+            continue
+        try:
+            feats_list = encode_pe_from_imageminus1to1(
+                bundle, img_batch, same_bucket=True
+            )
+        except Exception as e:
+            logger.warning("failed to encode batch of %d: %s", len(stems_ok), e)
+            continue
+        for stem, feats in zip(stems_ok, feats_list):
+            try:
+                save_one(stem, feats)
+                n_done += 1
+            except Exception as e:
+                logger.warning("failed to save %s: %s", stem, e)
+    return n_done
 
 
 @dataclass
@@ -165,11 +269,9 @@ def _cache_path(cache_dir: Path, stem: str) -> Path:
 class FeatureCacheBuilder:
     """Build per-stem mean-pooled PE-Core features into ``cache_dir``.
 
-    Uses a single-image-per-forward path for simplicity (PE-Core supports
-    dynamic resolution; we don't need to bucket-batch). One forward per
-    image is fast enough that 12K stems finish in ~10–20 minutes on a
-    single GPU; a bucketed-batch path can be added later if it shows up
-    in profiling.
+    Groups missing stems by aspect bucket and runs one batched encoder
+    forward per ``batch_size`` shape-homogeneous images (``_run_pe_cache``),
+    keeping the GPU fed instead of one image per forward. Idempotent.
     """
 
     def __init__(
@@ -180,6 +282,7 @@ class FeatureCacheBuilder:
         encoder_name: str = "pe",
         dtype: torch.dtype = torch.bfloat16,
         num_workers: int = 4,
+        batch_size: int = 8,
     ):
         self.manifest = manifest
         self.cache_dir = cache_dir
@@ -188,6 +291,7 @@ class FeatureCacheBuilder:
         self.encoder_name = encoder_name
         self.dtype = dtype
         self.num_workers = num_workers
+        self.batch_size = batch_size
         self._bundle: Optional[VisionEncoderBundle] = None
 
     def _bundle_lazy(self) -> VisionEncoderBundle:
@@ -228,39 +332,21 @@ class FeatureCacheBuilder:
         spec = bundle.bucket_spec
         d_enc = bundle.d_enc
 
-        ds = _ResizeDataset(
+        def save_one(stem: str, feats: torch.Tensor) -> None:
+            pooled = feats.mean(dim=0).to(torch.float32).cpu()  # [d_enc]
+            assert pooled.shape == (d_enc,), pooled.shape
+            st_save({"feature": pooled}, str(_cache_path(self.cache_dir, stem)))
+
+        n_done = _run_pe_cache(
             stems=[self.manifest.stems[i] for i in missing],
             image_paths=[self.manifest.image_paths[i] for i in missing],
             spec=spec,
-        )
-        loader = DataLoader(
-            ds,
-            batch_size=1,
+            bundle=bundle,
             num_workers=self.num_workers,
-            prefetch_factor=2 if self.num_workers > 0 else None,
-            collate_fn=_identity_collate,
-            pin_memory=False,
+            batch_size=self.batch_size,
+            save_one=save_one,
+            desc="pooled-pe",
         )
-
-        n_done = 0
-        for stem, tensor, err in tqdm(
-            loader, desc="pooled-pe", unit="img", total=len(ds)
-        ):
-            if tensor is None:
-                logger.warning("failed to decode %s: %s", stem, err)
-                continue
-            try:
-                tensor = tensor.unsqueeze(0)
-                feats_list = encode_pe_from_imageminus1to1(
-                    bundle, tensor, same_bucket=True
-                )
-                feats = feats_list[0]  # [T, d_enc]
-                pooled = feats.mean(dim=0).to(torch.float32).cpu()  # [d_enc]
-                assert pooled.shape == (d_enc,), pooled.shape
-                st_save({"feature": pooled}, str(_cache_path(self.cache_dir, stem)))
-                n_done += 1
-            except Exception as e:
-                logger.warning("failed to encode %s: %s", stem, e)
         logger.info("feature cache: wrote %d new entries", n_done)
         return n_done
 
@@ -281,8 +367,8 @@ class TokenCacheBuilder:
 
     Storage per stem ≈ ``T * d_enc * 2`` bytes; ~1.2 MB at PE-Core defaults.
     At 12K stems that's ~14 GB total — pay once, iterate on pool design
-    freely. Per-image encoder forwards are fast enough that 12K stems
-    finishes in ~10–20 minutes on a single GPU.
+    freely. Missing stems are grouped by aspect bucket and encoded in
+    batches of ``batch_size`` (``_run_pe_cache``) to keep the GPU saturated.
     """
 
     def __init__(
@@ -293,6 +379,7 @@ class TokenCacheBuilder:
         encoder_name: str = "pe",
         dtype: torch.dtype = torch.bfloat16,
         num_workers: int = 4,
+        batch_size: int = 8,
     ):
         self.manifest = manifest
         self.cache_dir = cache_dir
@@ -301,6 +388,7 @@ class TokenCacheBuilder:
         self.encoder_name = encoder_name
         self.dtype = dtype
         self.num_workers = num_workers
+        self.batch_size = batch_size
         self._bundle: Optional[VisionEncoderBundle] = None
 
     def _bundle_lazy(self) -> VisionEncoderBundle:
@@ -339,46 +427,25 @@ class TokenCacheBuilder:
         spec = bundle.bucket_spec
         d_enc = bundle.d_enc
 
-        ds = _ResizeDataset(
+        def save_one(stem: str, feats: torch.Tensor) -> None:
+            assert feats.shape[-1] == d_enc, feats.shape
+            # Stash as bf16 — encoder's native dtype, halves cache size
+            # vs fp32 with no quality loss on the downstream pool (the
+            # MAP head's LayerNorm + Linear projects back into fp32 /
+            # autocast-bf16 anyway).
+            tokens = feats.to(torch.bfloat16).cpu().contiguous()
+            st_save({"tokens": tokens}, str(_token_cache_path(self.cache_dir, stem)))
+
+        n_done = _run_pe_cache(
             stems=[self.manifest.stems[i] for i in missing],
             image_paths=[self.manifest.image_paths[i] for i in missing],
             spec=spec,
-        )
-        loader = DataLoader(
-            ds,
-            batch_size=1,
+            bundle=bundle,
             num_workers=self.num_workers,
-            prefetch_factor=2 if self.num_workers > 0 else None,
-            collate_fn=_identity_collate,
-            pin_memory=False,
+            batch_size=self.batch_size,
+            save_one=save_one,
+            desc="tokens-pe",
         )
-
-        n_done = 0
-        for stem, tensor, err in tqdm(
-            loader, desc="tokens-pe", unit="img", total=len(ds)
-        ):
-            if tensor is None:
-                logger.warning("failed to decode %s: %s", stem, err)
-                continue
-            try:
-                tensor = tensor.unsqueeze(0)
-                feats_list = encode_pe_from_imageminus1to1(
-                    bundle, tensor, same_bucket=True
-                )
-                feats = feats_list[0]  # [T, d_enc]
-                assert feats.shape[-1] == d_enc, feats.shape
-                # Stash as bf16 — encoder's native dtype, halves cache size
-                # vs fp32 with no quality loss on the downstream pool (the
-                # MAP head's LayerNorm + Linear projects back into fp32 /
-                # autocast-bf16 anyway).
-                tokens = feats.to(torch.bfloat16).cpu().contiguous()
-                st_save(
-                    {"tokens": tokens},
-                    str(_token_cache_path(self.cache_dir, stem)),
-                )
-                n_done += 1
-            except Exception as e:
-                logger.warning("failed to encode %s: %s", stem, e)
         logger.info("token cache: wrote %d new entries", n_done)
         return n_done
 

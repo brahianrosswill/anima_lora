@@ -94,6 +94,14 @@ def parse_args() -> argparse.Namespace:
         help="DataLoader workers for build_features CPU-side decode + LANCZOS "
         "resize (default: 4). Set to 0 to run inline on the main process.",
     )
+    p.add_argument(
+        "--feature_cache_batch_size",
+        type=int,
+        default=8,
+        help="Images per encoder forward during build_features. Stems are "
+        "grouped by aspect bucket so each batch is shape-homogeneous; raise "
+        "for more GPU throughput / lower for less VRAM (default: 8).",
+    )
 
     # Vocab-build inputs. All three default to subpaths of
     # ``$CAPTION_CORPUS_DIR``; pass --caption_roots / --tag_cache / --rules

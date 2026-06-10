@@ -157,6 +157,39 @@ def test_resize_to_buckets_writes_and_mirrors_layout(tmp_path: Path) -> None:
         assert (im.width, im.height) in bucket_counts
 
 
+def test_resize_to_buckets_default_tier_does_not_upscale_to_multitier(
+    tmp_path: Path,
+) -> None:
+    """Regression: target_res=None (no preprocess.toml / no flag, and the bare
+    [1024] that tasks.py strips to None) must resize against the single 1024
+    tier, NOT the full multi-tier catalog. The old else-branch fell back to
+    all_constant_token_buckets(), whose aspect-only match shoved a 0.73MP
+    portrait into the 1536-tier (1024, 2160) bucket — a 3x upscale."""
+    from library.datasets.buckets import buckets_for_edges
+    from library.preprocess import resize_to_buckets
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    _write_image(src / "portrait.png", (589, 1233))  # 0.73MP, ar 0.478
+
+    one_tier = set(buckets_for_edges([1024]))
+    for target_res in (None, [1024]):
+        stats, _ = resize_to_buckets(
+            src,
+            dst,
+            target_res=target_res,
+            min_pixels=0,
+            workers=1,
+            verbose=False,
+            overwrite=True,
+        )
+        assert stats.written == 1
+        with Image.open(dst / "portrait.png") as im:
+            reso = (im.width, im.height)
+        assert reso in one_tier, f"{target_res}: {reso} escaped the 1024 tier"
+        assert reso != (1024, 2160), f"{target_res}: reproduced the upscale bug"
+
+
 def test_resize_to_buckets_skips_up_to_date_and_rebuckets_on_tier_change(
     tmp_path: Path,
 ) -> None:

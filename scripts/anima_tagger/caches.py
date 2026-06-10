@@ -63,6 +63,7 @@ def _build_one_encoder(
         device=device,
         encoder_name=encoder_name,
         num_workers=args.feature_cache_workers,
+        batch_size=getattr(args, "feature_cache_batch_size", 8),
     )
     if pool_kind == "map":
         builder = TokenCacheBuilder(**builder_kwargs)

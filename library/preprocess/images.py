@@ -17,6 +17,7 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 from library.datasets.buckets import (
+    DEFAULT_TARGET_RES,
     BucketManager,
     buckets_for_edges,
     choose_edge,
@@ -93,13 +94,20 @@ def process_image(
     src_img = Image.open(image_path)
     w, h = src_img.size  # header-only read; no pixel decode yet
 
-    if use_constant and target_res:
-        # Multi-scale: pick the tier that resizes this image the least (nearest
-        # bucket by cover-scale), then the nearest-aspect bucket within it.
-        edge = choose_edge(w, h, target_res)
+    if use_constant:
+        # Pick the tier that resizes this image the least (nearest bucket by
+        # cover-scale), then the nearest-aspect bucket within it. target_res is
+        # absent when no preprocess.toml / config value supplies it (or it's a
+        # bare [1024], which tasks.py strips); default to the canonical 1024
+        # tier rather than the full multi-tier catalog. NOT defaulting here lets
+        # make_buckets fall back to all_constant_token_buckets() (every tier),
+        # whose aspect-only select_bucket happily UPSCALES a 0.7MP portrait into
+        # a 1536-tier 1024x2160 bucket — the multi-tier resize regression.
+        tier = target_res or list(DEFAULT_TARGET_RES)
+        edge = choose_edge(w, h, tier)
         bucket_mgr.set_predefined_resos(buckets_for_edges([edge]))
     else:
-        bucket_mgr.make_buckets(constant_token_buckets=use_constant)
+        bucket_mgr.make_buckets(constant_token_buckets=False)
 
     bucket_reso, _, _ = bucket_mgr.select_bucket(w, h)
     bw, bh = bucket_reso
