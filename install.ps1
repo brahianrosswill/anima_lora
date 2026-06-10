@@ -67,7 +67,7 @@ function Test-Cuda132 {
     $p = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\nvcc.exe'
     if (Test-Path $p) { $nvcc = $p } else { return $false }
   }
-  try { return [bool]((& $nvcc --version 2>$null) -match 'release 13\.2') } catch { return $false }
+  try { return [bool]((& $nvcc --version 2>$null) -match 'release 13\.2([^0-9]|$)') } catch { return $false }
 }
 if ($env:ANIMA_SKIP_CUDA) {
   Say 'ANIMA_SKIP_CUDA set — skipping the CUDA 13.2 toolkit check'
@@ -215,7 +215,7 @@ Write-Host "[OK] installed to $Dir\" -ForegroundColor Green
 Write-Host @"
 
 The GUI is opening now. To finish setup from inside it:
-  - authenticate for gated downloads (run 'hf auth login' in a terminal once)
+  - sign in to Hugging Face (built into the GUI now — no terminal step)
   - use the Models dialog to fetch the DiT + Qwen3 text encoder + VAE
 
 Re-launch later from the "Anima LoRA GUI" desktop shortcut,

@@ -17,9 +17,9 @@ Four things this repo aims to do well:
 
 ## How to start
 
-> **Requirements:** at least an Ampere GPU (RTX 3000-series / A100 or newer) · CUDA 13.2 · PyTorch 2.12
+> **Requirements:** at least an Ampere GPU (RTX 3000-series / A100 or newer) + NVIDIA driver **≥595**. The installer sets up the **CUDA 13.2 toolkit, Python 3.13, and PyTorch 2.12** for you.
 
-One line — installs [uv](https://astral.sh/uv) if missing, fetches the latest release, and runs `uv sync` (no git required). The installer is published as a signed-by-checksum release asset:
+One line — installs [uv](https://astral.sh/uv) and the **CUDA 13.2 toolkit** if missing, fetches the latest release, runs `uv sync` (Python 3.13 + torch), and on Windows opens the GUI (no git required). The installer is published as a signed-by-checksum release asset:
 
 ```bash
 # Linux / macOS
@@ -61,13 +61,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ANIMA_VERSION=v1.4.0 sh install.sh       # or: $env:ANIMA_VERSION='v1.4.0'; irm ... | iex
 ```
 
-Then authenticate and pull models:
+On Windows the GUI opens automatically when the installer finishes. **Sign in to Hugging Face and download models right in the GUI** — Hugging Face auth is built in now, so there's no `hf auth login` terminal step. Prefer the CLI? After signing in once (the GUI stores your HF token):
 
 ```bash
 cd anima_lora
-hf auth login
 make download-models      # DiT + Qwen3 TE + QwenImage VAE (+ SAM3 / MIT / PE for masking & image conditioning) into models/
-make gui                  # recommended — config editor + dataset browser + training monitor
+make gui                  # config editor + dataset browser + training monitor
 ```
 
 Update later in place with `make update` (release-tarball merge, no git needed). Prefer cloning the repo? See [Setup → Manual](#manual-from-a-clone).
@@ -171,13 +170,13 @@ Each ships with a doc — see the link for usage, flags, and caveats.
 
 ```bash
 uv sync                   # Python 3.13 with pre-built flash attention 2
-hf auth login
+hf auth login             # or just sign in from the GUI — auth is built in now
 make download-models      # DiT + Qwen3 TE + QwenImage VAE (+ SAM3 / MIT / PE for masking & image conditioning) into models/
 # place training images in image_dataset/ with .txt caption sidecars
 make gui                  # recommended — config editor + dataset browser + training monitor
 ```
 
-`uv sync` resolves to **torch 2.12 + CUDA 13.2** .
+`uv sync` resolves to **torch 2.12 + CUDA 13.2** runtime. The manual clone path does **not** auto-install the CUDA 13.2 **toolkit** (needed for `torch.compile`/Triton) — install it per [guidebook §2](docs/guidelines/guidebook.md#2-cuda-132-handled-by-the-installer), or just run the one-line installer above, which does it for you.
 
 > **Anima ships as a uv-locked application environment, not a generic pip package.** `pyproject.toml` pins `python ==3.13.*`, specific torch / flash-attn wheel URLs, and `index-strategy = "unsafe-best-match"` — these are maintainer-chosen, known-good builds. Install with `uv sync` against the committed `uv.lock`; don't `pip install` from `pyproject.toml` (pip won't honor uv's index strategy or the prebuilt flash-attn wheels).
 

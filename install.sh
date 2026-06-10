@@ -45,7 +45,7 @@ command -v uv >/dev/null 2>&1 || die "uv install failed; open a new shell and re
 cuda_ok() {
   for n in nvcc /usr/local/cuda-13.2/bin/nvcc /usr/local/cuda/bin/nvcc; do
     { command -v "$n" >/dev/null 2>&1 || [ -x "$n" ]; } || continue
-    "$n" --version 2>/dev/null | grep -qE 'release 13\.2' && return 0
+    "$n" --version 2>/dev/null | grep -qE 'release 13\.2([^0-9]|$)' && return 0
   done
   return 1
 }
@@ -117,9 +117,12 @@ $(printf '\033[1;32m✓ installed to %s/\033[0m' "$DIR")
 
 Next steps:
   cd $DIR
-  hf auth login            # authenticate for gated model downloads
+  make gui                 # sign in to Hugging Face + download models in the GUI
+                           #   (Hugging Face auth is built into the GUI now)
+
+Prefer the CLI? After signing in once (the GUI stores your HF token):
   make download-models     # DiT + Qwen3 text encoder + VAE into models/
-  make gui                 # or:  make lora   (CLI training)
+  make lora                # start training
 
 Update later with:  make update
 EOF
