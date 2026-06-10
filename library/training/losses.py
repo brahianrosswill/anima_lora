@@ -74,6 +74,73 @@ def apply_masked_loss(loss, batch) -> torch.FloatTensor:
     return loss
 
 
+def compute_cond_diff_weight(
+    latents: torch.Tensor,
+    cond_latents: torch.Tensor,
+    *,
+    floor: float = 0.2,
+    blur_sigma: float = 1.5,
+    quantile: float = 0.9,
+) -> torch.Tensor:
+    """Per-pixel loss weight from the cond↔target latent difference.
+
+    For paired cond≠target tasks (``cond_cache_dir`` subsets: sanitize /
+    near-twin pose / hair-color twins) the pair is near-identical except in
+    the edit region, so plain FM-MSE spends most of its gradient on the
+    copy-through behavior the extended attention already gives for free.
+    This map reallocates gradient toward the region that actually changes::
+
+        d = ‖z_cond − z_target‖₂  (channel)      # (B, 1, H, W)
+        d = gaussian_blur(d, blur_sigma)         # cover bubble interiors + halo
+        w = floor + (1 − floor) · min(d / q_quantile(d), 1)
+        w = w / mean(w)                          # per-image; effective LR unchanged
+
+    The floor keeps a "copy everything else faithfully" anchor — w=0 outside
+    the edit region would license drift there, the opposite of the intent.
+    A zero-diff pair (cond == target) degrades to a uniform all-ones map.
+    Both inputs are 4D ``(B, C, H, W)`` latents at the same bucket shape.
+    """
+    from library.runtime.fei import gaussian_blur_2d
+
+    eps = 1e-8
+    d = (cond_latents.float() - latents.float()).pow(2).sum(1, keepdim=True).sqrt()
+    d = gaussian_blur_2d(d, blur_sigma)
+    scale = torch.quantile(d.flatten(1), quantile, dim=1).view(-1, 1, 1, 1)
+    m = (d / scale.clamp_min(eps)).clamp(max=1.0)
+    w = floor + (1.0 - floor) * m
+    return w / w.flatten(1).mean(1).view(-1, 1, 1, 1).clamp_min(eps)
+
+
+def apply_cond_diff_loss(loss: torch.Tensor, ctx: "LossContext") -> torch.Tensor:
+    """Apply ``compute_cond_diff_weight`` to the per-element FM loss.
+
+    No-op unless ``--cond_diff_loss`` is set AND the batch carries paired
+    ``cond_latents`` (i.e. a ``cond_cache_dir`` subset). Mirrors the
+    ``apply_masked_loss`` slot — multiplies the unreduced ``(B, C, H, W)``
+    loss before the spatial mean.
+    """
+    if not bool(getattr(ctx.args, "cond_diff_loss", False)):
+        return loss
+    cond_latents = ctx.batch.get("cond_latents")
+    latents = ctx.batch.get("latents")
+    if cond_latents is None or latents is None:
+        return loss
+    if cond_latents.ndim == 5:
+        cond_latents = cond_latents.squeeze(2)
+    if latents.ndim == 5:
+        latents = latents.squeeze(2)
+    w = compute_cond_diff_weight(
+        latents.to(loss.device),
+        cond_latents.to(loss.device),
+        floor=float(getattr(ctx.args, "cond_diff_loss_floor", 0.2)),
+        blur_sigma=float(getattr(ctx.args, "cond_diff_loss_blur", 1.5)),
+        quantile=float(getattr(ctx.args, "cond_diff_loss_quantile", 0.9)),
+    )
+    if loss.ndim == 5:  # (B, C, 1, H, W) — singleton frame axis at dim 2
+        w = w.unsqueeze(2)
+    return loss * w.to(loss.dtype)
+
+
 def get_huber_threshold_if_needed(
     args, timesteps: torch.Tensor, noise_scheduler
 ) -> Optional[torch.Tensor]:
@@ -212,6 +279,7 @@ def _flow_match_loss(ctx: LossContext) -> torch.Tensor:
         "alpha_masks" in ctx.batch and ctx.batch["alpha_masks"] is not None
     ):
         loss = apply_masked_loss(loss, ctx.batch)
+    loss = apply_cond_diff_loss(loss, ctx)
     loss = loss.mean(dim=list(range(1, loss.ndim)))
     loss = loss * ctx.loss_weights
     return loss
@@ -270,6 +338,7 @@ def _flow_matching_vr_loss(ctx: LossContext) -> torch.Tensor:
         "alpha_masks" in ctx.batch and ctx.batch["alpha_masks"] is not None
     ):
         loss = apply_masked_loss(loss, ctx.batch)
+    loss = apply_cond_diff_loss(loss, ctx)
     loss = loss.mean(dim=list(range(1, loss.ndim)))
     loss = loss * ctx.loss_weights
     return weight * loss
@@ -486,7 +555,9 @@ __all__ = [
     "LossComposer",
     "LossFn",
     "LOSS_REGISTRY",
+    "apply_cond_diff_loss",
     "build_loss_composer",
+    "compute_cond_diff_weight",
     "_STAGE_PER_SAMPLE",
     "_STAGE_SCALAR_BROADCAST",
     "_STAGE_SCALAR_POST",

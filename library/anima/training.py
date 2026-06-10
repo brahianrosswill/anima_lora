@@ -300,6 +300,42 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         "dominance and force text to carry the high-frequency residual; sigma=0 "
         "stays in the training distribution so clean-cond inference still works.",
     )
+    parser.add_argument(
+        "--cond_diff_loss",
+        action="store_true",
+        help="Weight the per-pixel FM loss by the cond↔target latent difference "
+        "(library/training/losses.py::compute_cond_diff_weight). For paired "
+        "cond≠target tasks (cond_cache_dir subsets: sanitize / near-twin pose / "
+        "hair-color twins) where the pair differs only in a narrow edit region — "
+        "concentrates gradient there instead of on the copy-through behavior the "
+        "extended attention already provides. Per-image mean-normalized (pure "
+        "gradient reallocation, loss scale unchanged). No-op on batches without "
+        "cond_latents. NOT for colorize (gray→color differs everywhere; the map "
+        "degenerates to ~uniform).",
+    )
+    parser.add_argument(
+        "--cond_diff_loss_floor",
+        type=float,
+        default=0.2,
+        help="Minimum (pre-normalization) weight outside the edit region. Keeps "
+        "the copy-everything-else anchor; 0 would license drift outside the "
+        "bubble. Default 0.2.",
+    )
+    parser.add_argument(
+        "--cond_diff_loss_blur",
+        type=float,
+        default=1.5,
+        help="Gaussian sigma (latent px) applied to the diff map so the weight "
+        "covers bubble interiors plus a halo, not just strokes/outlines. "
+        "Default 1.5.",
+    )
+    parser.add_argument(
+        "--cond_diff_loss_quantile",
+        type=float,
+        default=0.9,
+        help="Per-image robust scale for the diff map: values at/above this "
+        "quantile saturate to full weight. Default 0.9.",
+    )
     # --- BYG (Bootstrap Your Generator) unpaired editing ----------------------
     # An owning-step method: a plain rank-64 LoRA trained with a multi-forward
     # objective (bootstrap rollout + DDS prior + cycle + identity), conditioned
