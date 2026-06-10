@@ -1734,6 +1734,37 @@ class AnimaTrainer:
         # the dynamo cache-size budget itself. Matches the harness order:
         # block-swap → grad-ckpt → compile.
         if args.torch_compile:
+            # Cap the AOT min-cut partitioner's saved-for-backward set. The
+            # 2026-06-10 custom-autograd removal silently grew it: the old
+            # LoRADownProjectFn was an explicit autograd boundary (save bf16
+            # x + weight, recompute casts in backward), and once the rank path
+            # became plain traceable ops the partitioner chose to save ~0.8 GB
+            # more intermediates per step — first-step OOM on 16 GB at 4200
+            # tokens without grad-ckpt. budget<1.0 makes it recompute cheap
+            # intermediates instead; 0.85 reproduces the pre-removal footprint
+            # at identical step time (1.02 vs 1.01 s/it, bench 2026-06-10).
+            # Set before compile_blocks — partitioning happens at first-forward
+            # compile, and this is a plain module attr (no ContextVar revert,
+            # unlike dynamo's recompile_limit).
+            # Skipped under gradient_checkpointing: the budget repartitions the
+            # joint graph, so checkpoint's recompute pass can select a
+            # different graph than forward → CheckpointError (saved-vs-
+            # recomputed metadata mismatch, torch #166926). Ckpt already
+            # minimizes saved activations, so the cap buys nothing there.
+            budget = float(getattr(args, "activation_memory_budget", 1.0) or 1.0)
+            if budget < 1.0 and not getattr(args, "gradient_checkpointing", False):
+                import torch._functorch.config as _functorch_config
+
+                _functorch_config.activation_memory_budget = budget
+                logger.info(
+                    f"torch.compile activation_memory_budget = {budget} "
+                    "(partitioner recomputes cheap intermediates in backward)"
+                )
+            elif budget < 1.0:
+                logger.info(
+                    "activation_memory_budget ignored: incompatible with "
+                    "gradient_checkpointing (and redundant under it)"
+                )
             target_res = getattr(args, "target_res", None)
             n_token_families = None
             seq_range = None

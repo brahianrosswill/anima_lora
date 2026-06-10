@@ -252,6 +252,23 @@ without autocast. Regression tests: `tests/test_lora_dtype_policy.py`
 allowlist, factory, EasyControl, turbo CLI) but is a logged no-op, so old
 snapshot TOMLs replay cleanly.
 
+**Post-removal addendum (2026-06-10, same day):** the Function was numerically
+dead weight but NOT memory-dead. Under `torch.compile` an `autograd.Function`
+is traced as a HOP that pins the saved-for-backward set to its
+`ctx.save_for_backward` choice ({x, weight}, casts recomputed in backward).
+With plain traceable ops, AOT's min-cut partitioner chose to save ~0.8 GB more
+intermediates per step — first-step OOM on a 16 GB card at 4200 tokens without
+gradient checkpointing. The generic replacement is
+`activation_memory_budget = 0.85` (base.toml → `torch._functorch.config.
+activation_memory_budget`, set in `train.py` before `compile_blocks`):
+measured identical step time (1.02 vs 1.01 s/it) and identical peak (~15.2 GB
+total) to the custom-Function era on the 26-step probe. It is auto-skipped
+under `gradient_checkpointing` — repartitioning makes checkpoint's recompute
+pass select a different graph than forward (`CheckpointError`, torch #166926),
+and ckpt already minimizes saved activations. Lesson: *numerically-inert ≠
+memory-inert* — removing a custom Function changes partitioning even when its
+math traces identically.
+
 ---
 
 ## 6. LoRA utils (`networks/lora_utils.py`)

@@ -308,6 +308,21 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         "across steps and is incompatible with block swap.",
     )
     parser.add_argument(
+        "--activation_memory_budget",
+        type=float,
+        default=1.0,
+        help="torch.compile AOT partitioner budget (torch._functorch.config."
+        "activation_memory_budget): fraction of the default saved-for-backward "
+        "activation memory the min-cut partitioner may keep; below 1.0 it "
+        "recomputes cheap intermediates in backward instead. 0.85 restores the "
+        "pre-2026-06-10 (custom-autograd-era) no-grad-ckpt training footprint "
+        "at identical step time. 1.0 = torch default (no cap). Only applies "
+        "when torch_compile is on; ignored (with a log line) under "
+        "gradient_checkpointing — repartitioning breaks checkpoint's "
+        "recompute-graph match (torch #166926) and ckpt already minimizes "
+        "saved activations.",
+    )
+    parser.add_argument(
         "--compile_dynamic_seq",
         action="store_true",
         help="Marks the sequence-length axis dynamic (torch._dynamo.mark_dynamic), "

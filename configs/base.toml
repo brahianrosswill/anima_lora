@@ -54,6 +54,11 @@ masked_loss = true
 torch_compile = true
 attn_mode = "flash"
 compile_dynamic_seq = true
+# Partitioner recompute cap — restores the pre-2026-06-10 no-grad-ckpt VRAM
+# footprint after the custom-autograd removal (which had implicitly pinned the
+# saved-for-backward set). 0.85 ≈ old peak at identical step time. Auto-skipped
+# (logged) when gradient_checkpointing=true — incompatible and redundant there.
+activation_memory_budget = 1.0
 log_every_n_steps=2
 dataloader_pin_memory = true
 persistent_data_loader_workers= true
