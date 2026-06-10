@@ -307,15 +307,20 @@ class MainWindow(QMainWindow):
         # switch / launch / run_start.
         self._tb_tab = TensorBoardTab()
 
+        # Built before ConfigTab so the Train auto-chain can flush this tab's
+        # target_res tiers to preprocess.toml right before it preprocesses.
+        self._preprocess_tab = PreprocessingTab()
+
         self.tabs = QTabWidget()
         self.tabs.addTab(
             ConfigTab(
                 methods=["lora", "tlora", "hydralora"],
                 tb_panel=self._tb_tab.panel,
+                preprocess_tab=self._preprocess_tab,
             ),
             t("tab_config"),
         )
-        self.tabs.addTab(PreprocessingTab(), t("tab_preprocess"))
+        self.tabs.addTab(self._preprocess_tab, t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
         self.tabs.addTab(QueueTab(), t("tab_queue"))

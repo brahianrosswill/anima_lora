@@ -490,6 +490,12 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         self.target_res_widget = _TargetResWidget(
             pp_cfg.get("target_res", DEFAULT_TARGET_RES)
         )
+        # Live-persist tier checkboxes to preprocess.toml on every toggle. The
+        # Config tab's Train auto-chain runs `tasks.py preprocess` (which reads
+        # preprocess.toml) without ever touching this widget, so without an
+        # immediate write the auto-chain would preprocess at the stale/default
+        # tier whenever the user changed tiers here but didn't click Save first.
+        self.target_res_widget.changed.connect(self.persist_target_res)
         img_form.addRow(
             self._field_label("target_res", t("preprocess_target_res")),
             self.target_res_widget,
@@ -747,6 +753,18 @@ class PreprocessingTab(LazyTabMixin, QWidget):
                 t("preprocess_invalid_float", field=field_label, value=text),
             )
             return None
+
+    def persist_target_res(self) -> None:
+        """Write just the tier selection to preprocess.toml.
+
+        Keeps preprocess.toml in sync with the widget so the Config tab's Train
+        auto-chain (which reads the file, not this widget) always preprocesses at
+        the chosen tiers — even if the user never clicks Save. Called on every
+        checkbox toggle, and by ConfigTab right before it launches the auto-chain
+        preprocess (the tab consumes the value but never touches this widget).
+        Scoped to target_res alone so it can't trip the float validation in
+        _save_all."""
+        _update_preprocess_toml({"target_res": self.target_res_widget.value()})
 
     def _save_all(self) -> bool:
         """Validate and persist every form value. Returns True on success."""

@@ -83,11 +83,16 @@ class ClickableLabel(QLabel):
 
 
 class ConfigTab(QWidget):
-    def __init__(self, methods: list[str] | None = None, tb_panel=None):
+    def __init__(self, methods: list[str] | None = None, tb_panel=None,
+                 preprocess_tab=None):
         super().__init__()
         # The TensorBoard runs panel lives on its own dedicated tab now; we only
         # hold a reference so we can sync its log dir / current run. May be None.
         self._tb_panel = tb_panel
+        # The PreprocessingTab owns the target_res tier widget; we flush it to
+        # preprocess.toml before the Train auto-chain preprocesses (the tier
+        # value otherwise lives only in that widget, not on disk). May be None.
+        self._preprocess_tab = preprocess_tab
         self._w: dict[str, QWidget] = {}
         self._preprocessed = (ROOT / "post_image_dataset").exists()
         # Advanced section starts collapsed; user's expand/collapse state
@@ -1058,6 +1063,14 @@ class ConfigTab(QWidget):
         # from disk, so unsaved form values would otherwise be ignored.
         if self._dirty:
             self._save_preset(silent=True)
+
+        # Flush the Preprocess tab's target_res tiers to preprocess.toml too.
+        # An auto-chain preprocess (cache-missing branch below) runs
+        # `tasks.py preprocess`, which reads the tiers from preprocess.toml —
+        # not from that widget — so without this the chain would resize at the
+        # stale/default tier whenever the user changed tiers but didn't Save.
+        if self._preprocess_tab is not None:
+            self._preprocess_tab.persist_target_res()
 
         variant = self._current_variant()
         cache_dir = self._resolve_cache_dir(variant)

@@ -308,11 +308,20 @@ def load_path_overrides(
         with open(preprocess_path, "r", encoding="utf-8") as f:
             out.update(_flat_scalars(toml.load(f)))
 
+    # `target_res` is the exception to the "legacy base.toml copy wins" rule
+    # above: it's owned by preprocess.toml (user-edited, preserved across
+    # `make update`), so a stray copy left in base.toml must NOT clobber it.
+    # preset / method layers may still override per run.
+    pp_has_target_res = "target_res" in out
+
     # base → preset → method, each projected to its flat scalars (later wins).
     for _kind, _path, _tag, raw in _iter_method_preset_layers(
         preset, configs_dir, methods_subdir, method, require_files=False
     ):
-        out.update(_flat_scalars(raw))
+        flat = _flat_scalars(raw)
+        if _kind == "base" and pp_has_target_res:
+            flat.pop("target_res", None)
+        out.update(flat)
 
     return out
 
@@ -502,6 +511,10 @@ def load_method_preset(
             merged["target_res"] = pp_raw["target_res"]
             provenance["target_res"] = _display_path(preprocess_path)
 
+    # preprocess.toml owns target_res; a stale copy in base.toml must not clobber
+    # the seed above (preset / method / CLI may still override per run).
+    pp_has_target_res = "target_res" in merged
+
     for kind, path, tag, raw in _iter_method_preset_layers(
         preset, configs_dir, methods_subdir, method, require_files=True
     ):
@@ -510,6 +523,8 @@ def load_method_preset(
         # ``_flatten_toml`` then descends one level into the section contents.
         to_flatten = {preset: raw} if kind == "preset" else raw
         for k, v in _flatten_toml(to_flatten, source=path, strict=strict).items():
+            if k == "target_res" and kind == "base" and pp_has_target_res:
+                continue
             merged[k] = v
             provenance[k] = tag
 

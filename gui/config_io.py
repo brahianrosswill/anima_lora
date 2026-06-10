@@ -469,7 +469,7 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
         ("sample_prompts", []),
         ("sample_every_n_epochs", 0),
         ("sample_at_first", False),
-        ("sample_decode_inline", "auto"),
+        ("sample_decode_inline", "false"),
     ):
         if _k not in merged:
             merged[_k] = _default
