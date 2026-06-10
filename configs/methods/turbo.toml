@@ -30,14 +30,6 @@ unsloth_offload_checkpointing = false
 # grad_mode × token-family × num_threads combos that land at the default 8 and
 # spill to eager; 64 gives ample headroom. Logged at startup.
 dynamo_recompile_limit = 64
-
-# Collapse the per-token-count block graphs to a single symbolic-seq graph by
-# marking only the seq-length axis dynamic (mark_dynamic) — the same path LoRA
-# training takes via base.toml's compile_dynamic_seq. Only matters when
-# torch_compile is on. The symbolic-axis bound + dynamo budget are sized
-# automatically from the token-count families present in the cached pool
-# (data_dir), so no target_res is needed here. (An explicit --target_res on the
-# CLI still overrides as an escape hatch.)
 compile_dynamic_seq = true
 
 # torch.compile partitioner saved-activation fraction (same lever as base.toml's
@@ -50,8 +42,7 @@ activation_memory_budget = 0.99
 
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
-# student, which dpdmd structurally can't produce). Pair "dmd" with [gad] to
-# restore initial-noise sensitivity geometrically instead of via the anchor.
+# student, which dpdmd structurally can't produce).
 base_loss = "dpdmd"
 
 [network]
@@ -74,40 +65,14 @@ student_steps = 4               # N — student rolls N Euler steps; inference m
 teacher_cfg = 4                 # CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4)
 dm_x0_norm = true               # per-sample x0-space magnitude normalization of the DM gradient
 norm_floor = 0.05               # clamp_min for the dm_x0_norm denominator (latent scale)
-grad_step = "random"            # which rollout step carries gradient (BOTH base_loss values):
-                                #   "random" — canonical DMD2 multistep: each iter samples
-                                #              g~U{0..N-1} (dmd) or g~U{1..N-1} over the
-                                #              refinement steps (dpdmd — step 0 stays the
-                                #              detached diversity anchor), backward-simulates
-                                #              the prefix under no_grad, grads ONLY step g's
-                                #              one-step x0-prediction. Supervises EVERY grid
-                                #              point (not just the clean tail). Memory-flat.
-                                #   "last"   — only the final, cleanest-σ step (memory-flat,
-                                #              but the noisy steps train only indirectly).
-                                #   "all"    — full-rollout BPTT (holds N forward graphs).
-                                # "random"/"all" are per_step_expert-compatible; "last" is not
-                                # (only the final head would train). Under dpdmd, "random"
-                                # spreads the mode-seeking DMD grad across all refinement σ
-                                # while "last" concentrates it at the tail — A/B for pose
-                                # diversity (CMMD is blind to it). See gad.md.
+grad_step = "random"
 
 # Optimization.
 [optim]
 student_lr = 2e-5
 fake_lr = 2e-5
 fake_steps_per_student_step = 4
-fake_warmup_steps = 50           # fake (critic) head-start: number of fake-only gradient
-                                # updates BEFORE the main loop, so the critic is calibrated
-                                # against the student's (init ≈ teacher) x_pred before the
-                                # student LR warmup (~40 steps) ramps to full strength —
-                                # kills the early grad_signal_rms spike (~step 50). Counted
-                                # in fake updates DIRECTLY (decoupled from
-                                # fake_steps_per_student_step — bumping the cadence no longer
-                                # rescales the head-start). 400 ≈ the old 100×4 magnitude.
-                                # The fake LR scheduler is sized over
-                                # (iterations·fake_steps_per_student_step + fake_warmup_steps)
-                                # and stepped through this phase, so its 0.02 LR warmup
-                                # overlaps the head-start; student schedule untouched. 0 = off.
+fake_warmup_steps = 50
 weight_decay = 0.0
 grad_clip = 1.0                 # student grad-norm cap
 
@@ -120,25 +85,6 @@ k_anchor = 6                    # teacher steps rolled to the diversity anchor (
 teacher_anchor_steps = 12        # teacher σ-grid the K is counted against
 div_weight = 0.05               # λ on the first-step diversity MSE
 detach_after_first = true       # load-bearing stop-grad after step 1 (A/B only)
-
-# Geometry-Aware Distillation (GAD; Huang et al., arXiv:2606.01651).
-#
-# An orthogonal Jacobian-vector-product regularizer that restores the distilled
-# student's *sensitivity to the initial noise* — the property standard pointwise
-# distillation flattens (→ seed mode-collapse, dead noise-control). Each step we
-# perturb the renoised DMD latent x_t by h·v and match the student's local score
-# response Δε to the teacher's (Eq.9). It folds into the SAME DMD2 surrogate as
-# the DM gradient (a detached latent-space signal · x_pred) — ~2 extra no_grad
-# forwards, zero extra backward graph. Composes with EITHER base_loss.
-#
-# weight=0 disables (default — shipped behavior unchanged). It's the diversity
-# mechanism for the base_loss="dmd" + student_steps=1 replacement arm; it can
-# also stack on dpdmd as an extra local-geometry shield. Their fixed h=1e-2 was
-# best (Table 9). CAUTION: a hard-routed fake/critic can route-flip across the
-# perturbation, making Δε_fake discontinuous — keep h small there.
-[gad]
-weight = 0.0
-h = 0.01
 
 # τ sampling distribution for the fake/critic update (+ fake warmup).
 [sampling]
@@ -183,7 +129,7 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 # (~3 GB) only to backprop into x_pred; `grad_ckpt` below recomputes them in
 # backward instead, so the GAN term costs ~one half-depth forward, not ~3 GB.
 [gan]
-weight_gen = 0.0               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
+weight_gen = 0.03               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
 feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
 disc_lr = 1e-5                  # discriminator AdamW LR
 disc_hidden = 0                 # disc MLP hidden width; 0 → inner_dim // 2

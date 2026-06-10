@@ -22,50 +22,12 @@ Both `make` (Unix) and `python tasks.py` (cross-platform/Windows) work — the `
 
 All training runs `train.py --method <name> --preset <name>`. By default it's invoked **directly** (single-GPU fast path — skips the ~5s accelerate launcher bootstrap; `train.py` builds its own single-process `Accelerator()` and reads `mixed_precision` from the config chain). Set `ANIMA_ACCELERATE_LAUNCH=1` to wrap it in `accelerate launch` for multi-GPU / distributed runs (see `build_launch_cmd` in `scripts/tasks/_common.py`). Override any config value from CLI (`--network_dim 32 --max_train_epochs 64`) or the preset via `PRESET=low_vram make lora`. `exp-*` targets are experimental — may break or be removed.
 
-```bash
-# Training (run from anima_lora/) — method + hardware preset; method wins on overlap
-make lora                                # methods/lora.toml + presets.toml[default]
-make lora PRESET=low_vram|fast_16gb|half # override preset (half → sample_ratio=0.5)
-make lora-gui GUI_PRESETS=tlora          # clean per-variant configs/gui-methods/ (no toggle blocks)
-                                         #   `ls configs/gui-methods/` for the live variant list
-make easycontrol [EASYADAPTER=colorize]  # + easycontrol-preprocess / easycontrol-download
-make exp-ip-adapter | exp-soft-tokens | exp-chimera | exp-turbo
+`make help` lists every target; the canonical bodies are in `tasks.py`. Non-obvious knobs and gotchas worth knowing up front:
 
-# Inference (latest output) — SPECTRUM=1 / MOD=1 / NOLORA=1 compose into every test-* target
-make test [MOD=1] [NOLORA=1] [SPECTRUM=1]
-make test-hydra            # HydraLoRA / FeRA router-live checkpoints
-make test-merge            # merged/baked DiT (no adapter)
-make test-dcw | test-dcw-v4 | test-smc-cfg     # DCW scalar / v4 calibrator / SMC-CFG
-make test-easycontrol REF_IMAGE=...            # EasyControl (EASYADAPTER=colorize for colorize)
-make exp-test-soft | exp-test-turbo | exp-test-ip REF_IMAGE=...
-make exp-test-directedit PROMPT='...' | exp-test-directedit-dry
-
-# Modulation guidance distillation
-make distill-prep          # stage uncond sidecar + teacher-synthetic clean-latents pool
-make distill-mod           # train pooled_text_proj MLP (add --synth_data_dir for paper-faithful fit)
-
-# DCW v4 calibration (one-shot per LoRA checkpoint)
-make dcw                   # sample 5 aspect buckets + train fusion head (~3-5h on a 5060 Ti)
-make dcw-train             # train-only on existing pool (~30s)
-
-# Training daemon (local FIFO job queue). Auto-starts on first submit.
-make daemon | daemon-attach [JOB=<id>] | daemon-kill [JOB=<id>] | daemon-terminate
-make lora --queue                        # enqueue instead of run inline (overnight sweep)
-make exp-turbo --queue                   # bespoke distill loops queue too (command-job, label exp-turbo)
-# GUI Train button + ComfyUI trainer node + preprocessing all submit to the daemon.
-
-make gui                   # PySide6 GUI (config editing, preprocess+train tabs, dataset browser)
-make mask | mask-clean     # SAM3 + MIT → post_image_dataset/masks/ (for masked loss)
-make merge ADAPTER_DIR=output/ckpt [MULTIPLIER=0.8]   # bake LoRA into DiT (LoRA/Ortho/T-LoRA only)
-make comfy-batch           # run ComfyUI batch workflow
-make print-config METHOD=lora PRESET=default          # dump merged config chain
-make test-unit             # pytest tests/ (smoke, config, loss/network registries)
-make export-logs RUN=...   # export TensorBoard run to JSON
-make update                # update from a GitHub release (--dry-run / --version / --no-sync)
-ruff check . --fix && ruff format .
-```
-
-Gotchas: `merge` refuses Hydra moe / postfix (not foldable) unless `--allow-partial`. `turbo` output is a normal LoRA — infer with `--infer_steps 2 --cfg 1.0` (matched to the DP-DMD `student_steps=2` rollout).
+- **Training**: `make lora PRESET=low_vram|fast_16gb|half` (half → `sample_ratio=0.5`); `make lora-gui GUI_PRESETS=tlora` runs the clean per-variant `configs/gui-methods/` tree (`ls` it for the live list). `exp-ip-adapter | exp-soft-tokens | exp-chimera | exp-turbo` are the experimental methods.
+- **Inference compose flags**: `SPECTRUM=1` / `MOD=1` / `NOLORA=1` compose into **every** `test-*` target (`make test`, `test-hydra`, `test-merge`, `test-dcw{,-v4}`, `test-smc-cfg`, `test-easycontrol REF_IMAGE=…`, `exp-test-*`).
+- **Daemon** (local FIFO job queue, auto-starts on first submit): `make daemon | daemon-attach [JOB=<id>] | daemon-kill | daemon-terminate`. Append `--queue` to any train/distill target to enqueue instead of running inline (`make lora --queue`, `make exp-turbo --queue`). GUI Train button, ComfyUI trainer node, and preprocessing all submit here.
+- **Gotchas**: `make merge ADAPTER_DIR=… [MULTIPLIER=0.8]` bakes LoRA into the DiT (LoRA/Ortho/T-LoRA only) and refuses Hydra-moe / postfix unless `--allow-partial`. `turbo` output is a normal LoRA — infer with `--infer_steps 2 --cfg 1.0` (matched to the DP-DMD `student_steps=2` rollout). `make print-config METHOD=… PRESET=…` dumps the merged chain; `make test-unit` runs pytest; `ruff check . --fix && ruff format .` (touched files only — see [[feedback_ruff_scope_collateral]]).
 
 ## Key entry points
 
@@ -100,7 +62,7 @@ Subsets accept `cache_dir` — redirects all VAE/TE/PE caches to that dir with s
 
 ## Architecture
 
-- **Modular `library/`**: `train_util.py` is a re-exporting facade; code lives in domain subpackages — `anima/` (DiT model, training helpers, weights, strategy), `datasets/` (incl. `cache.py` = general cached-pair train reader `CachedDataset`, re-exported by `distill.py` for back-compat), `training/` (optimizer/scheduler/checkpoint + loss/sampler/metric registries), `inference/` (engine: generation, sampling, models, text, adapters, sampler_context, `request.py` = typed `GenerationRequest`; plug-ins split into `corrections/` — DCW / SMC-CFG / mod-guidance — and `editing/` — DirectEdit + postfix inversion), `preprocess/` (dataset-caching **orchestration**: `images`/`latents`/`text`/`pe` — the scan→group-by-shape→batched-encode→idempotent-write loops), `models/` (VAE, metadata spec), `captioning/` (Anima Tagger), `vision/` (vision tower/resampler), `config/` (schema + loader), `io/` (`cache.py` = cache-path resolution + suffixes + discovery, `safetensors.py`), `runtime/` (device/offloading/noise + `cli.py` shared argparse surface + `harness.py` `build_anima` model-build harness), `env.py`, `log.py`.
+- **Modular `library/`** (`train_util.py` is a re-exporting facade): domain subpackages `anima/` (DiT model, weights, strategy), `datasets/` (`cache.py` = `CachedDataset`), `training/` (optimizer/scheduler/checkpoint + loss/sampler/metric registries), `inference/` (engine + `request.py` typed `GenerationRequest`; plug-ins split `corrections/` — DCW / SMC-CFG / mod-guidance — vs `editing/` — DirectEdit + postfix inversion), `preprocess/` (caching orchestration), `models/`, `captioning/`, `vision/`, `config/`, `io/` (cache-path resolution), `runtime/` (device/offloading + `cli.py` argparse + `harness.py` `build_anima`). Full per-subpackage map in `docs/structure/`.
 - **Tooling layering contract**: **primitives** (`library/*` — load a model, encode a batch, resolve a cache path) → **façade** (`anima_lora/` — embedder entry points) → **orchestration** (`library/preprocess/`, `library/runtime/harness.py` — drive primitives over a whole dataset/run) → **entry points** (`scripts/preprocess/*.py`, `bench/**/run_bench.py`, `scripts/**`, `tasks.py` — thin argparse wrappers). `scripts/preprocess/*.py` are now thin CLI shells over `library/preprocess/`. `bench/`, `scripts/` are **not** installed packages (only `anima_lora`/`library`/`networks` are) — they keep a `sys.path` bootstrap to import siblings.
 - **Strategy pattern** for tokenization/encoding (`library/anima/strategy.py`, `library/strategy_base.py`).
 - **Pluggable adapters** under `networks/` — selected via `network_module` + (for LoRA family) the three-axis routing cfg. LoRA modules in `networks/lora_modules/` coordinated by `networks/lora_anima/`; IP-Adapter/EasyControl in `networks/methods/`; attention dispatcher `networks/attention_dispatch.py`; Spectrum `networks/spectrum.py`; SPD `networks/spd.py`. **See `networks/CLAUDE.md`** for the per-module map, three-axis surface, and dispatch invariants.
@@ -142,7 +104,7 @@ Adapter families (training methods) below — one-line orientation plus the load
 
 ## Preprocessing & scripts
 
-Data-prep scripts in `scripts/preprocess/` (resize → VAE latents → text embeddings → PE features → masks); see file headers for flags and `make preprocess-{resize,vae,te,pe,pooled}` / `make mask`. Resize is **idempotent + size-aware**: it skips images whose resized PNG already sits at the correct bucket, so a re-run is near-free but a `target_res` tier change still re-resizes only the images whose bucket moved (`--overwrite` forces all). After changing tiers, `make preprocess-reconcile` (dry-run; `ARGS="--delete"` to act → `library/preprocess/reconcile.py`) drops orphaned latent npz + stale resized PNG + PE sidecar + mask for every image whose bucket changed (TE caches are text-only, never touched), so the next `make preprocess` / `make mask` regenerates them cleanly. **The caching logic moved to `library/preprocess/` — these scripts are now thin argparse wrappers**; edit the orchestration in the library, the flags in the script. Other utility scripts in `scripts/` — notably `distill_mod/` (mod-guidance distillation), `merge_to_dit.py`, `dcw/` (DCW v4 calibration pipeline), `anima_tagger/cli.py`, `edit.py`, `export_logs_json.py`.
+Data-prep scripts in `scripts/preprocess/` are thin argparse wrappers (resize → VAE latents → text embeddings → PE features → masks); **the caching logic lives in `library/preprocess/`** — edit orchestration there, flags in the script. `make preprocess-{resize,vae,te,pe,pooled}` / `make mask`. Resize is **idempotent + size-aware** (skips images already at the correct bucket; `--overwrite` forces all). After a `target_res` tier change, run `make preprocess-reconcile` (dry-run; `ARGS="--delete"` to act) to drop orphaned latent npz / stale resized PNG / PE sidecar / mask for every image whose bucket moved — TE caches are text-only and never touched. Other utility scripts: `distill_mod/`, `merge_to_dit.py`, `dcw/`, `anima_tagger/cli.py`, `edit.py`, `export_logs_json.py`.
 
 Caches live under `post_image_dataset/lora/`: `{stem}_{WxH}_anima.npz` (VAE), `{stem}_anima_te.safetensors` (text), `{stem}_anima_pe.safetensors` (PE). TE caching reads `.txt` from `image_dataset/` (the caption master); training reads only cached embeddings.
 
@@ -158,4 +120,4 @@ ComfyUI, SAM3, and manga-image-translator live in the parent directory (`../comf
 
 ## Contributing
 
-PRs follow a tier system in `CONTRIBUTING.md` (Tier 1 = bugfixes/typos; Tier 1.5 = numerics/efficiency revisions — bench script + invariant test required; Tier 2 = new adapter method — paper citation + `bench/<method>/` + docs + `make` targets; Tier 3 = new base-model support, not accepted). Bench scripts share `bench/_common.py` and drop a standard `result.json` envelope into `bench/<method>/results/<YYYYMMDD-HHMM>[-label]/`.
+PRs follow a tier system — see `CONTRIBUTING.md`. Key constraint for code work: numerics/efficiency changes (Tier 1.5) and new methods (Tier 2) **require a bench script + invariant test**. Bench scripts share `bench/_common.py` and drop a `result.json` envelope into `bench/<method>/results/<YYYYMMDD-HHMM>[-label]/`.

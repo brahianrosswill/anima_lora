@@ -8,9 +8,9 @@ each can be killed independently.
 
 Our Turbo (`scripts/distill_turbo/`, `networks/methods/turbo_dmd.py`) is a hand-rolled
 **DP-DMD**: teacher CFG real-score vs. fake-score VSD surrogate, plus a diversity-anchored
-first step and an optional GAD geometric term. It is, structurally, **DMD2 with the GAN
-amputated**. Ideas 1 and 2 add the missing adversarial machinery; idea 3 is the
-refactor that makes 1 (and future distillation methods) cheap to wire.
+first step. It is, structurally, **DMD2 with the GAN amputated**. Ideas 1 and 2 add the
+missing adversarial machinery; idea 3 is the refactor that makes 1 (and future
+distillation methods) cheap to wire.
 
 ---
 

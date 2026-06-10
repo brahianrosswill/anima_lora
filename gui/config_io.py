@@ -109,7 +109,7 @@ def list_gui_variants(method: str) -> list[str]:
     specific family.
     """
     by_family = _builtin_variants_by_family()
-    ordered = [stem for _order, stem, _label in by_family.get(method, [])]
+    ordered = [stem for _, stem, _ in by_family.get(method, [])]
     if CUSTOM_VARIANTS_DIR.exists():
         for p in sorted(CUSTOM_VARIANTS_DIR.glob("*.toml")):
             ordered.append(f"custom/{p.stem}")

@@ -337,34 +337,15 @@ def build_argparser() -> argparse.ArgumentParser:
         "(matches inference). Default: TOML (sampling.flow_shift, default 3.0).",
     )
 
-    # ---- Base objective + GAD (geometry-aware distillation; arXiv 2606.01651) ----
+    # ---- Base objective ----
     parser.add_argument(
         "--base_loss",
         type=str,
         default=None,
         choices=("dpdmd", "dmd"),
         help="Diversity mechanism: 'dpdmd' (first-step teacher anchor, default) "
-        "or 'dmd' (plain DMD2 — no anchor, allows student_steps=1; pair with "
-        "--gad_weight to restore noise sensitivity geometrically). Default: TOML "
+        "or 'dmd' (plain DMD2 — no anchor, allows student_steps=1). Default: TOML "
         "(base_loss, default 'dpdmd').",
-    )
-    parser.add_argument(
-        "--gad_weight",
-        type=float,
-        default=-1.0,
-        help="λ on the GAD (Jacobian-vector-product) response-matching term, "
-        "folded into the DMD2 surrogate. 0 disables. Restores initial-noise "
-        "sensitivity by matching the student's local directional score response "
-        "to the teacher's (arXiv 2606.01651 Eq.9). Composes with either base_loss. "
-        "Default: TOML (gad.weight, default 0).",
-    )
-    parser.add_argument(
-        "--gad_h",
-        type=float,
-        default=-1.0,
-        help="Finite-difference perturbation scale for the GAD JVP (their fixed "
-        "h=1e-2). Only active with --gad_weight > 0. Default: TOML (gad.h, "
-        "default 0.01).",
     )
 
     # ---- DMD2 teacher-feature GAN (FastGen idea 1; off by default) ----
@@ -478,10 +459,8 @@ class TurboConfig:
     norm_floor: float
     dmd_grad_step: str  # "all" | "last" | "random"
 
-    # Base objective selector + GAD (geometry-aware distillation)
+    # Base objective selector
     base_loss: str
-    gad_weight: float
-    gad_h: float
 
     # DMD2 teacher-feature GAN (idea 1) + f-distill reweighting (idea 2)
     gan_loss_weight_gen: float
@@ -599,14 +578,9 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     # (full-rollout BPTT).
     dmd_grad_step = str(_pick(args.dmd_grad_step, cfg, "dmd.grad_step", "all"))
 
-    # Base objective selector + GAD. 'dpdmd' keeps the first-step teacher anchor;
-    # 'dmd' is plain DMD2 (no anchor → student_steps >= 1 allowed). GAD (arXiv
-    # 2606.01651) is an orthogonal JVP regularizer — a detached latent-space
-    # signal folded into the SAME DMD2 surrogate as the DM gradient — so it
-    # composes with EITHER base.
+    # Base objective selector. 'dpdmd' keeps the first-step teacher anchor;
+    # 'dmd' is plain DMD2 (no anchor → student_steps >= 1 allowed).
     base_loss = _pick(args.base_loss, cfg, "base_loss", "dpdmd")
-    gad_weight = float(_pick(args.gad_weight, cfg, "gad.weight", 0.0))
-    gad_h = float(_pick(args.gad_h, cfg, "gad.h", 1e-2))
 
     # DMD2 teacher-feature GAN (idea 1) + f-distill (idea 2). weight_gen=0 keeps
     # the whole GAN/disc path off → byte-identical DP-DMD. feature_block_idx uses
@@ -763,10 +737,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             "only step g's one-step x0-prediction (memory-flat; supervises every "
             "grid point, not just the clean tail)."
         )
-    if gad_weight < 0.0:
-        raise ValueError(f"gad.weight={gad_weight}: must be >= 0")
-    if gad_weight > 0.0 and gad_h <= 0.0:
-        raise ValueError(f"gad.h={gad_h}: must be > 0 when gad.weight > 0")
     if gan_loss_weight_gen < 0.0:
         raise ValueError(f"gan.weight_gen={gan_loss_weight_gen}: must be >= 0")
     if gan_r1_weight < 0.0:
@@ -875,12 +845,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
             f"plain DMD2 (no diversity anchor): student N={student_steps} @ "
             f"flow_shift={flow_shift}, teacher_cfg={teacher_cfg}."
         )
-    if gad_weight > 0.0:
-        logger.info(
-            f"GAD (geometry-aware distillation, arXiv 2606.01651) ON: "
-            f"weight={gad_weight}, h={gad_h} — JVP score-response matching folded "
-            "into the DMD2 surrogate."
-        )
     if per_step_expert:
         if not detach_after_first:
             logger.warning(
@@ -935,8 +899,6 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         norm_floor=norm_floor,
         dmd_grad_step=dmd_grad_step,
         base_loss=base_loss,
-        gad_weight=gad_weight,
-        gad_h=gad_h,
         gan_loss_weight_gen=gan_loss_weight_gen,
         gan_feature_block_idx=gan_feature_block_idx,
         gan_disc_lr=gan_disc_lr,
@@ -1013,8 +975,6 @@ def tb_config_text(c: TurboConfig) -> str:
     """Formatted TensorBoard config summary (same key set as v1)."""
     pairs = {
         "base_loss": c.base_loss,
-        "gad_weight": c.gad_weight,
-        "gad_h": c.gad_h,
         "gan_loss_weight_gen": c.gan_loss_weight_gen,
         "f_div": c.f_div,
         "k_anchor": c.k_anchor,

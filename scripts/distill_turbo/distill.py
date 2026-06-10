@@ -765,13 +765,10 @@ def main():
 
     # ---------------- Training loop ----------------
     # base_loss='dpdmd' runs the first-step teacher anchor (diversity); 'dmd' is
-    # plain DMD2 with no anchor (student_steps may be 1). GAD (cfg.gad_weight>0)
-    # composes with either — it rides the DMD2 surrogate below, not the anchor.
+    # plain DMD2 with no anchor (student_steps may be 1).
     use_anchor = cfg.base_loss == "dpdmd"
     logger.info(
-        f"starting turbo training ({cfg.base_loss}"
-        + ("+GAD" if cfg.gad_weight > 0 else "")
-        + f"): {cfg.iterations} iterations"
+        f"starting turbo training ({cfg.base_loss}): {cfg.iterations} iterations"
     )
     progress = tqdm(range(cfg.iterations), desc="turbo")
     metrics = TurboMetrics(device)
@@ -980,31 +977,6 @@ def main():
             )
             grad_dm = grad_dm / denom
         grad_signal = grad_dm.detach()
-
-        # --- GAD: geometric (JVP) response matching on the score fields ---
-        # Restore initial-noise sensitivity (arXiv 2606.01651 Eq.9) by matching the
-        # student's local directional response to the teacher's. Perturb the
-        # (detached) renoised latent by h·v and take the finite-difference response
-        # of each score field. The GAD signal is the geometric twin of the DMD
-        # signal: same operand order (real − fake), so it inherits the verified DMD
-        # sign convention, and it folds into the SAME DMD2 surrogate (a detached
-        # latent-space vector dotted against x_pred). The renoise jacobian
-        # ∂x_t/∂x_pred = (1−τ) is the correct per-sample weight here (NOT the DMD
-        # τ-damping heuristic); h is absorbed into gad_weight. Both perturbed
-        # forwards are no_grad — GAD adds ~2 forwards and zero backward graph.
-        # NOTE: a hard-routed fake/critic can route-flip across x_pert, making
-        # Δv_fake discontinuous — keep gad_h small there (the teacher view is the
-        # frozen base DiT, so Δv_real is always smooth).
-        if cfg.gad_weight > 0.0:
-            vv = torch.randn_like(x_renoised_dm)
-            x_pert = x_renoised_dm + cfg.gad_h * vv
-            v_real_pert = _teacher_cfg_velocity(x_pert, tau_dm, crossattn_emb, c_null)
-            v_fake_pert = _forward(
-                "fake", x_pert, tau_dm, crossattn_emb, no_grad=True
-            ).squeeze(2)
-            delta_resp = (v_real_pert - v_real_cond_dm) - (v_fake_pert - v_fake_cond_dm)
-            gad_signal = cfg.gad_weight * (1.0 - tau_dm_e) * delta_resp.float()
-            grad_signal = grad_signal + gad_signal.detach()
 
         # --- GAN generator term + f-distill reweighting (ideas 1 & 2) ---
         # The discriminator scores the frozen TEACHER's block features of the
@@ -1277,8 +1249,6 @@ def main():
                 "ss_turbo_step": str(n),
                 "ss_turbo_k_anchor": str(cfg.k_anchor),
                 "ss_turbo_div_weight": str(cfg.div_weight),
-                "ss_turbo_gad_weight": str(cfg.gad_weight),
-                "ss_turbo_gad_h": str(cfg.gad_h),
                 "ss_turbo_gan_weight_gen": str(cfg.gan_loss_weight_gen),
                 "ss_turbo_f_div": cfg.f_div,
             }
