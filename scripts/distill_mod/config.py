@@ -66,7 +66,7 @@ def build_argparser() -> argparse.ArgumentParser:
         default="output/ckpt/pooled_text_proj.safetensors",
         help="Where to save the trained projection weights",
     )
-    parser.add_argument("--iterations", type=int, default=3000)
+    parser.add_argument("--iterations", type=int, default=12000)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size")
     parser.add_argument(
@@ -118,7 +118,6 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compile_dynamic_seq",
         action="store_true",
-        default=True,
         help="Collapse the per-token-count block graphs into ONE symbolic-seq "
         "graph (mark_dynamic on the seq axis), bounded by the token counts present "
         "in the cached pool (data_dir + synth_data_dir). Mirrors the LoRA-training "
@@ -209,13 +208,13 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validate_every_n_steps",
         type=int,
-        default=1000,
+        default=1500,
         help="Run validation every N optimizer steps (only if validation_split>0)",
     )
     parser.add_argument(
         "--save_every",
         type=int,
-        default=1000,
+        default=1500,
         help="Save checkpoint every N iterations",
     )
     parser.add_argument(
@@ -277,7 +276,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gad_weight",
         type=float,
-        default=1.0,
+        default=0.0,
         help="λ on the GAD text-response-matching term: L = L_mse + λ·MSE(ΔS, ΔT). "
         "0 (default) disables → exact reproduction of the MSE-only head. ΔT is the "
         "teacher's velocity response to a text swap (via cross-attn); ΔS is the "

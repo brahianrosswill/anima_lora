@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -130,6 +131,46 @@ def _save_cfg_dict(args, cfg, d_in, best_f1):
 
 
 # ── dual-encoder bucket-grouped DataLoader path ──────────────────────────
+
+
+def _drop_packed_sidecars(datasets, logger) -> None:
+    """Delete the per-stem token sidecars now that the mmap shards hold the
+    same data. Verifies every live shard exists + is non-empty FIRST, so a
+    half-built/corrupt pack never triggers a delete (we'd rather keep the
+    redundant sidecars than lose both copies). DESTRUCTIVE — repacking a
+    different split later needs `--mode build_features` to re-encode.
+    """
+    # Guard: all shards referenced by either split must be present.
+    for ds in datasets:
+        for side, dirpath in ds._pack_dirs.items():
+            row_map = ds._pack_main if side == "main" else ds._pack_aux
+            for bucket_key in {bk for bk, _row in row_map}:
+                shard = dirpath / f"{bucket_key}.safetensors"
+                if not (shard.exists() and shard.stat().st_size > 0):
+                    logger.warning(
+                        "skipping sidecar drop — shard missing/empty: %s", shard
+                    )
+                    return
+    # Sidecar Paths live on the dataset (self.paths / self.paths_aux). Both
+    # splits share the same cache dirs, so union + dedup before unlinking.
+    sidecars = set()
+    for ds in datasets:
+        sidecars.update(Path(p) for p in ds.paths)
+        sidecars.update(Path(p) for p in ds.paths_aux)
+    n_removed, bytes_freed = 0, 0
+    for p in sidecars:
+        try:
+            bytes_freed += p.stat().st_size
+            p.unlink()
+            n_removed += 1
+        except FileNotFoundError:
+            pass
+    logger.info(
+        "dropped %d packed sidecars (%.1f GB freed). NOTE: repacking a "
+        "different split now requires re-running `--mode build_features`.",
+        n_removed,
+        bytes_freed / 1e9,
+    )
 
 
 @torch.no_grad()
@@ -308,6 +349,11 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
             f"--encoder {args.encoder} --aux_encoder {aux_encoder} "
             f"--pool_kind_aux {pool_kind_aux}` first."
         )
+    # Consolidate the per-stem sidecars into per-bucket mmap shards so the
+    # loader stops opening ~30k tiny files per epoch (see CachedDualDataset
+    # docstring). Built once under out_dir/.cache/packed; reused across runs
+    # while the split is unchanged.
+    pack_root = out_dir / ".cache" / "packed"
     train_ds = CachedDualDataset(
         manifest,
         cache_dir,
@@ -317,6 +363,7 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         pool_kind_aux,
         spec_aux,
         stems_subset=manifest.train_stems,
+        pack_root=pack_root,
     )
     val_ds = CachedDualDataset(
         manifest,
@@ -327,7 +374,21 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         pool_kind_aux,
         spec_aux,
         stems_subset=manifest.val_stems,
+        pack_root=pack_root,
     )
+    # Shard dirs are keyed by a hash of their stem list, so a changed split
+    # (new images / different val_frac / seed) builds fresh dirs and orphans
+    # the old ~40 GB. train+val are the only live splits this run, so prune any
+    # other packed-shard dir to keep disk bounded to one split's worth. Only
+    # touches out_dir/.cache/packed/ — never the per-stem sidecars.
+    live_dirs = {d for ds in (train_ds, val_ds) for d in ds._pack_dirs.values()}
+    if pack_root.exists():
+        for child in pack_root.iterdir():
+            if child.is_dir() and child not in live_dirs:
+                logger.info("pruning orphaned packed-shard dir: %s", child.name)
+                shutil.rmtree(child, ignore_errors=True)
+    if getattr(args, "drop_sidecars_after_pack", False):
+        _drop_packed_sidecars((train_ds, val_ds), logger)
     d_in_aux = train_ds.d_in_aux
     logger.info(
         "train (cached dual): N=%d  val: N=%d  d_in=%d  d_in_aux=%d  "
@@ -428,20 +489,22 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         val_ds.buckets, batch_size=args.batch_size, seed=args.seed, shuffle=False
     )
     collate_fn = collate_dual_token_batch
-    train_loader = DataLoader(
-        train_ds,
-        batch_sampler=train_sampler,
-        num_workers=args.feature_cache_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_sampler=val_sampler,
-        num_workers=args.feature_cache_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-    )
+    # Feature reads are now zero-copy row slices off per-bucket mmap shards, so
+    # a handful of workers saturate the tiny MAP head — no need to brute-force
+    # with one-per-core. Keep them alive across epochs (avoids respawn) and
+    # prefetch a couple batches ahead. num_workers=0 stays inline.
+    n_train_workers = min(args.feature_cache_workers, 3)
+    loader_kwargs = dict(collate_fn=collate_fn, pin_memory=True)
+    if n_train_workers > 0:
+        loader_kwargs.update(
+            num_workers=n_train_workers,
+            persistent_workers=True,
+            prefetch_factor=4,
+        )
+    else:
+        loader_kwargs["num_workers"] = 0
+    train_loader = DataLoader(train_ds, batch_sampler=train_sampler, **loader_kwargs)
+    val_loader = DataLoader(val_ds, batch_sampler=val_sampler, **loader_kwargs)
 
     opt = torch.optim.AdamW(
         model.parameters(),

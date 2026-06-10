@@ -16,13 +16,13 @@
 # the denoise loss + per-pool balance loss. T-LoRA's mask is applied to
 # the content branch only (the freq branch keeps full rank at every t).
 
-network_alpha = 32
-network_dim = 32
+network_alpha = 48
+network_dim = 48
 
 learning_rate = 2e-5
-max_train_epochs = 12
-save_every_n_epochs = 3
-checkpointing_epochs = 3
+max_train_epochs = 18
+save_every_n_epochs = 6
+checkpointing_epochs = 6
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -31,12 +31,12 @@ caption_dropout_rate = 0.1
 # CMMD val (PE-Core MMD²) is the primary val signal.
 # use_cmmd = true
 
-output_name = "anima_chimera-0609-64"
+output_name = "anima_chimera-0611-48"
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 use_ortho_init = true
 use_timestep_mask = true
-min_rank = 1
+min_rank = 8
 alpha_rank_scale = 1.0
 blocks_to_swap=0
 

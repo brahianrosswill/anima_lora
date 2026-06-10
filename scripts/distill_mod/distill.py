@@ -93,22 +93,30 @@ def _pool_token_counts(cfg, patch: int) -> set[int]:
     ``distill_turbo``): the on-disk caches are the source of truth for which tiers
     the pool spans. Unlike SPD, the mod head trains at each latent's *native*
     resolution (no per-stage downsampling), so the token count is just
-    ``(h_lat // patch) * (w_lat // patch)``. When ``--synth_data_dir`` is set the
-    real latents are swapped for the synth pool (``CachedDataset`` remap), so union
-    both dirs' resolutions to bound the symbolic seq axis correctly.
+    ``(h_lat // patch) * (w_lat // patch)``.
+
+    When ``--synth_data_dir`` is set the real latents are swapped for the synth
+    pool (``CachedDataset`` remap) and samples with no synth latent are DROPPED,
+    so the forward only ever sees synth shapes. Scan the synth dir alone in that
+    case — unioning ``data_dir`` injects phantom token counts (real-only tiers
+    that are never fed) that widen the symbolic seq axis to a range the traced
+    graphs don't satisfy → ``ConstraintViolationError``.
     """
     import glob
 
-    res_strs: set[str] = {
-        get_latent_resolution(img.npz_path)
-        for img in discover_cached_pairs(cfg.data_dir)
-    }
     if cfg.synth_data_dir is not None:
-        for npz in glob.glob(
-            os.path.join(cfg.synth_data_dir, "**", f"*{LATENT_CACHE_SUFFIX}"),
-            recursive=True,
-        ):
-            res_strs.add(get_latent_resolution(npz))
+        res_strs: set[str] = {
+            get_latent_resolution(npz)
+            for npz in glob.glob(
+                os.path.join(cfg.synth_data_dir, "**", f"*{LATENT_CACHE_SUFFIX}"),
+                recursive=True,
+            )
+        }
+    else:
+        res_strs = {
+            get_latent_resolution(img.npz_path)
+            for img in discover_cached_pairs(cfg.data_dir)
+        }
     counts: set[int] = set()
     for res in res_strs:
         a, b = (int(v) for v in res.split("x"))  # latent dims (order-agnostic)

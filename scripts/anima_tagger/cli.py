@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--feature_cache_workers",
         type=int,
-        default=6,
+        default=3,
         help="DataLoader workers for build_features CPU-side decode + LANCZOS "
         "resize (default: 4). Set to 0 to run inline on the main process.",
     )
@@ -166,6 +166,16 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--d_hidden", type=int, default=1024)
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument(
+        "--drop_sidecars_after_pack",
+        action="store_true",
+        help="After the per-bucket mmap shards are built (and verified), delete "
+        "the original per-stem token sidecars to reclaim disk (~the full "
+        "tokens-<encoder>/ trees). DESTRUCTIVE: repacking a different split "
+        "later then requires re-running `--mode build_features` (GPU "
+        "re-encode). Off by default. Only deletes once BOTH train and val "
+        "shards are present.",
+    )
 
     # Pool architecture. ``map`` = K learnable queries attend over PE patch
     # tokens (CLS + mean concatenated as auxiliary channels). ``mean`` =

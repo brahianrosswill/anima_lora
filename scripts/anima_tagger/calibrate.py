@@ -156,6 +156,12 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
             f"missing aux cache {cache_dir_aux} — calibrate needs the same "
             f"cache the trainer used (pool_kind_aux={pool_kind_aux})."
         )
+    # Read from the same per-bucket mmap shards the trainer built (keyed by a
+    # hash of the kept-stem list, so this val split reuses the trainer's val
+    # shard rather than re-opening ~thousands of tiny per-stem sidecars). Built
+    # on demand if .cache/packed was cleared. Calibrate only materializes val,
+    # so it never prunes the trainer's train shards.
+    pack_root = out_dir / ".cache" / "packed"
     val_ds = CachedDualDataset(
         manifest,
         cache_dir,
@@ -165,6 +171,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         pool_kind_aux,
         spec_aux,
         stems_subset=manifest.val_stems,
+        pack_root=pack_root,
     )
     val_mh = val_ds.multi_hot.to(device)
     sampler = BucketBatchSampler(
