@@ -524,6 +524,13 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
     return merged, origin
 
 
+# Held-out slice written when the user enables validation but neither the form
+# nor base.toml carries a positive validation_split_num. Matches the historical
+# base.toml default referenced in library/config/loader.py and stays under the
+# _MIN_TRAIN_IMAGES_FOR_VALIDATION=100 auto-disable threshold's headroom.
+_DEFAULT_VALIDATION_SPLIT_NUM = 16
+
+
 def _validation_enabled_from_datasets(datasets: Any) -> Optional[bool]:
     """Inspect a TOML ``[[datasets]]`` list and decide whether validation is
     enabled. Returns ``True`` / ``False`` when either validation key is
@@ -593,11 +600,16 @@ def apply_validation_choice(
     """Encode the use_valid checkbox (+ optional validation_split_num int)
     into the variant TOML dict ``out``.
 
-    Enabled  → if ``split_num`` is provided and differs from ``base_split_num``,
-               write {validation_split_num = split_num} on the first
-               [[datasets]] entry (strips any fractional validation_split).
-               Otherwise strip both keys so the base.toml value wins through
-               the merge chain.
+    Enabled  → resolve the held-out count that should take effect (the form
+               ``split_num`` if positive, else ``base_split_num`` if positive,
+               else ``_DEFAULT_VALIDATION_SPLIT_NUM``). When that count equals
+               an already-enabled base, strip both keys so base.toml stays the
+               single source of truth; otherwise write {validation_split_num =
+               <count>} on the first [[datasets]] entry (dropping any fractional
+               validation_split). The fallback to a positive default is what
+               makes ticking the checkbox stick when base.toml ships
+               validation_split_num=0 — without it "enabled" would strip to
+               base's disabled 0 and silently turn validation back off.
     Disabled → write {validation_split_num = 0, validation_split = 0.0} on the
                first [[datasets]] entry, creating the block if absent. This is
                applied by _apply_dataset_overrides in library/config/io.py and
@@ -608,34 +620,41 @@ def apply_validation_choice(
     are preserved; we only touch the two validation keys."""
     existing = out.get("datasets")
     if enabled:
-        keep_override = (
-            split_num is not None
-            and split_num > 0
-            and split_num != (base_split_num or 0)
-        )
-        if keep_override:
-            if not isinstance(existing, list):
-                existing = []
-                out["datasets"] = existing
-            if not existing:
-                existing.append({})
+        base_vsn = base_split_num or 0
+        # Pick the count that should actually take effect. Falling back to a
+        # positive default (rather than stripping) is essential when base.toml
+        # disables validation (validation_split_num=0): otherwise enabling is a
+        # no-op because the stripped override just lets base's 0 win.
+        if split_num and split_num > 0:
+            effective = int(split_num)
+        elif base_vsn > 0:
+            effective = base_vsn
+        else:
+            effective = _DEFAULT_VALIDATION_SPLIT_NUM
+        if effective == base_vsn and base_vsn > 0:
+            # Base already enables this exact count — strip any override so
+            # base.toml stays the single source of truth (avoids noise keys).
+            if not isinstance(existing, list) or not existing:
+                return
             first = existing[0]
             if not isinstance(first, dict):
-                first = {}
-                existing[0] = first
-            first["validation_split_num"] = int(split_num)
+                return
+            first.pop("validation_split_num", None)
             first.pop("validation_split", None)
+            if not first and len(existing) == 1:
+                del out["datasets"]
             return
-        # No override needed — strip any zero/value override so base wins.
-        if not isinstance(existing, list) or not existing:
-            return
+        if not isinstance(existing, list):
+            existing = []
+            out["datasets"] = existing
+        if not existing:
+            existing.append({})
         first = existing[0]
         if not isinstance(first, dict):
-            return
-        first.pop("validation_split_num", None)
+            first = {}
+            existing[0] = first
+        first["validation_split_num"] = effective
         first.pop("validation_split", None)
-        if not first and len(existing) == 1:
-            del out["datasets"]
         return
 
     if not isinstance(existing, list):
