@@ -1574,9 +1574,10 @@ class AnimaTrainer:
         cache once whenever the signature changes (re-preprocessing with different
         ``target_res`` tiers is what changes it).
 
-        First run (no marker yet) writes the marker WITHOUT clearing — the current
-        cache is assumed to match the current signature, so we never needlessly
-        nuke a good cache. Unchanged signature reuses the cache (no recompile).
+        First run (no marker yet) also clears once: users updating from before the
+        tier fix typically carry a cache compiled against the old (buggy) tier set,
+        so a one-time wipe is the safe baseline. Unchanged signature reuses the
+        cache (no recompile).
         """
         import shutil
 
@@ -1590,30 +1591,34 @@ class AnimaTrainer:
         except OSError:
             prev = None
 
-        if prev != signature and prev is not None:
-            cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
-            if not cache_dir:
-                try:
-                    from torch._inductor.runtime.runtime_utils import (
-                        cache_dir as _inductor_cache_dir,
-                    )
+        if prev == signature:
+            return  # same tier set as last compile — cached graphs are valid
 
-                    cache_dir = _inductor_cache_dir()
-                except Exception:  # noqa: BLE001 — torch internals move across versions
-                    cache_dir = None
-            if cache_dir and os.path.isdir(cache_dir):
-                shutil.rmtree(cache_dir, ignore_errors=True)
-                logger.info(
-                    "Cleared torch.compile inductor cache — compile signature "
-                    f"changed ({prev} -> {signature}); rebuilding from scratch."
+        # Signature changed (or first run): cached graphs may be specialized for a
+        # different tier set, so wipe the cache once and let the next compile
+        # rebuild from scratch.
+        cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+        if not cache_dir:
+            try:
+                from torch._inductor.runtime.runtime_utils import (
+                    cache_dir as _inductor_cache_dir,
                 )
 
-        if prev != signature:
-            try:
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text(signature, encoding="utf-8")
-            except OSError as e:  # marker is best-effort; never block training on it
-                logger.warning(f"Could not write compile-cache marker {marker}: {e}")
+                cache_dir = _inductor_cache_dir()
+            except Exception:  # noqa: BLE001 — torch internals move across versions
+                cache_dir = None
+        if cache_dir and os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            logger.info(
+                "Cleared torch.compile inductor cache — compile signature "
+                f"changed ({prev or 'none'} -> {signature}); rebuilding from scratch."
+            )
+
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(signature, encoding="utf-8")
+        except OSError as e:  # marker is best-effort; never block training on it
+            logger.warning(f"Could not write compile-cache marker {marker}: {e}")
 
     def _create_and_apply_network(
         self,
