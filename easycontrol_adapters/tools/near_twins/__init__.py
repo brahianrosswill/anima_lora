@@ -7,6 +7,8 @@ repo root with ``python -m easycontrol_adapters.tools.near_twins``.
 
 Layout:
   - ``engine``  — discovery → embed/cache → Stage-B grid match → discriminators → run_artist
-  - ``outputs`` — HTML / TSV / pair-tree export / dataset blueprint
-  - ``__main__``— config ([miner] toml) + argparse CLI + orchestration
+  - ``outputs`` — ``_tags``/``_no_tags`` pair-tree export + EasyControl dataset blueprint
+  - ``__main__``— config ([staging] toml) + argparse CLI + orchestration
+
+See ``README.md`` for the end-to-end (mine → preprocess → train) workflow.
 """

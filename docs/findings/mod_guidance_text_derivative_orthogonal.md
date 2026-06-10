@@ -1,13 +1,26 @@
 # Mod-guidance: the distilled head matches the teacher pointwise but its text-derivative is orthogonal
 
+> **STATUS (resolved 2026-06-05).** The GAD experiment this finding motivated was
+> run, and the *negative* branch held. A JVP/finite-difference GAD term (and a
+> σ-FiLM head) did **not** lift `cos` off zero. A DC/AC decomposition explains why:
+> the teacher's text response is ~99% AC, but AdaLN modulation can only write DC,
+> so the reachable `cos` ceiling for *any* pooled-AdaLN head is just 0.05–0.17 —
+> an **architectural ceiling**, not a fit gap — and the head already sits at it.
+> Mod-guidance via AdaLN is a global-tone/contrast lever, not a content lever:
+> GAD-for-mod-guidance ships at `gad_weight=0` (dead) and σ-FiLM is inert even when
+> opted in. The measurement below stands — read it for the *mechanism*, not as open
+> work. Full verdict + reproduce: `docs/experimental/gad.md` → "GAD for
+> mod-guidance". (The GAD machinery is kept; its live home is turbo / DP-DMD.)
+> See [[project_mod_guidance_sigma_film]].
+
 > **TL;DR.** The `pooled_text_proj` head reaches ~2.5% held-out relative error
 > (the "low val loss" it was trained to) yet its *response to a text change* is
 > statistically uncorrelated with the teacher's (`cos(ΔS, ΔT) ≈ 0` at every σ).
 > This is not a fit failure or a distribution artifact — it is intrinsic to
 > pointwise MSE distillation when the text-conditioning signal is small relative
 > to the achievable residual. It is the textbook precondition for a
-> geometry-aware (first-order / JVP) distillation term. See
-> `docs/experimental/gad.md` and `scripts/distill_mod/plan.md`.
+> geometry-aware (first-order / JVP) distillation term — which was then wired and
+> run (see the STATUS note above). Mechanism home: `docs/experimental/gad.md`.
 
 ## What was measured
 
@@ -64,12 +77,15 @@ pairs/σ. Baseline run dir: `bench/mod_guidance/results/20260604-1848-0602-synth
 ## Implication
 
 This is precisely the regime GAD (geometry-aware distillation) targets: outputs
-match, the derivative is unconstrained/collapsed. The decisive experiment is to
-add a JVP/finite-difference term to `distill_mod` that supervises `ΔS → ΔT`,
-retrain, and re-run this probe. **Success = cos lifts off zero AND the high-σ
-ratio rises** vs the 0602 baseline above. If cos will not move, the
-architectural ceiling dominates and mod-guidance fundamentally cannot carry a
-teacher-aligned text derivative — itself a clean negative result.
+match, the derivative is unconstrained/collapsed. That motivated adding a
+JVP/finite-difference term to `distill_mod` to supervise `ΔS → ΔT` — **done, and
+it did not move `cos`.** The decisive test was "does cos lift off zero"; it did
+not, and a DC/AC decomposition (`text_jacobian.py`, extended) showed why: the
+teacher's text response is ~99% AC while AdaLN modulation can only push DC, so the
+reachable `cos` ceiling is 0.05–0.17 and the head already sits at it. The "clean
+negative result" branch held — mod-guidance cannot carry a teacher-aligned text
+*direction*; it is a global-tone lever. Full verdict + the σ-FiLM no-op:
+`docs/experimental/gad.md` → "GAD for mod-guidance".
 
 ## Caveats / how to reproduce
 

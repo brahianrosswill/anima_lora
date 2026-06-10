@@ -90,7 +90,12 @@ then spends the σ<0.45 tail copying that answer into the latent itself.
    directly on the boundary where the base is already done. The probe
    reports 57.8% of sigmoid mass falls below σ=0.55 (the "no signal"
    region), versus 38.3% for a `μ=+0.5` logit-normal that biases toward
-   the σ>0.55 region where the base is uncertain.
+   the σ>0.55 region where the base is uncertain. **NB this is a
+   *training-time* capacity-allocation hypothesis and is still unconfirmed**
+   — the related *inference-time* idea (reshaping the sampler's σ schedule
+   to densify one end at fixed NFE) was later **refuted**; see
+   [[project_sigma_reshape_no_win]] / `bench/sigma_reshape/`. Different
+   axis, but don't read this as an endorsed lever.
 
 2. **Adapter training capacity has two regimes to choose between**:
    - σ > 0.55, where the base is genuinely uncertain about the answer

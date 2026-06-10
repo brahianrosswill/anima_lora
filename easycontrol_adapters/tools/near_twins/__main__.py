@@ -173,7 +173,7 @@ def _default_image_dirs() -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="python -m easycontrol_adapters.tools.near_twin",
+        prog="python -m easycontrol_adapters.tools.near_twins",
         description="Mine in-artist near-twin variant pairs that differ by one attribute.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

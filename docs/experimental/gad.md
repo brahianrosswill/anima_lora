@@ -241,8 +241,9 @@ lever — content lives in the AC, which is cross-attention's job. Reaching it n
 AC-writing route (mini-cross-attn / pooled-text-gated *spatial* LoRA), i.e. abandoning
 the pure-AdaLN premise. Don't keep tuning the head (σ-FiLM, more steps, gad_h, or
 retargeting GAD to `dT_DC` — the DC piece is 0.3–5% of the response *and* unaligned).
-Plan + decision rule: `scripts/distill_mod/plan.md` (Phase 3); finding doc + the
-per-σ DC/AC tables in the two `result.json`s above.
+Evidence: the finding doc
+(`docs/findings/mod_guidance_text_derivative_orthogonal.md`) + the per-σ DC/AC
+tables in the two `result.json`s above.
 
 So GAD's homes in this codebase are **turbo** (initial-noise sensitivity under
 trajectory compression) and **mod-guidance** (text-direction sensitivity under
