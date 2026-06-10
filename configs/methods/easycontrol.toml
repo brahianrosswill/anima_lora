@@ -60,7 +60,4 @@ caption_dropout_rate = 0.1
 # the training distribution, so clean-cond inference still works unchanged.
 easycontrol_cond_noise_max = 0.3
 
-blocks_to_swap = 12
-gradient_checkpointing = false
-unsloth_offload_checkpointing = false
-activation_memory_budget = 0.7
+activation_memory_budget = 0.4
