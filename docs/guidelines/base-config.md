@@ -129,7 +129,7 @@ during `make preprocess`, then training reads only the caches.
 |---|---|---|
 | `gradient_checkpointing` | `false` | Recompute activations to save VRAM. Reach for `torch_compile` / `blocks_to_swap` first. |
 | `unsloth_offload_checkpointing` | `false` | Unsloth offload variant of grad checkpointing — **auto-enables `gradient_checkpointing`**; incompatible with `blocks_to_swap`. ⚠️ Its reentrant default can silently zero gradients on detached-input passes; the codebase forces `use_reentrant=False` where it matters. |
-| `channel_scaling_alpha` | `0.5` | SmoothQuant-style per-channel input pre-scaling, baked into the adapter **at training-init time** (not an inference knob). `0.0` disables; `0.5` = sqrt balance; `1.0` = fully flatten channel dominance. Calibration is vendored at `networks/calibration/channel_stats.safetensors` (regenerate with `bench/channel_stats/analyze_lora_input_channels.py`). |
+| `channel_scaling_alpha` | `0.5` | SmoothQuant-style per-channel input pre-scaling, baked into the adapter **at training-init time** (not an inference knob). `0.0` disables; `0.5` = sqrt balance; `1.0` = fully flatten channel dominance. Calibration is vendored at `networks/calibration/channel_stats.safetensors` (cond-stream sibling for EasyControl). Only affects variants with a *trainable* down-projection — exactly inert on frozen-basis ortho variants (`use_ortho` / OrthoHydra). See `docs/optimizations/channel_scaling.md`. |
 | `dataloader_pin_memory` | `true` | Pin DataLoader tensors in host RAM for faster GPU transfer. |
 | `persistent_data_loader_workers` | `true` | Keep DataLoader workers alive across epochs. |
 

@@ -42,9 +42,13 @@ def _load_channel_scales(
     """Load per-channel input pre-scaling stats, gated on ``channel_scaling_alpha``.
 
     SmoothQuant-style. ``channel_scaling_alpha`` is the sole user knob:
-    0.0 (default) disables; 0.5 = sqrt balance; 1.0 fully flattens. The
-    calibration file is vendored at ``networks/calibration/channel_stats.safetensors``;
+    0.0 disables (the kwarg fallback when unset); base.toml ships 0.5 = sqrt
+    balance, so it is ON by default; 1.0 fully flattens. The calibration file
+    is vendored at ``networks/calibration/channel_stats.safetensors``;
     regenerate it with ``bench/channel_stats/analyze_lora_input_channels.py``.
+    Only rebalances variants whose down-projection is trainable — exactly
+    inert on frozen-basis ortho variants (see
+    ``docs/optimizations/channel_scaling.md`` §Liveness).
     See ``bench/channel_stats/channel_dominance_analysis.md`` for motivation.
     """
     raw_alpha = kwargs.get("channel_scaling_alpha", 0.0)

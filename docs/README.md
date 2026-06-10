@@ -34,7 +34,6 @@ Training-free runtime stacks — acceleration and sampler-boundary corrections. 
 | [inference/smc_cfg.md](inference/smc_cfg.md) | SMC-CFG — training-free α-adaptive sliding-mode CFG correction in velocity space |
 | [inference/cns.md](inference/cns.md) | CNS — training-free SDE noise recolorer (`er_sde` only); shapes injected noise toward unresolved frequency bands |
 | [inference/mod-guidance.md](inference/mod-guidance.md) | Modulation guidance — text-conditioned AdaLN steering via distilled `pooled_text_proj` MLP |
-| [inference/channel_scaling.md](inference/channel_scaling.md) | Channel Scaling — SmoothQuant-style per-channel LoRA input pre-scaling (usage reference; motivation in `bench/channel_stats/`) |
 | [inference/invert.md](inference/invert.md) | Embedding inversion — optimize text embeddings (full and K-slot reference) |
 
 ## Experimental
@@ -84,15 +83,16 @@ Negative results and feasibility probes — methods evaluated and not adopted.
 | [findings/turbo_fei_band_deficit_falsified.md](findings/turbo_fei_band_deficit_falsified.md) | Turbo FEI band-deficit CA reweighting — why it was plausible, why it falsified |
 | [findings/agsm_reward_premise_holds.md](findings/agsm_reward_premise_holds.md) | AGSM reward premise — relative FM-ranking survives where absolute FM-MSE doesn't |
 | [findings/mod_guidance_quality_tag_axis.md](findings/mod_guidance_quality_tag_axis.md) | Mod-guidance pooled-text "quality axis" — demoted to geometry-only; replaced by image-space attribution |
-| [findings/channel_stats_content_independence.md](findings/channel_stats_content_independence.md) | `per_channel_scaling` calibration is content-agnostic on Anima (A/B result) |
+| [findings/channel_stats_content_independence.md](findings/channel_stats_content_independence.md) | Channel-scaling calibration is content-agnostic on Anima (A/B result) |
 
 ## Optimizations
 
-Compiler, kernel, and hardware setup.
+Compiler, kernel, hardware setup, and training-time optimizer geometry.
 
 | Doc | Description |
 |-----|-------------|
 | [optimizations/for_compile.md](optimizations/for_compile.md) | Changes from sd-scripts for torch.compile / dynamo |
+| [optimizations/channel_scaling.md](optimizations/channel_scaling.md) | Channel Scaling — SmoothQuant-style per-channel LoRA gradient rebalance (on by default, α=0.5; inert on frozen-basis ortho variants) |
 | [optimizations/fa4.md](optimizations/fa4.md) | Flash Attention 4 — why it was evaluated and removed |
 | [optimizations/adamw_fused.md](optimizations/adamw_fused.md) | AdamW8bit → fused AdamW — why bitsandbytes was dropped |
 | [optimizations/hydra_analysis.md](optimizations/hydra_analysis.md) | HydraLoRA — nsys-driven optimization pass (2026-05-03) |
