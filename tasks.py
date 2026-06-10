@@ -177,15 +177,14 @@ COMMANDS = {
     # ── Anima Tagger ──────────────────────────────────────────────────
     "preprocess-tagger": (
         tagger.cmd_preprocess_tagger,
-        "Build the Anima Tagger vocab/manifest + cache pooled PE features "
-        "+ cache resized images (build_vocab + build_features + "
-        "build_resized). Needs CAPTION_CORPUS_DIR in .env.",
+        "Build the Anima Tagger vocab/manifest + cache PE-Core & PE-Spatial "
+        "features (build_vocab + build_features). Needs CAPTION_CORPUS_DIR "
+        "in .env.",
     ),
     "tagger": (
         tagger.cmd_tagger,
-        "Two-stage train: Stage 1 head-only on cached pooled features, "
-        "then Stage 2 PE-LoRA warm-started from Stage 1. Requires "
-        "`make preprocess-tagger` first.",
+        "Train the dual-encoder hard-routed tagger head on cached PE-Core + "
+        "PE-Spatial features. Requires `make preprocess-tagger` first.",
     ),
     "test-tagger": (
         tagger.cmd_test_tagger,
