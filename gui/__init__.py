@@ -1,1130 +1,134 @@
-"""Anima LoRA — PySide6 GUI package."""
+"""Anima LoRA — PySide6 GUI package.
+
+The package root is a thin facade: path constants live in :mod:`gui._paths`,
+and the bulk of what used to live here was split into focused submodules —
+
+* :mod:`gui.config_io`   — variant/preset discovery, load/save, merge, lint (Qt-free)
+* :mod:`gui.validation`  — validation-split encoding (Qt-free)
+* :mod:`gui.dialogs`     — resume/cache confirmation popups + on-disk probes
+* :mod:`gui.discovery`   — image/adapter/dataset directory walks (Qt-free)
+* :mod:`gui.widgets`     — LazyTabMixin, the config-form field factory, ScaledImageLabel
+
+Everything is re-exported here so the historical ``from gui import <name>``
+call sites in the tabs keep working unchanged.
+"""
 
 from __future__ import annotations
 
-import json
-import re
-from pathlib import Path
-from typing import Any, Optional
-
-import toml
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPlainTextEdit,
-    QSpinBox,
-    QWidget,
+from gui._paths import (
+    CONFIGS_DIR,
+    CUSTOM_DIR,
+    CUSTOM_VARIANTS_DIR,
+    GUI_METHODS_DIR,
+    IMAGE_EXTS,
+    METHODS_DIR,
+    PRESETS_FILE,
+    ROOT,
+)
+from gui.config_io import (
+    _BASIC,
+    _GROUPS,
+    _K2G,
+    _SKIP,
+    _VIRTUAL_KEYS,
+    _builtin_variants_by_family,
+    _dataset_lint_sources,
+    _load,
+    _load_all_presets,
+    _load_base,
+    _read_variant_metadata,
+    _save,
+    custom_preset_path,
+    custom_variant_path,
+    is_basic_field,
+    is_custom_preset,
+    is_custom_variant,
+    lint_variant_configs,
+    list_gui_variants,
+    list_methods,
+    list_presets,
+    merged_gui_variant_preset,
+    merged_method_preset,
+    remove_unknown_dataset_keys,
+    variant_metadata,
+    variant_path,
+)
+from gui.dialogs import (
+    confirm_existing_caches,
+    confirm_resumable_checkpoint,
+    confirm_train_using_cache,
+    count_preprocess_caches,
+    find_resumable_checkpoint,
+)
+from gui.discovery import (
+    _adapter_dirs,
+    _image_dirs,
+    _imgs,
+    _safetensors_in,
+)
+from gui.validation import apply_validation_choice
+from gui.widgets import (
+    LazyTabMixin,
+    ScaledImageLabel,
+    _no_wheel,
+    _read,
+    _TargetResWidget,
+    _widget,
 )
 
-from gui.i18n import t
-
-ROOT = Path(__file__).resolve().parent.parent
-CONFIGS_DIR = ROOT / "configs"
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-
-METHODS_DIR = CONFIGS_DIR / "methods"
-GUI_METHODS_DIR = CONFIGS_DIR / "gui-methods"
-PRESETS_FILE = CONFIGS_DIR / "presets.toml"
-CUSTOM_DIR = CONFIGS_DIR / "custom"
-# User-created variants live alongside the curated gui-methods files but in
-# their own subdirectory so they're easy to find and don't pollute the
-# built-in family list.
-CUSTOM_VARIANTS_DIR = GUI_METHODS_DIR / "custom"
-
-
-_METHOD_ORDER = (
-    "lora",
-    "tlora",
-    "hydralora",
-    "fera",
-    "chimera",
-    "soft_tokens",
-    "ip_adapter",
-    "easycontrol",
-)
-
-# Built-in variant families are discovered from each gui-methods/*.toml file's
-# ``[variant]`` table (``family`` / ``label`` / ``description`` / optional
-# ``order`` / ``experimental``). The hand-curated _FAMILY_VARIANTS map was
-# retired in the Track 2 refactor — adding or renaming a variant is now a
-# one-file change.
-#
-# Display order within a family is ``[variant].order`` (ascending; ties broken
-# by file stem). Family ordering in the method combo stays curated via
-# ``_METHOD_ORDER``; a family omitted from it is kept off the GUI without
-# renaming its file (the picker also accepts an explicit ``methods=`` subset,
-# which is how the experimental MethodsTab surfaces soft_tokens / spd / turbo).
-# Customs under
-# ``configs/gui-methods/custom/`` are intentionally permissive — they don't
-# need a ``[variant]`` block and are surfaced under every family the same way
-# they were before.
-
-
-class LazyTabMixin:
-    """Defer a tab's first expensive scan until the tab is actually opened.
-
-    Several tabs walk dataset/checkpoint directories (and the Merge tab reads
-    safetensors keys) during construction. Doing that for *every* tab up front
-    is what made the window slow to appear, even though only the first tab is
-    visible at launch. Mixing this in lets construction stay cheap: the heavy
-    work runs on the first ``showEvent`` — i.e. when the user selects the tab —
-    and exactly once thereafter. Subclasses override ``_lazy_init``.
-
-    Mix in BEFORE ``QWidget`` so ``super().showEvent`` resolves to Qt's.
-    """
-
-    _lazy_done = False
-
-    def showEvent(self, event):  # noqa: N802 — Qt event handler name
-        super().showEvent(event)
-        if not self._lazy_done:
-            self._lazy_done = True
-            self._lazy_init()
-
-    def _lazy_init(self) -> None:
-        """Run the tab's first directory scan / classification. Override."""
-
-
-def _read_variant_metadata(path: Path) -> dict:
-    """Return the ``[variant]`` table from a gui-methods TOML, or ``{}``.
-
-    Failures (missing file, parse error, missing table) yield an empty dict
-    so callers can treat "no metadata" uniformly — built-in validation is
-    handled by ``tests/test_gui_variants.py``, not here.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        data = toml.loads(path.read_text(encoding="utf-8"))
-    except (toml.TomlDecodeError, OSError):
-        return {}
-    meta = data.get("variant")
-    return meta if isinstance(meta, dict) else {}
-
-
-def _builtin_variants_by_family() -> dict[str, list[tuple[int, str, str]]]:
-    """Map family → list of (order, stem, label) tuples for built-in variants.
-
-    Built-in = directly under ``configs/gui-methods/`` (not the ``custom/``
-    subdir). Files without a ``[variant].family`` are dropped silently —
-    they're either malformed or intentionally hidden, and listing them under
-    a guessed family would just re-introduce the stale-map problem.
-    """
-    by_family: dict[str, list[tuple[int, str, str]]] = {}
-    if not GUI_METHODS_DIR.is_dir():
-        return by_family
-    for path in GUI_METHODS_DIR.glob("*.toml"):
-        meta = _read_variant_metadata(path)
-        family = meta.get("family")
-        if not isinstance(family, str) or not family:
-            continue
-        order = meta.get("order")
-        order_int = order if isinstance(order, int) else 100
-        label = meta.get("label") if isinstance(meta.get("label"), str) else path.stem
-        by_family.setdefault(family, []).append((order_int, path.stem, label))
-    for entries in by_family.values():
-        entries.sort(key=lambda e: (e[0], e[1]))
-    return by_family
-
-
-def variant_metadata(variant: str) -> dict:
-    """Return the ``[variant]`` metadata for a built-in or ``custom/<name>``
-    variant. Empty dict when the file has no ``[variant]`` block (custom
-    variants may legitimately omit it)."""
-    return _read_variant_metadata(variant_path(variant))
-
-
-def list_methods() -> list[str]:
-    """Method families, in a user-friendly order (lora first)."""
-    return list(_METHOD_ORDER)
-
-
-def list_gui_variants(method: str) -> list[str]:
-    """gui-methods/*.toml files for the method family + all user customs.
-
-    Built-in variants are filtered to those whose ``[variant].family`` matches
-    ``method``, sorted by ``[variant].order`` then by file stem. Custom
-    variants in ``configs/gui-methods/custom/*.toml`` are surfaced for every
-    family — users name them freely and we don't try to bind a file to a
-    specific family.
-    """
-    by_family = _builtin_variants_by_family()
-    ordered = [stem for _order, stem, _label in by_family.get(method, [])]
-    if CUSTOM_VARIANTS_DIR.exists():
-        for p in sorted(CUSTOM_VARIANTS_DIR.glob("*.toml")):
-            ordered.append(f"custom/{p.stem}")
-    return ordered
-
-
-def is_custom_variant(name: str) -> bool:
-    return name.startswith("custom/")
-
-
-def custom_variant_path(name: str) -> Path:
-    """Resolve 'custom/<name>' (or bare '<name>') to the on-disk file path."""
-    stem = name[len("custom/") :] if name.startswith("custom/") else name
-    return CUSTOM_VARIANTS_DIR / f"{stem}.toml"
-
-
-def variant_path(variant: str) -> Path:
-    """Resolve a variant identifier (built-in or 'custom/<name>') to its file."""
-    return GUI_METHODS_DIR / f"{variant}.toml"
-
-
-def _load_all_presets() -> dict:
-    """Built-in sections in ``configs/presets.toml`` plus user-created flat
-    files under ``configs/custom/<name>.toml`` (one preset per file)."""
-    presets: dict = {}
-    if PRESETS_FILE.exists():
-        data = toml.loads(PRESETS_FILE.read_text(encoding="utf-8"))
-        presets.update({k: v for k, v in data.items() if isinstance(v, dict)})
-    if CUSTOM_DIR.exists():
-        for p in sorted(CUSTOM_DIR.glob("*.toml")):
-            try:
-                presets[p.stem] = toml.loads(p.read_text(encoding="utf-8"))
-            except (toml.TomlDecodeError, OSError):
-                continue
-    return presets
-
-
-def list_presets() -> list[str]:
-    return sorted(_load_all_presets())
-
-
-def is_custom_preset(name: str) -> bool:
-    return (CUSTOM_DIR / f"{name}.toml").exists()
-
-
-def custom_preset_path(name: str) -> Path:
-    return CUSTOM_DIR / f"{name}.toml"
-
-
-_GROUPS = {
-    "Architecture": {
-        "network_dim",
-        "network_alpha",
-        "network_module",
-        "network_args",
-        "use_ortho",
-        "use_timestep_mask",
-        "use_moe_style",
-        "route_per_layer",
-        "router_source",
-        "min_rank",
-        "alpha_rank_scale",
-        "num_experts",
-        "balance_loss_weight",
-        "balance_loss_warmup_ratio",
-        "sigma_feature_dim",
-        "router_targets",
-        "per_bucket_balance_weight",
-        "num_sigma_buckets",
-        "specialize_experts_by_sigma_buckets",
-        "sigma_bucket_boundaries",
-        "network_train_unet_only",
-    },
-    "Training": {
-        "learning_rate",
-        "max_train_epochs",
-        "save_every_n_epochs",
-        "checkpointing_epochs",
-        "gradient_accumulation_steps",
-        "use_shuffled_caption_variants",
-        "caption_dropout_rate",
-        "optimizer_type",
-        "lr_scheduler",
-        "timestep_sampling",
-        "discrete_flow_shift",
-        "use_valid",
-        "validation_split_num",
-        "sample_prompts",
-        "sample_every_n_epochs",
-        "sample_at_first",
-        "sample_decode_inline",
-    },
-    "Performance": {
-        "attn_mode",
-        "gradient_checkpointing",
-        "unsloth_offload_checkpointing",
-        "activation_memory_budget",
-        "blocks_to_swap",
-        "torch_compile",
-        "cache_llm_adapter_outputs",
-        "masked_loss",
-        "mixed_precision",
-        "vae_chunk_size",
-        "vae_disable_cache",
-        "use_vae_cache",
-        "use_text_cache",
-        "skip_cache_check",
-        "layer_start",
-        "use_cmmd",
-    },
-    "Paths": {
-        "pretrained_model_name_or_path",
-        "qwen3",
-        "vae",
-        "output_dir",
-        "output_name",
-        "save_model_as",
-        "source_image_dir",
-        "resized_image_dir",
-        "lora_cache_dir",
-        "path_pattern",
-        "drop_lowres_images",
-        "min_pixels",
-    },
-}
-_K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
-# target_res is a preprocess-time knob (dual-use: train.py only reads it to size
-# the compile cache) — it's edited in the Preprocess tab and seeded into the
-# training config from configs/preprocess.toml, so hide it from the config form
-# to keep a single source of truth and avoid the two surfaces silently drifting.
-_SKIP = {
-    "base_config",
-    "dataset_config",
-    "general",
-    "datasets",
-    "variant",
-    "target_res",
-}
-
-# Virtual keys appear in the form like normal fields but don't round-trip as
-# flat TOML keys — they're derived from / written into structured sections
-# (e.g. ``use_valid`` toggles a `[[datasets]]` validation_split_num override).
-# The save loop in ConfigTab skips these, and per-key apply helpers handle the
-# structured write.
-_VIRTUAL_KEYS = {"use_valid", "validation_split_num"}
-
-# Fields shown under the "Basic" section. Everything else falls under the
-# collapsible "Advanced" section. Picked to cover the knobs a first-time user
-# realistically wants to touch (rate/length/output, headline architecture
-# size, headline VRAM knobs, dataset/output paths) without exposing the long
-# tail of regularizer / router / adapter-internal parameters.
-_BASIC = {
-    "learning_rate",
-    "max_train_epochs",
-    "save_every_n_epochs",
-    "network_dim",
-    "network_alpha",
-    "network_weights",
-    "num_experts",
-    "output_name",
-    "use_shuffled_caption_variants",
-    "caption_dropout_rate",
-    "gradient_checkpointing",
-    "blocks_to_swap",
-    "source_image_dir",
-    "lora_cache_dir",
-    "output_dir",
-    "path_pattern",
-    "drop_lowres_images",
-    "min_pixels",
-    "use_valid",
-    "validation_split_num",
-    "sample_prompts",
-    "sample_every_n_epochs",
-    "sample_at_first",
-    "sample_decode_inline",
-}
-
-
-def is_basic_field(key: str) -> bool:
-    return key in _BASIC
-
-
-# flash4 is not supported yet (flash-attention-sm120 disabled)
-_ATTN_MODES = ["flex", "flash"]
-
-
-# ── Helpers ────────────────────────────────────────────────────
-
-
-def _load(p: Path) -> dict:
-    return toml.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-
-
-def _load_base() -> dict:
-    """``base.toml`` overlaid on ``configs/preprocess.toml`` (the split-out
-    preprocess-only knobs: source_image_dir / drop_lowres_images / min_pixels).
-
-    Mirrors ``load_path_overrides``' preprocess→base layering so the GUI form
-    baseline matches what preprocess/training actually read: a legacy key still
-    in base.toml wins; otherwise preprocess.toml supplies it. Use this anywhere
-    the GUI needs base.toml as a flat-key baseline."""
-    merged = _load(CONFIGS_DIR / "preprocess.toml")
-    merged.update(_load(CONFIGS_DIR / "base.toml"))
-    return merged
-
-
-def _save(p: Path, d: dict):
-    p.write_text(toml.dumps(d), encoding="utf-8")
-
-
-def _dataset_lint_sources(variant: str):
-    """The (path, label) pairs the dataset-blueprint linter scans: shared
-    ``base.toml`` plus the active variant file. ``label`` is what shows up in
-    the banner and must match the ``source=`` passed to ``lint_dataset_sections``."""
-    return (
-        (CONFIGS_DIR / "base.toml", "base.toml"),
-        (variant_path(variant), f"gui-methods/{variant}.toml"),
-    )
-
-
-def lint_variant_configs(variant: str) -> list:
-    """Scan the dataset-blueprint sections of ``base.toml`` and the variant
-    file for keys the trainer's validator will reject (e.g. a stale
-    ``resolution`` in ``[[datasets]]``). Returns a list of
-    ``library.config.dataset_keys.DatasetKeyIssue``.
-
-    Torch-free: imports only the static allow-list module, so it's safe to run
-    on every Config-tab reload without dragging the training stack into the GUI
-    process.
-    """
-    from library.config.dataset_keys import lint_dataset_sections
-
-    issues: list = []
-    for path, label in _dataset_lint_sources(variant):
-        if not path.exists():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-            raw = toml.loads(text)
-        except (OSError, toml.TomlDecodeError):
-            continue
-        issues.extend(lint_dataset_sections(raw, source=label, text=text))
-    return issues
-
-
-def remove_unknown_dataset_keys(variant: str) -> list[str]:
-    """Surgically delete the lines flagged by :func:`lint_variant_configs` from
-    their source files, returning a list of ``"key (label)"`` descriptions of
-    what was removed.
-
-    Comment- and formatting-preserving on purpose: ``base.toml`` is heavily
-    commented and the flat ``_save`` round-trips through ``toml.dumps`` (which
-    drops all comments), so we edit the raw text line-by-line instead. Each
-    flagged line carries its own line number from the linter; we delete in
-    descending order so earlier deletions don't shift later targets, and we
-    re-verify the line still starts with ``<key> =`` before cutting it.
-    """
-    from library.config.dataset_keys import lint_dataset_sections
-
-    removed: list[str] = []
-    for path, label in _dataset_lint_sources(variant):
-        if not path.exists():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-            raw = toml.loads(text)
-        except (OSError, toml.TomlDecodeError):
-            continue
-        issues = lint_dataset_sections(raw, source=label, text=text)
-        targets = sorted(
-            (i for i in issues if i.line is not None),
-            key=lambda i: i.line,
-            reverse=True,
-        )
-        if not targets:
-            continue
-        lines = text.splitlines(keepends=True)
-        changed = False
-        for issue in targets:
-            idx = issue.line - 1
-            if 0 <= idx < len(lines) and re.match(
-                rf"^\s*{re.escape(issue.key)}\s*=", lines[idx]
-            ):
-                del lines[idx]
-                removed.append(f"{issue.key} ({label})")
-                changed = True
-        if changed:
-            path.write_text("".join(lines), encoding="utf-8")
-    return removed
-
-
-def merged_method_preset(method: str, preset: str) -> tuple[dict, dict[str, str]]:
-    """Return (merged_dict, origin_map). origin_map[key] is 'base' | 'preset' | 'method'."""
-    base = _load_base()
-    pset = _load_all_presets().get(preset, {})
-    meth = _load(METHODS_DIR / f"{method}.toml")
-    merged: dict = {}
-    origin: dict[str, str] = {}
-    for k, v in base.items():
-        merged[k] = v
-        origin[k] = "base"
-    for k, v in pset.items():
-        merged[k] = v
-        origin[k] = "preset"
-    for k, v in meth.items():
-        merged[k] = v
-        origin[k] = "method"
-    return merged, origin
-
-
-def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str, str]]:
-    """Merge base + preset + gui-methods/<variant>.toml. The GUI uses this
-    instead of `merged_method_preset` so edits/training target the clean
-    per-variant file, not the toggle-block methods/ tree."""
-    base = _load_base()
-    pset = _load_all_presets().get(preset, {})
-    meth = _load(GUI_METHODS_DIR / f"{variant}.toml")
-    merged: dict = {}
-    origin: dict[str, str] = {}
-    for k, v in base.items():
-        merged[k] = v
-        origin[k] = "base"
-    for k, v in pset.items():
-        merged[k] = v
-        origin[k] = "preset"
-    for k, v in meth.items():
-        merged[k] = v
-        origin[k] = "method"
-
-    # Inject the `use_valid` virtual key derived from the [[datasets]] block.
-    # The variant file may shallow-override base.toml's validation_split_num /
-    # validation_split via _apply_dataset_overrides in library/config/io.py; we
-    # surface that as a single checkbox the user can flip in the form.
-    variant_override = _variant_validation_override(meth)
-    if variant_override is not None:
-        merged["use_valid"] = variant_override
-        origin["use_valid"] = "method"
-    else:
-        merged["use_valid"] = _base_validation_enabled(base)
-        origin["use_valid"] = "base"
-
-    # Inject `validation_split_num` (integer) from the same [[datasets]] block.
-    # Shown as a basic field so users can resize the held-out slice directly
-    # without dropping to base.toml. When the variant doesn't override it, the
-    # value comes from base.toml.
-    variant_vsn = _variant_validation_split_num(meth)
-    if variant_vsn is not None:
-        merged["validation_split_num"] = variant_vsn
-        origin["validation_split_num"] = "method"
-    else:
-        merged["validation_split_num"] = _base_validation_split_num(base)
-        origin["validation_split_num"] = "base"
-
-    # Surface the sample-image knobs as first-class fields even when no TOML in
-    # the chain has set them (their argparse defaults are None/None/False, so
-    # they'd otherwise never appear in `merged`). A variant that does set them
-    # keeps its value + "method" origin from the merge loop above. Cadence uses
-    # 0 as the "disabled" sentinel (train.py coerces non-positive → None).
-    for _k, _default in (
-        ("sample_prompts", []),
-        ("sample_every_n_epochs", 0),
-        ("sample_at_first", False),
-        ("sample_decode_inline", "auto"),
-    ):
-        if _k not in merged:
-            merged[_k] = _default
-            origin[_k] = "base"
-    return merged, origin
-
-
-# Held-out slice written when the user enables validation but neither the form
-# nor base.toml carries a positive validation_split_num. Matches the historical
-# base.toml default referenced in library/config/loader.py and stays under the
-# _MIN_TRAIN_IMAGES_FOR_VALIDATION=100 auto-disable threshold's headroom.
-_DEFAULT_VALIDATION_SPLIT_NUM = 16
-
-
-def _validation_enabled_from_datasets(datasets: Any) -> Optional[bool]:
-    """Inspect a TOML ``[[datasets]]`` list and decide whether validation is
-    enabled. Returns ``True`` / ``False`` when either validation key is
-    explicitly set on the first dataset entry, or ``None`` when no override
-    is present (caller falls back to the parent layer in the merge chain)."""
-    if not isinstance(datasets, list) or not datasets:
-        return None
-    first = datasets[0]
-    if not isinstance(first, dict):
-        return None
-    vsn = first.get("validation_split_num")
-    vs = first.get("validation_split")
-    if vsn is None and vs is None:
-        return None
-    return (vsn or 0) > 0 or (vs or 0.0) > 0.0
-
-
-def _variant_validation_override(variant_data: dict) -> Optional[bool]:
-    """Return the variant TOML's explicit use_valid override, or None when
-    the variant doesn't touch validation_split[_num]."""
-    return _validation_enabled_from_datasets(variant_data.get("datasets"))
-
-
-def _base_validation_enabled(base_data: dict) -> bool:
-    """Default use_valid pulled from configs/base.toml's [[datasets]] block.
-    Falls back to False when the block is missing — matches the
-    `validation_split == 0 and validation_split_num <= 0` short-circuit in
-    library/config/loader.py:generate_dataset_group_by_blueprint."""
-    return bool(_validation_enabled_from_datasets(base_data.get("datasets")))
-
-
-def _validation_split_num_from_datasets(datasets: Any) -> Optional[int]:
-    """Pull ``validation_split_num`` off the first [[datasets]] entry as an
-    int. Returns None when the block is missing or the key isn't set."""
-    if not isinstance(datasets, list) or not datasets:
-        return None
-    first = datasets[0]
-    if not isinstance(first, dict):
-        return None
-    vsn = first.get("validation_split_num")
-    if vsn is None:
-        return None
-    try:
-        return int(vsn)
-    except (TypeError, ValueError):
-        return None
-
-
-def _variant_validation_split_num(variant_data: dict) -> Optional[int]:
-    """Return the variant TOML's explicit validation_split_num override, or
-    None when the variant doesn't touch it."""
-    return _validation_split_num_from_datasets(variant_data.get("datasets"))
-
-
-def _base_validation_split_num(base_data: dict) -> int:
-    """Default validation_split_num pulled from configs/base.toml. Falls back
-    to 0 when the block / key is missing."""
-    return _validation_split_num_from_datasets(base_data.get("datasets")) or 0
-
-
-def apply_validation_choice(
-    out: dict,
-    enabled: bool,
-    split_num: Optional[int] = None,
-    base_split_num: Optional[int] = None,
-) -> None:
-    """Encode the use_valid checkbox (+ optional validation_split_num int)
-    into the variant TOML dict ``out``.
-
-    Enabled  → resolve the held-out count that should take effect (the form
-               ``split_num`` if positive, else ``base_split_num`` if positive,
-               else ``_DEFAULT_VALIDATION_SPLIT_NUM``). When that count equals
-               an already-enabled base, strip both keys so base.toml stays the
-               single source of truth; otherwise write {validation_split_num =
-               <count>} on the first [[datasets]] entry (dropping any fractional
-               validation_split). The fallback to a positive default is what
-               makes ticking the checkbox stick when base.toml ships
-               validation_split_num=0 — without it "enabled" would strip to
-               base's disabled 0 and silently turn validation back off.
-    Disabled → write {validation_split_num = 0, validation_split = 0.0} on the
-               first [[datasets]] entry, creating the block if absent. This is
-               applied by _apply_dataset_overrides in library/config/io.py and
-               causes generate_dataset_group_by_blueprint to skip the val set.
-               (The ``split_num`` int is ignored when disabled.)
-
-    Other keys in the variant's [[datasets]] block (e.g. a custom batch_size)
-    are preserved; we only touch the two validation keys."""
-    existing = out.get("datasets")
-    if enabled:
-        base_vsn = base_split_num or 0
-        # Pick the count that should actually take effect. Falling back to a
-        # positive default (rather than stripping) is essential when base.toml
-        # disables validation (validation_split_num=0): otherwise enabling is a
-        # no-op because the stripped override just lets base's 0 win.
-        if split_num and split_num > 0:
-            effective = int(split_num)
-        elif base_vsn > 0:
-            effective = base_vsn
-        else:
-            effective = _DEFAULT_VALIDATION_SPLIT_NUM
-        if effective == base_vsn and base_vsn > 0:
-            # Base already enables this exact count — strip any override so
-            # base.toml stays the single source of truth (avoids noise keys).
-            if not isinstance(existing, list) or not existing:
-                return
-            first = existing[0]
-            if not isinstance(first, dict):
-                return
-            first.pop("validation_split_num", None)
-            first.pop("validation_split", None)
-            if not first and len(existing) == 1:
-                del out["datasets"]
-            return
-        if not isinstance(existing, list):
-            existing = []
-            out["datasets"] = existing
-        if not existing:
-            existing.append({})
-        first = existing[0]
-        if not isinstance(first, dict):
-            first = {}
-            existing[0] = first
-        first["validation_split_num"] = effective
-        first.pop("validation_split", None)
-        return
-
-    if not isinstance(existing, list):
-        existing = []
-        out["datasets"] = existing
-    if not existing:
-        existing.append({})
-    first = existing[0]
-    if not isinstance(first, dict):
-        first = {}
-        existing[0] = first
-    first["validation_split_num"] = 0
-    first["validation_split"] = 0.0
-
-
-def confirm_resumable_checkpoint(parent: QWidget | None, merged: dict) -> bool:
-    """Prompt the user when a checkpoint is on disk; return whether to launch.
-
-    Returns True if training should proceed (Yes = let train.py auto-resume,
-    No = wipe the state dir + adapter sidecar so train.py starts fresh),
-    False if the user cancelled. Returns True with no prompt when there is
-    nothing to resume from — the call site can wrap every train launch in
-    this helper unconditionally.
-    """
-    found = find_resumable_checkpoint(merged)
-    if found is None:
-        return True
-    state_dir, step = found
-    choice = QMessageBox.question(
-        parent,
-        t("resume_checkpoint_title"),
-        t("resume_checkpoint_question", step=step),
-        QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-        QMessageBox.Yes,
-    )
-    if choice == QMessageBox.Cancel:
-        return False
-    if choice == QMessageBox.Yes:
-        return True
-    # No → start fresh. Wipe both the state dir and the sibling
-    # ``-checkpoint.safetensors`` adapter so train.py's auto_resume sees
-    # nothing on disk. Bail with a warning if the deletion fails — better
-    # than silently launching a resume the user explicitly opted out of.
-    import shutil
-
-    sidecar = state_dir.parent / f"{state_dir.name.removesuffix('-state')}.safetensors"
-    try:
-        shutil.rmtree(state_dir)
-        if sidecar.is_file():
-            sidecar.unlink()
-    except OSError as e:
-        QMessageBox.warning(
-            parent,
-            t("error"),
-            t("resume_checkpoint_delete_failed", error=str(e)),
-        )
-        return False
-    return True
-
-
-# Cache-file suffixes written by the preprocess scripts. Kept in sync with
-# scripts/preprocess/cache_latents.py, cache_text_embeddings.py, cache_pe_encoder.py.
-_LATENT_SUFFIX = "_anima.npz"
-_TE_SUFFIX = "_anima_te.safetensors"
-_PE_SUFFIX = "_anima_pe.safetensors"
-
-
-def count_preprocess_caches(cache_dir: Path) -> dict[str, int]:
-    """Count existing latent / TE / PE cache sidecars under a cache directory.
-
-    Returns zeros (without raising) if the directory does not exist. Used to
-    surface a reassurance popup that ``make preprocess`` reuses existing caches
-    rather than wiping them — a recurring point of confusion for new users.
-
-    Walks recursively so nested caches (mirroring a subfoldered source tree)
-    are counted.
-    """
-    out = {"latents": 0, "te": 0, "pe": 0}
-    if not cache_dir.is_dir():
-        return out
-    for p in cache_dir.rglob("*"):
-        if not p.is_file():
-            continue
-        n = p.name
-        if n.endswith(_TE_SUFFIX):
-            out["te"] += 1
-        elif n.endswith(_PE_SUFFIX):
-            out["pe"] += 1
-        elif n.endswith(_LATENT_SUFFIX):
-            out["latents"] += 1
-    return out
-
-
-def confirm_existing_caches(
-    parent: QWidget | None, cache_dir: Path, require_pe: bool = False
-) -> bool:
-    """Reassure the user that existing preprocess caches will be reused, not
-    deleted. Returns True to proceed, False if the user cancelled.
-
-    No-op (returns True without prompting) when the cache directory is empty
-    or missing, so the call site can wrap every preprocess launch in this.
-    """
-    counts = count_preprocess_caches(cache_dir)
-    has_any = (
-        counts["latents"] > 0 or counts["te"] > 0 or (require_pe and counts["pe"] > 0)
-    )
-    if not has_any:
-        return True
-
-    parts: list[str] = []
-    if counts["latents"]:
-        parts.append(t("preprocess_cache_count_latents", n=counts["latents"]))
-    if counts["te"]:
-        parts.append(t("preprocess_cache_count_te", n=counts["te"]))
-    if require_pe and counts["pe"]:
-        parts.append(t("preprocess_cache_count_pe", n=counts["pe"]))
-
-    body = t(
-        "preprocess_existing_caches_body",
-        cache_dir=str(cache_dir),
-        items="  • " + "\n  • ".join(parts),
-    )
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Information)
-    box.setWindowTitle(t("preprocess_existing_caches_title"))
-    box.setText(body)
-    box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-    box.setDefaultButton(QMessageBox.Ok)
-    return box.exec() == QMessageBox.Ok
-
-
-def confirm_train_using_cache(
-    parent: QWidget | None, cache_dir: Path, require_pe: bool = False
-) -> bool | None:
-    """Train-side cache confirmation: returns True to launch training against
-    the existing cache, False if the user cancelled, or None when no cache was
-    found on disk (caller should auto-chain a preprocess run instead).
-
-    Distinct from ``confirm_existing_caches`` (which reassures during
-    Preprocess) — this gates Train and exposes the empty-cache case as a
-    separate ``None`` so the caller can branch into the auto-preprocess flow.
-    """
-    counts = count_preprocess_caches(cache_dir)
-    has_any = (
-        counts["latents"] > 0 or counts["te"] > 0 or (require_pe and counts["pe"] > 0)
-    )
-    if not has_any:
-        return None
-
-    parts: list[str] = []
-    if counts["latents"]:
-        parts.append(t("preprocess_cache_count_latents", n=counts["latents"]))
-    if counts["te"]:
-        parts.append(t("preprocess_cache_count_te", n=counts["te"]))
-    if require_pe and counts["pe"]:
-        parts.append(t("preprocess_cache_count_pe", n=counts["pe"]))
-
-    body = t(
-        "train_using_cache_body",
-        cache_dir=str(cache_dir),
-        items="  • " + "\n  • ".join(parts),
-    )
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Question)
-    box.setWindowTitle(t("train_using_cache_title"))
-    box.setText(body)
-    box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
-    box.setDefaultButton(QMessageBox.Yes)
-    return box.exec() == QMessageBox.Yes
-
-
-def find_resumable_checkpoint(merged: dict) -> tuple[Path, int] | None:
-    """If the merged config has a writable ``checkpointing_epochs`` and an
-    on-disk checkpoint state directory exists with a usable ``train_state.json``,
-    return ``(state_dir, current_step)``. Returns ``None`` when there is
-    nothing to resume — that's the common case and callers should treat it as
-    "just launch training normally".
-
-    Mirrors ``library.training.checkpoints.AnimaCheckpointer.auto_resume``: the
-    same ``<output_dir>/<output_name>-checkpoint-state/`` path that ``train.py``
-    would auto-pick up. We deliberately do NOT enforce ``current_step <
-    max_train_steps`` here — that check varies with dataset size and is
-    re-evaluated at launch; the GUI prompt only needs to know "is there
-    something on disk that train.py would consider resumable".
-    """
-    if not merged.get("checkpointing_epochs"):
-        return None
-    output_dir = merged.get("output_dir")
-    output_name = merged.get("output_name") or "last"
-    if not output_dir:
-        return None
-    state_dir = ROOT / output_dir / f"{output_name}-checkpoint-state"
-    train_state_file = state_dir / "train_state.json"
-    if not train_state_file.is_file():
-        return None
-    try:
-        data = json.loads(train_state_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    step = int(data.get("current_step", 0))
-    return state_dir, step
-
-
-def _imgs(d: Path) -> list[Path]:
-    """Return every image file under ``d`` (recursively).
-
-    Walks subfolders so users who organize ``image_dataset/`` by character /
-    series see the full pool in the browser. Cache filenames are stem-keyed
-    and flat, so stems must stay unique across the tree — the trainer enforces
-    this via ``_assert_unique_stems``; here we just sort and return.
-    """
-    if not d.exists():
-        return []
-    return sorted(
-        p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-    )
-
-
-def _safetensors_in(d: Path) -> list[Path]:
-    """Return .safetensors files in a directory, newest first."""
-    if not d.exists():
-        return []
-    return sorted(
-        (p for p in d.iterdir() if p.is_file() and p.suffix == ".safetensors"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-
-
-def _adapter_dirs() -> dict[str, Path]:
-    """Directories likely to contain LoRA adapter checkpoints.
-
-    Mirrors ``_image_dirs``: returns only paths that exist and actually have
-    .safetensors files, keyed by a short display name.
-    """
-    dirs: dict[str, Path] = {}
-    for name, path in [
-        ("output/ckpt", ROOT / "output" / "ckpt"),
-        ("output_temp", ROOT / "output_temp"),
-        ("models/diffusion_models", ROOT / "models" / "diffusion_models"),
-    ]:
-        if path.exists() and any(path.glob("*.safetensors")):
-            dirs[name] = path
-    # Any subdirectory of output/ckpt/ or output_temp/ with .safetensors (e.g.
-    # iteration snapshots). Skip *-checkpoint-state dirs — those are
-    # optimizer/state shards, not adapters.
-    for parent, label in (
-        (ROOT / "output" / "ckpt", "output/ckpt"),
-        (ROOT / "output_temp", "output_temp"),
-    ):
-        if not parent.exists():
-            continue
-        for p in sorted(parent.iterdir()):
-            if (
-                p.is_dir()
-                and not p.name.endswith("-checkpoint-state")
-                and any(p.glob("*.safetensors"))
-            ):
-                dirs[f"{label}/{p.name}"] = p
-    return dirs
-
-
-def _image_dirs() -> dict[str, Path]:
-    dirs: dict[str, Path] = {}
-    for name, path in [
-        ("image_dataset", ROOT / "image_dataset"),
-        ("post_image_dataset/resized", ROOT / "post_image_dataset" / "resized"),
-        ("ip-adapter-dataset", ROOT / "ip-adapter-dataset"),
-        ("easycontrol-dataset", ROOT / "easycontrol-dataset"),
-        ("output/tests", ROOT / "output" / "tests"),
-    ]:
-        if path.exists():
-            dirs[name] = path
-    return dirs
-
-
-# Allowed multi-scale tiers — mirrors library.datasets.buckets.ALLOWED_TARGET_RES
-# (hardcoded so the GUI import stays light / library-free).
-_TARGET_RES_TIERS = (512, 768, 896, 1024, 1280, 1536)
-
-# High-cost tiers: large per-image token counts + an extra compiled block
-# graph each. Flagged in the GUI so users don't casually enable them.
-_TARGET_RES_DANGER = {1280: 6300, 1536: 8640}
-
-
-class _TargetResWidget(QWidget):
-    """Horizontal row of tier checkboxes for the multi-scale ``target_res`` knob.
-
-    Reads/writes a list of edge ints (e.g. ``[1024, 1536]``). Never returns an
-    empty list — unchecking everything falls back to ``[1024]`` (the legacy
-    single ~1MP tier) so preprocess/train always have a valid tier.
-
-    The 1280/1536 tiers are visually flagged as "dangerous" (high token count
-    + extra compile graph / VRAM) via colour + an i18n tooltip.
-    """
-
-    changed = Signal()
-
-    def __init__(self, selected) -> None:
-        super().__init__()
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        sel = {int(e) for e in selected} if selected else set()
-        self._boxes: dict[int, QCheckBox] = {}
-        for edge in _TARGET_RES_TIERS:
-            cb = QCheckBox(str(edge))
-            cb.setChecked(edge in sel)
-            cb.toggled.connect(self.changed)
-            if edge in _TARGET_RES_DANGER:
-                cb.setStyleSheet("QCheckBox { color: #d9822b; font-weight: bold; }")
-                cb.setToolTip(
-                    t(
-                        "target_res_danger_tooltip",
-                        edge=edge,
-                        tokens=_TARGET_RES_DANGER[edge],
-                    )
-                )
-            lay.addWidget(cb)
-            self._boxes[edge] = cb
-        lay.addStretch(1)
-
-    def value(self) -> list[int]:
-        out = [e for e, cb in self._boxes.items() if cb.isChecked()]
-        return out or [1024]
-
-
-def _no_wheel(w: QWidget) -> QWidget:
-    """Stop a hovered combo/spin from changing value (and stealing focus) on
-    mouse-wheel scroll — otherwise scrolling the form silently edits whichever
-    dropdown the cursor passes over. The widget still works via click + keys."""
-    w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    w.wheelEvent = lambda e: e.ignore()
-    return w
-
-
-def _widget(v: Any, key: str = "") -> QWidget:
-    if key == "target_res":
-        sel = v if isinstance(v, (list, tuple)) else ([v] if v else [1024])
-        return _TargetResWidget(sel)
-    if key == "sample_prompts":
-        # One preview prompt per line. Stored in TOML as a string (single line)
-        # or an array (multi-line); train.py materializes either into the
-        # sample_prompts.txt file the sampler reads.
-        w = QPlainTextEdit()
-        if isinstance(v, (list, tuple)):
-            text = "\n".join(str(p) for p in v)
-        elif v is None:
-            text = ""
-        else:
-            text = str(v)
-        w.setPlainText(text)
-        w.setPlaceholderText("1girl, solo, ...\n(one preview prompt per line)")
-        w.setMaximumHeight(120)
-        return w
-    if key == "attn_mode":
-        w = QComboBox()
-        w.addItems(_ATTN_MODES)
-        idx = w.findText(str(v))
-        if idx >= 0:
-            w.setCurrentIndex(idx)
-        return _no_wheel(w)
-    if key == "sample_decode_inline":
-        # Tri-state: stored as the literal string "auto" / "true" / "false"
-        # (all three are accepted by library.config.cli_args._optional_bool).
-        # Must precede the bool branch below so a bool value gets the combo,
-        # not a plain checkbox that can't express "auto".
-        w = QComboBox()
-        w.addItems(["auto", "true", "false"])
-        if v is None:
-            cur = "auto"
-        elif isinstance(v, bool):
-            cur = "true" if v else "false"
-        else:
-            cur = str(v).strip().lower()
-            if cur in ("", "none"):
-                cur = "auto"
-        idx = w.findText(cur)
-        if idx >= 0:
-            w.setCurrentIndex(idx)
-        return _no_wheel(w)
-    if isinstance(v, bool):
-        w = QCheckBox()
-        w.setChecked(v)
-        return w
-    if isinstance(v, int):
-        w = QSpinBox()
-        # Per-key range overrides for fields that legitimately exceed the
-        # default 10k cap (silently clips otherwise). Keep these explicit
-        # rather than raising the global ceiling — most int fields are
-        # small (epochs, ranks, expert counts) and a 10k cap keeps the
-        # user from typoing a giant value into them.
-        if key == "min_pixels":
-            w.setRange(0, 100_000_000)  # 100MP — covers any real image
-        else:
-            w.setRange(0, 10000)
-        w.setValue(v)
-        return _no_wheel(w)
-    if isinstance(v, float):
-        return QLineEdit(f"{v:g}")
-    if isinstance(v, list):
-        return QLineEdit(json.dumps(v))
-    return QLineEdit(str(v))
-
-
-def _read(w: QWidget, orig: Any = None) -> Any:
-    if isinstance(w, _TargetResWidget):
-        return w.value()
-    if isinstance(w, QPlainTextEdit):
-        # sample_prompts box → list of non-empty, non-comment lines.
-        return [
-            ln.strip()
-            for ln in w.toPlainText().splitlines()
-            if ln.strip() and not ln.strip().startswith("#")
-        ]
-    if isinstance(w, QComboBox):
-        return w.currentText()
-    if isinstance(w, QCheckBox):
-        return w.isChecked()
-    if isinstance(w, QSpinBox):
-        return w.value()
-    t = w.text()
-    if isinstance(orig, float):
-        try:
-            return float(t)
-        except ValueError:
-            pass
-    if isinstance(orig, list):
-        try:
-            return json.loads(t)
-        except (json.JSONDecodeError, ValueError):
-            pass
-    # Normalize Windows-style backslashes pasted into path/string fields.
-    # Forward slashes are valid on every OS Python runs on, and avoid
-    # downstream TOML escape errors (e.g. "C:\Users" → \U is not a valid
-    # TOML escape).
-    if "\\" in t:
-        t = t.replace("\\", "/")
-    return t
-
-
-# ── ScaledImageLabel ───────────────────────────────────────────
-
-
-class ScaledImageLabel(QLabel):
-    def __init__(self):
-        super().__init__()
-        self._src: QPixmap | None = None
-        self.setAlignment(Qt.AlignCenter)
-
-    def set_source(self, pm: QPixmap):
-        self._src = pm
-        self._rescale()
-
-    def resizeEvent(self, ev):
-        super().resizeEvent(ev)
-        self._rescale()
-
-    def _rescale(self):
-        if self._src and not self._src.isNull():
-            self.setPixmap(
-                self._src.scaled(
-                    self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
-            )
-
-
-# ── Public entry point ─────────────────────────────────────────
+__all__ = [
+    "ROOT",
+    "CONFIGS_DIR",
+    "IMAGE_EXTS",
+    "METHODS_DIR",
+    "GUI_METHODS_DIR",
+    "PRESETS_FILE",
+    "CUSTOM_DIR",
+    "CUSTOM_VARIANTS_DIR",
+    "LazyTabMixin",
+    "ScaledImageLabel",
+    "_TargetResWidget",
+    "_no_wheel",
+    "_read",
+    "_widget",
+    "_load",
+    "_load_base",
+    "_save",
+    "_load_all_presets",
+    "_builtin_variants_by_family",
+    "_read_variant_metadata",
+    "_dataset_lint_sources",
+    "_GROUPS",
+    "_K2G",
+    "_SKIP",
+    "_BASIC",
+    "_VIRTUAL_KEYS",
+    "is_basic_field",
+    "list_methods",
+    "list_gui_variants",
+    "list_presets",
+    "is_custom_variant",
+    "is_custom_preset",
+    "custom_variant_path",
+    "custom_preset_path",
+    "variant_path",
+    "variant_metadata",
+    "lint_variant_configs",
+    "remove_unknown_dataset_keys",
+    "merged_method_preset",
+    "merged_gui_variant_preset",
+    "apply_validation_choice",
+    "confirm_resumable_checkpoint",
+    "confirm_existing_caches",
+    "confirm_train_using_cache",
+    "count_preprocess_caches",
+    "find_resumable_checkpoint",
+    "_imgs",
+    "_safetensors_in",
+    "_adapter_dirs",
+    "_image_dirs",
+    "main",
+]
 
 
 def main():
