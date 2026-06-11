@@ -42,7 +42,9 @@ from library.datasets.cache import make_cached_collate  # noqa: E402
 from library.datasets.distill import CachedDataset  # noqa: E402
 from library.runtime.harness import (  # noqa: E402
     compile_dit_blocks,
+    compile_signature,
     enable_training_grad_ckpt,
+    isolate_compile_cache,
     place_dit_for_training,
 )
 from library.training.forward import PadCache, renoise, to_dit_5d  # noqa: E402
@@ -636,6 +638,20 @@ def main():
                 "activation_memory_budget ignored: incompatible with grad_ckpt "
                 "(and redundant under it)"
             )
+        # Isolate the persistent compile caches per compile signature — entries
+        # compiled under different seq-range bounds otherwise poison this run's
+        # dynamic-seq marks (AOTAutogradCache replays a stale narrow guard →
+        # ConstraintViolationError; see isolate_compile_cache). Same signature →
+        # warm cache reuse, shared with the other training entry points.
+        isolate_compile_cache(
+            compile_signature(
+                n_token_families=n_token_families,
+                seq_range=seq_range,
+                dynamic_seq=compile_dynamic_seq,
+                backend=args.dynamo_backend,
+                mode=compile_inductor_mode,
+            )
+        )
         compile_dit_blocks(
             model,
             enabled=True,

@@ -34,7 +34,9 @@ from library.inference.uncond import (
 from library.runtime.dynamo import pin_dynamo_limit as _pin_dynamo_limit
 from library.runtime.harness import (
     compile_dit_blocks,
+    compile_signature,
     enable_training_grad_ckpt,
+    isolate_compile_cache,
     place_dit_for_training,
 )
 from networks.methods.turbo_dmd import (
@@ -414,6 +416,22 @@ def main():
         logger.info(
             "activation_memory_budget ignored: incompatible with grad_ckpt "
             "(and redundant under it)"
+        )
+    # Isolate the persistent compile caches per compile signature — entries
+    # deposited by runs compiled under different seq-range bounds (e.g. an
+    # inference run's canonical 4032-floored default) otherwise poison this
+    # run's wider dynamic-seq marks: AOTAutogradCache replays the stale narrow
+    # guard into the fresh ShapeEnv and the first ≥4032-token trace dies with a
+    # ConstraintViolationError (see isolate_compile_cache). Same signature →
+    # warm cache reuse, shared with train.py runs of the same tier set.
+    if cfg.torch_compile:
+        isolate_compile_cache(
+            compile_signature(
+                n_token_families=n_token_families,
+                seq_range=seq_range,
+                dynamic_seq=cfg.compile_dynamic_seq,
+                mode="",
+            )
         )
     compile_dit_blocks(
         model,

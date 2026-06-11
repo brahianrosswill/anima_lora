@@ -32,6 +32,14 @@ unlike a hue it shouldn't be tag-dropped, so it's emitted as a protected prefix
 (see ``protect_fn`` in :func:`library.preprocess.generate_caption_variants`).
 Copyright tags are identified against the corpus copyright vocab in the caption
 index (``post_image_dataset/captions/caption_index.json`` ``groups.copyright``).
+
+:func:`filter_to_colors_and_protected` generalizes that prefix to any set of
+genuinely-ambiguous tags: copyright (series identity) and **comic/panel-format**
+tags (``comic``, ``4koma``, …). The mangafied cond carries lineart + screentone
+but the multi-panel *page format* is text the model should bind so a "comic"
+prompt produces panelled output — kept first and dropout-protected, like
+copyright. Comic tags match a fixed booru format vocab (:data:`COMIC_TAGS`), no
+caption-index lookup needed.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ from __future__ import annotations
 import functools
 import json
 from pathlib import Path
+from typing import Callable
 
 # Repo root: easycontrol_adapters/colorization/color_caption.py → ../../..
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,11 +61,41 @@ DEFAULT_CAPTION_INDEX = (
 # a false-drop loses a hue the model needs.
 COLOR_WORDS: frozenset[str] = frozenset(
     {
-        "aqua", "black", "blonde", "blue", "brown", "green", "grey", "gray",
-        "orange", "pink", "purple", "red", "silver", "white", "yellow",
-        "tan", "teal", "cyan", "magenta", "maroon", "navy", "olive", "violet",
-        "beige", "gold", "golden", "cream", "crimson", "scarlet", "turquoise",
-        "lavender", "peach", "azure", "ivory", "bronze",
+        "aqua",
+        "black",
+        "blonde",
+        "blue",
+        "brown",
+        "green",
+        "grey",
+        "gray",
+        "orange",
+        "pink",
+        "purple",
+        "red",
+        "silver",
+        "white",
+        "yellow",
+        "tan",
+        "teal",
+        "cyan",
+        "magenta",
+        "maroon",
+        "navy",
+        "olive",
+        "violet",
+        "beige",
+        "gold",
+        "golden",
+        "cream",
+        "crimson",
+        "scarlet",
+        "turquoise",
+        "lavender",
+        "peach",
+        "azure",
+        "ivory",
+        "bronze",
     }
 )
 
@@ -70,17 +109,63 @@ COLOR_MODIFIERS: frozenset[str] = frozenset(
 # should be kept whole.
 COLOR_PHRASES: frozenset[str] = frozenset(
     {
-        "monochrome", "greyscale", "grayscale", "colorful", "muted color",
-        "pastel colors", "limited palette", "spot color", "rainbow order",
+        "monochrome",
+        "greyscale",
+        "grayscale",
+        "colorful",
+        "muted color",
+        "pastel colors",
+        "limited palette",
+        "spot color",
+        "rainbow order",
         # hair/eye multi-color escapes (booru groups.yaml escapes)
-        "two-tone hair", "multicolored hair", "gradient hair", "streaked hair",
-        "split-color hair", "rainbow hair", "colored inner hair",
-        "multicolored eyes", "heterochromia", "two-tone eyes",
+        "two-tone hair",
+        "multicolored hair",
+        "gradient hair",
+        "streaked hair",
+        "split-color hair",
+        "rainbow hair",
+        "colored inner hair",
+        "multicolored eyes",
+        "heterochromia",
+        "two-tone eyes",
         # skin tone
-        "dark skin", "pale skin", "tan", "sun tan", "tanlines", "tan lines",
-        "dark-skinned female", "dark-skinned male",
+        "dark skin",
+        "pale skin",
+        "tan",
+        "sun tan",
+        "tanlines",
+        "tan lines",
+        "dark-skinned female",
+        "dark-skinned male",
     }
 )
+
+
+# Comic / panel-format tags. The mangafied cond synthesizes lineart + screentone
+# but doesn't reliably hand the model the "this is a multi-panel comic page"
+# signal, so — like copyright — it's genuinely-ambiguous text worth binding: kept
+# as a protected, dropout-immune leading token so the adapter learns the `comic`
+# tag and a "comic" prompt steers toward panelled output. A fixed booru
+# format-tag vocab (no caption-index lookup, unlike copyright); the koma variants
+# are the same comic-page family.
+COMIC_TAGS: frozenset[str] = frozenset(
+    {
+        "comic",
+        "manga",
+        "doujinshi",
+        "2koma",
+        "3koma",
+        "4koma",
+        "5koma",
+        "multiple 4koma",
+    }
+)
+
+
+def is_comic_tag(tag: str) -> bool:
+    """True if ``tag`` is a comic / panel-format tag worth keeping + binding."""
+    return tag.strip().lower() in COMIC_TAGS
 
 
 def is_color_tag(tag: str) -> bool:
@@ -92,19 +177,13 @@ def is_color_tag(tag: str) -> bool:
         return True
     words = t.split()
     # "<...> hair/eyes/skin" with a color word anywhere → colored body feature.
-    if words[-1] in ("hair", "eyes", "skin") and any(
-        w in COLOR_WORDS for w in words
-    ):
+    if words[-1] in ("hair", "eyes", "skin") and any(w in COLOR_WORDS for w in words):
         return True
     # Leading color word: "<color> <noun>" (clothing, object, background, …).
     if words[0] in COLOR_WORDS:
         return True
     # Modifier + color word: "light blue dress", "dark green skirt".
-    if (
-        words[0] in COLOR_MODIFIERS
-        and len(words) >= 2
-        and words[1] in COLOR_WORDS
-    ):
+    if words[0] in COLOR_MODIFIERS and len(words) >= 2 and words[1] in COLOR_WORDS:
         return True
     return False
 
@@ -131,7 +210,9 @@ _NON_SERIES_COPYRIGHT: frozenset[str] = frozenset({"original", "original charact
 
 
 @functools.lru_cache(maxsize=4)
-def load_copyright_tags(index_path: str | Path = DEFAULT_CAPTION_INDEX) -> frozenset[str]:
+def load_copyright_tags(
+    index_path: str | Path = DEFAULT_CAPTION_INDEX,
+) -> frozenset[str]:
     """Lowercased set of every copyright tag name from the caption index.
 
     Reads ``groups.copyright`` (a ``{copyright_name: [image_ids]}`` map) from the
@@ -161,22 +242,52 @@ def is_copyright_tag(tag: str, copyright_tags: frozenset[str]) -> bool:
     return tag.strip().lower() in copyright_tags
 
 
+def filter_to_colors_and_protected(
+    caption: str,
+    copyright_tags: frozenset[str] | None = None,
+    *,
+    keep_copyright: bool = True,
+    keep_comic: bool = False,
+) -> str:
+    """Reduce a caption to its protected leading tags followed by its color tags.
+
+    The protected prefix is, in order: copyright/series tags (``keep_copyright``)
+    then comic/panel-format tags (``keep_comic``). They lead the color tags so
+    they form a contiguous run, mirroring the ``@artist``-prefix convention the
+    variant generator already protects, and a prompt reads naturally — "genshin
+    impact, comic, pink hair, blue eyes". Each tag is emitted once: a tag that is
+    both copyright/comic and color-shaped stays in its protected slot. Pass
+    ``copyright_tags`` to avoid re-reading the caption index per call; defaults to
+    :func:`load_copyright_tags` (only consulted when ``keep_copyright``).
+    """
+    if copyright_tags is None:
+        copyright_tags = load_copyright_tags() if keep_copyright else frozenset()
+    tags = [t.strip() for t in caption.split(",") if t.strip()]
+    protected: list[str] = []
+    seen: set[str] = set()
+
+    def _take(pred: Callable[[str], bool]) -> None:
+        for t in tags:
+            if t.lower() not in seen and pred(t):
+                protected.append(t)
+                seen.add(t.lower())
+
+    if keep_copyright:
+        _take(lambda t: is_copyright_tag(t, copyright_tags))
+    if keep_comic:
+        _take(is_comic_tag)
+    colors = [t for t in tags if t.lower() not in seen and is_color_tag(t)]
+    return ", ".join(protected + colors)
+
+
 def filter_to_colors_and_copyright(
     caption: str, copyright_tags: frozenset[str] | None = None
 ) -> str:
     """Reduce a caption to its copyright tags (first) followed by its color tags.
 
-    Copyright tags are emitted *before* the color tags so they form a contiguous
-    leading run, mirroring the ``@artist``-prefix convention the variant
-    generator already protects. A color prompt then reads naturally — "genshin
-    impact, pink hair, blue eyes". Pass ``copyright_tags`` to avoid re-reading the
-    caption index per call; defaults to :func:`load_copyright_tags`. A tag that is
-    both a copyright name and color-shaped is kept once, in the copyright slot.
+    Thin back-compat wrapper over :func:`filter_to_colors_and_protected` with only
+    the copyright prefix enabled.
     """
-    if copyright_tags is None:
-        copyright_tags = load_copyright_tags()
-    tags = [t.strip() for t in caption.split(",") if t.strip()]
-    copyrights = [t for t in tags if is_copyright_tag(t, copyright_tags)]
-    seen = {t.lower() for t in copyrights}
-    colors = [t for t in tags if t.lower() not in seen and is_color_tag(t)]
-    return ", ".join(copyrights + colors)
+    return filter_to_colors_and_protected(
+        caption, copyright_tags, keep_copyright=True, keep_comic=False
+    )

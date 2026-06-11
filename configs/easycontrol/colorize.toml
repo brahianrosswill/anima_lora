@@ -51,14 +51,18 @@ text_tag_dropout_rate = 0.8
 # Keep the copyright/series tag alongside the colors (placed first, protected from
 # dropout) — the manga cond can't encode which series a page is from.
 text_keep_copyright = true
+# Keep comic/panel-format tags (comic, 4koma, …) too, in the protected prefix and
+# immune to dropout — the mangafied cond doesn't reliably signal "multi-panel comic
+# page", so binding the tag lets a "comic" prompt steer toward panelled output.
+text_keep_comic = true
 
 # Training overrides folded onto configs/methods/easycontrol.toml (CLI wins the
 # merge chain). Only the colorize-specific deltas live here; infra knobs
 # (network_module, use_easycontrol, blocks_to_swap, gradient/offload checkpointing)
 # are inherited from the base easycontrol method.
 [training]
-network_dim = 32
-network_alpha = 32
+network_dim = 48
+network_alpha = 48
 target_res = [896, 1024]
 network_args = [
     "b_cond_init=-6.0",

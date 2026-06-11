@@ -19,8 +19,9 @@ Three idempotent stages:
    cond latent shape matches its target latent exactly. Skips cached resolutions.
 
 3. **Text** — re-encode the *target* captions filtered to **color tags** (plus
-   the **copyright/series tag** by default, ``--text_keep_copyright``;
-   :func:`color_caption.filter_to_colors_and_copyright`) into ``--text_cache_dir``, mirroring
+   the **copyright/series tag** by default, ``--text_keep_copyright``, and
+   optionally **comic/panel-format tags** via ``--text_keep_comic``;
+   :func:`color_caption.filter_to_colors_and_protected`) into ``--text_cache_dir``, mirroring
    the source subpath. Reads ``.txt`` from ``--caption_src`` (the caption master,
    nested identically to the resized tree), so the TE caches key-match the
    colorize loader's ``image_dir=post_image_dataset/resized`` lookup. The colorize
@@ -458,6 +459,7 @@ def stage_text(
     shuffle_variants: int,
     tag_dropout_rate: float,
     keep_copyright: bool = True,
+    keep_comic: bool = False,
     caption_index: str | None = None,
 ):
     """Cache color-only TE embeddings for the color targets into ``text_cache_dir``.
@@ -481,10 +483,16 @@ def stage_text(
     around it still drop. The manga cond can't encode which series a page is from,
     so copyright is genuinely-ambiguous text worth binding. Copyright names are
     matched against ``caption_index`` (defaults to the corpus typed-tag index).
+
+    ``keep_comic`` does the same for comic/panel-format tags (``comic``, ``4koma``,
+    …; matched against the fixed :data:`color_caption.COMIC_TAGS` vocab) — kept in
+    the protected prefix after copyright and immune to dropout, so the adapter
+    learns the ``comic`` tag and a "comic" prompt steers toward panelled output.
     """
     from color_caption import (
         filter_to_colors,
-        filter_to_colors_and_copyright,
+        filter_to_colors_and_protected,
+        is_comic_tag,
         is_copyright_tag,
         load_copyright_tags,
     )
@@ -529,10 +537,12 @@ def stage_text(
         overwrite=False,
     )
 
-    # Resolve the color-only vs color+copyright caption transform. When keeping
-    # copyright, also build a protect_fn so the copyright tag survives dropout in
-    # the partial-color variants (the colors around it still drop).
+    # Resolve the caption transform. Color tags are always kept; copyright and/or
+    # comic tags optionally ride along as a protected prefix. When either is kept,
+    # build a protect_fn so those tags survive dropout in the partial-color
+    # variants (the colors around them still drop).
     caption_protect_fn = None
+    copyright_tags: frozenset[str] = frozenset()
     if keep_copyright:
         copyright_tags = (
             load_copyright_tags(caption_index)
@@ -546,11 +556,20 @@ def stage_text(
                 "Run `make caption-index` or pass --caption_index."
             )
 
+    if keep_copyright or keep_comic:
+
         def caption_transform(caption: str) -> str:
-            return filter_to_colors_and_copyright(caption, copyright_tags)
+            return filter_to_colors_and_protected(
+                caption,
+                copyright_tags,
+                keep_copyright=keep_copyright,
+                keep_comic=keep_comic,
+            )
 
         def caption_protect_fn(tag: str) -> bool:
-            return is_copyright_tag(tag, copyright_tags)
+            return (keep_copyright and is_copyright_tag(tag, copyright_tags)) or (
+                keep_comic and is_comic_tag(tag)
+            )
     else:
         caption_transform = filter_to_colors
 
@@ -726,6 +745,14 @@ def main() -> None:
         "reverts to color-only captions.",
     )
     parser.add_argument(
+        "--text_keep_comic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="keep comic/panel-format tags (comic, 4koma, …) alongside the color "
+        "tags (placed in the protected prefix after copyright, immune to "
+        "tag-dropout) so the adapter learns the `comic` tag. Off by default.",
+    )
+    parser.add_argument(
         "--caption_index",
         default=None,
         help="caption index JSON with a groups.copyright vocab, used to identify "
@@ -809,6 +836,7 @@ def main() -> None:
             shuffle_variants=args.text_shuffle_variants,
             tag_dropout_rate=args.text_tag_dropout_rate,
             keep_copyright=args.text_keep_copyright,
+            keep_comic=args.text_keep_comic,
             caption_index=args.caption_index,
         )
         print(

@@ -350,10 +350,18 @@ class AnimaTrainer:
                     raise ValueError(
                         "--cache_llm_adapter_outputs is incompatible with --network_args train_llm_adapter=True"
                     )
-        else:
-            assert not getattr(args, "cache_llm_adapter_outputs", False), (
-                "--cache_llm_adapter_outputs requires --cache_text_encoder_outputs"
+        elif getattr(args, "cache_llm_adapter_outputs", False):
+            # Adapter-output caching writes into the TE cache; with text caching
+            # off there is nothing to write into (the caching strategy is None and
+            # adapter outputs are computed live), so the flag is a harmless no-op.
+            # Auto-disable it instead of crashing — this combination is easy to
+            # hit from the GUI, where use_text_cache and cache_llm_adapter_outputs
+            # are independent toggles while methods default the latter to true.
+            logger.warning(
+                "cache_llm_adapter_outputs=true has no effect without text-encoder "
+                "caching (use_text_cache=false / live text encoding); disabling it."
             )
+            args.cache_llm_adapter_outputs = False
 
         assert args.network_train_unet_only or not args.cache_text_encoder_outputs, (
             "network for Text Encoder cannot be trained with caching Text Encoder outputs"
@@ -1561,65 +1569,6 @@ class AnimaTrainer:
         counts = token_counts_for_resos(resos)
         return len(counts), (min(counts), max(counts))
 
-    def _maybe_clear_stale_compile_cache(self, signature: str) -> None:
-        """Wipe the torch inductor cache when the compile signature changed.
-
-        The persistent inductor ``FxGraphCache`` can hand back a graph whose
-        dynamic-seq shape guards were specialized for a DIFFERENT token-family set
-        than this run needs. Concretely: a prior single-tier 1024 run leaves a
-        graph floored at ``seq >= 4032``; a later 896+1024 run reuses it and then
-        raises ``ConstraintViolationError`` the moment a 3000-token (896-tier)
-        batch arrives. torch's cache key doesn't catch this cross-run mismatch, so
-        we record the families we compiled for in a marker file and clear the
-        cache once whenever the signature changes (re-preprocessing with different
-        ``target_res`` tiers is what changes it).
-
-        First run (no marker yet) also clears once: users updating from before the
-        tier fix typically carry a cache compiled against the old (buggy) tier set,
-        so a one-time wipe is the safe baseline. Unchanged signature reuses the
-        cache (no recompile).
-        """
-        import shutil
-
-        from library.env import resolve_under_home
-
-        marker = resolve_under_home("output/.torch_compile_sig")
-        try:
-            prev = (
-                marker.read_text(encoding="utf-8").strip() if marker.exists() else None
-            )
-        except OSError:
-            prev = None
-
-        if prev == signature:
-            return  # same tier set as last compile — cached graphs are valid
-
-        # Signature changed (or first run): cached graphs may be specialized for a
-        # different tier set, so wipe the cache once and let the next compile
-        # rebuild from scratch.
-        cache_dir = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
-        if not cache_dir:
-            try:
-                from torch._inductor.runtime.runtime_utils import (
-                    cache_dir as _inductor_cache_dir,
-                )
-
-                cache_dir = _inductor_cache_dir()
-            except Exception:  # noqa: BLE001 — torch internals move across versions
-                cache_dir = None
-        if cache_dir and os.path.isdir(cache_dir):
-            shutil.rmtree(cache_dir, ignore_errors=True)
-            logger.info(
-                "Cleared torch.compile inductor cache — compile signature "
-                f"changed ({prev or 'none'} -> {signature}); rebuilding from scratch."
-            )
-
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(signature, encoding="utf-8")
-        except OSError as e:  # marker is best-effort; never block training on it
-            logger.warning(f"Could not write compile-cache marker {marker}: {e}")
-
     def _create_and_apply_network(
         self,
         args,
@@ -1787,14 +1736,24 @@ class AnimaTrainer:
                 self, "_compile_token_budget", (None, None)
             )
             dynamic_seq = bool(getattr(args, "compile_dynamic_seq", False))
-            # Clear the inductor cache if the token-family composition (or compile
-            # mode) changed since the last run — a stale graph specialized for a
-            # different tier set otherwise triggers a ConstraintViolationError
-            # (see _maybe_clear_stale_compile_cache). No-op when unchanged.
-            self._maybe_clear_stale_compile_cache(
-                f"families={n_token_families};seq_range={seq_range};"
-                f"dynamic_seq={dynamic_seq};backend={args.dynamo_backend};"
-                f"mode={getattr(args, 'compile_inductor_mode', None)}"
+            # Isolate the persistent compile caches per compile signature — a
+            # cached graph compiled under different seq-range bounds (e.g. an
+            # inference run's canonical 4032-floored range) otherwise poisons
+            # this run's wider dynamic-seq marks with a ConstraintViolationError
+            # (see isolate_compile_cache). Same signature → warm cache reuse.
+            from library.runtime.harness import (
+                compile_signature,
+                isolate_compile_cache,
+            )
+
+            isolate_compile_cache(
+                compile_signature(
+                    n_token_families=n_token_families,
+                    seq_range=seq_range,
+                    dynamic_seq=dynamic_seq,
+                    backend=args.dynamo_backend,
+                    mode=getattr(args, "compile_inductor_mode", None),
+                )
             )
             unet.compile_blocks(
                 args.dynamo_backend,

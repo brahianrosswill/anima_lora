@@ -16,7 +16,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 1000
+iterations = 1250
 batch_size = 1
 seed = 42
 use_masked_loss = true
@@ -46,10 +46,10 @@ activation_memory_budget = 0.99
 base_loss = "dpdmd"
 
 [network]
-student_rank = 64
-student_alpha = 64
-fake_rank = 64
-fake_alpha = 64
+student_rank = 96
+student_alpha = 96
+fake_rank = 96
+fake_alpha = 96
 attn_mode = "flash"
 # Per-step expert: split the student into K = student_steps up-heads off a
 # shared down-proj, head k serving denoise step k. Removes the diversity↔quality
@@ -69,8 +69,8 @@ grad_step = "random"
 
 # Optimization.
 [optim]
-student_lr = 2e-5
-fake_lr = 2e-5
+student_lr = 1e-5
+fake_lr = 1e-5
 fake_steps_per_student_step = 4
 fake_warmup_steps = 50
 weight_decay = 0.0
@@ -157,7 +157,7 @@ ratio_normalization = true      # per-τ histogram normalization of r
 
 # Logging / checkpoints.
 [io]
-save_every = 500
+save_every = 625
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 500
+validate_every_n_steps = 625

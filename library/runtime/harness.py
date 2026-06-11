@@ -405,6 +405,93 @@ def compile_dit_blocks(
     )
 
 
+def compile_signature(
+    *,
+    n_token_families: Optional[int],
+    seq_range: Optional[tuple],
+    dynamic_seq: bool,
+    backend: str = "inductor",
+    mode: Optional[str] = None,
+) -> str:
+    """Canonical signature string for ``maybe_clear_stale_compile_cache``.
+
+    Every compile entry point (``train.py``, ``scripts/distill_turbo``) must
+    build the marker signature through this one formatter so equivalent compile
+    configs serialize identically — a formatting drift between callers would
+    thrash-wipe the shared inductor cache on every entry-point switch. ``mode``
+    is normalized so the two "inductor default" spellings (``None`` and ``""``)
+    don't read as a signature change.
+    """
+    return (
+        f"families={n_token_families};seq_range={seq_range};"
+        f"dynamic_seq={dynamic_seq};backend={backend};mode={mode or None}"
+    )
+
+
+# Original torch.compile cache base, captured on the first isolate_compile_cache
+# call so repeated calls (or a different signature later in the same process)
+# re-derive from the same root instead of nesting per-signature dirs.
+_compile_cache_base: Optional[str] = None
+
+
+def isolate_compile_cache(signature: str) -> str:
+    """Route this run's torch.compile caches to a per-signature directory.
+
+    The persistent compile caches (``FxGraphCache`` AND ``AOTAutogradCache``,
+    both rooted at ``TORCHINDUCTOR_CACHE_DIR``) key on the FX graph but NOT on
+    the ``mark_dynamic`` value range, so processes compiled with different
+    seq-range bounds poison each other through the shared default cache dir.
+    Concretely: inference/bench runs compile the block graph with the canonical
+    1024-table default range and deposit entries whose stored guards are floored
+    at ``seq >= 4032``; a later multi-tier training run marks ``[3000, 4200]``,
+    and if its first compile's example batch happens to be ≥4032 tokens, the
+    stale entry's guard evaluates TRUE at that hint — AOTAutogradCache accepts
+    the hit and re-asserts the narrow guard into the fresh ShapeEnv
+    (``autograd_cache.py::evaluate_guards``), which then contradicts the wider
+    mark constraint → ``ConstraintViolationError`` (instead of a cache miss).
+    Hint-dependent, which is why it strikes "sometimes": a sub-4032 first batch
+    evaluates the guard False and misses cleanly.
+
+    Wiping the shared dir (the previous approach) can't fix this: inference
+    re-deposits default-range entries between training runs. Instead, point
+    ``TORCHINDUCTOR_CACHE_DIR`` at a per-signature subdir of the original cache
+    root — every entry inside was compiled under the SAME seq bounds, so guard
+    replay is always consistent. Same-signature reruns keep their warm cache
+    (and unlike the wipe, switching tier sets back and forth no longer
+    re-compiles from scratch each time). Inference/bench keep the default dir.
+
+    Must run BEFORE the first ``torch.compile`` trace in the process (torch
+    reads the env var lazily per cache access). Build ``signature`` via
+    ``compile_signature``. Returns the directory used.
+    """
+    global _compile_cache_base
+    import hashlib
+    import os
+
+    if _compile_cache_base is None:
+        base = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+        if not base:
+            try:
+                from torch._inductor.runtime.cache_dir_utils import default_cache_dir
+
+                base = default_cache_dir()
+            except Exception:  # noqa: BLE001 — torch internals move across versions
+                import getpass
+                import tempfile
+
+                base = os.path.join(
+                    tempfile.gettempdir(), f"torchinductor_{getpass.getuser()}"
+                )
+        _compile_cache_base = base
+
+    digest = hashlib.sha1(signature.encode("utf-8")).hexdigest()[:16]
+    target = os.path.join(_compile_cache_base, f"anima-sig-{digest}")
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = target
+    log.info(f"torch.compile cache isolated per compile signature: {target}")
+    log.info(f"compile signature: {signature}")
+    return target
+
+
 def enable_training_grad_ckpt(anima: object, *, enabled: bool) -> None:
     """Toggle unsloth CPU-offload gradient checkpointing for a training run.
 
