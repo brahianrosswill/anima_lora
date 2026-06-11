@@ -4,7 +4,8 @@ Distills the CFG=4 Anima teacher into a **few-step LoRA student** via
 **Diversity-Preserved Distribution Matching Distillation** (Wu, Li, Zhang, Ma —
 arXiv:2602.03139). The output is a **plain standard LoRA** — there is no
 inference-side turbo code; you load it through the normal LoRA path and run
-`--infer_steps 2 --cfg 1.0` (CFG is baked into the student during distillation).
+`--infer_steps` matched to `student_steps` (currently 4) with `--cfg 1.0` (CFG is
+baked into the student during distillation).
 
 > **History.** This replaced the CA-decoupled DMD2 ("CFG-as-Spear, Distribution-
 > Matching-as-Shield", Liu et al. arXiv:2511.22677) objective on **2026-05-30**.
@@ -127,7 +128,7 @@ Sectioned, bespoke. Every key has a matching CLI override flag (see
 | top | `iterations` | `2000` | |
 | top | `use_masked_loss` | `true` | **student-only** mask on the DMD grad; fake/critic stays full-frame |
 | `[network]` | `student_rank` / `fake_rank` | `64` / `64` | `fake_rank ≥ student_rank` (fake is a score *tracker*, capacity ceiling on DM strength) |
-| `[dmd]` | `student_steps` (N) | `2` | Euler steps the student rolls; inference matches (`--infer_steps 2`) |
+| `[dmd]` | `student_steps` (N) | `4` | Euler steps the student rolls; inference matches (`--infer_steps 4`) |
 | `[dmd]` | `teacher_cfg` (α) | `4` | CFG scale baked into the teacher anchor + DMD real score (Anima prod CFG=4) |
 | `[dmd]` | `grad_step` | `all` | which refinement step(s) carry the DMD grad: `all` (BPTT) / `last` (tail-only, memory-flat) / `random` (one-step x0-pred at `g~U{1..N−1}`, memory-flat, trains every head). Honored under **both** `base_loss`. |
 | `[dmd]` | `dm_x0_norm` | `true` | per-sample x0-space magnitude normalization of the DM grad ([[project_turbo_dmd_x0_norm_wins]]) |
@@ -174,15 +175,17 @@ read pose diversity + saturation, not the scalars.
 
 ## Inference: step count
 
-The student is trained at `student_steps=2`, so `--infer_steps 2 --cfg 1.0` is the
-matched schedule. **However**, an under-trained / lightly-distilled student behaves
-like a continuous velocity field (the DMD quality loss is trained at *random* τ, not
-on the 2-step grid; only step 0 is grid-anchored), so it can integrate **better** at
-more Euler steps — at 2 steps the entire detail-forming band below σ≈0.5
-([[project_sigma_signal_resolves_by_045]]) is crossed by a single `0.75→0` Euler
-jump, while at 4 steps it gets a function evaluation at σ=0.5 *and* preserves the
-σ=0.75 anchor. If a checkpoint looks better at 4 steps than 2, that's the tell that
-distillation hasn't reached a true 2-step map yet — train longer or raise
+The student is trained at `student_steps` (currently 4 — was 2 until `5ef128d`), so
+`--infer_steps 4 --cfg 1.0` is the matched schedule. **However**, an under-trained /
+lightly-distilled student behaves like a continuous velocity field (the DMD quality
+loss is trained at *random* τ, not on the N-step grid; only step 0 is
+grid-anchored), so it can integrate **better** at more Euler steps than it was
+trained for — the 2-step era made this concrete: a single `0.75→0` Euler jump
+crosses the entire detail-forming band below σ≈0.5
+([[project_sigma_signal_resolves_by_045]]), while 4 steps get a function evaluation
+at σ=0.5 *and* preserve the σ=0.75 anchor (one motivation for the 2→4 move). If a
+checkpoint looks better at more steps than its trained grid, that's the tell that
+distillation hasn't reached a true N-step map yet — train longer or raise
 `student_steps`. Always keep `--cfg 1.0` regardless of step count (CFG is baked;
 don't double-guide).
 

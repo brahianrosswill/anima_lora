@@ -11,14 +11,13 @@
 # paths below reference {name} and are interpolated at train time, so changing
 # this (e.g. name = "sanitize" → easycontrol/sanitize/) + re-running preprocess →
 # train reroutes everything with no path edit. Defaults to "near_twins" if omitted.
-name = "uncensor"
+name = "sanitize"
 
 # Mining run knobs (read by `python -m easycontrol_adapters.tools.near_twin`;
 # legacy name [miner] still accepted). Any --flag dest works as a key here.
 [staging]
 # Discriminator — set exactly one of: tag_any / tag / region (bool) / signal.
-# tag_any = ["speech bubble", "thought bubble", "blank speech bubble", "spoken text", "english text", "japanese text", "sound effects"]
-tag_any = ["bar censor", "censored", "mosaic censoring"]
+tag_any = ["speech bubble", "thought bubble", "blank speech bubble", "spoken text", "english text", "japanese text", "sound effects"]
 
 # Source trees (<dir>/<artist>/<id>.<ext>).
 image_dirs = ["{CAPTION_CORPUS_DIR}/retrieved"]

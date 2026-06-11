@@ -120,9 +120,10 @@ another prompt --seed 42 --flow_shift 4.0
 | `lcm` | x0 re-noise — **distilled few-step models only** (see Turbo below). |
 
 ### Few-step (Turbo / distilled) checkpoints
-Turbo output is a normal LoRA but expects the DP-DMD 2-step rollout:
+Turbo output is a normal LoRA but expects the DP-DMD rollout it was trained at
+(`student_steps` in `configs/methods/turbo.toml`, currently 4):
 ```bash
-python inference.py … --lora_weight turbo.safetensors --infer_steps 2 --guidance_scale 1.0
+python inference.py … --lora_weight turbo.safetensors --infer_steps 4 --guidance_scale 1.0
 ```
 
 ### Go faster (training-free)

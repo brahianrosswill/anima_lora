@@ -45,14 +45,14 @@ channel_scaling_alpha = 0.5
 # run t∈(0.5,1] at half resolution, expand at σ≈0.5, finish full-res.
 [schedule]
 stages = [0.5, 1.0]
-transition_sigmas = [0.5]
-label = "single_0.5_sigma0.5"
+transition_sigmas = [0.7]
+label = "single_0.5_sigma0.7"
 # Per-stage sampling multiplier (len = len(stages)). The trainer samples a stage
 # each micro-step ∝ (band width × stage_weight): the band-width factor keeps σ
 # marginally-uniform *within* each stage (paper's U(0,1)); stage_weights then tilt
 # how much of the gradient budget lands on each stage WITHOUT disturbing in-band σ
 # density. All-ones (or omitted) = exact band-width-proportional baseline.
-stage_weights = [0.3, 0.7]
+stage_weights = [0.4, 0.6]
 sigma_jitter = 0.0
 flow_shift = 3.0
 
