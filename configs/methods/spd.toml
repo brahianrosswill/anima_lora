@@ -17,7 +17,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 4000
+iterations = 16000
 batch_size = 1
 seed = 42
 # compile_inductor_mode = "reduce-overhead"
@@ -109,7 +109,7 @@ warmup = 0.05           # ratio of iterations (int >=1 → absolute steps)
 ema_decay = 0.0
 
 [io]
-save_every = 2000
+save_every = 16000
 log_interval = 5
 log_dir = "output/logs/spd"
 # CMMD-free validation: held out per-bucket (never trained on), scored as the
@@ -118,5 +118,5 @@ log_dir = "output/logs/spd"
 # comparable step-to-step, so train↓/val↑ flags the trajectory-memorisation
 # overfit. 0 = off. CLI: --val_split / --val_interval / --n_val_sigmas.
 val_split = 0.01
-val_interval = 2000
+val_interval = 16000
 n_val_sigmas = 4

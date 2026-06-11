@@ -530,15 +530,15 @@ def cmd_invert_directedit(extra):
     # 2. Inversion knobs — env overrides for the common dials, defaults match
     #    the proposal (and the invert_postfix_tail.py CLI defaults).
     K = int(os.environ.get("K", "8"))
-    invert_steps = int(os.environ.get("INVERT_STEPS", "50"))
-    invert_lr = float(os.environ.get("INVERT_LR", "1e-2"))
+    invert_steps = int(os.environ.get("INVERT_STEPS", "100"))
+    invert_lr = float(os.environ.get("INVERT_LR", "1e-1"))
     lambda_zero = float(os.environ.get("LAMBDA_ZERO", "0.0"))
     sigma_min = float(os.environ.get("SIGMA_MIN", "0"))
     sigma_max = float(os.environ.get("SIGMA_MAX", "1.0"))
-    basis_kind = os.environ.get("BASIS", "svd_te").strip()
+    basis_kind = os.environ.get("BASIS", "random").strip()
     seed = int(os.environ.get("SEED", "0"))
     timesteps_per_step = int(os.environ.get("TIMESTEPS_PER_STEP", "1"))
-    grad_accum = int(os.environ.get("GRAD_ACCUM", "3"))
+    grad_accum = int(os.environ.get("GRAD_ACCUM", "2"))
 
     run_root = ROOT / "output" / "tests" / "invert_directedit"
     run_root.mkdir(parents=True, exist_ok=True)
@@ -596,6 +596,11 @@ def cmd_invert_directedit(extra):
             invert_cmd = [
                 py,
                 "scripts/inversion/invert_postfix_tail.py",
+                # directedit needs the ortho_tail s-vector (spliced via basis Q
+                # below); the probe script now defaults to soft_tokens, which
+                # writes a bank/ file instead — pin the mode explicitly.
+                "--parameterization",
+                "ortho_tail",
                 "--dit",
                 str(dit_path),
                 "--attn_mode",

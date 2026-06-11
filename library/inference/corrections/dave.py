@@ -25,6 +25,9 @@ eager 5D ``(B,T,H,W,D)`` and the native-flattened fake-5D ``(B,1,seq,1,D)`` layo
 v0: standard denoise loop only (no Spectrum/SPD compose) — the scoping CNS shipped
 with. The edit applies to both the cond and uncond CFG forwards (a uniform
 representation edit; the hook does not distinguish the two passes).
+
+Reference: "Breaking the Lock-in: Diversifying Text-to-Image Generation via
+Representation Modulation", ICML 2026 — https://github.com/daheekwon/DAVE
 """
 
 from __future__ import annotations

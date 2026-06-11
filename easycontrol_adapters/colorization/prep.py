@@ -493,7 +493,6 @@ def stage_text(
         filter_to_colors,
         filter_to_colors_and_protected,
         is_comic_tag,
-        is_copyright_tag,
         load_copyright_tags,
     )
 
@@ -538,9 +537,10 @@ def stage_text(
     )
 
     # Resolve the caption transform. Color tags are always kept; copyright and/or
-    # comic tags optionally ride along as a protected prefix. When either is kept,
-    # build a protect_fn so those tags survive dropout in the partial-color
-    # variants (the colors around them still drop).
+    # comic tags optionally ride along as a leading prefix. Inclusion and dropout-
+    # protection are decoupled: comic is the only family protected from dropout —
+    # copyright is kept but droppable (it rides the same tag-dropout as the colors),
+    # so the protect_fn below covers comic alone.
     caption_protect_fn = None
     copyright_tags: frozenset[str] = frozenset()
     if keep_copyright:
@@ -567,9 +567,8 @@ def stage_text(
             )
 
         def caption_protect_fn(tag: str) -> bool:
-            return (keep_copyright and is_copyright_tag(tag, copyright_tags)) or (
-                keep_comic and is_comic_tag(tag)
-            )
+            # Comic only — copyright is included by the filter but left droppable.
+            return keep_comic and is_comic_tag(tag)
     else:
         caption_transform = filter_to_colors
 
@@ -740,17 +739,19 @@ def main() -> None:
         "--text_keep_copyright",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="keep the copyright/series tag alongside the color tags (placed "
-        "first and protected from tag-dropout). --no-text_keep_copyright "
-        "reverts to color-only captions.",
+        help="carry the copyright/series tag alongside the color tags (placed "
+        "first). Kept but NOT protected — it rides the same tag-dropout as the "
+        "color tags (only comic is protected). --no-text_keep_copyright drops "
+        "it entirely.",
     )
     parser.add_argument(
         "--text_keep_comic",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="keep comic/panel-format tags (comic, 4koma, …) alongside the color "
-        "tags (placed in the protected prefix after copyright, immune to "
-        "tag-dropout) so the adapter learns the `comic` tag. Off by default.",
+        "tags (placed in the protected prefix, immune to tag-dropout) so the "
+        "adapter learns the `comic` tag. On by default; "
+        "--no-text_keep_comic drops them.",
     )
     parser.add_argument(
         "--caption_index",
