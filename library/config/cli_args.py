@@ -558,9 +558,12 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
         help=(
             "Decode each round of sample latents to PNG right after that "
             "sampling event (per-epoch visibility) instead of batching the "
-            "decode to the end of training. true/false, or 'auto' (default): "
-            "auto decodes inline unless the run is block-swapping "
-            "(blocks_to_swap>0), where bringing the VAE to GPU mid-run risks OOM."
+            "decode to the end of training. The inline decode parks the DiT on "
+            "CPU while the VAE runs (never co-resident), so it's OOM-safe. "
+            "true/false, or 'auto' (default): auto decodes inline unless the run "
+            "is block-swapping (blocks_to_swap>0), where the deferred end-of-"
+            "training decode avoids paying a full DiT CPU<->GPU round-trip per "
+            "sample event on a tight card."
         ),
     )
     parser.add_argument(

@@ -993,13 +993,25 @@ def sample_images(
 
     # Decode this round's stashed latents to PNG right away so each epoch's
     # samples are viewable as soon as they're generated, rather than only after
-    # the whole run finishes. Skipped (latents left for the end-of-training
-    # decode_pending_samples in train.py) when block-swapping — bringing the VAE
-    # to GPU mid-run alongside swapped blocks is the OOM risk the deferral was
-    # built to avoid; see _should_decode_inline. Main process only, mirroring
-    # the end-of-training decode.
+    # the whole run finishes. Deferred to the end-of-training
+    # decode_pending_samples in train.py for block-swapping runs (tight cards,
+    # where the repeated full-DiT CPU↔GPU transfer below isn't worth paying every
+    # sample event); see _should_decode_inline. Main process only, mirroring the
+    # end-of-training decode.
     if accelerator.is_main_process and _should_decode_inline(args):
-        decode_pending_samples(accelerator, args, vae)
+        # VAE decode needs the VAE resident on the GPU. Rather than let the DiT
+        # and VAE be co-resident, fully evict the DiT to CPU first, decode, then
+        # bring it back and restore block-swap placement so training resumes
+        # unchanged — the same load/unload discipline the deferred path gets for
+        # free once the loop has torn the DiT down. Mirrors train.py's
+        # end-of-training teardown.
+        dit.to("cpu")
+        clean_memory_on_device(accelerator.device)
+        try:
+            decode_pending_samples(accelerator, args, vae)
+        finally:
+            dit.move_to_device_except_swap_blocks(accelerator.device)
+            dit.prepare_block_swap_before_forward()
 
 
 def _should_decode_inline(args) -> bool:
@@ -1007,9 +1019,11 @@ def _should_decode_inline(args) -> bool:
     (per-epoch visibility) vs. deferring the whole batch to end of training.
 
     Explicit ``--sample_decode_inline`` wins; otherwise auto — inline when the
-    run isn't block-swapping (``blocks_to_swap == 0`` ⇒ the card has headroom
-    for the resident DiT plus the VAE decode), deferred when it is (tight card,
-    where co-resident VAE + swapped blocks is the OOM risk deferral avoids)."""
+    run isn't block-swapping (``blocks_to_swap == 0``), deferred when it is. The
+    inline path parks the DiT on CPU before the VAE decode (so the two are never
+    co-resident), so it's OOM-safe either way; the block-swap default still
+    defers because on a tight card the repeated full-DiT CPU↔GPU transfer per
+    sample event isn't worth paying when the end-of-training decode is free."""
     explicit = getattr(args, "sample_decode_inline", None)
     if isinstance(explicit, str):
         s = explicit.strip().lower()

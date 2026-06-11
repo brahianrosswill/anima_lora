@@ -62,7 +62,7 @@ dependencies = [
     "blake3>=1.0.8",
     "softtorch>=0.1.1",
     "controlnet-aux>=0.0.10",
-    "scikit-learn>=1.9.0rc1",
+    "scikit-learn>=1.9.0",
     "datasets>=4.8.5",
 ]
 
