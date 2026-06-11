@@ -11,7 +11,7 @@ from typing import Any
 import html
 
 import toml
-from PySide6.QtCore import QProcess, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPen, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -397,6 +397,20 @@ class ConfigTab(QWidget):
         self.log.setStyleSheet("font-family:monospace;font-size:11px;")
         self.log.setPlaceholderText(t("log_placeholder"))
         vsplit.addWidget(self.log)
+
+        # Small "Copy" button floating in the top-right corner of the log box.
+        self._log_copy_btn = QToolButton(self.log)
+        self._log_copy_btn.setText(t("copy_log"))
+        self._log_copy_btn.setToolTip(t("copy_log_tooltip"))
+        self._log_copy_btn.setCursor(Qt.PointingHandCursor)
+        self._log_copy_btn.setStyleSheet(
+            "QToolButton { background:#3a3a3a; color:#e0e0e0; border:1px solid #555;"
+            " border-radius:4px; padding:2px 8px; font-size:11px; }"
+            "QToolButton:hover { background:#4a4a4a; }"
+        )
+        self._log_copy_btn.clicked.connect(self._copy_log)
+        self.log.installEventFilter(self)
+        self._reposition_log_copy_btn()
 
         vsplit.setSizes([500, 200])
         lay.addWidget(vsplit)
@@ -1679,3 +1693,28 @@ class ConfigTab(QWidget):
         self.log.moveCursor(QTextCursor.End)
         self.log.insertPlainText(text)
         self.log.moveCursor(QTextCursor.End)
+
+    def eventFilter(self, obj, event):
+        if obj is self.log and event.type() == QEvent.Resize:
+            self._reposition_log_copy_btn()
+        return super().eventFilter(obj, event)
+
+    def _reposition_log_copy_btn(self):
+        """Keep the Copy button pinned to the top-right of the log viewport."""
+        btn = getattr(self, "_log_copy_btn", None)
+        if btn is None:
+            return
+        btn.adjustSize()
+        margin = 6
+        # Account for a visible vertical scrollbar so the button doesn't overlap it.
+        sb = self.log.verticalScrollBar()
+        sb_w = sb.width() if sb is not None and sb.isVisible() else 0
+        x = self.log.width() - btn.width() - sb_w - margin
+        btn.move(max(margin, x), margin)
+        btn.raise_()
+
+    def _copy_log(self):
+        QApplication.clipboard().setText(self.log.toPlainText())
+        btn = self._log_copy_btn
+        btn.setText(t("copy_log_done"))
+        QTimer.singleShot(1200, lambda: btn.setText(t("copy_log")))

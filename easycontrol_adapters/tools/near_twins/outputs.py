@@ -9,6 +9,7 @@ The two training-shaped artifacts are the ``_tags`` / ``_no_tags`` pair tree
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -178,6 +179,38 @@ batch_size = 1
 """
 
 
+# Blueprint section headers ([general] / [[datasets]] / [[datasets.subsets]]).
+# These never appear in the head (the head only carries [staging]/[preprocess]/
+# [training]), so the first one marks where the generated blueprint begins — the
+# fallback boundary when the sentinel comment has been hand-edited away.
+_BLUEPRINT_HEADER_RE = re.compile(r"^\s*\[\[?(?:general|datasets)\b")
+
+
+def _strip_blueprint(existing: str) -> str:
+    """Return the user-owned head of ``existing``, dropping any prior blueprint.
+
+    Preferred boundary is the sentinel comment. If it's missing (the user edited
+    the head and lost the sentinel line), fall back to the first blueprint
+    section header and rewind past the contiguous comment/blank block that
+    introduces it — so the blueprint's own header comments don't accumulate
+    across runs. Without this fallback a missing sentinel makes ``split`` keep
+    the whole file (blueprint included) as head, and each run appends another
+    blueprint copy.
+    """
+    if _BLUEPRINT_SENTINEL in existing:
+        return existing.split(_BLUEPRINT_SENTINEL, 1)[0].rstrip()
+    lines = existing.splitlines()
+    for i, line in enumerate(lines):
+        if _BLUEPRINT_HEADER_RE.match(line):
+            j = i
+            while j > 0 and (
+                lines[j - 1].lstrip().startswith("#") or not lines[j - 1].strip()
+            ):
+                j -= 1
+            return "\n".join(lines[:j]).rstrip()
+    return existing.rstrip()
+
+
 def write_dataset_config(export_dir: Path, config_path: Path) -> None:
     """Rewrite the blueprint tail of ``config_path``, preserving the head tables.
 
@@ -186,8 +219,7 @@ def write_dataset_config(export_dir: Path, config_path: Path) -> None:
     """
     blueprint = _blueprint_text(export_dir)
     if config_path.is_file():
-        existing = config_path.read_text(encoding="utf-8")
-        head = existing.split(_BLUEPRINT_SENTINEL, 1)[0].rstrip()
+        head = _strip_blueprint(config_path.read_text(encoding="utf-8"))
         content = f"{head}\n\n{blueprint}" if head else blueprint
     else:
         content = f"{_DEFAULT_STAGING_HEADER}\n{blueprint}"
