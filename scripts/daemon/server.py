@@ -13,9 +13,11 @@ Endpoints
     GET  /jobs              → [job, …]
     GET  /jobs/{id}         → job (+ latest progress event, stale_for)
     POST /jobs/{id}/stop    → {job}
+    POST /queue/start       → {ok, paused:false}  (resume a paused queue)
+    POST /queue/pause       → {ok, paused:true}   (hold queued jobs)
     GET  /jobs/{id}/logs    → SSE: tail of the job's stdout.log
     GET  /events            → SSE: daemon-level lifecycle events
-    GET  /health            → {ok, pid, port, root, active_job}
+    GET  /health            → {ok, pid, port, root, active_job, paused}
     POST /shutdown          {kill_jobs} → {ok}
 """
 
@@ -112,6 +114,12 @@ class _Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/jobs":
             self._handle_submit()
+        elif path == "/queue/start":
+            self.manager.resume()
+            self._send_json({"ok": True, "paused": False})
+        elif path == "/queue/pause":
+            self.manager.pause()
+            self._send_json({"ok": True, "paused": True})
         elif path == "/shutdown":
             self._handle_shutdown()
         elif m := _JOB_STOP_RE.match(path):
@@ -130,11 +138,15 @@ class _Handler(BaseHTTPRequestHandler):
                 "port": self.server.server_address[1],
                 "root": str(config.ROOT),
                 "active_job": active.id if active else None,
+                "paused": self.manager.is_paused(),
             }
         )
 
     def _handle_submit(self) -> None:
         body = self._read_json()
+        # ``start`` (optional): True → run now (resume the queue), False → add to
+        # the queue but hold it paused, omitted/None → leave the gate as-is.
+        start = body.get("start")
         if (body.get("kind") or "train") == "command":
             argv = body.get("argv")
             if not isinstance(argv, list) or not argv:
@@ -147,6 +159,7 @@ class _Handler(BaseHTTPRequestHandler):
                 chain_train=body.get("chain_train") or None,
                 config_snapshot=body.get("config_snapshot") or None,
                 config_file=body.get("config_file") or None,
+                start=start,
             )
             self._send_json({"job_id": job.id, "state": job.state}, 201)
             return
@@ -162,6 +175,7 @@ class _Handler(BaseHTTPRequestHandler):
             config_file=body.get("config_file") or None,
             overrides=body.get("overrides") or {},
             extra=body.get("extra") or [],
+            start=start,
         )
         self._send_json({"job_id": job.id, "state": job.state}, 201)
 

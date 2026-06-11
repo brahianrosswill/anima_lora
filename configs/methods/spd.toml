@@ -17,7 +17,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 16000
+iterations = 4000
 batch_size = 1
 seed = 42
 # compile_inductor_mode = "reduce-overhead"
@@ -30,7 +30,7 @@ compile_dynamic_seq = true
 # activation_memory_budget: partitioner saved-activation fraction (<1.0 recomputes
 # cheap intermediates in backward to cut peak VRAM). 1.0 = off. Ignored under
 # --grad_ckpt. 0.85 is the train.py default trade-off.
-activation_memory_budget = 1.0
+activation_memory_budget = 0.99
 
 [network]
 rank = 64

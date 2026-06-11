@@ -79,6 +79,14 @@ class JobManager:
         self._subscribers: set["queue.Queue[dict]"] = set()
         self._stopping = False
         self._kill_on_shutdown = False
+        # Queue run gate: set → the worker launches queued jobs as the GPU frees
+        # (the historical always-on behavior); cleared → the queue is *paused*,
+        # so dequeued jobs are held (still `queued`) until `resume()`. A running
+        # job is never interrupted by a pause — only the *next* launch waits.
+        # Default set so callers that don't opt into hold-then-start (CLI,
+        # ComfyUI node) keep running immediately.
+        self._run_gate = threading.Event()
+        self._run_gate.set()
         self._worker = threading.Thread(
             target=self._run, name="anima-job-worker", daemon=True
         )
@@ -101,6 +109,7 @@ class JobManager:
         if kill_jobs and current is not None:
             current.stop_requested = True
             self._kill_job_tree(current)
+        self._run_gate.set()  # release a worker parked on a paused queue
         self._queue.put(_SENTINEL)  # wake the worker so it can exit
 
     # ----- submission / query -----
@@ -116,6 +125,7 @@ class JobManager:
         overrides: Optional[dict] = None,
         extra: Optional[list[str]] = None,
         from_chain: bool = False,
+        start: Optional[bool] = None,
     ) -> Job:
         job = Job(
             id=new_job_id(),
@@ -129,7 +139,7 @@ class JobManager:
         self._attach_config_file(
             job, config_snapshot=config_snapshot, config_file=config_file
         )
-        return self._register_and_queue(job)
+        return self._register_and_queue(job, start=start)
 
     def submit_command(
         self,
@@ -140,6 +150,7 @@ class JobManager:
         chain_train: Optional[dict] = None,
         config_snapshot: Optional[dict] = None,
         config_file: Optional[str] = None,
+        start: Optional[bool] = None,
     ) -> Job:
         """Enqueue a plain ``python <argv>`` task (preprocess / mask).
 
@@ -169,7 +180,7 @@ class JobManager:
             job.extra_env["CONFIG_FILE"] = job.config_file
             if job.chain_train is not None:
                 job.chain_train.setdefault("config_file", job.config_file)
-        return self._register_and_queue(job)
+        return self._register_and_queue(job, start=start)
 
     def _attach_config_file(
         self,
@@ -193,7 +204,14 @@ class JobManager:
                 shutil.copyfile(src, dst)
         job.config_file = str(dst)
 
-    def _register_and_queue(self, job: Job) -> Job:
+    def _register_and_queue(self, job: Job, *, start: Optional[bool] = None) -> Job:
+        # ``start`` controls the run gate atomically with enqueue, so there's no
+        # window where a "hold this one" job could slip past the worker:
+        #   False → pause *before* the job is visible to the worker (hold it);
+        #   True  → enqueue, then resume (run now — flushes any held backlog);
+        #   None  → leave the gate as-is (legacy: runs if not currently paused).
+        if start is False:
+            self.pause()
         d = config.job_dir(job.id)
         job.progress_path = str(d / "progress.jsonl")
         job.stdout_path = str(d / "stdout.log")
@@ -201,8 +219,28 @@ class JobManager:
             self._jobs[job.id] = job
             job.persist()
         self._queue.put(job.id)
+        if start is True:
+            self.resume()
         self._broadcast({"ev": "submitted", "job_id": job.id, "state": job.state})
         return job
+
+    # ----- queue run gate (pause / start) -----
+
+    def pause(self) -> None:
+        """Hold the queue: queued jobs stay ``queued`` until :meth:`resume`. A
+        job already running is left alone — only the next launch waits."""
+        if self._run_gate.is_set():
+            self._run_gate.clear()
+            self._broadcast({"ev": "queue_state", "paused": True})
+
+    def resume(self) -> None:
+        """Release a paused queue so the worker launches queued jobs in order."""
+        if not self._run_gate.is_set():
+            self._run_gate.set()
+            self._broadcast({"ev": "queue_state", "paused": False})
+
+    def is_paused(self) -> bool:
+        return not self._run_gate.is_set()
 
     def list_jobs(self) -> list[Job]:
         with self._lock:
@@ -276,6 +314,14 @@ class JobManager:
             if job.stop_requested:
                 self._finalize(job, STATE_STOPPED, detail="cancelled while queued")
                 continue
+            # Hold here while the queue is paused (the GUI's "Start Queue" button
+            # resumes it). Re-validate after waking: the job may have been
+            # cancelled while held, or the daemon may be shutting down.
+            if not self._await_run_gate(job):
+                continue
+            with self._lock:
+                if job.state != STATE_QUEUED or job.stop_requested:
+                    continue
             # Auto-chained train steps skip the guard: the daemon just ran the
             # preceding preprocess on this same serial queue, so the only VRAM
             # in flight is that step's still-releasing allocation, which the
@@ -283,6 +329,23 @@ class JobManager:
             if not job.from_chain:
                 self._gpu_guard(job)
             self._launch_and_monitor(job)
+
+    def _await_run_gate(self, job: Job) -> bool:
+        """Block while the queue is paused. Returns True when cleared to launch,
+        False if the worker should skip this job (daemon stopping, or the job was
+        cancelled while held). Polls so a stop/shutdown is noticed promptly even
+        though the gate itself stays closed."""
+        if self._run_gate.is_set():
+            return True
+        self._broadcast({"ev": "queue_held", "job_id": job.id})
+        while not self._run_gate.wait(timeout=1.0):
+            with self._lock:
+                if self._stopping:
+                    return False
+                cur = self._jobs.get(job.id)
+                if cur is None or cur.stop_requested or cur.state in TERMINAL_STATES:
+                    return False
+        return not self._stopping
 
     def _launch_and_monitor(self, job: Job) -> None:
         cmd, env = self._build_cmd(job)

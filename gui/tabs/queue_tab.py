@@ -123,6 +123,7 @@ class QueueTab(LazyTabMixin, QWidget):
         self._jobs: list[dict] = []
         self._selected_job_id: str | None = None
         self._last_log_text: str | None = None
+        self._paused: bool = False
 
         outer = QVBoxLayout(self)
 
@@ -130,6 +131,14 @@ class QueueTab(LazyTabMixin, QWidget):
         self.refresh_btn = QPushButton(t("queue_refresh"))
         self.refresh_btn.clicked.connect(self.refresh)
         top.addWidget(self.refresh_btn)
+
+        # Toggle: "Start Queue" resumes a paused queue (runs jobs added via the
+        # dropdowns); "Pause Queue" holds it. Label/style flip with state in
+        # refresh(); disabled when no daemon is up.
+        self.queue_btn = QPushButton(t("queue_start"))
+        self.queue_btn.clicked.connect(self._toggle_queue)
+        self.queue_btn.setEnabled(False)
+        top.addWidget(self.queue_btn)
 
         self.stop_btn = QPushButton(t("queue_stop_selected"))
         self.stop_btn.setStyleSheet(
@@ -199,13 +208,14 @@ class QueueTab(LazyTabMixin, QWidget):
         try:
             # Passive: a monitor that polls on a timer must never spawn a daemon
             # just by being open, nor block the UI thread waiting for one.
-            jobs = gui_daemon.list_jobs_passive()
+            jobs, self._paused = gui_daemon.queue_snapshot_passive()
         except Exception as exc:  # noqa: BLE001
             self._jobs = []
             self.job_list.clear()
             self.detail.clear()
             self.log.clear()
             self.status_label.setText(t("queue_daemon_unavailable"))
+            self.queue_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
             self.copy_btn.setEnabled(False)
             self.progress.setVisible(False)
@@ -243,8 +253,35 @@ class QueueTab(LazyTabMixin, QWidget):
         self.job_list.blockSignals(False)
 
         live = sum(1 for job in self._jobs if job.get("state") in _LIVE_STATES)
-        self.status_label.setText(t("queue_status", total=len(self._jobs), live=live))
+        status_key = "queue_status_paused" if self._paused else "queue_status"
+        self.status_label.setText(t(status_key, total=len(self._jobs), live=live))
+        self._update_queue_button()
         self._update_selected_view()
+
+    def _update_queue_button(self) -> None:
+        """Reflect the daemon's pause state on the toggle button."""
+        self.queue_btn.setEnabled(True)
+        if self._paused:
+            self.queue_btn.setText(t("queue_start"))
+            self.queue_btn.setToolTip(t("queue_start_tooltip"))
+            self.queue_btn.setStyleSheet(
+                "background:#27ae60;color:white;font-weight:bold;padding:4px 16px;"
+            )
+        else:
+            self.queue_btn.setText(t("queue_pause"))
+            self.queue_btn.setToolTip(t("queue_pause_tooltip"))
+            self.queue_btn.setStyleSheet("")
+
+    def _toggle_queue(self) -> None:
+        try:
+            if self._paused:
+                gui_daemon.start_queue()
+            else:
+                gui_daemon.pause_queue()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, t("error"), str(exc))
+            return
+        self.refresh()
 
     def _selection_changed(self, current: QListWidgetItem | None, _prev) -> None:
         self._selected_job_id = current.data(Qt.UserRole) if current else None

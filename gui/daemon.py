@@ -73,12 +73,15 @@ def submit_training(
     config_file: Optional[str] = None,
     overrides: Optional[dict] = None,
     extra: Optional[list[str]] = None,
+    start: Optional[bool] = None,
 ) -> dict:
     """Auto-start the daemon if needed and enqueue a training job.
 
     Mirrors what ``tasks.py lora-gui <variant>`` would have launched inline:
     ``method`` is the gui-methods variant stem and ``methods_subdir`` is
-    ``"gui-methods"``. Returns the daemon's ``{job_id, state}`` response.
+    ``"gui-methods"``. ``start`` controls the queue gate: ``True`` (the main
+    Train button) runs it now, ``False`` (the queue dropdown) holds it until
+    "Start Queue". Returns the daemon's ``{job_id, state}`` response.
     """
     cl = ensure_daemon()
     return cl.submit(
@@ -89,6 +92,7 @@ def submit_training(
         config_file=config_file,
         overrides=overrides or {},
         extra=extra or [],
+        start=start,
     )
 
 
@@ -100,6 +104,7 @@ def submit_command(
     chain_train: Optional[dict] = None,
     config_snapshot: Optional[dict] = None,
     config_file: Optional[str] = None,
+    start: Optional[bool] = None,
 ) -> dict:
     """Auto-start the daemon if needed and enqueue a plain task job.
 
@@ -110,7 +115,9 @@ def submit_command(
     ``chain_train`` (``{method, preset, methods_subdir}``) makes the daemon
     enqueue that training job itself once this one finishes successfully — the
     "preprocess → train" auto-chain then completes even if the GUI closes
-    mid-way. Returns the daemon's ``{job_id, state}`` response.
+    mid-way. ``start`` controls the queue gate: ``True`` (a main Run action)
+    runs it now, ``False`` (the "add to queue" dropdown) holds it until "Start
+    Queue". Returns the daemon's ``{job_id, state}`` response.
     """
     cl = ensure_daemon()
     return cl.submit_command(
@@ -120,12 +127,23 @@ def submit_command(
         chain_train=chain_train or None,
         config_snapshot=config_snapshot or None,
         config_file=config_file,
+        start=start,
     )
 
 
 def stop_job(job_id: str) -> dict:
     """Abort a running/queued job (daemon stays up, advances the queue)."""
     return _client.DaemonClient().stop(job_id)
+
+
+def start_queue() -> None:
+    """Resume a paused queue (the Queue tab's "Start Queue" button)."""
+    _client.DaemonClient().start_queue()
+
+
+def pause_queue() -> None:
+    """Hold the queue so newly-added jobs wait for "Start Queue"."""
+    _client.DaemonClient().pause_queue()
 
 
 def list_jobs() -> list:
@@ -145,6 +163,20 @@ def list_jobs_passive() -> list:
     if _current_health() is None:
         raise DaemonUnavailable("no training daemon is running for this checkout")
     return _client.DaemonClient().list_jobs()
+
+
+def queue_snapshot_passive() -> tuple[list, bool]:
+    """``(jobs, paused)`` for the Queue tab — passive, never spawns a daemon.
+
+    One ``/health`` probe (also the root-match check) plus the job list, so the
+    tab gets the queue's pause state without an extra round-trip. Raises
+    :class:`DaemonUnavailable` when no matching daemon answers ``/health``.
+    """
+    health = _current_health()
+    if health is None:
+        raise DaemonUnavailable("no training daemon is running for this checkout")
+    jobs = _client.DaemonClient().list_jobs()
+    return jobs, bool(health.get("paused"))
 
 
 def active_job_id() -> Optional[str]:

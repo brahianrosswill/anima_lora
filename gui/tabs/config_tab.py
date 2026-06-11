@@ -12,7 +12,7 @@ import html
 
 import toml
 from PySide6.QtCore import QProcess, Qt, QTimer, Signal
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QColor, QPen, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -24,9 +24,12 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProxyStyle,
     QPushButton,
     QScrollArea,
     QSplitter,
+    QStyle,
+    QStyleOptionToolButton,
     QTextBrowser,
     QToolButton,
     QVBoxLayout,
@@ -79,8 +82,6 @@ _FIELD_ORDER = {
     "output_name": 15,
     "save_model_as": 16,
     "path_pattern": 20,
-    "drop_lowres_images": 21,
-    "min_pixels": 22,
     "pretrained_model_name_or_path": 30,
     "qwen3": 31,
     "vae": 32,
@@ -89,6 +90,48 @@ _FIELD_ORDER = {
     "sample_at_first": 12,
     "sample_decode_inline": 13,
 }
+
+
+class SplitButtonStyle(QProxyStyle):
+    """Widen a ``QToolButton``'s dropdown indicator and paint a divider + tint.
+
+    Styling ``QToolButton::menu-button`` via a stylesheet disables Qt's
+    reservation of the arrow region for layout, which snaps the label to the
+    *full*-button centre. Driving the indicator width from the style metric
+    instead keeps Qt's reservation intact, so the label stays centred in the
+    action (non-arrow) segment — what we actually want for a split button —
+    while still giving a wide, visually distinct dropdown half. The divider +
+    subtle dark tint are painted over the menu sub-control (a stylesheet rule
+    there would re-break the centring).
+
+    Apply with ``button.setStyle(style)`` and keep a reference alive (the widget
+    does not take ownership). Set the style BEFORE the stylesheet.
+    """
+
+    INDICATOR = 22
+
+    def pixelMetric(self, metric, option=None, widget=None):
+        if metric == QStyle.PM_MenuButtonIndicator:
+            return self.INDICATOR
+        return super().pixelMetric(metric, option, widget)
+
+    def drawComplexControl(self, control, option, painter, widget=None):
+        super().drawComplexControl(control, option, painter, widget)
+        if (
+            control == QStyle.CC_ToolButton
+            and isinstance(option, QStyleOptionToolButton)
+            and option.features & QStyleOptionToolButton.HasMenu
+        ):
+            rect = self.subControlRect(
+                QStyle.CC_ToolButton, option, QStyle.SC_ToolButtonMenu, widget
+            )
+            painter.save()
+            painter.fillRect(rect, QColor(0, 0, 0, 46))
+            painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
+            painter.drawLine(
+                rect.left(), rect.top() + 3, rect.left(), rect.bottom() - 3
+            )
+            painter.restore()
 
 
 class ClickableLabel(QLabel):
@@ -107,8 +150,9 @@ class ClickableLabel(QLabel):
 
 
 class ConfigTab(QWidget):
-    def __init__(self, methods: list[str] | None = None, tb_panel=None,
-                 preprocess_tab=None):
+    def __init__(
+        self, methods: list[str] | None = None, tb_panel=None, preprocess_tab=None
+    ):
         super().__init__()
         # The TensorBoard runs panel lives on its own dedicated tab now; we only
         # hold a reference so we can sync its log dir / current run. May be None.
@@ -191,47 +235,49 @@ class ConfigTab(QWidget):
         self._save_btn.clicked.connect(self._save_preset)
         top.addWidget(self._save_btn)
 
-        self.train_btn = QPushButton(t("train"))
+        # Train is a split button: the main action trains the current variant
+        # now; the dropdown queues it on the daemon instead ("don't start now,
+        # add to the queue"). Folding Queue into Train's menu drops the separate
+        # Queue button while keeping both behaviors one click apart.
+        self.train_btn = QToolButton()
+        # SplitButtonStyle widens the dropdown indicator and paints its divider +
+        # tint from the *style* (not a ::menu-button stylesheet rule, which would
+        # re-center the label across the whole button) — so the label stays
+        # centred in the action segment. Symmetric padding only; the style owns
+        # the arrow geometry. Set the style before the stylesheet, and keep a ref
+        # (the widget doesn't own it).
+        self._split_style = SplitButtonStyle()
+        self.train_btn.setStyle(self._split_style)
         self._train_idle_style = (
-            "background:#27ae60;color:white;font-weight:bold;padding:4px 16px;"
+            "QToolButton{background:#27ae60;color:white;font-weight:bold;"
+            "padding:4px 16px;}"
         )
         self._train_busy_style = (
-            "background:#7f8c8d;color:white;font-weight:bold;padding:4px 16px;"
+            "QToolButton{background:#7f8c8d;color:white;font-weight:bold;"
+            "padding:4px 16px;}"
         )
+        self.train_btn.setText(t("train"))
+        self.train_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.train_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.train_btn.setStyleSheet(self._train_idle_style)
+        self.train_btn.setToolTip(t("train_tooltip"))
         self.train_btn.clicked.connect(self._start_training)
-        # Always enabled — when no cache exists yet, clicking Train silently
-        # chains a Preprocess run first (see _start_training).
-        self.train_btn.setEnabled(True)
-        top.addWidget(self.train_btn)
-
-        self.queue_btn = QToolButton()
-        self._queue_idle_style = (
-            "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
-        )
-        self._queue_busy_style = (
-            "background:#7f8c8d;color:white;font-weight:bold;padding:4px 16px;"
-        )
-        self.queue_btn.setText(t("queue"))
-        self.queue_btn.setPopupMode(QToolButton.MenuButtonPopup)
-        self.queue_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self.queue_btn.setStyleSheet(self._queue_idle_style)
-        self.queue_btn.setToolTip(t("queue_tooltip"))
-        self.queue_btn.clicked.connect(
-            lambda _checked=False: self._queue_preprocess(train_after=True)
-        )
-        queue_menu = QMenu(self.queue_btn)
+        queue_menu = QMenu(self.train_btn)
         train_preprocess_action = queue_menu.addAction(t("queue_train_preprocess"))
         train_preprocess_action.triggered.connect(
             lambda _checked=False: self._queue_preprocess(train_after=True)
         )
-        preprocess_only_action = queue_menu.addAction(t("queue_preprocess_only"))
-        preprocess_only_action.triggered.connect(
-            lambda _checked=False: self._queue_preprocess(train_after=False)
+        train_only_action = queue_menu.addAction(t("queue_train_only"))
+        train_only_action.triggered.connect(
+            lambda _checked=False: self._queue_train()
         )
-        self.queue_btn.setMenu(queue_menu)
-        self.queue_btn.setEnabled(True)
-        top.addWidget(self.queue_btn)
+        self.train_btn.setMenu(queue_menu)
+        # Always enabled — when no cache exists yet, clicking Train silently
+        # chains a Preprocess run first (see _start_training). It stays enabled
+        # while a daemon job is attached too, so the dropdown can keep queuing
+        # more variants behind the running one (the main action is guarded).
+        self.train_btn.setEnabled(True)
+        top.addWidget(self.train_btn)
 
         self.test_btn = QPushButton(t("test"))
         self._test_idle_style = (
@@ -941,7 +987,6 @@ class ConfigTab(QWidget):
         self.test_btn.setStyleSheet(self._test_busy_style)
         self.test_btn.setEnabled(False)
         self.train_btn.setEnabled(False)
-        self.queue_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -1093,7 +1138,6 @@ class ConfigTab(QWidget):
             self.train_btn.setText(t("train_preprocessing"))
             self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
-        self.queue_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -1123,6 +1167,7 @@ class ConfigTab(QWidget):
                 extra_env=self._preprocess_env(variant),
                 chain_train=chain_train,
                 config_snapshot=snapshot,
+                start=True,  # main Train auto-chain: run now
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
@@ -1143,6 +1188,13 @@ class ConfigTab(QWidget):
         self._attach_to_job(job_id, replay_log=False, kind="preprocess")
 
     def _start_training(self):
+        # The split button stays enabled while a daemon job is attached (so its
+        # dropdown can queue more variants), so guard the foreground action: a
+        # second attach would hijack the bar away from the running job.
+        if self._job_id is not None:
+            QMessageBox.information(self, "", t("train_busy_use_queue"))
+            return
+
         # Flush form edits to disk first — train.py reads the variant file
         # from disk, so unsaved form values would otherwise be ignored.
         if self._dirty:
@@ -1191,6 +1243,47 @@ class ConfigTab(QWidget):
         # Cache exists and user confirmed — go straight to training.
         self._launch_training(variant)
 
+    def _queue_train(self):
+        """Enqueue training only (no preprocess) for the current variant.
+
+        Held on the daemon until the Queue tab's "Start Queue"; the form stays
+        usable so more variants can be stacked behind it. Assumes the cache is
+        already built — use "Train + Preprocess" when it isn't.
+        """
+        if self._dirty:
+            self._save_preset(silent=True)
+
+        variant = self._current_variant()
+        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged = self._gui_scoped_paths(merged)
+        if not confirm_resumable_checkpoint(self, merged):
+            return
+
+        self._log(t("queue_submitting", variant=variant) + "\n")
+        QApplication.processEvents()
+
+        try:
+            snapshot = self._queue_config_snapshot(variant, merged)
+            resp = gui_daemon.submit_training(
+                method=variant,
+                preset=self._IMPLICIT_PRESET,
+                methods_subdir="gui-methods",
+                config_snapshot=snapshot,
+                start=False,  # queue dropdown: add to queue, don't start now
+            )
+        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
+            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
+            return
+
+        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        if not job_id:
+            QMessageBox.warning(
+                self, t("error"), t("daemon_submit_failed", err=str(resp))
+            )
+            return
+
+        self._log(t("queue_added_train", variant=variant, job_id=job_id))
+
     def _queue_preprocess(self, *, train_after: bool):
         """Enqueue preprocess for the current variant, optionally chaining train.
 
@@ -1213,9 +1306,6 @@ class ConfigTab(QWidget):
         if train_after and not confirm_resumable_checkpoint(self, merged):
             return
 
-        self.queue_btn.setText(t("queue") + " ...")
-        self.queue_btn.setStyleSheet(self._queue_busy_style)
-        self.queue_btn.setEnabled(False)
         submit_key = (
             "queue_submitting_train_preprocess"
             if train_after
@@ -1232,6 +1322,7 @@ class ConfigTab(QWidget):
                 extra_env=self._preprocess_env(variant),
                 chain_train=self._chain_train_spec(variant) if train_after else None,
                 config_snapshot=snapshot,
+                start=False,  # queue dropdown: add to queue, don't start now
             )
             queued_key = (
                 "queue_added_preprocess"
@@ -1240,7 +1331,6 @@ class ConfigTab(QWidget):
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._restore_queue_button()
             return
 
         job_id = resp.get("job_id") if isinstance(resp, dict) else None
@@ -1248,33 +1338,14 @@ class ConfigTab(QWidget):
             QMessageBox.warning(
                 self, t("error"), t("daemon_submit_failed", err=str(resp))
             )
-            self._restore_queue_button()
             return
 
         self._log(t(queued_key, variant=variant, job_id=job_id))
-        self._restore_queue_button()
-
-        # When the tab is idle, surface this job's progress right here: on an
-        # empty daemon queue it starts running immediately, so the user expects
-        # to see it in the main tab's bar (not just the Queue tab). The form stays
-        # usable (Queue + combos remain live, see _attach_to_job), so more
-        # variants can still be stacked behind it. When a job is already attached,
-        # the new one just queues silently behind it — visible in the Queue tab —
-        # rather than hijacking the bar.
-        if self._job_id is None and self._proc.state() != QProcess.Running:
-            self.log.clear()
-            self._reset_progress()
-            self._progress_tracker.mark_starting(t("starting"))
-            if train_after:
-                # Mirror the Train auto-chain: follow this preprocess into the
-                # training the daemon will enqueue after it.
-                self._chain_train_after_preprocess = True
-                self._chain_variant = variant
-                self._attach_to_job(job_id, replay_log=False, kind="preprocess")
-            else:
-                self._chain_train_after_preprocess = False
-                self._chain_variant = variant
-                self._attach_to_job(job_id, replay_log=False, kind="preprocess")
+        # The queue dropdown only *enqueues* (the daemon holds it paused until
+        # the Queue tab's "Start Queue" button), so we deliberately don't attach
+        # the main tab's bar to it — that would show a perpetual "starting…"
+        # spinner for a job that isn't meant to run yet. It's watched and started
+        # from the Queue tab; the daemon owns the preprocess→train chain.
 
     def _launch_training(self, variant: str) -> None:
         """Submit a training job to the local daemon (Phase 2).
@@ -1297,7 +1368,6 @@ class ConfigTab(QWidget):
         self.train_btn.setText(t("train") + " ...")
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
-        self.queue_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(False)
         self.variant_combo.setEnabled(False)
@@ -1315,6 +1385,7 @@ class ConfigTab(QWidget):
                 preset=self._IMPLICIT_PRESET,
                 methods_subdir="gui-methods",
                 config_snapshot=snapshot,
+                start=True,  # main Train button: run now
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
@@ -1397,13 +1468,13 @@ class ConfigTab(QWidget):
         else:
             self.train_btn.setText(t("train_running_daemon"))
         self.train_btn.setStyleSheet(self._train_busy_style)
-        self.train_btn.setEnabled(False)
-        # Keep Queue + the variant pickers live while a job is attached: the user
-        # can select another variant and Queue it behind the running one. Only
-        # Train (foreground attach) and Test (local GPU) are blocked. The running
-        # job uses an immutable config snapshot captured at submit, so editing the
-        # form afterward can't disturb it.
-        self.queue_btn.setEnabled(True)
+        # Keep the Train split button + the variant pickers live while a job is
+        # attached: the user can select another variant and use the dropdown to
+        # Queue it behind the running one. The button's main (foreground-train)
+        # action is guarded in _start_training; only Test (local GPU) is blocked.
+        # The running job uses an immutable config snapshot captured at submit, so
+        # editing the form afterward can't disturb it.
+        self.train_btn.setEnabled(True)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(True)
         self.variant_combo.setEnabled(True)
@@ -1509,22 +1580,12 @@ class ConfigTab(QWidget):
         self._progress_tracker.mark_starting(t("starting"))
         self._attach_to_job(job_id, replay_log=False, kind="train")
 
-    def _restore_queue_button(self):
-        self.queue_btn.setText(t("queue"))
-        self.queue_btn.setStyleSheet(self._queue_idle_style)
-        # Queue stays usable even while a daemon job is attached/running, so the
-        # user can keep stacking variants behind it — that's the whole point of a
-        # queue (and what the button's tooltip promises). Only a local foreground
-        # QProcess (a Test run, which holds the GPU itself) blocks it.
-        self.queue_btn.setEnabled(self._proc.state() != QProcess.Running)
-
     def _restore_idle_ui(self):
         """Return every control to its idle state (shared by the daemon-job and
         QProcess-error paths)."""
         self.train_btn.setText(t("train"))
         self.train_btn.setStyleSheet(self._train_idle_style)
         self.train_btn.setEnabled(True)
-        self._restore_queue_button()
         self.test_btn.setText(t("test"))
         self.test_btn.setStyleSheet(self._test_idle_style)
         self.test_btn.setEnabled(self._has_lora_output())

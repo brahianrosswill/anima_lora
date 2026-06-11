@@ -212,10 +212,6 @@ _GROUPS = {
         "use_valid",
         "validation_split_num",
     },
-    "Preprocess": {
-        "drop_lowres_images",
-        "min_pixels",
-    },
     "Samples": {
         "sample_prompts",
         "sample_every_n_epochs",
@@ -241,10 +237,11 @@ _GROUPS = {
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
-# target_res is a preprocess-time knob (dual-use: train.py only reads it to size
-# the compile cache) — it's edited in the Preprocess tab and seeded into the
-# training config from configs/preprocess.toml, so hide it from the config form
-# to keep a single source of truth and avoid the two surfaces silently drifting.
+# Preprocess-time knobs (target_res, drop_lowres_images, min_pixels) are owned by
+# the Preprocess tab and seeded into the training config from
+# configs/preprocess.toml — target_res is dual-use (train.py reads it only to
+# size the compile cache). Hide them from the config form to keep a single
+# source of truth and avoid the two surfaces silently drifting.
 _SKIP = {
     "base_config",
     "dataset_config",
@@ -252,6 +249,8 @@ _SKIP = {
     "datasets",
     "variant",
     "target_res",
+    "drop_lowres_images",
+    "min_pixels",
 }
 
 # Virtual keys appear in the form like normal fields but don't round-trip as
@@ -271,6 +270,7 @@ _BASIC = {
     "learning_rate",
     "max_train_epochs",
     "save_every_n_epochs",
+    "checkpointing_epochs",
     "network_dim",
     "network_alpha",
     "network_weights",
@@ -283,8 +283,6 @@ _BASIC = {
     "path_scope",
     "output_name",
     "path_pattern",
-    "drop_lowres_images",
-    "min_pixels",
     "use_valid",
     "validation_split_num",
     "sample_prompts",

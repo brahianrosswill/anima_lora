@@ -17,6 +17,8 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
@@ -335,8 +337,12 @@ class _SamplePromptsWidget(QWidget):
     _COLLAPSED_HEIGHT = 300
     _EXPANDED_HEIGHT = 650
 
-    def __init__(self, prompts) -> None:
+    def __init__(self, prompts, fill: bool = False) -> None:
         super().__init__()
+        # ``fill`` = expand to fill the host (used inside the editor dialog,
+        # which is resizable). When false the widget self-clamps to a fixed
+        # height and offers an expand/collapse toggle for inline embedding.
+        self._fill = fill
         self._expanded = False
         self._rows: list[_SamplePromptRow] = []
         lay = QVBoxLayout(self)
@@ -351,7 +357,10 @@ class _SamplePromptsWidget(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.scroll.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Expanding if fill else QSizePolicy.Fixed,
+        )
         self.scroll.setStyleSheet(
             """
             QScrollBar:vertical {
@@ -399,9 +408,11 @@ class _SamplePromptsWidget(QWidget):
         remove_btn = QPushButton(t("sample_prompt_remove"))
         remove_btn.clicked.connect(self._remove_selected)
         row_lay.addWidget(remove_btn)
-        self.expand_btn = QPushButton(t("sample_prompt_expand"))
-        self.expand_btn.clicked.connect(self._toggle_expanded)
-        row_lay.addWidget(self.expand_btn)
+        self.expand_btn: QPushButton | None = None
+        if not fill:
+            self.expand_btn = QPushButton(t("sample_prompt_expand"))
+            self.expand_btn.clicked.connect(self._toggle_expanded)
+            row_lay.addWidget(self.expand_btn)
         row_lay.addStretch(1)
         lay.addLayout(row_lay)
 
@@ -414,6 +425,8 @@ class _SamplePromptsWidget(QWidget):
         self._apply_height()
 
     def _apply_height(self) -> None:
+        if self._fill or self.expand_btn is None:
+            return
         height = self._EXPANDED_HEIGHT if self._expanded else self._COLLAPSED_HEIGHT
         self.scroll.setMinimumHeight(height)
         self.scroll.setMaximumHeight(height)
@@ -515,6 +528,86 @@ class _SamplePromptsWidget(QWidget):
         return lines
 
 
+def _normalize_prompt_lines(prompts) -> list[str]:
+    """Coerce a stored sample_prompts value (list or multiline string) into a
+    clean list of non-empty, non-comment one-line prompts."""
+    if isinstance(prompts, (list, tuple)):
+        lines = [str(p).strip() for p in prompts]
+    elif prompts is None:
+        lines = []
+    else:
+        lines = [ln.strip() for ln in str(prompts).splitlines()]
+    return [ln for ln in lines if ln and not ln.startswith("#")]
+
+
+class SamplePromptsDialog(QDialog):
+    """Popup hosting the structured sample-prompt editor at full size."""
+
+    def __init__(self, prompts, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(t("sample_prompt_dialog_title"))
+        self.setModal(True)
+        self.resize(960, 720)
+        lay = QVBoxLayout(self)
+        self._editor = _SamplePromptsWidget(prompts, fill=True)
+        lay.addWidget(self._editor, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def value(self) -> list[str]:
+        return self._editor.value()
+
+
+class _SamplePromptsLauncher(QWidget):
+    """Compact field stand-in: a button + summary that opens the editor popup.
+
+    Replaces the tall inline editor in the config form. Holds the current
+    prompt list and round-trips it through :class:`SamplePromptsDialog`.
+    """
+
+    changed = Signal()
+
+    def __init__(self, prompts) -> None:
+        super().__init__()
+        self._prompts = _normalize_prompt_lines(prompts)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._edit_btn = QPushButton(t("sample_prompt_edit_button"))
+        self._edit_btn.clicked.connect(self._open_dialog)
+        lay.addWidget(self._edit_btn)
+        self._summary = QLabel()
+        self._summary.setWordWrap(True)
+        self._summary.setStyleSheet("color:#aaa;")
+        lay.addWidget(self._summary, 1)
+        self._refresh_summary()
+
+    def _refresh_summary(self) -> None:
+        n = len(self._prompts)
+        if not n:
+            self._summary.setText(t("sample_prompt_summary_none"))
+            self._summary.setToolTip("")
+            return
+        first = self._prompts[0].split(" --", 1)[0].strip()
+        if len(first) > 60:
+            first = first[:57] + "…"
+        self._summary.setText(t("sample_prompt_summary_count", n=n, first=first))
+        self._summary.setToolTip("\n".join(self._prompts))
+
+    def _open_dialog(self) -> None:
+        dlg = SamplePromptsDialog(self._prompts, self)
+        if dlg.exec():
+            self._prompts = dlg.value()
+            self._refresh_summary()
+            self.changed.emit()
+
+    def value(self) -> list[str]:
+        return list(self._prompts)
+
+
 def _no_wheel(w: QWidget) -> QWidget:
     """Stop a hovered combo/spin from changing value (and stealing focus) on
     mouse-wheel scroll — otherwise scrolling the form silently edits whichever
@@ -529,7 +622,7 @@ def _widget(v: Any, key: str = "") -> QWidget:
         sel = v if isinstance(v, (list, tuple)) else ([v] if v else [1024])
         return _TargetResWidget(sel)
     if key == "sample_prompts":
-        return _SamplePromptsWidget(v)
+        return _SamplePromptsLauncher(v)
     if key == "attn_mode":
         w = QComboBox()
         w.addItems(_ATTN_MODES)
@@ -583,7 +676,7 @@ def _widget(v: Any, key: str = "") -> QWidget:
 def _read(w: QWidget, orig: Any = None) -> Any:
     if isinstance(w, _TargetResWidget):
         return w.value()
-    if isinstance(w, _SamplePromptsWidget):
+    if isinstance(w, _SamplePromptsLauncher):
         return w.value()
     if isinstance(w, QPlainTextEdit):
         # sample_prompts box → list of non-empty, non-comment lines.

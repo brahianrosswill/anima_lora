@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -48,6 +49,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QTextBrowser,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -68,7 +70,7 @@ from gui import daemon as gui_daemon
 from gui.explanations import preprocess_field_help, preprocess_guide
 from gui.i18n import t
 from gui.progress import TQDM_RE, TqdmProgressTracker, make_progress_bar
-from gui.tabs.config_tab import ClickableLabel, ConfigTab
+from gui.tabs.config_tab import ClickableLabel, ConfigTab, SplitButtonStyle
 from library.datasets.subsets import filter_paths_by_glob
 
 SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
@@ -373,7 +375,10 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         self._job_timer = QTimer(self)
         self._job_timer.setInterval(400)
         self._job_timer.timeout.connect(self._poll_job)
-        self._run_buttons: list[QPushButton] = []
+        self._run_buttons: list[QToolButton] = []
+        # Custom QStyle instances for the split Run buttons — kept alive here
+        # because setStyle() does not take ownership.
+        self._split_styles: list[SplitButtonStyle] = []
         self._variant: str | None = None
         self._loading_variant = False
 
@@ -389,8 +394,13 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         #   Save           → neutral (default styling, no background tint)
         #   Cache / mask   → blue   (#2980b9) — run a specific preprocess step
         #   Stop           → red    (#c0392b) — abort the running subprocess
+        # Split Run buttons (matches ConfigTab's Train button): SplitButtonStyle
+        # widens the dropdown indicator and paints its divider + tint from the
+        # style, so the label stays centred in the action segment. Symmetric
+        # padding only — the style owns the arrow geometry.
         run_step_style = (
-            "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
+            "QToolButton{background:#2980b9;color:white;font-weight:bold;"
+            "padding:4px 16px;}"
         )
 
         self._method_label = QLabel("Method")
@@ -419,17 +429,18 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         top.addWidget(self.save_btn)
 
         # Per-step Run buttons. Save is implicit on each Run (same pattern
-        # as ConfigTab's auto-save before Train/Preprocess).
-        self.run_te_btn = QPushButton(t("preprocess_run_te"))
-        self.run_te_btn.setStyleSheet(run_step_style)
-        self.run_te_btn.clicked.connect(self._run_te)
-        self._run_buttons.append(self.run_te_btn)
+        # as ConfigTab's auto-save before Train/Preprocess). Each is a split
+        # button: the main action runs the step now (attaches this tab to the
+        # job); the dropdown queues it on the daemon without attaching, so the
+        # user can stack the next step / variant before anything starts.
+        self.run_te_btn = self._make_run_button(
+            t("preprocess_run_te"), run_step_style, self._run_te
+        )
         top.addWidget(self.run_te_btn)
 
-        self.run_mask_btn = QPushButton(t("preprocess_run_mask"))
-        self.run_mask_btn.setStyleSheet(run_step_style)
-        self.run_mask_btn.clicked.connect(self._run_mask)
-        self._run_buttons.append(self.run_mask_btn)
+        self.run_mask_btn = self._make_run_button(
+            t("preprocess_run_mask"), run_step_style, self._run_mask
+        )
         top.addWidget(self.run_mask_btn)
 
         top.addStretch()
@@ -496,13 +507,9 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             str(pp_cfg.get("preprocess_path_pattern", DEFAULT_PREPROCESS_PATH_PATTERN))
         )
         self.preprocess_path_pattern_edit.setPlaceholderText("*")
-        self.preprocess_path_pattern_edit.setToolTip(
-            t("preprocess_path_pattern_tip")
-        )
+        self.preprocess_path_pattern_edit.setToolTip(t("preprocess_path_pattern_tip"))
         img_form.addRow(
-            self._field_label(
-                "preprocess_path_pattern", t("preprocess_path_pattern")
-            ),
+            self._field_label("preprocess_path_pattern", t("preprocess_path_pattern")),
             self.preprocess_path_pattern_edit,
         )
 
@@ -745,7 +752,9 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         except Exception:
             source_dir = DEFAULT_SOURCE_IMAGE_DIR
 
-        target_res = meta.get("target_res", pp_cfg.get("target_res", DEFAULT_TARGET_RES))
+        target_res = meta.get(
+            "target_res", pp_cfg.get("target_res", DEFAULT_TARGET_RES)
+        )
         path_pattern = meta.get(
             "preprocess_path_pattern", DEFAULT_PREPROCESS_PATH_PATTERN
         )
@@ -753,7 +762,9 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             "drop_lowres_images",
             pp_cfg.get("drop_lowres_images", DEFAULT_DROP_LOWRES_IMAGES),
         )
-        min_pixels = meta.get("min_pixels", pp_cfg.get("min_pixels", DEFAULT_MIN_PIXELS))
+        min_pixels = meta.get(
+            "min_pixels", pp_cfg.get("min_pixels", DEFAULT_MIN_PIXELS)
+        )
         shuffle_variants = meta.get(
             "caption_shuffle_variants",
             settings.get("caption_shuffle_variants", DEFAULT_TE_SHUFFLE_VARIANTS),
@@ -1007,10 +1018,14 @@ class PreprocessingTab(LazyTabMixin, QWidget):
     def _save_variant_preprocess_meta(self, *, validate_dropout: bool) -> bool:
         if not self._variant:
             return True
-        dropout = self._parse_float(
-            self.dropout_edit.text().strip(),
-            t("preprocess_caption_tag_dropout_rate"),
-        ) if validate_dropout else None
+        dropout = (
+            self._parse_float(
+                self.dropout_edit.text().strip(),
+                t("preprocess_caption_tag_dropout_rate"),
+            )
+            if validate_dropout
+            else None
+        )
         if validate_dropout and dropout is None:
             return False
         if dropout is None:
@@ -1114,7 +1129,32 @@ class PreprocessingTab(LazyTabMixin, QWidget):
     def _is_running(self) -> bool:
         return self._job_id is not None
 
-    def _run_te(self) -> None:
+    def _make_run_button(self, label: str, style: str, run_cb) -> QToolButton:
+        """Build a split Run button: main action runs now, dropdown queues it.
+
+        ``run_cb`` is a ``_run_*`` handler taking a keyword-only ``queue`` flag;
+        the dropdown calls it with ``queue=True`` (submit without attaching).
+        """
+        btn = QToolButton()
+        # SplitButtonStyle (set before the stylesheet) widens the dropdown
+        # indicator + paints its divider/tint, keeping the label centred in the
+        # action segment. The style must outlive the button, so stash a ref.
+        split_style = SplitButtonStyle()
+        self._split_styles.append(split_style)
+        btn.setStyle(split_style)
+        btn.setText(label)
+        btn.setStyleSheet(style)
+        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        btn.setPopupMode(QToolButton.MenuButtonPopup)
+        btn.clicked.connect(lambda _checked=False: run_cb())
+        menu = QMenu(btn)
+        queue_action = menu.addAction(t("preprocess_add_to_queue"))
+        queue_action.triggered.connect(lambda _checked=False: run_cb(queue=True))
+        btn.setMenu(menu)
+        self._run_buttons.append(btn)
+        return btn
+
+    def _run_te(self, *, queue: bool = False) -> None:
         # Unified "caching" step — runs `tasks.py preprocess`, which chains
         # resize → VAE-latent cache → text-embedding cache. Replaces the old
         # text-only path now that the ConfigTab's standalone Preprocess
@@ -1129,9 +1169,10 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             argv=["tasks.py", "preprocess"],
             extra_env=self.preprocess_env(),
             config_snapshot=snapshot,
+            attach=not queue,
         )
 
-    def _run_mask(self) -> None:
+    def _run_mask(self, *, queue: bool = False) -> None:
         # Single-shot pipeline. ``tasks.py mask`` runs SAM and/or MIT into
         # a tempdir, merges the produced sources, and writes only the
         # merged result to ``post_image_dataset/masks/<rel>/``. SAM reads
@@ -1154,6 +1195,7 @@ class PreprocessingTab(LazyTabMixin, QWidget):
                 "RUN_SAM_MASK": "1" if run_sam else "0",
                 "RUN_MIT_MASK": "1" if run_mit else "0",
             },
+            attach=not queue,
         )
 
     def _submit(
@@ -1163,28 +1205,37 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         argv: list[str],
         extra_env: dict,
         config_snapshot: dict | None = None,
+        attach: bool = True,
     ) -> None:
-        """Submit a preprocess/mask job to the daemon, then observe it.
+        """Submit a preprocess/mask job to the daemon.
 
         The daemon spawns ``python <argv>`` detached and serializes it behind
         any running training job (single GPU). Pre-launch validation
-        (``_save_all`` + per-step gating) is the caller's job."""
-        if self._is_running():
+        (``_save_all`` + per-step gating) is the caller's job.
+
+        With ``attach=True`` (the main Run action) this tab takes over its
+        log/bar and blocks the Run buttons until the job finishes. With
+        ``attach=False`` (the "add to queue" dropdown) the job is submitted
+        silently — the Run buttons stay live so the next step / variant can be
+        queued, and the job is watched from the Queue tab."""
+        if attach and self._is_running():
             QMessageBox.information(self, "", t("preprocess_already_running"))
             return
-        # Busy UI + repaint before the submit so the tab feels responsive while
-        # the daemon auto-start + /health wait completes on a cold start.
-        for btn in self._run_buttons:
-            btn.setEnabled(False)
-        self.save_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.log.clear()
-        self._stdout_buf = ""
-        self._progress_tracker.reset()
-        self._progress_tracker.mark_starting(t("starting"))
-        self.log.appendPlainText("> " + " ".join([sys.executable, *argv]))
-        self.log.appendPlainText(t("daemon_submitting"))
-        QApplication.processEvents()
+        if attach:
+            # Busy UI + repaint before the submit so the tab feels responsive
+            # while the daemon auto-start + /health wait completes on a cold
+            # start.
+            for btn in self._run_buttons:
+                btn.setEnabled(False)
+            self.save_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
+            self.log.clear()
+            self._stdout_buf = ""
+            self._progress_tracker.reset()
+            self._progress_tracker.mark_starting(t("starting"))
+            self.log.appendPlainText("> " + " ".join([sys.executable, *argv]))
+            self.log.appendPlainText(t("daemon_submitting"))
+            QApplication.processEvents()
 
         try:
             resp = gui_daemon.submit_command(
@@ -1192,20 +1243,28 @@ class PreprocessingTab(LazyTabMixin, QWidget):
                 argv=argv,
                 extra_env=extra_env,
                 config_snapshot=config_snapshot,
+                # Main Run starts now; the "add to queue" dropdown holds it
+                # paused until the Queue tab's "Start Queue".
+                start=attach,
             )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._restore_idle_ui()
+            if attach:
+                self._restore_idle_ui()
             return
         job_id = resp.get("job_id") if isinstance(resp, dict) else None
         if not job_id:
             QMessageBox.warning(
                 self, t("error"), t("daemon_submit_failed", err=str(resp))
             )
-            self._restore_idle_ui()
+            if attach:
+                self._restore_idle_ui()
             return
-        self.log.appendPlainText(t("daemon_queued", job_id=job_id).rstrip("\n"))
-        self._attach_to_job(job_id, replay_log=False)
+        if attach:
+            self.log.appendPlainText(t("daemon_queued", job_id=job_id).rstrip("\n"))
+            self._attach_to_job(job_id, replay_log=False)
+        else:
+            self.log.appendPlainText(t("preprocess_queued", label=label, job_id=job_id))
 
     def _try_reattach(self) -> None:
         """Bind to a preprocess/mask job still running when the tab first opens.

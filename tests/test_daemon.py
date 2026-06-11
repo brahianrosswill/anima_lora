@@ -185,9 +185,7 @@ def test_cli_queue_submits_instead_of_launching(daemon, monkeypatch):
 
     monkeypatch.setattr(daemon_client, "ensure_daemon", lambda **kw: cl)
     launched = []
-    monkeypatch.setattr(
-        _common, "accelerate_launch", lambda *a: launched.append(a)
-    )
+    monkeypatch.setattr(_common, "accelerate_launch", lambda *a: launched.append(a))
 
     _common.train("tlora", ["--queue"], methods_subdir="gui-methods")
 
@@ -255,6 +253,64 @@ def test_stop_queued_job_finalizes_immediately(daemon):
     assert _wait_until(lambda: cl.get(j1)["state"] == "stopped", timeout=10)
     time.sleep(0.5)
     assert cl.get(j2)["state"] == "stopped"
+
+
+def test_queue_hold_then_start(daemon):
+    """A job submitted with ``start=False`` is enqueued but *held* (the queue is
+    paused — health reflects it), and only runs once ``start_queue`` resumes it.
+    This is the GUI "add to queue, don't start now" → "Start Queue" flow."""
+    cl, _ = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 1.0}, start=False)["job_id"]
+
+    assert cl.health()["paused"] is True
+    # Held: it stays queued and does not start on its own.
+    assert _wait_until(lambda: cl.get(jid)["state"] == "queued", timeout=2)
+    time.sleep(0.7)
+    assert cl.get(jid)["state"] == "queued"  # still not launched
+
+    cl.start_queue()
+    assert cl.health()["paused"] is False
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+
+
+def test_queue_start_true_flushes_held_backlog(daemon):
+    """``start=True`` (the main Train/Run button) resumes a paused queue, so a
+    job held earlier via ``start=False`` runs too."""
+    cl, _ = daemon
+    held = cl.submit(method="lora", overrides={"duration": 1.0}, start=False)["job_id"]
+    assert cl.health()["paused"] is True
+
+    run_now = cl.submit(method="lora", overrides={"duration": 1.0}, start=True)[
+        "job_id"
+    ]
+    assert cl.health()["paused"] is False
+    # Both drain in FIFO order once the gate opens.
+    assert _wait_until(lambda: cl.get(held)["state"] == "done", timeout=15)
+    assert _wait_until(lambda: cl.get(run_now)["state"] == "done", timeout=15)
+    assert cl.get(run_now)["started_at"] >= cl.get(held)["ended_at"] - 0.5
+
+
+def test_pause_does_not_interrupt_running_job(daemon):
+    """Pausing the queue holds the *next* launch but never stops a job already
+    running."""
+    cl, _ = daemon
+    running = cl.submit(method="lora", overrides={"duration": 60.0}, start=True)[
+        "job_id"
+    ]
+    queued = cl.submit(method="lora", overrides={"duration": 1.0})["job_id"]
+    assert _wait_until(lambda: cl.get(running)["state"] == "running", timeout=10)
+
+    cl.pause_queue()
+    assert cl.health()["paused"] is True
+    assert cl.get(running)["state"] == "running"  # untouched
+
+    cl.stop(running)
+    assert _wait_until(lambda: cl.get(running)["state"] == "stopped", timeout=10)
+    # The queued one stays held while paused — it must not advance.
+    time.sleep(0.7)
+    assert cl.get(queued)["state"] == "queued"
+    cl.start_queue()
+    assert _wait_until(lambda: cl.get(queued)["state"] == "done", timeout=15)
 
 
 def test_reconcile_orphan_requeue_adopt(tmp_path, monkeypatch):
@@ -365,7 +421,10 @@ def test_command_job_end_to_end(real_cmd_daemon):
     cl, _ = real_cmd_daemon
     resp = cl.submit_command(
         label="preprocess",
-        argv=["-c", "import os;print('shuf=' + os.environ['CAPTION_SHUFFLE_VARIANTS'])"],
+        argv=[
+            "-c",
+            "import os;print('shuf=' + os.environ['CAPTION_SHUFFLE_VARIANTS'])",
+        ],
         extra_env={"CAPTION_SHUFFLE_VARIANTS": "7"},
     )
     jid = resp["job_id"]
