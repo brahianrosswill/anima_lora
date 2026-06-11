@@ -8,17 +8,9 @@ import torch
 
 from networks.lora_modules.base import BaseLoRAModule
 from networks.lora_modules.router_state import (
+    RouterStateMixin,
     _apply_sigma_band_mask,
-    _clear_fei_feature_cache,
-    _clear_routing_weights,
-    _clear_sigma_feature_cache,
-    _register_fei_feature_cache,
-    _register_routing_weights_buffer,
     _register_sigma_band_partition,
-    _register_sigma_feature_cache,
-    _set_fei_feature_cache,
-    _set_routing_weights,
-    _set_sigma_feature_cache,
 )
 
 
@@ -285,50 +277,31 @@ class OrthoInitLoRAModule(BaseLoRAModule):
         # (mutates ``.data`` in place; output unchanged, gradient rebalanced).
         self._register_channel_scale(self.Q_init.data, channel_scale)
 
-    def forward(self, x):
-        org_forwarded = self.org_forward(x)
+    # Forward is the shared BaseLoRAModule scaffold; this class supplies the
+    # trainable SVD-seeded down / up GEMMs and folds ``lambda_layer`` into the
+    # T-LoRA gate. The fp32-master → ``work`` cast dance + dtype-policy rationale
+    # (mirrors the lora.py 8c2005c fix) live in the base scaffold.
 
-        if not self.training:
-            # bf16 fast path (mirrors LoRAModule). Distilled checkpoints infer
-            # as plain LoRA; this branch only fires for sample-during-training.
-            x_lora = self._rebalance(x)
-            lx = torch.nn.functional.linear(x_lora, self.Q_init.to(x.dtype))
-            lx = lx * self.lambda_layer.to(x.dtype) * self._timestep_mask.to(x.dtype)
-            lx = torch.nn.functional.linear(lx, self.P_init.to(x.dtype))
-            return org_forwarded + lx * self.multiplier * self.scale
+    def _down(self, x_lora, work):
+        return torch.nn.functional.linear(x_lora, self.Q_init.to(work))
 
-        if self._skip_module():
-            return org_forwarded
+    def _gate(self, lx, work):
+        # λ (fp32 master Parameter) + the T-LoRA mask gate the rank latent. lx
+        # is (B, L, r) here — tiny — so the fp32 promotion is negligible and the
+        # base scaffold casts back to ``work`` before the up GEMM.
+        return lx * self.lambda_layer.float() * self._timestep_mask
 
-        # Training: rank GEMMs in the model COMPUTE dtype (``org_forwarded.dtype``
-        # — the frozen bf16 base's output = the autocast/model dtype), NOT the
-        # activation dtype. ``x`` arrives fp32: the AdaLN ``nn.LayerNorm`` feeding
-        # this Linear emits fp32 under autocast(bf16). Keying the GEMM off
-        # ``x.dtype`` left the whole rank path in fp32 — and ``_rebalance`` then
-        # allocated a fresh full-size fp32 activation (``x * inv_scale``, per
-        # channel scaling), saved for backward across all 196 modules → OOM, for
-        # zero numeric gain (autocast re-casts the GEMM to bf16 regardless). The
-        # fp32 master ``Q_init`` / ``P_init`` are cast DOWN to ``work`` at the
-        # matmul boundary, exactly where autocast cast them before. Bit-identical
-        # to the retired fp32-bottleneck path under autocast. Mirrors the lora.py
-        # fix (8c2005c); see bench/lora_fp32_bottleneck.
-        work = org_forwarded.dtype
-        x_lora = self._rebalance(x.to(work))
-        lx = torch.nn.functional.linear(x_lora, self.Q_init.to(work))
+    def _up(self, lx, work):
+        return torch.nn.functional.linear(lx, self.P_init.to(work))
 
-        # λ + T-LoRA mask gate the rank latent. λ is a fp32 master Parameter;
-        # the mask is the default all-ones buffer unless T-LoRA binds it. lx is
-        # (B, L, r=32) here — tiny — so the fp32 promotion is negligible and the
-        # up GEMM below casts back to ``work``.
-        lx = lx * self.lambda_layer.float() * self._timestep_mask
-
-        if self.dropout is not None:
-            lx = torch.nn.functional.dropout(lx, p=self.dropout)
-
-        lx, scale = self._apply_rank_dropout(lx)
-
-        lx = torch.nn.functional.linear(lx.to(work), self.P_init.to(work))
-        return org_forwarded + (lx * self.multiplier * scale).to(org_forwarded.dtype)
+    def _eval_delta(self, x, org_forwarded):
+        # bf16 fast path (mirrors LoRAModule). Distilled checkpoints infer as
+        # plain LoRA; this branch only fires for sample-during-training.
+        x_lora = self._rebalance(x)
+        lx = torch.nn.functional.linear(x_lora, self.Q_init.to(x.dtype))
+        lx = lx * self.lambda_layer.to(x.dtype) * self._timestep_mask.to(x.dtype)
+        lx = torch.nn.functional.linear(lx, self.P_init.to(x.dtype))
+        return lx * self.multiplier * self.scale
 
     @classmethod
     def distill_save_state_dict(
@@ -379,7 +352,7 @@ class OrthoInitLoRAModule(BaseLoRAModule):
                 state_dict[f"{prefix}.alpha"] = alpha
 
 
-class OrthoHydraLoRAModule(BaseLoRAModule):
+class OrthoHydraLoRAModule(RouterStateMixin, BaseLoRAModule):
     """OrthoLoRA + HydraLoRA: Cayley-rotated MoE with disjoint per-expert P-bases.
 
     Shared Q_basis + trainable S_q (down). Up takes the top E*r singular
@@ -517,10 +490,7 @@ class OrthoHydraLoRAModule(BaseLoRAModule):
         self._last_gate = None
         # See router_state.py + HydraLoRAModule for the always-a-Tensor +
         # pointer-stable buffer protocol that drops the compile guards.
-        _register_sigma_feature_cache(self, self.sigma_feature_dim)
-        _register_fei_feature_cache(self, self.fei_feature_dim)
-        if self.use_global_router:
-            _register_routing_weights_buffer(self, num_experts)
+        self._register_router_io_buffers(num_experts)
         if specialize_experts_by_sigma_buckets and self.use_global_router:
             raise ValueError(
                 "specialize_experts_by_sigma_buckets is incompatible with "
@@ -586,30 +556,9 @@ class OrthoHydraLoRAModule(BaseLoRAModule):
             )
         return torch.softmax(logits, dim=-1)
 
-    def set_sigma(
-        self, sigmas: torch.Tensor, sigma_features: torch.Tensor | None = None
-    ) -> None:
-        _set_sigma_feature_cache(self, sigmas, sigma_features)
-
-    def clear_sigma(self) -> None:
-        _clear_sigma_feature_cache(self)
-
-    def set_fei(self, fei: torch.Tensor) -> None:
-        _set_fei_feature_cache(self, fei)
-
-    def clear_fei(self) -> None:
-        _clear_fei_feature_cache(self)
-
-    def set_routing_weights(self, weights: torch.Tensor) -> None:
-        # Shared helper preserves grad_fn (router_state._set_routing_weights).
-        if not getattr(self, "use_global_router", False):
-            return
-        _set_routing_weights(self, weights)
-
-    def clear_routing_weights(self) -> None:
-        if not getattr(self, "use_global_router", False):
-            return
-        _clear_routing_weights(self)
+    # σ / FEI / routing-weights method surface is inherited from
+    # RouterStateMixin (set_sigma / clear_sigma / set_fei / clear_fei /
+    # set_routing_weights / clear_routing_weights — each buffer-presence-guarded).
 
     def forward(self, x):
         org_forwarded = self.org_forward(x)
