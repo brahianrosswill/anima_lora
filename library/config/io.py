@@ -54,6 +54,23 @@ def _read_text_silent(path: Optional[str]) -> Optional[str]:
         return None
 
 
+def toml_get(cfg: dict, key_path: str, default: Any = None) -> Any:
+    """Look up a dotted ``a.b.c`` path in a nested (TOML) dict.
+
+    Returns ``default`` if any segment is missing or a non-dict is hit before
+    the leaf. This is the dotted-path reader the bespoke-schema distill scripts
+    use (``spd.toml`` / ``turbo.toml`` are sectioned configs read raw, not
+    through :func:`load_method_preset`). Unlike :func:`_flatten_toml` it does
+    NOT collapse sections into one namespace — it walks the exact path.
+    """
+    node: Any = cfg
+    for part in key_path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+
 def _flatten_toml(
     d: dict,
     *,

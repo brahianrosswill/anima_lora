@@ -492,6 +492,126 @@ def isolate_compile_cache(signature: str) -> str:
     return target
 
 
+@dataclass
+class PoolCompileResult:
+    """What :func:`compile_dit_blocks_for_pool` derived, for caller-side logging.
+
+    ``n_token_families`` / ``seq_range`` are ``None`` on the static (per-shape)
+    path; ``n_shapes`` is always the distinct-token-count tally (≥1).
+    """
+
+    n_shapes: int
+    n_token_families: Optional[int]
+    seq_range: Optional[tuple]
+
+
+def compile_dit_blocks_for_pool(
+    anima: object,
+    token_counts,
+    *,
+    enabled: bool = True,
+    dynamic_seq: bool = True,
+    backend: str = "inductor",
+    mode: Optional[str] = None,
+    activation_memory_budget: float = 1.0,
+    grad_ckpt: bool = False,
+    cache_size_limit: Optional[int] = None,
+    logger: logging.Logger = log,
+) -> PoolCompileResult:
+    """Partitioner budget → per-signature cache isolation → block compile, for a
+    self-describing distillation pool.
+
+    The verbatim compile-setup sequence ``distill_spd`` / ``distill_mod`` shared —
+    and the home where the cross-cutting compile fixes belong (dynamo cache
+    sizing, the AOTAutogradCache guard-poisoning isolation, the ``_functorch``
+    partitioner budget). The caller derives ``token_counts`` — the distinct
+    ``(W//patch)*(H//patch)`` counts its cached pool populates, coupled to each
+    trainer's stage/synth pool logic, so it stays at the call site — and this
+    owns everything after:
+
+      1. ``n_shapes`` and, under ``dynamic_seq``, the symbolic-seq
+         ``n_token_families`` / ``seq_range`` (one graph bounded by the pool's
+         real token range; else ``None`` → per-shape static graphs).
+      2. the partitioner ``activation_memory_budget`` — skipped + logged under
+         ``grad_ckpt`` (repartitioning the joint graph trips CheckpointError,
+         torch #166926); ckpt already minimizes saved activations.
+      3. ``isolate_compile_cache(compile_signature(...))`` — a per-signature
+         cache dir so a stale seq-range guard can't poison this run
+         (ConstraintViolationError; see :func:`isolate_compile_cache`).
+      4. ``compile_dit_blocks`` with the dynamo cache sized to ``2*n_shapes + 8``
+         (override via ``cache_size_limit``).
+
+    Returns the derived :class:`PoolCompileResult` (computed even when ``enabled``
+    is False, so callers can still log it). Run AFTER the network ``apply_to`` —
+    the compile-after-monkey-patch invariant ``build_anima`` encodes.
+    """
+    counts = {int(c) for c in token_counts}
+    n_shapes = max(1, len(counts))
+    if dynamic_seq and counts:
+        # ONE symbolic-seq graph for every shape: mark_dynamic on the seq axis,
+        # bounded by the pool's real token range.
+        n_token_families: Optional[int] = n_shapes
+        seq_range: Optional[tuple] = (min(counts), max(counts))
+    else:
+        # Static path: one graph per distinct token count, each at its real
+        # token count (no padding). compile_blocks keys per token count.
+        n_token_families = None
+        seq_range = None
+    result = PoolCompileResult(n_shapes, n_token_families, seq_range)
+
+    if not enabled:
+        return result
+
+    # (2) Partitioner saved-activation cap. Must be set BEFORE compile_dit_blocks —
+    # partitioning happens at first-forward compile and this is a plain module
+    # attr (no ContextVar revert). Skipped under grad_ckpt: the budget repartitions
+    # the joint graph, so checkpoint's recompute pass can pick a different graph
+    # than forward → CheckpointError (torch #166926); ckpt already minimizes saved
+    # activations, so the cap buys nothing there.
+    if activation_memory_budget < 1.0 and not grad_ckpt:
+        import torch._functorch.config as _functorch_config
+
+        _functorch_config.activation_memory_budget = activation_memory_budget
+        logger.info(
+            "torch.compile activation_memory_budget = %.3g "
+            "(partitioner recomputes cheap intermediates in backward)",
+            activation_memory_budget,
+        )
+    elif activation_memory_budget < 1.0 and grad_ckpt:
+        logger.info(
+            "activation_memory_budget ignored: incompatible with grad_ckpt "
+            "(and redundant under it)"
+        )
+
+    # (3) Isolate the persistent compile caches per signature — entries compiled
+    # under different seq-range bounds otherwise poison this run's dynamic-seq
+    # marks (AOTAutogradCache replays a stale narrow guard → ConstraintViolationError).
+    # Same signature → warm-cache reuse shared with the other training entry points.
+    isolate_compile_cache(
+        compile_signature(
+            n_token_families=n_token_families,
+            seq_range=seq_range,
+            dynamic_seq=dynamic_seq,
+            backend=backend,
+            mode=mode,
+        )
+    )
+    # (4) Compile each Block._forward (compile-after-apply invariant).
+    compile_dit_blocks(
+        anima,
+        enabled=True,
+        cache_size_limit=(
+            2 * n_shapes + 8 if cache_size_limit is None else cache_size_limit
+        ),
+        backend=backend,
+        mode=mode,
+        dynamic_seq=dynamic_seq,
+        n_token_families=n_token_families,
+        seq_range=seq_range,
+    )
+    return result
+
+
 def enable_training_grad_ckpt(anima: object, *, enabled: bool) -> None:
     """Toggle unsloth CPU-offload gradient checkpointing for a training run.
 

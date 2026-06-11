@@ -39,15 +39,15 @@ from tqdm import tqdm  # noqa: E402
 
 from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
+from library.config.io import toml_get as _flatten  # noqa: E402
 from library.datasets.cache import make_cached_collate  # noqa: E402
 from library.datasets.distill import CachedDataset  # noqa: E402
 from library.runtime.harness import (  # noqa: E402
-    compile_dit_blocks,
-    compile_signature,
+    compile_dit_blocks_for_pool,
     enable_training_grad_ckpt,
-    isolate_compile_cache,
     place_dit_for_training,
 )
+from library.training.accumulator import ScalarAccumulator  # noqa: E402
 from library.training.forward import PadCache, renoise, to_dit_5d  # noqa: E402
 from library.training.schedulers import make_warmup_cosine_scheduler  # noqa: E402
 from networks.lora_anima.factory import create_network  # noqa: E402
@@ -73,16 +73,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
-
-
-def _flatten(cfg: dict, key_path: str, default):
-    """Look up ``a.b.c`` in a nested TOML dict, falling back to ``default``."""
-    node = cfg
-    for part in key_path.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return default
-        node = node[part]
-    return node
 
 
 def main():
@@ -678,6 +668,10 @@ def main():
     # *below* them. Enumerate every (stage × on-disk bucket) token count so both the
     # static and the dynamic-seq paths size themselves to the true shape set.
     if args.torch_compile:
+        # Distinct (stage × bucket) token counts in the cached pool — each image's
+        # full-res latent downsampled per stage scale. This derivation is coupled
+        # to SPD's multi-stage schedule, so it stays here; the budget → cache
+        # isolation → block-compile glue is the shared library helper.
         stage_bucket_tokens: set[int] = set()
         for npz, _te in dataset.samples:
             w_lat, h_lat = (int(v) for v in get_latent_resolution(npz).split("x"))
@@ -685,62 +679,16 @@ def main():
                 h = min(_snap(h_lat * s, patch), h_lat) if s < 1.0 else h_lat
                 w = min(_snap(w_lat * s, patch), w_lat) if s < 1.0 else w_lat
                 stage_bucket_tokens.add((h // patch) * (w // patch))
-        n_shapes = max(1, len(stage_bucket_tokens))
-        if compile_dynamic_seq:
-            # ONE symbolic-seq graph for every shape: mark_dynamic on the seq axis,
-            # bounded by the *downsampled* token range (NOT the on-disk full-res
-            # min) so stage-0's small forwards stay inside the guarded interval and
-            # don't trigger range-violation recompiles.
-            n_token_families = n_shapes
-            seq_range = (min(stage_bucket_tokens), max(stage_bucket_tokens))
-        else:
-            # Static path: one graph per (stage × bucket) shape, each at its real
-            # token count (no padding). Let compile_blocks key per token count.
-            n_token_families = None
-            seq_range = None
-        # Partitioner saved-activation cap (mirrors train.py / distill_turbo). Must
-        # be set BEFORE compile_dit_blocks — partitioning happens at first-forward
-        # compile and this is a plain module attr (no ContextVar revert). Skipped
-        # under grad_ckpt: the budget repartitions the joint graph, so checkpoint's
-        # recompute pass can pick a different graph than forward -> CheckpointError
-        # (torch #166926); ckpt already minimizes saved activations anyway.
-        if activation_memory_budget < 1.0 and not args.grad_ckpt:
-            import torch._functorch.config as _functorch_config
-
-            _functorch_config.activation_memory_budget = activation_memory_budget
-            logger.info(
-                "torch.compile activation_memory_budget = %.3g "
-                "(partitioner recomputes cheap intermediates in backward)",
-                activation_memory_budget,
-            )
-        elif activation_memory_budget < 1.0 and args.grad_ckpt:
-            logger.info(
-                "activation_memory_budget ignored: incompatible with grad_ckpt "
-                "(and redundant under it)"
-            )
-        # Isolate the persistent compile caches per compile signature — entries
-        # compiled under different seq-range bounds otherwise poison this run's
-        # dynamic-seq marks (AOTAutogradCache replays a stale narrow guard →
-        # ConstraintViolationError; see isolate_compile_cache). Same signature →
-        # warm cache reuse, shared with the other training entry points.
-        isolate_compile_cache(
-            compile_signature(
-                n_token_families=n_token_families,
-                seq_range=seq_range,
-                dynamic_seq=compile_dynamic_seq,
-                backend=args.dynamo_backend,
-                mode=compile_inductor_mode,
-            )
-        )
-        compile_dit_blocks(
+        pc = compile_dit_blocks_for_pool(
             model,
+            stage_bucket_tokens,
             enabled=True,
-            cache_size_limit=2 * n_shapes + 8,
+            dynamic_seq=compile_dynamic_seq,
             backend=args.dynamo_backend,
             mode=compile_inductor_mode,
-            dynamic_seq=compile_dynamic_seq,
-            n_token_families=n_token_families,
-            seq_range=seq_range,
+            activation_memory_budget=activation_memory_budget,
+            grad_ckpt=args.grad_ckpt,
+            logger=logger,
         )
         logger.info(
             "torch_compile: %d block._forward compiled (backend=%s, mode=%s, "
@@ -749,9 +697,9 @@ def main():
             args.dynamo_backend,
             compile_inductor_mode,
             compile_dynamic_seq,
-            n_shapes,
+            pc.n_shapes,
             (
-                f"seq_range={seq_range} (one symbolic graph)"
+                f"seq_range={pc.seq_range} (one symbolic graph)"
                 if compile_dynamic_seq
                 else "static per-shape graphs"
             ),
@@ -971,11 +919,13 @@ def main():
     # syncs per optimizer step) and the per-parameter .item() walk in the
     # LoRA-norm logging. Mirrors the accumulator pattern in scripts/distill_turbo/metrics.py.
     n_stages = len(stages)
-    acc_loss = torch.zeros((), device=device)  # Σ step-mean loss
-    acc_loss_stage = torch.zeros(n_stages, device=device)  # Σ micro-loss by stage
-    acc_stage_cnt = torch.zeros(n_stages, device=device)  # micro-steps by stage
-    acc_gate_w = torch.zeros((), device=device)  # Σ mean gate weight (gate on)
-    acc_ungated = torch.zeros((), device=device)  # Σ plain-MSE micro-loss (gate on)
+    # Named GPU-side accumulators flushed in a single CUDA sync per log boundary
+    # (library.training.accumulator). Scalar "loss" (Σ step-mean loss); vector
+    # "stage_loss"/"stage_cnt" (per-stage micro-loss sum + count, width n_stages);
+    # and — only when the SNR gate is on — scalar "gate_w"/"ungated". The
+    # per-boundary LoRA norms ("up_sq"/"down_sq") are added just before the flush
+    # so they ride the same sync. No magic slice offsets — read by name.
+    acc = ScalarAccumulator(device)
 
     # Fixed RNG for validation: reseeded each eval so the ε field (and hence the
     # analytic target) is identical across checkpoints → val/loss is a pure
@@ -1116,8 +1066,8 @@ def main():
             loss, gate_w = snr_gate.gated_mse(
                 pred, v_target, t, (int(x0_full.shape[-2]), int(x0_full.shape[-1]))
             )
-            acc_gate_w.add_(gate_w)
-            acc_ungated.add_(nn.functional.mse_loss(pred.detach().float(), v_target))
+            acc.add("gate_w", gate_w)
+            acc.add("ungated", nn.functional.mse_loss(pred.detach().float(), v_target))
         else:
             loss = nn.functional.mse_loss(pred.float(), v_target)
         # Scale so accumulated grads are the *mean* over micro-steps (matches a
@@ -1136,14 +1086,16 @@ def main():
         for _ in range(grad_accum):
             micro_loss, stage_idx = _micro_step(step)
             step_loss = step_loss + micro_loss / grad_accum
-            acc_loss_stage[stage_idx] += micro_loss  # python idx → no sync
-            acc_stage_cnt[stage_idx] += 1
+            acc.add_at(
+                "stage_loss", stage_idx, micro_loss, width=n_stages
+            )  # python idx → no sync
+            acc.add_at("stage_cnt", stage_idx, 1.0, width=n_stages)
         if grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
-        acc_loss.add_(step_loss)
+        acc.add("loss", step_loss)
         if ema_shadow is not None:
             with torch.no_grad():
                 for s, p in zip(ema_shadow, trainable):
@@ -1163,24 +1115,22 @@ def main():
                         up_sq = up_sq + s
                     elif "lora_down" in name:
                         down_sq = down_sq + s
-            # One CUDA sync per log boundary: stack every scalar, read once.
-            stage_means = acc_loss_stage / acc_stage_cnt.clamp(min=1)
+            acc.add("up_sq", up_sq)
+            acc.add("down_sq", down_sq)
+            # One CUDA sync per log boundary: read every accumulator by name.
+            # Per-key reductions (mean over the interval, sqrt of squared-norm
+            # sums) run on the returned floats — no further sync.
+            m = acc.flush_reset()
             n_micro = log_interval * grad_accum  # micro-steps per log interval
-            packed = torch.cat(
-                [
-                    (acc_loss / log_interval).reshape(1),
-                    up_sq.sqrt().reshape(1),
-                    down_sq.sqrt().reshape(1),
-                    (acc_gate_w / n_micro).reshape(1),
-                    (acc_ungated / n_micro).reshape(1),
-                    stage_means,
-                    acc_stage_cnt,
-                ]
-            ).tolist()
-            avg, up_norm, down_norm = packed[0], packed[1], packed[2]
-            gate_w_mean, ungated_mean = packed[3], packed[4]
-            stage_vals = packed[5 : 5 + n_stages]
-            stage_cnts = packed[5 + n_stages : 5 + 2 * n_stages]
+            avg = m["loss"] / log_interval
+            up_norm = m["up_sq"] ** 0.5
+            down_norm = m["down_sq"] ** 0.5
+            gate_w_mean = m.get("gate_w", 0.0) / n_micro
+            ungated_mean = m.get("ungated", 0.0) / n_micro
+            stage_cnts = m["stage_cnt"]
+            stage_vals = [
+                ls / c if c > 0 else 0.0 for ls, c in zip(m["stage_loss"], stage_cnts)
+            ]
             cur_lr = scheduler.get_last_lr()[0]  # CPU-side; no sync
             progress.set_postfix(
                 loss=f"{avg:.5f}",
@@ -1204,11 +1154,6 @@ def main():
                         writer.add_scalar(
                             f"train/loss_stage{si}", stage_vals[si], step + 1
                         )
-            acc_loss.zero_()
-            acc_loss_stage.zero_()
-            acc_stage_cnt.zero_()
-            acc_gate_w.zero_()
-            acc_ungated.zero_()
 
         # --- Held-out analytic-MSE validation (CMMD-free overfit signal) ---
         improved = False

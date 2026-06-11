@@ -55,10 +55,8 @@ from library.io.cache import (  # noqa: E402
     get_latent_resolution,
 )
 from library.runtime.harness import (  # noqa: E402
-    compile_dit_blocks,
-    compile_signature,
+    compile_dit_blocks_for_pool,
     enable_training_grad_ckpt,
-    isolate_compile_cache,
     place_dit_for_training,
 )
 from library.training.forward import (  # noqa: E402
@@ -250,60 +248,19 @@ def main():
     place_dit_for_training(model, device, blocks_to_swap=cfg.blocks_to_swap)
     if cfg.torch_compile:
         # Self-describing compile budget: derive the distinct token counts from the
-        # cached pool (data_dir + synth_data_dir) rather than a fixed table.
+        # cached pool (data_dir + synth_data_dir) rather than a fixed table. This
+        # derivation is coupled to mod's synth-pool logic, so it stays here; the
+        # budget → cache isolation → block-compile glue is the shared library helper.
         token_counts = _pool_token_counts(cfg, model.patch_spatial)
-        n_shapes = max(1, len(token_counts))
-        if cfg.compile_dynamic_seq and token_counts:
-            # ONE symbolic-seq graph for the whole pool: mark_dynamic on the seq
-            # axis, bounded by the pool's real token range.
-            n_token_families = n_shapes
-            seq_range = (min(token_counts), max(token_counts))
-        else:
-            # Static path: one graph per distinct token count, each at its real
-            # token count (no padding). Let compile_blocks key per token count.
-            n_token_families = None
-            seq_range = None
-        # Partitioner saved-activation cap (mirrors train.py / distill_turbo). Must
-        # be set BEFORE compile_dit_blocks — partitioning happens at first-forward
-        # compile and this is a plain module attr (no ContextVar revert). Skipped
-        # under grad_ckpt: the budget repartitions the joint graph, so checkpoint's
-        # recompute pass can pick a different graph than forward → CheckpointError
-        # (torch #166926); ckpt already minimizes saved activations anyway.
-        if cfg.activation_memory_budget < 1.0 and not cfg.grad_ckpt:
-            import torch._functorch.config as _functorch_config
-
-            _functorch_config.activation_memory_budget = cfg.activation_memory_budget
-            logger.info(
-                "torch.compile activation_memory_budget = %.3g "
-                "(partitioner recomputes cheap intermediates in backward)",
-                cfg.activation_memory_budget,
-            )
-        elif cfg.activation_memory_budget < 1.0 and cfg.grad_ckpt:
-            logger.info(
-                "activation_memory_budget ignored: incompatible with grad_ckpt "
-                "(and redundant under it)"
-            )
-        # Isolate the persistent compile caches per compile signature — entries
-        # compiled under different seq-range bounds otherwise poison this run's
-        # dynamic-seq marks (AOTAutogradCache replays a stale narrow guard →
-        # ConstraintViolationError; see isolate_compile_cache). Same signature →
-        # warm cache reuse, shared with the other training entry points.
-        isolate_compile_cache(
-            compile_signature(
-                n_token_families=n_token_families,
-                seq_range=seq_range,
-                dynamic_seq=cfg.compile_dynamic_seq,
-                mode=cfg.compile_inductor_mode,
-            )
-        )
-        compile_dit_blocks(
+        pc = compile_dit_blocks_for_pool(
             model,
+            token_counts,
             enabled=True,
-            cache_size_limit=2 * n_shapes + 8,
-            mode=cfg.compile_inductor_mode,
             dynamic_seq=cfg.compile_dynamic_seq,
-            n_token_families=n_token_families,
-            seq_range=seq_range,
+            mode=cfg.compile_inductor_mode,
+            activation_memory_budget=cfg.activation_memory_budget,
+            grad_ckpt=cfg.grad_ckpt,
+            logger=logger,
         )
         logger.info(
             "torch_compile: %d block._forward compiled (mode=%s, dynamic_seq=%s); "
@@ -311,9 +268,9 @@ def main():
             len(model.blocks),
             cfg.compile_inductor_mode,
             cfg.compile_dynamic_seq,
-            n_shapes,
+            pc.n_shapes,
             (
-                f"seq_range={seq_range} (one symbolic graph)"
+                f"seq_range={pc.seq_range} (one symbolic graph)"
                 if cfg.compile_dynamic_seq
                 else "static per-shape graphs"
             ),

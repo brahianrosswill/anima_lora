@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from library.config.io import toml_get as _flatten
+
 # Python 3.11+; fall back to ``tomli`` if needed.
 try:
     import tomllib
@@ -29,16 +31,6 @@ logger = logging.getLogger(__name__)
 def load_turbo_config(path: str) -> dict:
     with open(path, "rb") as f:
         return tomllib.load(f)
-
-
-def _flatten(cfg: dict, key_path: str, default):
-    """Look up ``a.b.c`` in a nested TOML dict, falling back to ``default``."""
-    node = cfg
-    for part in key_path.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return default
-        node = node[part]
-    return node
 
 
 def _pick(cli_val: Any, cfg: dict, toml_key: str, default: Any) -> Any:
