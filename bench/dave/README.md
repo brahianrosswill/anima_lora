@@ -416,6 +416,58 @@ Code: `scripts/distill_turbo/diversity.py` (probe), `config.py` (`io.validate_ev
 Status: wired + unit-smoke-tested (layout-invariance, cosine math, config round-trip);
 **not yet exercised in a live distill run**.
 
+## Phase 4 — MOD-guidance compose probe (2026-06-11): orthogonal, not antagonistic
+
+Field observation (ComfyUI, orthoinit LoRA): mod-guidance alone sometimes lands in
+degenerate layout attractors — *every* sample back-facing, or thick letterbox
+borders — and composing DAVE (τ0.10·s0.5) rescued exactly those cases. Hypothesis
+tested here: **does MOD deepen the early DC lock, and does DAVE restore it?**
+
+Four arms of `probe_dc_convergence.py` (new `--lora/--mod/--dave` flags), same 8
+seeds × 24 steps, CFG 4, `anima_channel_ortho` armed, `pooled_text_proj-0611`,
+stock step_i8_skip27 schedule, w=3. Capture is **pre-attenuation** (probe hooks
+register before `generate()` arms DAVE's), so the +DAVE numbers are the emergent
+state change, not our own subtraction. Fixed pool = blocks 8–18:
+
+| arm | DC s0–8 | AC s0–8 | AC s8–24 | DC power 8–26 (early) |
+|---|---|---|---|---|
+| vanilla | 0.998 | 0.581 | 0.538 | 0.327 |
+| dave | 0.996 | **0.477** | **0.265** | 0.291 |
+| mod | 0.998 | 0.586 | 0.550 | 0.328 |
+| mod+dave | 0.996 | **0.477** | **0.265** | 0.292 |
+
+AC-sim deltas vs vanilla: dave **−0.104**, mod **+0.005**, mod+dave **−0.104** →
+interaction **−0.005 ≈ 0**. Results: `results/20260611-205*-{base-lora,dave,mod,mod-dave}/`.
+
+1. **"MOD deepens the lock" is REFUTED.** MOD moves *nothing* the lock stats can
+   see — DC sim, AC sim, even DC power ratio in its own 8–26 window are all
+   vanilla-identical. The AdaLN delta rides `t_emb`, a **common-mode re-aim** of
+   the already-locked DC: every seed's DC shifts together, which cross-seed
+   similarity is blind to (and it's already saturated at 0.999).
+   *Not a no-op artifact*: `probe_mod_presence.py` (same-seed MOD-on/off diff)
+   shows MOD re-aims every block's DC by 0.6–4% at every step (cos ≥ 0.9994,
+   |ΔDC| 45–67) — blocks 0–7 shift *more* than the steering window, because the
+   base `proj(main)` t_emb injection reaches all blocks. Present, common-mode,
+   lock-invariant.
+2. **DAVE's unlock is emergent and persistent.** 2–3 attenuated early steps halve
+   the *late*-trajectory AC sim (0.538 → 0.265) — divergence compounds through
+   the latent long after the hooks go quiet.
+3. **Zero interaction = true orthogonality.** DAVE's effect under MOD is bitwise
+   the same story as without; MOD's (non-)effect likewise.
+
+Follow-up proposal: `docs/proposal/dave_mod_bestofn.md` — make "why the compose
+gives better images" falsifiable via best-of-N order statistics with correlated
+draws (MOD moves μ, DAVE moves ρ/N_eff; predicted vs observed best-of-n curves).
+
+So the compose story is **not** compensation-by-opposition. It is: the DC lock
+means all seeds share one layout basin; MOD re-aims that shared basin (tone win,
+occasionally a degenerate basin — and because the lock is intact, **every seed
+inherits the failure**, which is why MOD failures look like "everyone facing
+away" and seed re-rolls don't fix them). DAVE weakens the lock so seeds spread
+across basins again — it doesn't fight MOD, it **restores the seed lottery that
+MOD's failures had made useless**. Practical rule: MOD steers, DAVE de-correlates;
+compose them when a MOD failure survives re-rolling.
+
 ## Files
 
 | File | Role |
@@ -424,6 +476,7 @@ Status: wired + unit-smoke-tested (layout-invariance, cosine math, config round-
 | `derive_alpha_mask.py` | Phase-1/2d offline mask: `per_block.npz` → flat pool `networks/calibration/dave_alpha.npz`. |
 | `eyeball.py` | Phase-2 sweep: baseline vs DAVE configs × seeds → `output/tests/dave/`. |
 | `probe_patch_imprint.py` | Phase-3 analytic dot-predictor: per-block patch-grid imprint → measured block cap. |
+| `probe_mod_presence.py` | Phase-4 sanity: same-seed MOD-on/off ΔDC per block (MOD is present + common-mode, not a no-op). |
 | `results/<ts>/` | Standard `result.json` envelope + PNGs + `per_block.npz` / `imprint.npz`. |
 
 Intervention code lives outside `bench/`: `library/inference/corrections/dave.py`

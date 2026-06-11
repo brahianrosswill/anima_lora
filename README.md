@@ -2,22 +2,9 @@
 
 📖 Guidebook: [English](docs/guidelines/guidebook.md) · [한국어](docs/guidelines/가이드북.md) · [日本語](docs/guidelines/ガイドブック.md) · [中文](docs/guidelines/指南书.md)
 
-LoRA / T-LoRA training and inference engine for the [Anima](https://huggingface.co/circlestone-labs/Anima) diffusion model (DiT-based, flow-matching).
-
-Four things this repo aims to do well:
-
-1. **Fast LoRA training** on consumer GPUs — per-block `torch.compile` over a tiny fixed shape set (one block graph per token-count family), end to end.
-2. **Solid conventional implementations** — LoRA, OrthoLoRA, and T-LoRA stack together and bake losslessly into a standalone DiT checkpoint.
-3. **Recent methods, engineered for Anima** — Spectrum inference, DCW & SMC-CFG samplers, OrthoHydraLoRA, and modulation guidance, each implemented end-to-end against Anima's compile contract rather than dropped in as a toy port.
-4. **A broad experimental surface** — SPD, ChimeraHydra, Soft Tokens, Turbo distillation, EasyControl, DirectEdit, embedding inversion.
-
-> **At-a-glance diagrams** for every method (DiT internals, LoRA, OrthoLoRA, T-LoRA, HydraLoRA, Spectrum, modulation, compile optimizations) live in [`docs/structure_images/`](docs/structure_images/) — paired with prose walkthroughs in [`docs/structure/`](docs/structure/).
-
----
-
-## How to start
-
-> **Requirements:** at least an Ampere GPU (RTX 3000-series / A100 or newer) + NVIDIA driver **≥595**. The installer sets up the **CUDA 13.2 toolkit, Python 3.13, and PyTorch 2.12** for you.
+<p align="center">
+  <img src="docs/gui.png" alt="Anima LoRA GUI — training-config editor with method/variant picker, inline method help, and live training monitor" width="900">
+</p>
 
 One line — installs [uv](https://astral.sh/uv) and the **CUDA 13.2 toolkit** if missing, fetches the latest release, runs `uv sync` (Python 3.13 + torch), and on Windows opens the GUI (no git required). The installer is published as a signed-by-checksum release asset:
 
@@ -29,6 +16,8 @@ curl -LsSf https://github.com/sorryhyun/anima_lora/releases/latest/download/inst
 # Windows (PowerShell)
 irm https://github.com/sorryhyun/anima_lora/releases/latest/download/install.ps1 | iex
 ```
+
+> **Requirements:** at least an Ampere GPU (RTX 3000-series / A100 or newer) + NVIDIA driver **≥595**. The installer sets up the **CUDA 13.2 toolkit, Python 3.13, and PyTorch 2.12** for you.
 
 Installs into `./anima_lora/` (override with `ANIMA_DIR`). On Windows it also drops an **"Anima LoRA GUI"** shortcut on your desktop.
 
@@ -70,6 +59,19 @@ make gui                  # config editor + dataset browser + training monitor
 ```
 
 Update later in place with `make update` (release-tarball merge, no git needed). Prefer cloning the repo? See [Setup → Manual](#manual-from-a-clone).
+
+---
+
+LoRA / T-LoRA training and inference engine for the [Anima](https://huggingface.co/circlestone-labs/Anima) diffusion model (DiT-based, flow-matching).
+
+Four things this repo aims to do well:
+
+1. **Fast LoRA training** on consumer GPUs — per-block `torch.compile` over a tiny fixed shape set (one block graph per token-count family), end to end.
+2. **Solid conventional implementations** — LoRA, OrthoLoRA, and T-LoRA stack together and bake losslessly into a standalone DiT checkpoint.
+3. **Recent methods, engineered for Anima** — Spectrum inference, DCW & SMC-CFG samplers, OrthoHydraLoRA, and modulation guidance, each implemented end-to-end against Anima's compile contract rather than dropped in as a toy port.
+4. **A broad experimental surface** — SPD, ChimeraHydra, Soft Tokens, Turbo distillation, EasyControl, DirectEdit, embedding inversion.
+
+> **At-a-glance diagrams** for every method (DiT internals, LoRA, OrthoLoRA, T-LoRA, HydraLoRA, Spectrum, modulation, compile optimizations) live in [`docs/structure_images/`](docs/structure_images/) — paired with prose walkthroughs in [`docs/structure/`](docs/structure/).
 
 ---
 

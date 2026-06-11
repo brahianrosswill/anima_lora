@@ -33,11 +33,29 @@ and attenuating the DC won't help — we stop before building the intervention.
 Read-only: post-hooks only, eager 5D forwards, compile off. Outputs a
 ``result.json``, three PNGs, and a ``per_block.npz`` of the (S,L) matrices.
 
+Arms (MOD / DAVE compose)
+-------------------------
+``--mod`` (mod-guidance via pooled_text_proj, stock step_i8_skip27 schedule) and
+``--dave`` (DC attenuation) turn the probe into the compose-mechanism experiment:
+does MOD deepen the early DC lock, and does DAVE restore the AC gap under MOD?
+Run the same seeds/prompt across arms and compare ``per_block.npz``.
+
+Capture semantics under ``--dave``: the probe's hooks are registered *before*
+``generate()`` arms DAVE's hooks, so each block's capture is the block's own
+(pre-attenuation) output — while its *input* already carries the propagated
+effect of attenuation at earlier blocks and diverged latents from earlier steps.
+That is deliberate: the probe measures the **emergent** unlock of the network
+state, not the mechanical subtraction DAVE itself applies.
+
 Usage
 -----
     uv run python bench/dave/probe_dc_convergence.py --seeds 8 --steps 24 --cfg 4.0
     uv run python bench/dave/probe_dc_convergence.py --seeds 12 --label teddy \
         --prompt "a girl in a plain dress next to a white teddy bear"
+    # compose arms (same seeds, then diff the result.json / per_block.npz):
+    uv run python bench/dave/probe_dc_convergence.py --lora latest --label base
+    uv run python bench/dave/probe_dc_convergence.py --lora latest --mod auto
+    uv run python bench/dave/probe_dc_convergence.py --lora latest --mod auto --dave auto
 """
 
 from __future__ import annotations
@@ -290,12 +308,64 @@ def main() -> None:
         default=0.30,
         help="block counts as DC-heavy if its early-step mean power ratio ≥ this",
     )
+    p.add_argument(
+        "--lora",
+        default=None,
+        help="LoRA .safetensors to arm ('latest' = newest non-pooled ckpt in "
+        "output/ckpt/; default: bare DiT, the original Phase-0 setup)",
+    )
+    p.add_argument(
+        "--mod",
+        default=None,
+        help="MOD arm: pooled_text_proj .safetensors ('auto' = newest "
+        "output/ckpt/pooled_text_proj*). Stock per-block schedule (step_i8_skip27).",
+    )
+    p.add_argument("--mod_w", type=float, default=3.0, help="mod-guidance strength w")
+    p.add_argument(
+        "--dave",
+        default=None,
+        help="DAVE arm: mask npz path or 'auto' (shipped flat 8-18 pool)",
+    )
+    p.add_argument("--dave_strength", type=float, default=0.5)
+    p.add_argument("--dave_tau", type=float, default=0.10)
+    p.add_argument(
+        "--extra",
+        nargs="*",
+        default=[],
+        help="verbatim inference.py argv passthrough (e.g. --extra --mod_taper 4)",
+    )
     p.add_argument("--label", default=None)
     opts = p.parse_args()
+
+    # Resolve arm checkpoints + auto-label so result dirs are self-describing.
+    if opts.lora == "latest":
+        from scripts.tasks._common import latest_lora
+
+        opts.lora = str(latest_lora())
+    if opts.mod == "auto":
+        from scripts.tasks._common import latest_output
+
+        opts.mod = str(latest_output("pooled_text_proj"))
+    if opts.label is None:
+        arm = [s for s, on in (("mod", opts.mod), ("dave", opts.dave)) if on]
+        opts.label = "-".join(arm) if arm else None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Build a canonical inference args Namespace (every getattr() knob populated).
+    extra_argv = []
+    if opts.mod:
+        extra_argv += ["--mod_w", str(opts.mod_w)]
+    if opts.dave:
+        extra_argv += [
+            "--dave",
+            opts.dave,
+            "--dave_strength",
+            str(opts.dave_strength),
+            "--dave_tau",
+            str(opts.dave_tau),
+        ]
+    extra_argv += opts.extra
     ckpts = default_checkpoints()
     req = GenerationRequest(
         dit=ckpts.dit,
@@ -308,6 +378,9 @@ def main() -> None:
         guidance_scale=opts.cfg,
         image_size=tuple(opts.size),
         seed=opts.seed0,
+        lora_weight=[opts.lora] if opts.lora else None,
+        pooled_text_proj=opts.mod,
+        extra_argv=extra_argv,
     )
     args = req.to_args()
     args.device = device
@@ -331,12 +404,22 @@ def main() -> None:
         for i, blk in enumerate(anima.blocks)
     ]
 
+    shared = {"model": anima}
+    if opts.mod:
+        # setup_mod_guidance runs per generate() call; keep the text encoder in
+        # shared_models so it's loaded once (it parks itself on CPU between calls).
+        from library.inference.models import load_text_encoder
+
+        print("[dave-probe] loading text encoder (shared, MOD arm)…")
+        shared["text_encoder"] = load_text_encoder(
+            args, dtype=torch.bfloat16, device=device
+        )
+        shared["text_encoder"].eval()
+
     # Encode text once (prompt identical across seeds) — reused via precomputed.
     print("[dave-probe] encoding text…")
-    context, context_null = prepare_text_inputs(args, device, anima)
+    context, context_null = prepare_text_inputs(args, device, anima, shared)
     text_data = {"context": context, "context_null": context_null}
-
-    shared = {"model": anima}
     try:
         for k in range(opts.seeds):
             seed = opts.seed0 + k
@@ -376,7 +459,18 @@ def main() -> None:
     dc_all = col_avg(dc_sim, [], early)
     ac_all = col_avg(ac_sim, [], early)
 
+    arm = (
+        "+".join(s for s, on in (("mod", opts.mod), ("dave", opts.dave)) if on)
+        or "vanilla"
+    )
     metrics = {
+        "arm": arm,
+        "lora": opts.lora,
+        "mod": opts.mod,
+        "mod_w": opts.mod_w if opts.mod else None,
+        "dave": opts.dave,
+        "dave_strength": opts.dave_strength if opts.dave else None,
+        "dave_tau": opts.dave_tau if opts.dave else None,
         "num_blocks": num_blocks,
         "num_steps": opts.steps,
         "num_seeds": opts.seeds,
@@ -428,6 +522,7 @@ def main() -> None:
     )
 
     print("\n" + "=" * 66)
+    print(f"  arm: {arm}" + (f"  (lora={Path(opts.lora).name})" if opts.lora else ""))
     print(f"  DC-heavy blocks (ratio≥{opts.heavy_ratio}): {heavy_blocks}")
     print(
         f"  -- all blocks (early) --   DC {dc_all:.3f} | AC {ac_all:.3f} "
