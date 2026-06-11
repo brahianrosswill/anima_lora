@@ -21,12 +21,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
     QTextBrowser,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +47,7 @@ from gui import (
     _save,
     _widget,
     apply_validation_choice,
+    confirm_existing_caches,
     confirm_resumable_checkpoint,
     confirm_train_using_cache,
     is_basic_field,
@@ -65,6 +68,27 @@ from gui.progress import (
     TqdmProgressTracker,
     make_progress_bar,
 )
+
+_GUI_PATH_SCOPE_KEY = "path_scope"
+_FIELD_ORDER = {
+    _GUI_PATH_SCOPE_KEY: 10,
+    "source_image_dir": 11,
+    "resized_image_dir": 12,
+    "lora_cache_dir": 13,
+    "output_dir": 14,
+    "output_name": 15,
+    "save_model_as": 16,
+    "path_pattern": 20,
+    "drop_lowres_images": 21,
+    "min_pixels": 22,
+    "pretrained_model_name_or_path": 30,
+    "qwen3": 31,
+    "vae": 32,
+    "sample_prompts": 10,
+    "sample_every_n_epochs": 11,
+    "sample_at_first": 12,
+    "sample_decode_inline": 13,
+}
 
 
 class ClickableLabel(QLabel):
@@ -167,11 +191,6 @@ class ConfigTab(QWidget):
         self._save_btn.clicked.connect(self._save_preset)
         top.addWidget(self._save_btn)
 
-        # The standalone Preprocess button used to live here; it was retired
-        # once the Train button gained an auto-chain that runs preprocess
-        # itself when no cache is present. Per-step preprocess controls (TE
-        # caching, SAM/MIT masks, …) still live on the PreprocessingTab.
-
         self.train_btn = QPushButton(t("train"))
         self._train_idle_style = (
             "background:#27ae60;color:white;font-weight:bold;padding:4px 16px;"
@@ -186,16 +205,31 @@ class ConfigTab(QWidget):
         self.train_btn.setEnabled(True)
         top.addWidget(self.train_btn)
 
-        self.queue_btn = QPushButton(t("queue"))
+        self.queue_btn = QToolButton()
         self._queue_idle_style = (
             "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
         )
         self._queue_busy_style = (
             "background:#7f8c8d;color:white;font-weight:bold;padding:4px 16px;"
         )
+        self.queue_btn.setText(t("queue"))
+        self.queue_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.queue_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.queue_btn.setStyleSheet(self._queue_idle_style)
         self.queue_btn.setToolTip(t("queue_tooltip"))
-        self.queue_btn.clicked.connect(self._queue_training)
+        self.queue_btn.clicked.connect(
+            lambda _checked=False: self._queue_preprocess(train_after=True)
+        )
+        queue_menu = QMenu(self.queue_btn)
+        train_preprocess_action = queue_menu.addAction(t("queue_train_preprocess"))
+        train_preprocess_action.triggered.connect(
+            lambda _checked=False: self._queue_preprocess(train_after=True)
+        )
+        preprocess_only_action = queue_menu.addAction(t("queue_preprocess_only"))
+        preprocess_only_action.triggered.connect(
+            lambda _checked=False: self._queue_preprocess(train_after=False)
+        )
+        self.queue_btn.setMenu(queue_menu)
         self.queue_btn.setEnabled(True)
         top.addWidget(self.queue_btn)
 
@@ -393,6 +427,8 @@ class ConfigTab(QWidget):
         variant = self._current_variant()
         merged, origin = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         cfg = {k: v for k, v in merged.items() if k not in _SKIP}
+        if self._preprocess_tab is not None:
+            self._preprocess_tab.set_variant(variant, method=method)
 
         self._origin = origin
 
@@ -442,7 +478,7 @@ class ConfigTab(QWidget):
         def _build_subgroup_box(gn: str, flds: dict) -> QGroupBox:
             box = QGroupBox(gn)
             form = QFormLayout()
-            for k in sorted(flds):
+            for k in sorted(flds, key=lambda key: (_FIELD_ORDER.get(key, 100), key)):
                 w = _widget(flds[k], key=k)
                 self._w[k] = w
                 lbl = ClickableLabel(k)
@@ -505,31 +541,9 @@ class ConfigTab(QWidget):
         for w in self._w.values():
             self._connect_dirty_signal(w)
 
-        # Sample-image previews are part of the evaluation surface, so they
-        # follow the `use_valid` master toggle: when validation is off, the
-        # sample fields grey out and saving forces sampling off (see
-        # _save_preset). Wire the checkbox so the form reflects this live.
-        self._wire_sample_fields_to_use_valid()
-
         self._clear_dirty()
 
         self._refresh_config_warnings(variant)
-
-    def _wire_sample_fields_to_use_valid(self) -> None:
-        """Bind the sample-prompt widgets' enabled state to the `use_valid`
-        checkbox so previews visibly belong to the evaluation toggle."""
-        use_valid_w = self._w.get("use_valid")
-        sample_keys = ("sample_prompts", "sample_every_n_epochs", "sample_at_first")
-        sample_ws = [self._w[k] for k in sample_keys if k in self._w]
-        if use_valid_w is None or not sample_ws:
-            return
-
-        def _apply(enabled: bool):
-            for w in sample_ws:
-                w.setEnabled(bool(enabled))
-
-        _apply(use_valid_w.isChecked())
-        use_valid_w.toggled.connect(_apply)
 
     def _refresh_config_warnings(self, variant: str) -> None:
         """Show/hide the config-health banner based on a torch-free scan of the
@@ -595,9 +609,11 @@ class ConfigTab(QWidget):
             QSpinBox,
         )
 
-        from gui import _TargetResWidget
+        from gui import _SamplePromptsWidget, _TargetResWidget
 
         if isinstance(w, _TargetResWidget):
+            w.changed.connect(self._mark_dirty)
+        elif isinstance(w, _SamplePromptsWidget):
             w.changed.connect(self._mark_dirty)
         elif isinstance(w, QComboBox):
             w.currentTextChanged.connect(self._mark_dirty)
@@ -699,6 +715,7 @@ class ConfigTab(QWidget):
             merged, _ = merged_gui_variant_preset(
                 self._current_variant(), self._IMPLICIT_PRESET
             )
+            merged = self._gui_scoped_paths(merged)
             out = merged.get("output_dir") or "output/ckpt"
         except Exception:
             out = "output/ckpt"
@@ -766,22 +783,26 @@ class ConfigTab(QWidget):
                 # Virtual keys (e.g. use_valid) aren't real flat TOML keys —
                 # their writeback is handled below via per-key apply helpers.
                 continue
+            if k == _GUI_PATH_SCOPE_KEY:
+                scope = str(_read(w, "") or "").strip()
+                meta = out.get("variant")
+                if not isinstance(meta, dict):
+                    meta = {}
+                if scope:
+                    meta[_GUI_PATH_SCOPE_KEY] = scope
+                    out["variant"] = meta
+                else:
+                    meta.pop(_GUI_PATH_SCOPE_KEY, None)
+                    if meta:
+                        out["variant"] = meta
+                    else:
+                        out.pop("variant", None)
+                out.pop(_GUI_PATH_SCOPE_KEY, None)
+                continue
             baseline = method_orig.get(k, implicit_pset.get(k, base.get(k)))
             v = _read(w, baseline)
             if k in method_orig or v != baseline:
                 out[k] = v
-
-        # Sample previews follow the `use_valid` master toggle: when validation
-        # is off, force sampling off in the written config (the cadence/at-first
-        # knobs gate `sampling_enabled` in train.py). The typed prompts are left
-        # intact so re-enabling validation brings them back. Only override when
-        # something would actually have sampled — avoids writing noise keys.
-        _uv = self._w.get("use_valid")
-        if _uv is not None and not bool(_read(_uv)):
-            if out.get("sample_every_n_epochs"):
-                out["sample_every_n_epochs"] = 0
-            if out.get("sample_at_first"):
-                out["sample_at_first"] = False
 
         use_valid_w = self._w.get("use_valid")
         if use_valid_w is not None:
@@ -930,11 +951,79 @@ class ConfigTab(QWidget):
         """Resolve the absolute lora_cache_dir for the given variant. Used by
         the Train cache-exists branch and the auto-chain preprocess path."""
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged = self._gui_scoped_paths(merged)
         cache_rel = merged.get("lora_cache_dir") or "post_image_dataset/lora"
         cache_dir = Path(cache_rel)
         if not cache_dir.is_absolute():
             cache_dir = ROOT / cache_dir
         return cache_dir
+
+    def _preprocess_env(self, variant: str) -> dict[str, str]:
+        env = {
+            "METHOD": variant,
+            "METHODS_SUBDIR": "gui-methods",
+            "PRESET": self._IMPLICIT_PRESET,
+        }
+        if self._preprocess_tab is not None:
+            env.update(self._preprocess_tab.preprocess_env())
+        return env
+
+    def _chain_train_spec(self, variant: str) -> dict[str, str]:
+        return {
+            "method": variant,
+            "preset": self._IMPLICIT_PRESET,
+            "methods_subdir": "gui-methods",
+        }
+
+    @staticmethod
+    def _normalize_path_scope(scope: Any) -> str | None:
+        """Return a safe relative GUI path scope like ``data_group1``."""
+        if not isinstance(scope, str):
+            return None
+        value = scope.strip().replace("\\", "/").strip("/")
+        if not value:
+            return None
+        if value.endswith("/*"):
+            value = value[:-2].strip("/")
+        if not value or "|" in value or any(ch in value for ch in "*?[]:"):
+            return None
+        parts = value.split("/")
+        if any(not part or part in {".", ".."} for part in parts):
+            return None
+        return "/".join(parts)
+
+    @staticmethod
+    def _append_scope(path_value: Any, scope: str) -> str:
+        base = str(path_value).strip() if path_value is not None else ""
+        if not base:
+            return scope
+        norm = base.replace("\\", "/").rstrip("/")
+        if norm == scope or norm.endswith("/" + scope):
+            return base
+        return f"{norm}/{scope}"
+
+    @staticmethod
+    def _gui_scoped_paths(merged: dict[str, Any]) -> dict[str, Any]:
+        """Apply GUI-only path_scope to concrete run paths.
+
+        ``path_pattern`` keeps its original training-filter meaning and is
+        evaluated relative to the scoped image/cache directories.
+        """
+        scope = ConfigTab._normalize_path_scope(merged.get(_GUI_PATH_SCOPE_KEY))
+        if not scope:
+            return merged
+        out = copy.deepcopy(merged)
+        defaults = {
+            "source_image_dir": "image_dataset",
+            "resized_image_dir": "post_image_dataset/resized",
+            "lora_cache_dir": "post_image_dataset/lora",
+            "output_dir": "output/ckpt",
+        }
+        for key, default in defaults.items():
+            out[key] = ConfigTab._append_scope(out.get(key) or default, scope)
+        out.pop(_GUI_PATH_SCOPE_KEY, None)
+        out.pop("variant", None)
+        return out
 
     def _queue_config_snapshot(
         self, variant: str, merged: dict[str, Any] | None = None
@@ -947,6 +1036,9 @@ class ConfigTab(QWidget):
             if merged is not None
             else merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)[0]
         )
+        snapshot = self._gui_scoped_paths(snapshot)
+        if self._preprocess_tab is not None:
+            snapshot.update(self._preprocess_tab.preprocess_overrides())
         for key in (
             "base_config",
             "dataset_config",
@@ -954,6 +1046,8 @@ class ConfigTab(QWidget):
             "method",
             "preset",
             "methods_subdir",
+            _GUI_PATH_SCOPE_KEY,
+            "preprocess_path_pattern",
             *_VIRTUAL_KEYS,
         ):
             snapshot.pop(key, None)
@@ -994,8 +1088,10 @@ class ConfigTab(QWidget):
         lora_cache_dir override in the variant file is honored by preprocess too
         (read via scripts/tasks/_common._path_overrides; drop_lowres_images /
         min_pixels likewise come from the merged config chain)."""
-        self.train_btn.setText(t("train_preprocessing"))
-        self.train_btn.setStyleSheet(self._train_busy_style)
+        chain_after = getattr(self, "_chain_train_after_preprocess", False)
+        if chain_after:
+            self.train_btn.setText(t("train_preprocessing"))
+            self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
         self.queue_btn.setEnabled(False)
         self.test_btn.setEnabled(False)
@@ -1005,7 +1101,7 @@ class ConfigTab(QWidget):
         self.log.clear()
         self._reset_progress()
         self._progress_tracker.mark_starting(t("starting"))
-        if getattr(self, "_chain_train_after_preprocess", False):
+        if chain_after:
             self._log(t("train_autopreprocess_log"))
         self._log(t("daemon_submitting") + "\n")
         QApplication.processEvents()
@@ -1018,25 +1114,13 @@ class ConfigTab(QWidget):
         # succeeds — the chain then completes even if the GUI closes mid-cache.
         # The spec also tags this command job as *this tab's* preprocess, so
         # ConfigTab re-claims it on reopen and the PreprocessingTab leaves it be.
-        chain_train = (
-            {
-                "method": variant,
-                "preset": self._IMPLICIT_PRESET,
-                "methods_subdir": "gui-methods",
-            }
-            if getattr(self, "_chain_train_after_preprocess", False)
-            else None
-        )
+        chain_train = self._chain_train_spec(variant) if chain_after else None
         try:
             snapshot = self._queue_config_snapshot(variant)
             resp = gui_daemon.submit_command(
                 label="preprocess",
                 argv=["tasks.py", "preprocess"],
-                extra_env={
-                    "METHOD": variant,
-                    "METHODS_SUBDIR": "gui-methods",
-                    "PRESET": self._IMPLICIT_PRESET,
-                },
+                extra_env=self._preprocess_env(variant),
                 chain_train=chain_train,
                 config_snapshot=snapshot,
             )
@@ -1064,13 +1148,13 @@ class ConfigTab(QWidget):
         if self._dirty:
             self._save_preset(silent=True)
 
-        # Flush the Preprocess tab's target_res tiers to preprocess.toml too.
+        # Flush the Preprocess tab's cache settings to preprocess.toml too.
         # An auto-chain preprocess (cache-missing branch below) runs
-        # `tasks.py preprocess`, which reads the tiers from preprocess.toml —
-        # not from that widget — so without this the chain would resize at the
-        # stale/default tier whenever the user changed tiers but didn't Save.
+        # `tasks.py preprocess`, which reads the tiers/filter from preprocess.toml
+        # and caption shuffle knobs from the env — not directly from widgets.
         if self._preprocess_tab is not None:
-            self._preprocess_tab.persist_target_res()
+            if not self._preprocess_tab.persist_preprocess_inputs():
+                return
 
         variant = self._current_variant()
         cache_dir = self._resolve_cache_dir(variant)
@@ -1092,6 +1176,7 @@ class ConfigTab(QWidget):
         # does its wipe-for-fresh synchronously, so it's settled before training
         # ever runs. Returns True with no prompt when there's nothing to resume.
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged = self._gui_scoped_paths(merged)
         if not confirm_resumable_checkpoint(self, merged):
             return
 
@@ -1106,59 +1191,53 @@ class ConfigTab(QWidget):
         # Cache exists and user confirmed — go straight to training.
         self._launch_training(variant)
 
-    def _queue_training(self):
-        """Enqueue the current variant without attaching the GUI to that job.
+    def _queue_preprocess(self, *, train_after: bool):
+        """Enqueue preprocess for the current variant, optionally chaining train.
 
-        This is the GUI equivalent of the CLI ``--queue`` path: the daemon owns
-        execution order, while the form stays usable so the user can select
-        another variant and queue it too.
+        The daemon owns execution order, while the form stays usable so the user
+        can select another variant and queue it too.
         """
         if self._dirty:
             self._save_preset(silent=True)
+        if self._preprocess_tab is not None:
+            if not self._preprocess_tab.persist_preprocess_inputs():
+                return
 
         variant = self._current_variant()
         cache_dir = self._resolve_cache_dir(variant)
-        decision = confirm_train_using_cache(self, cache_dir)
-        if decision is False:
+        if not confirm_existing_caches(self, cache_dir):
             return
 
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
-        if not confirm_resumable_checkpoint(self, merged):
+        merged = self._gui_scoped_paths(merged)
+        if train_after and not confirm_resumable_checkpoint(self, merged):
             return
 
         self.queue_btn.setText(t("queue") + " ...")
         self.queue_btn.setStyleSheet(self._queue_busy_style)
         self.queue_btn.setEnabled(False)
-        self._log(t("queue_submitting", variant=variant) + "\n")
+        submit_key = (
+            "queue_submitting_train_preprocess"
+            if train_after
+            else "queue_submitting_preprocess"
+        )
+        self._log(t(submit_key, variant=variant) + "\n")
         QApplication.processEvents()
 
         try:
             snapshot = self._queue_config_snapshot(variant, merged)
-            if decision is None:
-                resp = gui_daemon.submit_command(
-                    label="preprocess",
-                    argv=["tasks.py", "preprocess"],
-                    extra_env={
-                        "METHOD": variant,
-                        "METHODS_SUBDIR": "gui-methods",
-                        "PRESET": self._IMPLICIT_PRESET,
-                    },
-                    chain_train={
-                        "method": variant,
-                        "preset": self._IMPLICIT_PRESET,
-                        "methods_subdir": "gui-methods",
-                    },
-                    config_snapshot=snapshot,
-                )
-                queued_key = "queue_added_preprocess"
-            else:
-                resp = gui_daemon.submit_training(
-                    method=variant,
-                    preset=self._IMPLICIT_PRESET,
-                    methods_subdir="gui-methods",
-                    config_snapshot=snapshot,
-                )
-                queued_key = "queue_added_train"
+            resp = gui_daemon.submit_command(
+                label="preprocess",
+                argv=["tasks.py", "preprocess"],
+                extra_env=self._preprocess_env(variant),
+                chain_train=self._chain_train_spec(variant) if train_after else None,
+                config_snapshot=snapshot,
+            )
+            queued_key = (
+                "queue_added_preprocess"
+                if train_after
+                else "queue_added_preprocess_only"
+            )
         except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
             QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
             self._restore_queue_button()
@@ -1186,14 +1265,16 @@ class ConfigTab(QWidget):
             self.log.clear()
             self._reset_progress()
             self._progress_tracker.mark_starting(t("starting"))
-            if queued_key == "queue_added_preprocess":
+            if train_after:
                 # Mirror the Train auto-chain: follow this preprocess into the
                 # training the daemon will enqueue after it.
                 self._chain_train_after_preprocess = True
                 self._chain_variant = variant
                 self._attach_to_job(job_id, replay_log=False, kind="preprocess")
             else:
-                self._attach_to_job(job_id, replay_log=False, kind="train")
+                self._chain_train_after_preprocess = False
+                self._chain_variant = variant
+                self._attach_to_job(job_id, replay_log=False, kind="preprocess")
 
     def _launch_training(self, variant: str) -> None:
         """Submit a training job to the local daemon (Phase 2).
@@ -1206,6 +1287,7 @@ class ConfigTab(QWidget):
         # Sync the TensorBoard panel to the logging_dir for this variant so it
         # starts scanning for the new run dir immediately.
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged = self._gui_scoped_paths(merged)
         logging_dir = merged.get("logging_dir")
         if logging_dir and self._tb_panel is not None:
             self._tb_panel.set_log_dir(logging_dir)
@@ -1307,11 +1389,13 @@ class ConfigTab(QWidget):
         self._stdout_tailer.watch(gui_daemon.stdout_path(job_id))
         if not replay_log:
             self._stdout_tailer.read_new()  # discard backlog
-        self.train_btn.setText(
-            t("train_preprocessing")
-            if kind == "preprocess"
-            else t("train_running_daemon")
-        )
+        chain_after = getattr(self, "_chain_train_after_preprocess", False)
+        if kind == "preprocess":
+            self.train_btn.setText(
+                t("train_preprocessing") if chain_after else t("train")
+            )
+        else:
+            self.train_btn.setText(t("train_running_daemon"))
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
         # Keep Queue + the variant pickers live while a job is attached: the user

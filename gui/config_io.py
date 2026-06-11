@@ -183,6 +183,19 @@ _GROUPS = {
         "sigma_bucket_boundaries",
         "network_train_unet_only",
     },
+    "Paths": {
+        "pretrained_model_name_or_path",
+        "qwen3",
+        "vae",
+        "path_scope",
+        "output_dir",
+        "output_name",
+        "save_model_as",
+        "source_image_dir",
+        "resized_image_dir",
+        "lora_cache_dir",
+        "path_pattern",
+    },
     "Training": {
         "learning_rate",
         "max_train_epochs",
@@ -195,8 +208,15 @@ _GROUPS = {
         "lr_scheduler",
         "timestep_sampling",
         "discrete_flow_shift",
+        "masked_loss",
         "use_valid",
         "validation_split_num",
+    },
+    "Preprocess": {
+        "drop_lowres_images",
+        "min_pixels",
+    },
+    "Samples": {
         "sample_prompts",
         "sample_every_n_epochs",
         "sample_at_first",
@@ -210,7 +230,6 @@ _GROUPS = {
         "blocks_to_swap",
         "torch_compile",
         "cache_llm_adapter_outputs",
-        "masked_loss",
         "mixed_precision",
         "vae_chunk_size",
         "vae_disable_cache",
@@ -219,20 +238,6 @@ _GROUPS = {
         "skip_cache_check",
         "layer_start",
         "use_cmmd",
-    },
-    "Paths": {
-        "pretrained_model_name_or_path",
-        "qwen3",
-        "vae",
-        "output_dir",
-        "output_name",
-        "save_model_as",
-        "source_image_dir",
-        "resized_image_dir",
-        "lora_cache_dir",
-        "path_pattern",
-        "drop_lowres_images",
-        "min_pixels",
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
@@ -259,8 +264,9 @@ _VIRTUAL_KEYS = {"use_valid", "validation_split_num"}
 # Fields shown under the "Basic" section. Everything else falls under the
 # collapsible "Advanced" section. Picked to cover the knobs a first-time user
 # realistically wants to touch (rate/length/output, headline architecture
-# size, headline VRAM knobs, dataset/output paths) without exposing the long
-# tail of regularizer / router / adapter-internal parameters.
+# size, headline VRAM knobs) without exposing the long tail of regularizer /
+# router / adapter-internal parameters. Keep only the common GUI path controls
+# in Basic; concrete path overrides stay in Advanced for users who need them.
 _BASIC = {
     "learning_rate",
     "max_train_epochs",
@@ -269,14 +275,13 @@ _BASIC = {
     "network_alpha",
     "network_weights",
     "num_experts",
-    "output_name",
     "use_shuffled_caption_variants",
     "caption_dropout_rate",
+    "masked_loss",
     "gradient_checkpointing",
     "blocks_to_swap",
-    "source_image_dir",
-    "lora_cache_dir",
-    "output_dir",
+    "path_scope",
+    "output_name",
     "path_pattern",
     "drop_lowres_images",
     "min_pixels",
@@ -435,6 +440,17 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
     for k, v in meth.items():
         merged[k] = v
         origin[k] = "method"
+
+    # GUI-only path scope is stored under [variant] so CLI config loading strips
+    # it with the rest of the variant metadata. The Config tab surfaces it as a
+    # normal field and expands it into concrete paths at submit time.
+    meta = meth.get("variant")
+    if isinstance(meta, dict) and isinstance(meta.get("path_scope"), str):
+        merged["path_scope"] = meta["path_scope"]
+        origin["path_scope"] = "method"
+    elif "path_scope" not in merged:
+        merged["path_scope"] = ""
+        origin["path_scope"] = "base"
 
     # Inject the `use_valid` virtual key derived from the [[datasets]] block.
     # The variant file may shallow-override base.toml's validation_split_num /

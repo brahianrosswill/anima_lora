@@ -135,6 +135,7 @@ def cache_text_embeddings(
     device: torch.device,
     cache_dir: Path | None = None,
     recursive: bool = False,
+    path_pattern: str | None = None,
     batch_size: int = 16,
     caption_shuffle_variants: int = 0,
     caption_tag_dropout_rate: float = 0.0,
@@ -161,7 +162,7 @@ def cache_text_embeddings(
     :func:`generate_caption_variants` to exempt matching tags from tag-dropout
     (e.g. colorize copyright tags). No-op unless ``caption_shuffle_variants > 0``.
     """
-    candidates = walk_images(data_dir, recursive=recursive)
+    candidates = walk_images(data_dir, recursive=recursive, pattern=path_pattern)
 
     entries: list[tuple[Path, str]] = []
     skipped_small = 0

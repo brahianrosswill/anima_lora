@@ -121,6 +121,7 @@ def cache_latents(
     *,
     cache_dir: Path | None = None,
     recursive: bool = False,
+    path_pattern: str | None = None,
     batch_size: int = 4,
     progress: ProgressFn | None = None,
     io_workers: int | None = None,
@@ -135,7 +136,7 @@ def cache_latents(
     CPU/IO, so they're farmed to thread pools that overlap the GPU — the GPU no
     longer idles between batches. ``io_workers`` sizes those pools (default
     ``min(8, cpu_count)``). Output is byte-identical to the serial path."""
-    image_files = walk_images(data_dir, recursive=recursive)
+    image_files = walk_images(data_dir, recursive=recursive, pattern=path_pattern)
     reso_groups = group_by_shape(image_files)
     stats = PreprocessStats(seen=len(image_files))
 

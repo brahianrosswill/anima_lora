@@ -45,6 +45,18 @@ def test_walk_images_recursive_same_stem_across_folders_ok(tmp_path: Path) -> No
     assert len(paths) == 2  # same stem in different folders is fine
 
 
+def test_walk_images_path_pattern_filters_relative_paths(tmp_path: Path) -> None:
+    from library.preprocess import walk_images
+
+    _write_image(tmp_path / "charA" / "cover.png", (8, 8))
+    _write_image(tmp_path / "charB" / "cover.png", (8, 8))
+
+    paths = walk_images(tmp_path, recursive=True, pattern="charA/*")
+    assert [p.relative_to(tmp_path).as_posix() for p in paths] == [
+        "charA/cover.png"
+    ]
+
+
 def test_walk_images_collision_within_folder_raises(tmp_path: Path) -> None:
     from library.preprocess import walk_images
 
@@ -83,6 +95,25 @@ def test_partition_cached(tmp_path: Path) -> None:
     pending, skipped = partition_cached(imgs, lambda p: tmp_path / f"{p.stem}.cached")
     assert skipped == 1
     assert [p.name for p in pending] == ["img0.png", "img2.png"]
+
+
+def test_count_preprocess_caches_path_pattern_filters_nested_caches(
+    tmp_path: Path,
+) -> None:
+    from gui.dialogs import count_preprocess_caches
+
+    (tmp_path / "charA").mkdir()
+    (tmp_path / "charB").mkdir()
+    (tmp_path / "charA" / "cover_1024x1024_anima.npz").touch()
+    (tmp_path / "charA" / "cover_anima_te.safetensors").touch()
+    (tmp_path / "charB" / "cover_1024x1024_anima.npz").touch()
+    (tmp_path / "charB" / "cover_anima_te.safetensors").touch()
+
+    assert count_preprocess_caches(tmp_path, "charA/*") == {
+        "latents": 1,
+        "te": 1,
+        "pe": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +186,32 @@ def test_resize_to_buckets_writes_and_mirrors_layout(tmp_path: Path) -> None:
     # Output matches a real bucket resolution.
     with Image.open(out_a) as im:
         assert (im.width, im.height) in bucket_counts
+
+
+def test_resize_to_buckets_path_pattern_preserves_filtered_layout(
+    tmp_path: Path,
+) -> None:
+    from library.preprocess import resize_to_buckets
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    _write_image(src / "charA" / "a.png", (900, 900))
+    _write_image(src / "charB" / "b.png", (900, 900))
+
+    stats, bucket_counts = resize_to_buckets(
+        src,
+        dst,
+        recursive=True,
+        path_pattern="charA/*",
+        min_pixels=0,
+        workers=1,
+        verbose=False,
+    )
+    assert stats.seen == 1
+    assert stats.written == 1
+    assert sum(bucket_counts.values()) == 1
+    assert (dst / "charA" / "a.png").exists()
+    assert not (dst / "charB" / "b.png").exists()
 
 
 def test_resize_to_buckets_default_tier_does_not_upscale_to_multitier(

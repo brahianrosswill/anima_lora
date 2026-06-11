@@ -70,6 +70,7 @@ from gui.validation import apply_validation_choice
 from gui.widgets import (
     LazyTabMixin,
     ScaledImageLabel,
+    _SamplePromptsWidget,
     _no_wheel,
     _read,
     _TargetResWidget,
@@ -87,6 +88,7 @@ __all__ = [
     "CUSTOM_VARIANTS_DIR",
     "LazyTabMixin",
     "ScaledImageLabel",
+    "_SamplePromptsWidget",
     "_TargetResWidget",
     "_no_wheel",
     "_read",

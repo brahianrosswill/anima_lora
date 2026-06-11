@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 
 from gui._paths import ROOT
 from gui.i18n import t
+from library.datasets.subsets import filter_paths_by_glob
 
 
 def confirm_resumable_checkpoint(parent: QWidget | None, merged: dict) -> bool:
@@ -70,7 +71,9 @@ _TE_SUFFIX = "_anima_te.safetensors"
 _PE_SUFFIX = "_anima_pe.safetensors"
 
 
-def count_preprocess_caches(cache_dir: Path) -> dict[str, int]:
+def count_preprocess_caches(
+    cache_dir: Path, path_pattern: str | None = None
+) -> dict[str, int]:
     """Count existing latent / TE / PE cache sidecars under a cache directory.
 
     Returns zeros (without raising) if the directory does not exist. Used to
@@ -83,9 +86,15 @@ def count_preprocess_caches(cache_dir: Path) -> dict[str, int]:
     out = {"latents": 0, "te": 0, "pe": 0}
     if not cache_dir.is_dir():
         return out
-    for p in cache_dir.rglob("*"):
-        if not p.is_file():
-            continue
+    paths = [p for p in cache_dir.rglob("*") if p.is_file()]
+    if path_pattern and path_pattern != "*":
+        keep = filter_paths_by_glob(
+            [str(p) for p in paths],
+            str(cache_dir),
+            path_pattern,
+        )
+        paths = [p for p, k in zip(paths, keep) if k]
+    for p in paths:
         n = p.name
         if n.endswith(_TE_SUFFIX):
             out["te"] += 1

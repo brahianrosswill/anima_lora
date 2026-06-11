@@ -100,6 +100,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--path_pattern",
+        "--path-pattern",
+        dest="path_pattern",
+        default="*",
+        help=(
+            "Only preprocess images whose path relative to --src matches this "
+            "fnmatch glob. Use | to separate alternatives. Default: *"
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help=(
@@ -136,6 +146,7 @@ def main() -> None:
         min_pixels=args.min_pixels,
         copy_captions=not args.no_copy_captions,
         recursive=args.recursive,
+        path_pattern=args.path_pattern,
         overwrite=args.overwrite,
         progress=tqdm_progress("Resizing"),
     )

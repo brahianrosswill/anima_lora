@@ -308,7 +308,7 @@ class MainWindow(QMainWindow):
         self._tb_tab = TensorBoardTab()
 
         # Built before ConfigTab so the Train auto-chain can flush this tab's
-        # target_res tiers to preprocess.toml right before it preprocesses.
+        # GUI preprocess settings to the selected method before it preprocesses.
         self._preprocess_tab = PreprocessingTab()
 
         self.tabs = QTabWidget()

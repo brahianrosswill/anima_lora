@@ -25,9 +25,17 @@ STRINGS: dict[str, str] = {
     "preprocess_image_prep": "Image preprocessing (resize / filter)",
     "preprocess_source_image_dir": "Source image dir:",
     "preprocess_source_image_dir_tip": (
-        "Folder of raw training images (with .txt caption sidecars), resized "
-        "into post_image_dataset/ by the caching step. Written to "
-        "configs/preprocess.toml."
+        "Effective raw image root for the selected GUI method. It follows the "
+        "method paths and path_scope; use the preprocess path filter below to "
+        "run only part of this tree without changing where files are stored."
+    ),
+    "preprocess_path_pattern": "Preprocess path filter:",
+    "preprocess_path_pattern_tip": (
+        "path_scope is applied first to choose the effective source image root. "
+        "For example, path_scope=data_group1 makes the preprocess root "
+        "image_dataset/data_group1. This filter is then matched relative to "
+        "that root. '*' (or blank) processes everything, '1/*' processes only "
+        "data_group1/1, and '1/*|2/*' processes both subfolders."
     ),
     "preprocess_drop_lowres": "Drop low-resolution images",
     "preprocess_drop_lowres_tip": (
@@ -125,10 +133,10 @@ STRINGS: dict[str, str] = {
     "preprocess_status_resized": "Resized images: {n}",
     "preprocess_status_caches": "Caches — latents: {lat}, text: {te}, PE: {pe}",
     "preprocess_status_masks": "Masks: {masks}",
-    "preprocess_status_no_resized": "No resized images yet — run Preprocess in the Training Config tab first.",
+    "preprocess_status_no_resized": "No resized images yet.",
     "preprocess_log_placeholder": "Preprocessing output will appear here...",
     "preprocess_save_settings": "Save",
-    "preprocess_save_settings_tip": "Persist these settings (writes configs/preprocess.toml + configs/sam_mask.yaml + GUI settings).",
+    "preprocess_save_settings_tip": "Persist these settings (writes the selected GUI method + configs/sam_mask.yaml + GUI settings).",
     "preprocess_settings_saved": "Preprocessing settings saved.",
     "preprocess_invalid_float": "Invalid number for {field}: {value}",
     "preprocess_already_running": "A preprocessing step is already running.",
@@ -138,7 +146,9 @@ STRINGS: dict[str, str] = {
     "save_dirty_tooltip": "Form has unsaved edits. Click Save to write them to the variant file (Train/Preprocess auto-saves first if you skip this).",
     "train": "Train",
     "queue": "Queue",
-    "queue_tooltip": "Add the current variant to the daemon queue without attaching this tab, so you can queue more variants.",
+    "queue_tooltip": "Add the current variant to the daemon queue. Open the menu to choose train-after-preprocess or preprocess only.",
+    "queue_train_preprocess": "Train + Preprocess",
+    "queue_preprocess_only": "Preprocess only",
     "test": "Test",
     "stop": "Stop",
     "log_placeholder": "Training output will appear here...",
@@ -153,7 +163,8 @@ STRINGS: dict[str, str] = {
     "error": "Error",
     "accelerate_not_found": "accelerate not found on PATH",
     "preprocess": "Preprocess",
-    "preprocess_required": "Please run Preprocess before training.",
+    "preprocess_current_tooltip": "Run preprocessing for the current variant using its GUI path scope.",
+    "preprocess_required": "Preprocess will run before training starts.",
     "preprocess_existing_caches_title": "Existing caches will be reused",
     "preprocess_existing_caches_body": (
         "Cache files already exist in:\n  {cache_dir}\n\n"
@@ -177,8 +188,7 @@ STRINGS: dict[str, str] = {
         "Proceed with the existing cache?"
     ),
     "train_autopreprocess_log": (
-        "No preprocessed cache found — running preprocess first, "
-        "then training automatically.\n"
+        "No preprocessed cache found — running preprocess before training starts.\n"
     ),
     "train_preprocessing": "Preprocessing…",
     "no_lora_for_test": "No LoRA in output/ckpt/ to test. Run training first.",
@@ -186,6 +196,43 @@ STRINGS: dict[str, str] = {
     "test_output_empty": "output/tests/ is empty.",
     "sample_output_title": "Latest training samples",
     "sample_output_empty": "No samples yet — they appear under the output dir's sample/ folder as training generates them.",
+    "sample_prompt_col_prompt": "Prompt",
+    "sample_prompt_col_width": "W",
+    "sample_prompt_col_height": "H",
+    "sample_prompt_col_steps": "Steps",
+    "sample_prompt_col_seed": "Seed",
+    "sample_prompt_col_cfg": "CFG",
+    "sample_prompt_col_guidance": "Guidance",
+    "sample_prompt_col_shift": "Shift",
+    "sample_prompt_col_negative": "Negative",
+    "sample_prompt_col_extra": "Extra",
+    "sample_prompt_add": "Add prompt",
+    "sample_prompt_select_all": "Select all",
+    "sample_prompt_remove": "Remove selected",
+    "sample_prompt_remove_confirm_title": "Remove sample prompts",
+    "sample_prompt_remove_confirm_body": "Remove {n} selected sample prompt(s)?",
+    "sample_prompt_expand": "Expand editor",
+    "sample_prompt_collapse": "Collapse editor",
+    "sample_prompt_select": "Select",
+    "sample_prompt_prompt_placeholder": "Prompt text. Line breaks are shown here and saved as spaces.",
+    "sample_prompt_hint": "Blank/default values are not written to the prompt line.",
+    "sample_prompt_default_width": "default 512",
+    "sample_prompt_default_height": "default 512",
+    "sample_prompt_default_steps": "default 30",
+    "sample_prompt_default_seed": "auto seed",
+    "sample_prompt_default_cfg": "default 7.5",
+    "sample_prompt_default_guidance": "default 1.0",
+    "sample_prompt_default_shift": "default 3.0",
+    "sample_prompt_default_negative": "default: none",
+    "sample_prompt_tip_width": "Image width (`--w`). Blank uses train.py default 512.",
+    "sample_prompt_tip_height": "Image height (`--h`). Blank uses train.py default 512.",
+    "sample_prompt_tip_steps": "Sampling steps (`--s`). Blank uses train.py default 30.",
+    "sample_prompt_tip_seed": "Seed (`--d`). Auto seed keeps each prompt comparable across epochs.",
+    "sample_prompt_tip_cfg": "CFG scale (`--l`). Blank uses train.py default 7.5.",
+    "sample_prompt_tip_guidance": "Guidance scale (`--g`). Blank uses train.py default 1.0.",
+    "sample_prompt_tip_shift": "Flow shift (`--fs`) for the sampling sigma schedule. Blank uses train.py default 3.0.",
+    "sample_prompt_tip_negative": "Negative prompt (`--n`) for this sample only.",
+    "sample_prompt_tip_extra": "Additional raw sample arguments, preserved as typed.",
     "finished": "--- Finished (exit code {code}) ---",
     "starting": "Starting… (loading torch / accelerate)",
     # Daemon-backed training (Phase 2 — training survives GUI close)
@@ -193,8 +240,11 @@ STRINGS: dict[str, str] = {
     "daemon_submit_failed": "Could not reach the training daemon: {err}",
     "daemon_queued": "Queued job {job_id} on the training daemon.\n",
     "queue_submitting": "Queueing {variant} on the training daemon…",
+    "queue_submitting_train_preprocess": "Queueing preprocess + training for {variant} on the training daemon…",
+    "queue_submitting_preprocess": "Queueing preprocess for {variant} on the training daemon…",
     "queue_added_train": "Queued {variant} as training job {job_id}.\n",
     "queue_added_preprocess": "Queued {variant} as preprocess job {job_id}; training will chain after it.\n",
+    "queue_added_preprocess_only": "Queued {variant} as preprocess job {job_id}.\n",
     "queue_refresh": "Refresh",
     "queue_stop_selected": "Stop selected",
     "queue_copy_output": "Copy output",

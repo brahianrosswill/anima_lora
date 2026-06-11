@@ -24,9 +24,16 @@ STRINGS: dict[str, str] = {
     "preprocess_image_prep": "이미지 전처리 (리사이즈 / 필터)",
     "preprocess_source_image_dir": "소스 이미지 폴더:",
     "preprocess_source_image_dir_tip": (
-        "원본 학습 이미지가 있는 폴더 (.txt 캡션 사이드카 포함). "
-        "캐싱 단계에서 post_image_dataset/로 리사이즈됩니다. "
-        "configs/preprocess.toml에 저장됩니다."
+        "선택한 GUI method의 실제 원본 이미지 루트입니다. method 경로와 "
+        "path_scope를 따라가며, 저장 위치를 바꾸지 않고 일부만 전처리하려면 "
+        "아래 전처리 경로 필터를 사용하세요."
+    ),
+    "preprocess_path_pattern": "전처리 경로 필터:",
+    "preprocess_path_pattern_tip": (
+        "path_scope가 먼저 소스 이미지 폴더를 정합니다. 예를 들어 path_scope=data_group1이면 "
+        "전처리 루트는 image_dataset/data_group1이 됩니다. 이 필터는 그 루트 기준 상대 경로에 "
+        "적용됩니다. '*'(또는 빈 값)은 전체, '1/*'는 data_group1/1 하위만, "
+        "'1/*|2/*'는 두 하위 폴더를 처리합니다."
     ),
     "preprocess_drop_lowres": "저해상도 이미지 제외",
     "preprocess_drop_lowres_tip": (
@@ -122,10 +129,10 @@ STRINGS: dict[str, str] = {
     "preprocess_status_resized": "리사이즈된 이미지: {n}장",
     "preprocess_status_caches": "캐시 — latents: {lat}, text: {te}, PE: {pe}",
     "preprocess_status_masks": "마스크: {masks}장",
-    "preprocess_status_no_resized": "리사이즈된 이미지가 없습니다 — 학습 설정 탭에서 Preprocess를 먼저 실행하세요.",
+    "preprocess_status_no_resized": "리사이즈된 이미지가 없습니다.",
     "preprocess_log_placeholder": "전처리 출력이 여기에 표시됩니다...",
     "preprocess_save_settings": "저장",
-    "preprocess_save_settings_tip": "이 설정들을 디스크에 저장합니다 (configs/preprocess.toml + configs/sam_mask.yaml + GUI 설정).",
+    "preprocess_save_settings_tip": "이 설정들을 디스크에 저장합니다 (선택한 GUI method + configs/sam_mask.yaml + GUI 설정).",
     "preprocess_settings_saved": "전처리 설정이 저장되었습니다.",
     "preprocess_invalid_float": "{field}에 잘못된 숫자: {value}",
     "preprocess_already_running": "이미 전처리 단계가 실행 중입니다.",
@@ -135,7 +142,9 @@ STRINGS: dict[str, str] = {
     "save_dirty_tooltip": "저장되지 않은 편집이 있습니다. Save를 누르면 variant 파일에 기록됩니다 (학습/전처리 시작 시 자동 저장됨).",
     "train": "학습",
     "queue": "큐 추가",
-    "queue_tooltip": "현재 variant를 이 탭에 연결하지 않고 daemon 큐에 추가합니다. 이후 다른 variant를 계속 큐에 넣을 수 있습니다.",
+    "queue_tooltip": "현재 variant를 daemon 큐에 추가합니다. 펼침 메뉴에서 학습+전처리 또는 전처리만 선택할 수 있습니다.",
+    "queue_train_preprocess": "학습 및 전처리",
+    "queue_preprocess_only": "전처리",
     "test": "테스트",
     "stop": "정지",
     "log_placeholder": "학습 출력이 여기에 표시됩니다...",
@@ -150,7 +159,8 @@ STRINGS: dict[str, str] = {
     "error": "오류",
     "accelerate_not_found": "PATH에서 accelerate를 찾을 수 없습니다",
     "preprocess": "전처리",
-    "preprocess_required": "학습 전에 전처리를 먼저 실행해주세요.",
+    "preprocess_current_tooltip": "현재 variant의 GUI 경로 스코프를 적용해 전처리를 실행합니다.",
+    "preprocess_required": "학습을 시작하면 전처리가 먼저 실행됩니다.",
     "preprocess_existing_caches_title": "기존 캐시를 그대로 재사용합니다",
     "preprocess_existing_caches_body": (
         "다음 경로에 이미 캐시 파일이 있습니다:\n  {cache_dir}\n\n"
@@ -174,7 +184,7 @@ STRINGS: dict[str, str] = {
         "기존 캐시로 학습을 진행할까요?"
     ),
     "train_autopreprocess_log": (
-        "전처리 캐시가 없어 전처리를 먼저 실행한 뒤 자동으로 학습을 시작합니다.\n"
+        "전처리 캐시가 없어 학습 시작 전에 전처리를 먼저 실행합니다.\n"
     ),
     "train_preprocessing": "전처리 중…",
     "no_lora_for_test": "테스트할 LoRA가 output/ckpt/에 없습니다. 먼저 학습을 실행하세요.",
@@ -182,11 +192,51 @@ STRINGS: dict[str, str] = {
     "test_output_empty": "output/tests/가 비어 있습니다.",
     "sample_output_title": "최신 학습 샘플",
     "sample_output_empty": "아직 샘플이 없습니다 — 학습이 생성하면 출력 디렉터리의 sample/ 폴더에 나타납니다.",
+    "sample_prompt_col_prompt": "프롬프트",
+    "sample_prompt_col_width": "W",
+    "sample_prompt_col_height": "H",
+    "sample_prompt_col_steps": "스텝",
+    "sample_prompt_col_seed": "시드",
+    "sample_prompt_col_cfg": "CFG",
+    "sample_prompt_col_guidance": "Guidance",
+    "sample_prompt_col_shift": "Shift",
+    "sample_prompt_col_negative": "네거티브",
+    "sample_prompt_col_extra": "추가 옵션",
+    "sample_prompt_add": "프롬프트 추가",
+    "sample_prompt_select_all": "전체 선택",
+    "sample_prompt_remove": "선택 삭제",
+    "sample_prompt_remove_confirm_title": "샘플 프롬프트 삭제",
+    "sample_prompt_remove_confirm_body": "선택한 샘플 프롬프트 {n}개를 삭제할까요?",
+    "sample_prompt_expand": "입력창 키우기",
+    "sample_prompt_collapse": "입력창 줄이기",
+    "sample_prompt_select": "선택",
+    "sample_prompt_prompt_placeholder": "프롬프트 본문. 줄바꿈은 여기서 보이고 저장 시 공백으로 정리됩니다.",
+    "sample_prompt_hint": "기본값으로 표시된 항목은 프롬프트 줄에 저장하지 않습니다.",
+    "sample_prompt_default_width": "기본 512",
+    "sample_prompt_default_height": "기본 512",
+    "sample_prompt_default_steps": "기본 30",
+    "sample_prompt_default_seed": "자동 시드",
+    "sample_prompt_default_cfg": "기본 7.5",
+    "sample_prompt_default_guidance": "기본 1.0",
+    "sample_prompt_default_shift": "기본 3.0",
+    "sample_prompt_default_negative": "기본: 없음",
+    "sample_prompt_tip_width": "이미지 폭(`--w`)입니다. 비우면 train.py 기본값 512를 사용합니다.",
+    "sample_prompt_tip_height": "이미지 높이(`--h`)입니다. 비우면 train.py 기본값 512를 사용합니다.",
+    "sample_prompt_tip_steps": "샘플링 스텝(`--s`)입니다. 비우면 train.py 기본값 30을 사용합니다.",
+    "sample_prompt_tip_seed": "시드(`--d`)입니다. 자동 시드는 에폭 간 비교가 가능하도록 프롬프트별 기준을 유지합니다.",
+    "sample_prompt_tip_cfg": "CFG scale(`--l`)입니다. 비우면 train.py 기본값 7.5를 사용합니다.",
+    "sample_prompt_tip_guidance": "Guidance scale(`--g`)입니다. 비우면 train.py 기본값 1.0을 사용합니다.",
+    "sample_prompt_tip_shift": "샘플링 시그마 스케줄의 flow shift(`--fs`)입니다. 비우면 train.py 기본값 3.0을 사용합니다.",
+    "sample_prompt_tip_negative": "이 샘플에만 적용할 네거티브 프롬프트(`--n`)입니다.",
+    "sample_prompt_tip_extra": "추가 sample 인자입니다. 입력한 원문을 그대로 보존합니다.",
     "finished": "--- 완료 (종료 코드 {code}) ---",
     "starting": "시작 중… (torch / accelerate 로딩)",
     "queue_submitting": "{variant}을(를) 학습 daemon 큐에 추가 중…",
+    "queue_submitting_train_preprocess": "{variant}의 전처리와 학습을 daemon 큐에 추가 중…",
+    "queue_submitting_preprocess": "{variant}의 전처리를 daemon 큐에 추가 중…",
     "queue_added_train": "{variant}을(를) 학습 job {job_id}(으)로 큐에 추가했습니다.\n",
     "queue_added_preprocess": "{variant}을(를) 전처리 job {job_id}(으)로 큐에 추가했습니다. 완료 후 학습이 이어집니다.\n",
+    "queue_added_preprocess_only": "{variant}을(를) 전처리 job {job_id}(으)로 큐에 추가했습니다.\n",
     "queue_refresh": "새로고침",
     "queue_stop_selected": "선택 항목 정지",
     "queue_copy_output": "출력 복사",

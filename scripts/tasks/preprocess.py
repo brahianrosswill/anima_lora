@@ -77,6 +77,27 @@ def _target_res_args(extra) -> list[str]:
     return ["--target_res", *(str(e) for e in edges)]
 
 
+def _preprocess_path_pattern_args(extra) -> list[str]:
+    """``--path_pattern <glob>`` for GUI preprocess subset filtering.
+
+    CLI ARGS wins when it already carries a path-pattern flag. GUI submits pass
+    ``PREPROCESS_PATH_PATTERN`` so training can keep using the method's regular
+    ``path_pattern`` independently.
+    """
+    if "--path_pattern" in extra or "--path-pattern" in extra:
+        return []
+
+    from ._common import _path_overrides
+
+    raw = os.environ.get("PREPROCESS_PATH_PATTERN")
+    if raw is None:
+        raw = _path_overrides().get("preprocess_path_pattern")
+    pattern = str(raw or "").strip()
+    if not pattern or pattern == "*":
+        return []
+    return ["--path_pattern", pattern]
+
+
 def _pop_target_res(extra) -> list[str]:
     """Strip ``--target_res E1 E2 …`` (a resize-only flag) from ``extra``.
 
@@ -132,6 +153,7 @@ def _resolve_lowres_filter(extra) -> tuple[list[str], list[str]]:
 def cmd_preprocess_resize(extra):
     mp_args, extra = _resolve_lowres_filter(extra)
     tr_args = _target_res_args(extra)
+    pp_args = _preprocess_path_pattern_args(extra)
     run(
         [
             PY,
@@ -144,6 +166,7 @@ def cmd_preprocess_resize(extra):
             "--recursive",
             *mp_args,
             *tr_args,
+            *pp_args,
             *extra,
         ]
     )
@@ -182,6 +205,7 @@ def cmd_preprocess_reconcile(extra):
 
 
 def cmd_preprocess_vae(extra):
+    pp_args = _preprocess_path_pattern_args(extra)
     run(
         [
             PY,
@@ -197,6 +221,7 @@ def cmd_preprocess_vae(extra):
             "--chunk_size",
             "64",
             "--recursive",
+            *pp_args,
             *extra,
         ]
     )
@@ -210,6 +235,7 @@ def cmd_preprocess_te(extra):
     shuffle_variants = os.environ.get("CAPTION_SHUFFLE_VARIANTS", "4")
     tag_dropout_rate = os.environ.get("CAPTION_TAG_DROPOUT_RATE", "0.1")
     mp_args, extra = _resolve_lowres_filter(extra)
+    pp_args = _preprocess_path_pattern_args(extra)
     run(
         [
             PY,
@@ -228,6 +254,7 @@ def cmd_preprocess_te(extra):
             tag_dropout_rate,
             "--recursive",
             *mp_args,
+            *pp_args,
             *extra,
         ]
     )
@@ -297,12 +324,14 @@ def cmd_caption_index(extra):
     distinct-pair sampler, artist balancing, and dataset analytics. Regenerate
     when the dataset or vocab changes.
     """
+    pp_args = _preprocess_path_pattern_args(extra)
     run(
         [
             PY,
             "scripts/preprocess/build_caption_index.py",
             "--src",
             _path("source_image_dir", "image_dataset"),
+            *pp_args,
             *extra,
         ]
     )

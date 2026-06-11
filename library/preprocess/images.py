@@ -170,6 +170,7 @@ def resize_to_buckets(
     min_pixels: int = 500_000,
     copy_captions: bool = True,
     recursive: bool = False,
+    path_pattern: str | None = None,
     verbose: bool = True,
     overwrite: bool = False,
     progress: ProgressFn | None = None,
@@ -198,7 +199,7 @@ def resize_to_buckets(
 
     # walk_images enforces per-subfolder stem uniqueness (same-folder stem
     # collisions would collide the resized output).
-    image_files = walk_images(src, recursive=recursive)
+    image_files = walk_images(src, recursive=recursive, pattern=path_pattern)
     stats = PreprocessStats(seen=len(image_files))
 
     if min_pixels > 0:

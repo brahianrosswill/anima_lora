@@ -25,9 +25,17 @@ STRINGS: dict[str, str] = {
     "preprocess_image_prep": "画像前処理 (リサイズ / フィルター)",
     "preprocess_source_image_dir": "ソース画像フォルダー:",
     "preprocess_source_image_dir_tip": (
-        "学習用元画像が入ったフォルダー (.txt キャプションサイドカーを含む)。"
-        "キャッシュステップで post_image_dataset/ にリサイズされます。"
-        "configs/preprocess.toml に保存されます。"
+        "選択中の GUI method で実際に使われる元画像ルートです。"
+        "method のパスと path_scope に従います。保存先を変えずに一部だけ"
+        "前処理する場合は下の前処理パスフィルターを使用してください。"
+    ),
+    "preprocess_path_pattern": "前処理パスフィルター:",
+    "preprocess_path_pattern_tip": (
+        "path_scope が先に実効ソース画像ルートを決めます。"
+        "たとえば path_scope=data_group1 の場合、前処理ルートは "
+        "image_dataset/data_group1 になります。このフィルターはそのルートからの"
+        "相対パスに適用されます。'*'(または空欄) は全件、'1/*' は "
+        "data_group1/1 のみ、'1/*|2/*' は両方のサブフォルダーを処理します。"
     ),
     "preprocess_drop_lowres": "低解像度画像を除外",
     "preprocess_drop_lowres_tip": (
@@ -126,10 +134,10 @@ STRINGS: dict[str, str] = {
     "preprocess_status_resized": "リサイズ済み画像: {n}",
     "preprocess_status_caches": "キャッシュ — 潜在変数: {lat}, テキスト: {te}, PE: {pe}",
     "preprocess_status_masks": "マスク: {masks}",
-    "preprocess_status_no_resized": "リサイズ済み画像がありません — まず学習設定タブの前処理を実行してください。",
+    "preprocess_status_no_resized": "リサイズ済み画像がありません。",
     "preprocess_log_placeholder": "前処理の出力がここに表示されます...",
     "preprocess_save_settings": "保存",
-    "preprocess_save_settings_tip": "設定を保存します (configs/preprocess.toml + configs/sam_mask.yaml + GUI設定に書き込みます)。",
+    "preprocess_save_settings_tip": "設定を保存します (選択中の GUI method + configs/sam_mask.yaml + GUI設定に書き込みます)。",
     "preprocess_settings_saved": "前処理設定を保存しました。",
     "preprocess_invalid_float": "{field} の値が不正です: {value}",
     "preprocess_already_running": "前処理ステップが既に実行中です。",
@@ -154,7 +162,7 @@ STRINGS: dict[str, str] = {
     "error": "エラー",
     "accelerate_not_found": "PATH に accelerate が見つかりません",
     "preprocess": "前処理",
-    "preprocess_required": "学習前に前処理を実行してください。",
+    "preprocess_required": "学習開始前に前処理が先に実行されます。",
     "preprocess_existing_caches_title": "既存のキャッシュを再利用します",
     "preprocess_existing_caches_body": (
         "次のディレクトリにキャッシュファイルが既に存在します:\n  {cache_dir}\n\n"
@@ -176,7 +184,7 @@ STRINGS: dict[str, str] = {
         "既存のキャッシュで続行しますか?"
     ),
     "train_autopreprocess_log": (
-        "前処理済みキャッシュが見つかりません — 前処理を実行してから自動的に学習を開始します。\n"
+        "前処理済みキャッシュが見つかりません — 学習開始前に前処理を先に実行します。\n"
     ),
     "train_preprocessing": "前処理中…",
     "no_lora_for_test": "output/ckpt/ に LoRA が見つかりません。先に学習を実行してください。",
