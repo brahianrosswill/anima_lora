@@ -134,7 +134,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "리사이즈된 이미지가 없습니다.",
     "preprocess_log_placeholder": "전처리 출력이 여기에 표시됩니다...",
     "preprocess_save_settings": "저장",
-    "preprocess_save_settings_tip": "이 설정들을 디스크에 저장합니다 (선택한 GUI method + configs/sam_mask.yaml + GUI 설정).",
+    "preprocess_save_settings_tip": "이 설정들을 선택한 GUI method 프로필에 저장합니다. 마스킹 실행 시에는 현재 프로필의 마스크 설정이 작업에 함께 전달됩니다.",
     "preprocess_settings_saved": "전처리 설정이 저장되었습니다.",
     "preprocess_invalid_float": "{field}에 잘못된 숫자: {value}",
     "preprocess_already_running": "이미 전처리 단계가 실행 중입니다.",

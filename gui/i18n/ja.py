@@ -139,7 +139,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "リサイズ済み画像がありません。",
     "preprocess_log_placeholder": "前処理の出力がここに表示されます...",
     "preprocess_save_settings": "保存",
-    "preprocess_save_settings_tip": "設定を保存します (選択中の GUI method + configs/sam_mask.yaml + GUI設定に書き込みます)。",
+    "preprocess_save_settings_tip": "設定を選択中の GUI method プロファイルに保存します。マスキング実行時は現在のプロファイルのマスク設定がジョブに渡されます。",
     "preprocess_settings_saved": "前処理設定を保存しました。",
     "preprocess_invalid_float": "{field} の値が不正です: {value}",
     "preprocess_already_running": "前処理ステップが既に実行中です。",

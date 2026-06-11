@@ -138,7 +138,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "No resized images yet.",
     "preprocess_log_placeholder": "Preprocessing output will appear here...",
     "preprocess_save_settings": "Save",
-    "preprocess_save_settings_tip": "Persist these settings (writes the selected GUI method + configs/sam_mask.yaml + GUI settings).",
+    "preprocess_save_settings_tip": "Persist these settings to the selected GUI method profile. Mask runs receive the current profile's mask settings with the job.",
     "preprocess_settings_saved": "Preprocessing settings saved.",
     "preprocess_invalid_float": "Invalid number for {field}: {value}",
     "preprocess_already_running": "A preprocessing step is already running.",

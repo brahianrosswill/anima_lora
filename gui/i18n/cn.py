@@ -132,7 +132,7 @@ STRINGS: dict[str, str] = {
     "preprocess_status_no_resized": "尚无已调整大小的图像。",
     "preprocess_log_placeholder": "预处理输出将显示在此处……",
     "preprocess_save_settings": "保存",
-    "preprocess_save_settings_tip": "持久化这些设置 (写入所选 GUI method + configs/sam_mask.yaml + GUI 设置)。",
+    "preprocess_save_settings_tip": "将这些设置保存到所选 GUI method 配置。运行遮罩时，当前配置的遮罩设置会随任务一起提交。",
     "preprocess_settings_saved": "预处理设置已保存。",
     "preprocess_invalid_float": "{field} 的数字无效: {value}",
     "preprocess_already_running": "已有预处理步骤在运行。",

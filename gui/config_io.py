@@ -238,10 +238,11 @@ _GROUPS = {
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
 # Preprocess-time knobs (target_res, drop_lowres_images, min_pixels) are owned by
-# the Preprocess tab and seeded into the training config from
-# configs/preprocess.toml — target_res is dual-use (train.py reads it only to
-# size the compile cache). Hide them from the config form to keep a single
-# source of truth and avoid the two surfaces silently drifting.
+# the Preprocess tab. The tab persists GUI-profile overrides in the selected
+# gui-method variant metadata and uses configs/preprocess.toml only as the CLI
+# default/fallback. target_res is dual-use (train.py reads it only to size the
+# compile cache). Hide them from the config form to keep a single source of truth
+# and avoid the two surfaces silently drifting.
 _SKIP = {
     "base_config",
     "dataset_config",
