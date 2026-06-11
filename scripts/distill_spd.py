@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 from pathlib import Path
 
 
@@ -52,14 +53,16 @@ from library.training.schedulers import make_warmup_cosine_scheduler  # noqa: E4
 from networks.lora_anima.factory import create_network  # noqa: E402
 from networks.lora_save import save_network_weights  # noqa: E402
 from networks.spd import (  # noqa: E402
+    SpdSnrGate,
     _snap,
     dct_lowpass_init,
+    measure_dct_power_profile,
     spd_rollout_to_stage,
     spd_schedule_bands,
     spd_stage_target,
     spectral_expand,
 )
-from library.io.cache import get_latent_resolution  # noqa: E402
+from library.io.cache import get_latent_resolution, load_cached_latents  # noqa: E402
 
 try:
     import tomllib
@@ -281,6 +284,44 @@ def main():
         help="flow_shift for the rollout σ schedule — MUST match the deployed SPD "
         "sampler. Overrides schedule.flow_shift (default 1.0).",
     )
+    # --- SNR-gated (information-aware) loss ---------------------------------------
+    # Plain per-sample velocity MSE supervises every frequency band at every σ —
+    # including bands whose clean coefficient is statistically unrecoverable from
+    # x_t (post-expansion HF is fresh noise). The MSE-optimal response there is
+    # dataset-mean detail, i.e. learned HF attenuation ("looks fast, blurry").
+    # The gate weights the DCT-domain error by the per-band recoverable fraction
+    # (paper Prop. 1 / Eq. 15 fed back into the loss; see SpdSnrGate).
+    parser.add_argument(
+        "--snr_gate",
+        default=None,
+        action=argparse.BooleanOptionalAction,
+        help="Weight the velocity loss per DCT band by SNR_w(t) so only bands "
+        "the input determines are supervised. Sentinel None -> TOML "
+        "(snr_gate.enabled). Validation uses the same gated loss, so best-ckpt "
+        "selection no longer rewards HF hedging.",
+    )
+    parser.add_argument(
+        "--snr_gate_mode",
+        type=str,
+        default=None,
+        choices=["soft", "hard"],
+        help="soft = w=SNR/(1+SNR) (recoverable-variance fraction); hard = "
+        "binary 1[t <= t_w] at the Prop.-1 delta-activation time.",
+    )
+    parser.add_argument(
+        "--snr_gate_delta",
+        type=float,
+        default=-1.0,
+        help="Error tolerance delta for the hard gate's activation time "
+        "(paper default 0.01). Ignored in soft mode.",
+    )
+    parser.add_argument(
+        "--snr_gate_profile_n",
+        type=int,
+        default=-1,
+        help="Training latents sampled at startup to measure the per-frequency "
+        "power profile P_w the gate is built from.",
+    )
     parser.add_argument(
         "--dry_run",
         action="store_true",
@@ -402,6 +443,17 @@ def main():
     )
     onpolicy_ratio = float(pick(args.onpolicy_ratio, "onpolicy.ratio", 1.0))
     rollout_steps = int(pick(args.rollout_steps, "onpolicy.rollout_steps", 12))
+
+    # SNR-gated loss config.
+    snr_gate_enabled = bool(
+        args.snr_gate
+        if args.snr_gate is not None
+        else _flatten(cfg, "snr_gate.enabled", False)
+    )
+    snr_gate_mode = pick(args.snr_gate_mode, "snr_gate.mode", "soft")
+    snr_gate_delta = float(pick(args.snr_gate_delta, "snr_gate.delta", 0.01))
+    snr_gate_profile_n = int(pick(args.snr_gate_profile_n, "snr_gate.profile_n", 64))
+    snr_gate_n_bins = int(_flatten(cfg, "snr_gate.n_bins", 128))
     if onpolicy and len(stages) < 2:
         logger.warning(
             "onpolicy set but schedule has one stage → no prefix to roll; ignoring."
@@ -538,6 +590,34 @@ def main():
                 break
         logger.info("Dry run OK: stage-target construction + collation clean.")
         return
+
+    # --- SNR gate: measure P_w from the train latents, build the loss gate ---
+    # Orthonormal-DCT per-coefficient power, radially binned — measured rather
+    # than power-law-fitted (anime latents carry line-art HF a 2-param fit
+    # smooths over). Train split only; the profile is a dataset statistic, not
+    # a per-image quantity, so a small sample suffices.
+    snr_gate = None
+    if snr_gate_enabled:
+        prof_rng = random.Random(seed + 31)
+        prof_paths = [npz for (npz, _te) in dataset.samples]
+        prof_rng.shuffle(prof_paths)
+        prof_paths = prof_paths[: max(1, snr_gate_profile_n)]
+        profile = measure_dct_power_profile(
+            (load_cached_latents(p)[0].to(device, torch.float32) for p in prof_paths),
+            n_bins=snr_gate_n_bins,
+        )
+        snr_gate = SpdSnrGate(profile, mode=snr_gate_mode, delta=snr_gate_delta)
+        logger.info(
+            "SNR gate ON (mode=%s%s): P_w profile from %d latents, %d bins; "
+            "P[lowest bin]=%.3g, P[median bin]=%.3g, P[last bin]=%.3g",
+            snr_gate_mode,
+            f", delta={snr_gate_delta}" if snr_gate_mode == "hard" else "",
+            len(prof_paths),
+            snr_gate_n_bins,
+            float(profile[0]),
+            float(profile[snr_gate_n_bins // 2]),
+            float(profile[-1]),
+        )
 
     # --- Load DiT (frozen) ---
     logger.info("Loading DiT model...")
@@ -743,6 +823,8 @@ def main():
                     "val_interval": val_interval,
                     "n_val_sigmas": n_val_sigmas,
                     "ema_decay": ema_decay,
+                    "snr_gate": snr_gate_mode if snr_gate is not None else "off",
+                    "snr_gate_delta": snr_gate_delta,
                 }.items()
             ),
         )
@@ -776,6 +858,8 @@ def main():
                 "ss_spd_step": str(step),
                 "ss_spd_onpolicy": str(onpolicy),
                 "ss_spd_flow_shift": str(flow_shift),
+                "ss_spd_snr_gate": snr_gate_mode if snr_gate is not None else "off",
+                "ss_spd_snr_gate_delta": str(snr_gate_delta),
             },
             save_variant="standard",
         )
@@ -890,6 +974,8 @@ def main():
     acc_loss = torch.zeros((), device=device)  # Σ step-mean loss
     acc_loss_stage = torch.zeros(n_stages, device=device)  # Σ micro-loss by stage
     acc_stage_cnt = torch.zeros(n_stages, device=device)  # micro-steps by stage
+    acc_gate_w = torch.zeros((), device=device)  # Σ mean gate weight (gate on)
+    acc_ungated = torch.zeros((), device=device)  # Σ plain-MSE micro-loss (gate on)
 
     # Fixed RNG for validation: reseeded each eval so the ε field (and hence the
     # analytic target) is identical across checkpoints → val/loss is a pure
@@ -942,9 +1028,18 @@ def main():
                         )
                         x_t = renoise(x0_si, t, eps_si)
                         pred = _forward_dit(x_t, t, crossattn_emb)
-                        sums[stage_idx] += nn.functional.mse_loss(
-                            pred.float(), v_target
-                        )
+                        if snr_gate is not None:
+                            v_loss, _ = snr_gate.gated_mse(
+                                pred,
+                                v_target,
+                                t,
+                                (int(x0_full.shape[-2]), int(x0_full.shape[-1])),
+                            )
+                            sums[stage_idx] += v_loss
+                        else:
+                            sums[stage_idx] += nn.functional.mse_loss(
+                                pred.float(), v_target
+                            )
                         cnts[stage_idx] += 1
         overall = sums.sum() / cnts.sum().clamp(min=1)
         return overall, sums / cnts.clamp(min=1), cnts
@@ -1014,7 +1109,17 @@ def main():
         # compile_blocks above, which traces one graph per (stage × bucket) shape
         # keyed on the real seq_len — nothing per-step to set here.
         pred = _forward_dit(x_t, t, crossattn_emb)
-        loss = nn.functional.mse_loss(pred.float(), v_target)
+        if snr_gate is not None:
+            # Information-aware loss: DCT-domain error weighted by the per-band
+            # recoverable fraction at this t. The plain MSE is kept (detached)
+            # for the train/loss_ungated comparison curve.
+            loss, gate_w = snr_gate.gated_mse(
+                pred, v_target, t, (int(x0_full.shape[-2]), int(x0_full.shape[-1]))
+            )
+            acc_gate_w.add_(gate_w)
+            acc_ungated.add_(nn.functional.mse_loss(pred.detach().float(), v_target))
+        else:
+            loss = nn.functional.mse_loss(pred.float(), v_target)
         # Scale so accumulated grads are the *mean* over micro-steps (matches a
         # true batch); LR/grad_clip semantics stay invariant to grad_accum.
         (loss / grad_accum).backward()
@@ -1060,18 +1165,22 @@ def main():
                         down_sq = down_sq + s
             # One CUDA sync per log boundary: stack every scalar, read once.
             stage_means = acc_loss_stage / acc_stage_cnt.clamp(min=1)
+            n_micro = log_interval * grad_accum  # micro-steps per log interval
             packed = torch.cat(
                 [
                     (acc_loss / log_interval).reshape(1),
                     up_sq.sqrt().reshape(1),
                     down_sq.sqrt().reshape(1),
+                    (acc_gate_w / n_micro).reshape(1),
+                    (acc_ungated / n_micro).reshape(1),
                     stage_means,
                     acc_stage_cnt,
                 ]
             ).tolist()
             avg, up_norm, down_norm = packed[0], packed[1], packed[2]
-            stage_vals = packed[3 : 3 + n_stages]
-            stage_cnts = packed[3 + n_stages : 3 + 2 * n_stages]
+            gate_w_mean, ungated_mean = packed[3], packed[4]
+            stage_vals = packed[5 : 5 + n_stages]
+            stage_cnts = packed[5 + n_stages : 5 + 2 * n_stages]
             cur_lr = scheduler.get_last_lr()[0]  # CPU-side; no sync
             progress.set_postfix(
                 loss=f"{avg:.5f}",
@@ -1084,6 +1193,11 @@ def main():
                 writer.add_scalar("train/lr", cur_lr, step + 1)
                 writer.add_scalar("train/lora_up_norm", up_norm, step + 1)
                 writer.add_scalar("train/lora_down_norm", down_norm, step + 1)
+                if snr_gate is not None:
+                    # Effective supervised fraction + the plain MSE the gated
+                    # loss replaced (diverging curves = the gate is doing work).
+                    writer.add_scalar("train/gate_w", gate_w_mean, step + 1)
+                    writer.add_scalar("train/loss_ungated", ungated_mean, step + 1)
                 # Per-stage mean loss over the interval (only stages touched).
                 for si in range(n_stages):
                     if stage_cnts[si] > 0:
@@ -1093,6 +1207,8 @@ def main():
             acc_loss.zero_()
             acc_loss_stage.zero_()
             acc_stage_cnt.zero_()
+            acc_gate_w.zero_()
+            acc_ungated.zero_()
 
         # --- Held-out analytic-MSE validation (CMMD-free overfit signal) ---
         improved = False

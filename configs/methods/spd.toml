@@ -12,7 +12,7 @@
 # shape-agnostic; only the learned behavior is coupled to the schedule below,
 # so it is snapshotted into the safetensors metadata (R2).
 
-output_name = "anima_spd_16k_scheduled"
+output_name = "anima_spd_snrgate"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -75,6 +75,23 @@ ratio = 1.0
 # Euler steps in the no-grad prefix rollout. Fewer than deploy is fine (only a
 # plausible on-policy state is needed) and keeps the extra forwards cheap.
 rollout_steps = 18
+
+# SNR-gated (information-aware) velocity loss. Plain per-sample velocity MSE
+# supervises every DCT band at every σ — including bands whose clean coefficient
+# is statistically unrecoverable from x_t (the post-expansion HF block is fresh
+# noise). The MSE-optimal response there is dataset-mean detail = learned HF
+# attenuation: the "blurs instead of improving" failure of the ungated run.
+# The gate weights the DCT-domain error per band by the recoverable fraction
+# w_ω(t) = SNR_ω(t)/(1+SNR_ω(t)) (paper Prop. 1 / Eq. 15 fed back into the
+# loss), with P_ω measured from the training latents at startup. Validation
+# scores the same gated loss, so best-ckpt selection stops rewarding hedging.
+# CLI: --snr_gate / --snr_gate_mode / --snr_gate_delta / --snr_gate_profile_n.
+[snr_gate]
+enabled = true
+mode = "soft"        # "soft" = w=SNR/(1+SNR); "hard" = 1[t<=t_ω] at delta below
+delta = 0.01         # hard-mode activation-time tolerance (paper default)
+profile_n = 64       # latents sampled to measure P_ω
+n_bins = 128         # radial-frequency bins of the measured profile
 
 [optim]
 lr = 1e-5
