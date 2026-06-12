@@ -1544,15 +1544,17 @@ class AnimaTrainer:
             use_dreambooth_method=use_dreambooth_method,
         )
 
-    def _derive_token_budget(self, train_group, val_group):
+    def _derive_token_budget(self, args, train_group, val_group):
         """(n_token_families, seq_range) from the buckets the datasets populate.
 
         Reads each dataset's ``bucket_manager.resos`` (the buckets at least one
-        selected image landed in) and reduces to the set of distinct token counts.
-        This sizes ``compile_blocks``' dynamo cache to exactly the tiers on disk
-        for this run — independent of ``args.target_res``. Returns ``(None, None)``
-        when no bucketed resos are available (e.g. a MinimalDataset), leaving
-        compile_blocks on its own defaults.
+        selected image landed in) and reduces to the set of distinct token counts,
+        unioned with the token counts the sample prompts will request (see
+        ``_sample_prompt_token_counts``). This sizes ``compile_blocks``' dynamo
+        cache to exactly the tiers on disk for this run — independent of
+        ``args.target_res``. Returns ``(None, None)`` when no bucketed resos are
+        available (e.g. a MinimalDataset), leaving compile_blocks on its own
+        defaults.
         """
         from library.datasets.buckets import token_counts_for_resos
 
@@ -1566,8 +1568,42 @@ class AnimaTrainer:
                     resos.update(bm.resos)
         if not resos:
             return None, None
-        counts = token_counts_for_resos(resos)
+        counts = token_counts_for_resos(resos) | self._sample_prompt_token_counts(args)
         return len(counts), (min(counts), max(counts))
+
+    def _sample_prompt_token_counts(self, args) -> set:
+        """Token counts the sample prompts will request; empty when sampling is off.
+
+        Sample generation runs through the same compiled blocks as training, so a
+        sample resolution outside the training buckets (e.g. ``--w 1024 --h 1536``
+        over 1024-tier data) would land outside the dynamic-seq mark_dynamic range
+        and crash the run mid-training with a ConstraintViolationError (#42).
+        Folding the prompt resolutions into the budget compiles for them up front.
+        Prompts are re-read from disk at every sample event, so resolutions added
+        to the file mid-run are NOT covered here — those are skipped with a
+        warning at sample time instead (``_sample_image_inference``).
+        """
+        from library.datasets.buckets import token_counts_for_sample_prompts
+
+        if not getattr(args, "sample_prompts", None):
+            return set()
+        will_sample = (
+            getattr(args, "sample_at_first", False)
+            or getattr(args, "sample_every_n_steps", None)
+            or getattr(args, "sample_every_n_epochs", None)
+        )
+        if not will_sample:
+            return set()
+        try:
+            prompts = train_util.load_prompts(args.sample_prompts)
+        except Exception as e:
+            logger.warning(
+                f"Could not parse sample prompts ({args.sample_prompts}) for the "
+                f"compile token budget: {e}. Sample resolutions outside the "
+                "training buckets may be skipped under torch_compile."
+            )
+            return set()
+        return token_counts_for_sample_prompts(prompts)
 
     def _create_and_apply_network(
         self,
@@ -2054,9 +2090,11 @@ class AnimaTrainer:
         # selected (path_pattern-filtered) images actually populate — NOT from
         # args.target_res. The on-disk caches are the source of truth for which
         # tiers are present, so this can't drift from preprocess, and a filtered
-        # run sizes the dynamo cache to only the families it really uses.
+        # run sizes the dynamo cache to only the families it really uses. Sample
+        # prompt resolutions are folded in (when sampling is enabled) so sample
+        # generation outside the training buckets compiles instead of crashing.
         self._compile_token_budget = self._derive_token_budget(
-            train_dataset_group, val_dataset_group
+            args, train_dataset_group, val_dataset_group
         )
 
         if args.debug_dataset:

@@ -75,7 +75,7 @@ _FORBIDDEN_ROOTS = ("library.training", "train")
 
 def _imports(path: Path):
     """Yield every fully-qualified module name imported by ``path``."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:

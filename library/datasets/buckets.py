@@ -224,6 +224,36 @@ def token_counts_for_resos(resos) -> set:
     return {(w // 16) * (h // 16) for w, h in resos}
 
 
+def snap_sample_size(width: int, height: int) -> Tuple[int, int]:
+    """Snap a requested sample (W, H) to the DiT's 16px pixel grid.
+
+    The single definition of the snap ``_sample_image_inference`` applies before
+    sampling — shared with the compile token budget so both sides agree on the
+    seq len a sample prompt will actually run at.
+    """
+    return max(64, width - width % 16), max(64, height - height % 16)
+
+
+def token_counts_for_sample_prompts(prompts) -> set:
+    """Distinct DiT token counts the training sample prompts will request.
+
+    ``prompts`` are ``train_util.load_prompts`` dicts; width/height default to
+    512, matching ``_sample_image_inference``. Folded into the torch.compile
+    token budget so a sample resolution outside the training buckets (e.g.
+    ``--w 1024 --h 1536`` over 1024-tier data → 6144 tokens vs a (4032, 4200)
+    range) widens the compiled range instead of crashing mid-training with a
+    dynamic-seq ConstraintViolationError (issue #42).
+    """
+    counts: set = set()
+    for prompt_dict in prompts:
+        w, h = snap_sample_size(
+            int(prompt_dict.get("width", 512)),
+            int(prompt_dict.get("height", 512)),
+        )
+        counts.add((w // 16) * (h // 16))
+    return counts
+
+
 def _nearest_aspect_bucket(width: int, height: int, table) -> tuple[int, int]:
     """The bucket in ``table`` whose aspect ratio is closest to the image's —
     same selection rule as ``BucketManager.select_bucket`` (argmin |Δ aspect|)."""
