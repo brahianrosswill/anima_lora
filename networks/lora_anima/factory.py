@@ -136,6 +136,32 @@ def create_network(
     if spec.post_init is not None:
         spec.post_init(network, kwargs)
 
+    # REPA v2 auxiliary alignment loss. Off unless use_repa is set. Stash the
+    # config on the network so REPAMethodAdapter + losses._repa_loss read it
+    # without new args plumbing; build the projection head for absolute mode
+    # (relational/Gram has no head). See library/training/repa.py.
+    from networks.lora_anima.config import _as_bool
+
+    if _as_bool(kwargs.get("use_repa")):
+        network._repa_mode = str(kwargs.get("repa_mode", "relational")).lower()
+        network._repa_weight = float(kwargs.get("repa_weight", 0.05) or 0.0)
+        network._repa_layer = int(kwargs.get("repa_layer", 8))
+        network._repa_encoder = str(kwargs.get("repa_encoder", "pe_spatial"))
+        network._repa_lr_scale = float(kwargs.get("repa_lr_scale", 1.0) or 1.0)
+        if network._repa_mode == "absolute":
+            from library.training.repa import REPAHead
+            from library.vision.encoders import get_encoder_info
+
+            enc_dim = get_encoder_info(network._repa_encoder).d_enc
+            dit_dim = int(unet.model_channels)
+            network.repa_head = REPAHead(dit_dim, dit_dim, enc_dim)
+        logger.info(
+            f"REPA[{network._repa_mode}]: weight={network._repa_weight}, "
+            f"layer={network._repa_layer}, encoder={network._repa_encoder}"
+        )
+    else:
+        network._repa_weight = 0.0
+
     if cfg.use_timestep_mask:
         logger.info(
             f"Timestep-dependent rank masking: min_rank={cfg.min_rank}, alpha={cfg.alpha_rank_scale}"

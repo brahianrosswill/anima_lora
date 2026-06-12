@@ -118,7 +118,7 @@ def cache_pe_features(
 
     reso_groups = group_by_shape(pending)
 
-    metadata = {
+    base_metadata = {
         "encoder": bundle.name,
         "d_enc": str(bundle.d_enc),
         "patch": str(bundle.bucket_spec.patch),
@@ -130,11 +130,20 @@ def cache_pe_features(
 
     from safetensors.torch import save_file
 
+    from library.vision.buckets import pick_bucket
+
     for paths in reso_groups.values():
         out_paths = [
             cache_path_for(p, bundle.name, cache_dir=cache_dir, image_dir=data_dir)
             for p in paths
         ]
+        # All images in a shape-group share one encoder bucket → one patch grid.
+        # Stamp it so consumers (REPA v2) can unflatten tokens → (grid_h, grid_w)
+        # without re-deriving the aspect bucket.
+        with Image.open(str(paths[0])) as _probe:
+            _pw, _ph = _probe.size  # PIL: (W, H)
+        _gh, _gw = pick_bucket(_ph, _pw, bundle.bucket_spec)
+        metadata = {**base_metadata, "grid_h": str(_gh), "grid_w": str(_gw)}
         ds = _PEImageGroup(paths, out_paths)
         loader = DataLoader(
             ds,

@@ -155,3 +155,25 @@ validation_split_num = 0
 # See bench/fm_vr_headroom/proposal.md.
 # vr_loss_weight = 1.0
 # vr_fei_sigma_low_div = 4.0
+
+# -------------
+# REPA v2 — encoder-alignment aux loss (docs/proposal/repa_v2_patchwise_pe_spatial.md).
+#
+# Aligns a mid-block DiT feature to cached PE-Spatial patch tokens — a training-
+# time regularizer, orthogonal to the routing axes above (composes with the
+# default stack). Off by default. PREREQ: `make preprocess-pe-spatial` to cache
+# {stem}_anima_pe_spatial.safetensors sidecars first.
+#
+#   repa_mode = "relational"  → Gram / relational-KD form (no head, domain-offset
+#                               cancelled). Phase-0 preferred arm.
+#             = "absolute"     → paper-faithful per-token cosine + MLP head.
+#
+# Phase 0 is a 3-arm A/B (baseline / absolute / relational at weight 0.05); read
+# sample grids for style+anatomy and CMMD-vs-own-PE-Core as the drift tripwire.
+# Style break on the relational arm closes the line (see the proposal's gate).
+# use_repa       = true
+# repa_mode      = "relational"
+# repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
+# repa_layer     = 8            # block to hook (of 28)
+# repa_encoder   = "pe_spatial"
+# repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)

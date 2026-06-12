@@ -362,6 +362,27 @@ class AnimaTrainer:
                     dataset.restrict_to_byg_tuples()
                 val_dataset_group.refresh_concat_state()
 
+        # REPA v2: load cached PE-Spatial patch tokens into batches when
+        # use_repa is set. The flag rides the network kwargs, so it may be on
+        # args (top-level TOML key) or only in --network_args — check both.
+        def _repa_kwarg(key: str, default: str = "") -> str:
+            for na in getattr(args, "network_args", None) or []:
+                if na.startswith(f"{key}="):
+                    return na.split("=", 1)[1]
+            val = getattr(args, key, None)
+            return default if val is None else str(val)
+
+        if _repa_kwarg("use_repa").lower() in ("true", "1", "yes"):
+            repa_encoder = _repa_kwarg("repa_encoder", "pe_spatial") or "pe_spatial"
+            for dataset in train_dataset_group.datasets:
+                dataset.load_repa_pe = True
+                dataset.repa_pe_encoder = repa_encoder
+            logger.info(
+                f"REPA: PE feature loading enabled (encoder={repa_encoder}); "
+                f"batches carry repa_pe_features. Run "
+                f"`make preprocess-pe ARGS='--encoder {repa_encoder}'` if absent."
+            )
+
         # Soft-tokens contrastive negatives. The objective's knobs live in
         # ``network_args`` (see configs/methods/soft_tokens.toml); preview them
         # here to decide whether

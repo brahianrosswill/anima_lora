@@ -1877,6 +1877,25 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                         f"content_router_lr_scale of unet_lr={base_lr})"
                     )
 
+        # REPA v2 projection-head param group (absolute mode only; relational
+        # has no head). LR = repa_lr_scale × unet_lr. Training-only — stripped
+        # from saved adapters by lora_save (re-inits on warm start).
+        if getattr(self, "repa_head", None) is not None:
+            rh_params = list(self.repa_head.parameters())
+            if len(rh_params) > 0:
+                repa_scale = float(getattr(self, "_repa_lr_scale", 1.0))
+                base_lr = unet_lr if unet_lr is not None else default_lr
+                if base_lr is None or base_lr == 0:
+                    logger.info("REPA head: no base LR, skipping param group")
+                else:
+                    rh_lr = float(base_lr) * repa_scale
+                    all_params.append({"params": rh_params, "lr": rh_lr})
+                    lr_descriptions.append("repa head")
+                    logger.info(
+                        f"REPA head param group: lr={rh_lr:.2e} "
+                        f"({repa_scale}x repa_lr_scale of unet_lr={base_lr})"
+                    )
+
         return all_params, lr_descriptions
 
     def enable_gradient_checkpointing(self):
@@ -1997,6 +2016,11 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
             metadata["ss_chimera_centered_gate"] = "true"
 
         state_dict = self.state_dict()
+        # REPA projection head is training-only (Arm A). Strip it so the saved
+        # adapter stays inference-clean; a warm start re-inits it (it re-converges
+        # in a few hundred steps). See library/training/repa.py.
+        for key in [k for k in state_dict if k.startswith("repa_head.")]:
+            del state_dict[key]
         lora_save.save_network_weights(
             state_dict,
             file=file,

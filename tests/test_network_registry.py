@@ -79,6 +79,21 @@ def test_hydra_router_kwargs_registered():
     assert not missing, f"allowlist missing hydra router kwargs: {missing}"
 
 
+def test_repa_kwargs_registered():
+    """REPA v2 kwargs must stay in the allowlist (else use_repa is silently
+    inert + the config test rejects the key). See library/training/repa.py."""
+    must_have = {
+        "use_repa",
+        "repa_mode",
+        "repa_weight",
+        "repa_layer",
+        "repa_encoder",
+        "repa_lr_scale",
+    }
+    missing = must_have - set(NETWORK_KWARGS)
+    assert not missing, f"allowlist missing repa kwargs: {missing}"
+
+
 # ---------------------------------------------------------------------------
 # resolve_network_spec precedence
 # ---------------------------------------------------------------------------

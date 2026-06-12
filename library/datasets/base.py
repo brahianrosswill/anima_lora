@@ -128,6 +128,14 @@ class BaseDataset(torch.utils.data.Dataset):
             "reverse_instruction",
         )
 
+        # REPA v2 PE feature loading. Set via `dataset.load_repa_pe = True`
+        # (+ `repa_pe_encoder`) after construction; off disables. Loads the
+        # cached {stem}_anima_{encoder}.safetensors patch tokens into
+        # batch["repa_pe_features"] for REPAMethodAdapter. The sidecar lives in
+        # the same cache dir as the TE npz (where make preprocess-pe wrote it).
+        self.load_repa_pe: bool = False
+        self.repa_pe_encoder: str = "pe_spatial"
+
         # Soft-tokens contrastive negatives. When a sampler is attached via
         # ``setup_contrastive_negatives`` each example carries
         # ``neg_crossattn_emb`` of shape (B, k, S, D): k cached text embeddings
@@ -1265,6 +1273,32 @@ class BaseDataset(torch.utils.data.Dataset):
             runs.append(t.float())
         return torch.stack(runs, dim=0)  # [N_runs, S, D]
 
+    def _try_load_repa_pe(
+        self, image_abs_path: str, te_npz: Optional[str]
+    ) -> Optional[torch.Tensor]:
+        """Load cached ``{stem}_anima_{encoder}.safetensors`` patch tokens.
+
+        Returns the ``[T, d_enc]`` feature tensor (CLS still at index 0), or
+        None when loading is off / the sidecar is missing (the adapter then
+        skips the REPA term for that batch). The sidecar lives in the same dir
+        as the TE cache (where ``make preprocess-pe --encoder <enc>`` wrote it),
+        mirroring ``library.training.cmmd.resolve_pe_sidecar``.
+        """
+        if not self.load_repa_pe:
+            return None
+        stem = os.path.splitext(os.path.basename(image_abs_path))[0]
+        cache_dir = (
+            os.path.dirname(te_npz) if te_npz else os.path.dirname(image_abs_path)
+        )
+        p = os.path.join(cache_dir, f"{stem}_anima_{self.repa_pe_encoder}.safetensors")
+        if not os.path.exists(p):
+            return None
+        from safetensors.torch import load_file
+
+        sd = load_file(p)
+        feats = sd.get("image_features")
+        return feats.float() if feats is not None else None
+
     def restrict_to_byg_tuples(self) -> tuple[int, int]:
         """Drop images lacking a BYG edit-tuple sidecar, then rebuild buckets.
 
@@ -1362,6 +1396,8 @@ class BaseDataset(torch.utils.data.Dataset):
         neg_jaccard_list: List[Optional[torch.Tensor]] = []
         # BYG per-image edit-tuple dicts (role embeddings + masks), or None.
         byg_tuple_list: List[Optional[dict]] = []
+        # REPA v2 per-image PE patch tokens [T, d_enc], or None.
+        repa_pe_list: List[Optional[torch.Tensor]] = []
 
         for image_key in bucket[image_index : image_index + bucket_batch_size]:
             image_info = self.image_data[image_key]
@@ -1538,6 +1574,16 @@ class BaseDataset(torch.utils.data.Dataset):
                 )
             else:
                 inversion_runs_list.append(None)
+
+            if self.load_repa_pe:
+                repa_pe_list.append(
+                    self._try_load_repa_pe(
+                        image_info.absolute_path,
+                        image_info.text_encoder_outputs_npz,
+                    )
+                )
+            else:
+                repa_pe_list.append(None)
 
             # Soft-tokens contrastive negatives: draw k unrelated stems and load
             # their cached text embeddings. Deterministic per target on the
@@ -1751,6 +1797,21 @@ class BaseDataset(torch.utils.data.Dataset):
                     example[f"byg_{role}_mask"] = torch.stack(
                         [t[f"{role}_mask"] for t in byg_tuple_list], dim=0
                     )
+
+        # REPA v2 PE patch tokens. All-or-nothing per batch: stack only when
+        # every sample resolved its sidecar AND they share a token count (same
+        # latent bucket → same aspect → same encoder bucket, so equal T is the
+        # norm; guard the rare aspect-rounding edge so a mismatch skips the term
+        # instead of crashing the epoch). The adapter skips when the key is absent.
+        if (
+            self.load_repa_pe
+            and repa_pe_list
+            and all(t is not None for t in repa_pe_list)
+            and len({t.shape[0] for t in repa_pe_list}) == 1
+        ):
+            example["repa_pe_features"] = torch.stack(repa_pe_list, dim=0)
+        else:
+            example["repa_pe_features"] = None
 
         if self.debug_dataset:
             example["image_keys"] = bucket[image_index : image_index + self.batch_size]
