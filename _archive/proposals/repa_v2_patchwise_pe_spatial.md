@@ -1,6 +1,14 @@
 # REPA v2 — patchwise / relational alignment against PE-Spatial
 
-Status: **proposal / not started**. Phase 0 is a three-arm short-run A/B with
+Status: **IMPLEMENTED + Phase 0 CLOSED 2026-06-12 — archived.** Both arms
+shipped (`library/training/repa.py`); the three-arm A/B landed on the GO
+outcome: REPA decisively better than baseline, relational preferred ~6:4–7:3
+over absolute on eyeballed grids. Live doc: `docs/experimental/repa.md`.
+Phase-1 successor: `docs/proposal/repa_phase1_operating_point.md`.
+
+Original text below, unedited.
+
+Phase 0 is a three-arm short-run A/B with
 pre-registered gates, designed so that two of the three outcomes **close this
 line permanently** — that outcome is as valuable as the lever.
 

@@ -21,20 +21,19 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 
-network_alpha = 32
-network_dim = 32
+network_alpha = 16
+network_dim = 16
 
-learning_rate = 2e-5
-max_train_epochs = 6
-save_every_n_epochs = 6
-checkpointing_epochs = 6
+learning_rate = 5e-5
+max_train_epochs = 3
+save_every_n_epochs = 3
+checkpointing_epochs = 3
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
-
-output_name = "anima_channel_ortho"
+output_name = "anima_repa_tenth"
 # sigmoid_bias = 0.5
 # path_pattern = "channel_(caststation)/*"
 
@@ -46,7 +45,7 @@ output_name = "anima_channel_ortho"
 # -------------
 # Ortho-lora
 
-use_ortho_init = true
+# use_ortho_init = true
 
 # -------------
 # OrthoInit: top-r SVD of W0 as *trainable* init (no frozen-subspace cap).
@@ -58,9 +57,9 @@ use_ortho_init = true
 # -------------
 # Timestep mask
 
-use_timestep_mask = true
-min_rank = 1
-alpha_rank_scale = 1.0
+# use_timestep_mask = true
+# min_rank = 1
+# alpha_rank_scale = 1.0
 
 
 # ---
@@ -102,8 +101,6 @@ alpha_rank_scale = 1.0
 # ortho_centered_gate = true
 # ortho_lambda_init = 1e-2     # auto-bumped from 0 when centered_gate is on
 
-[[datasets]]
-validation_split_num = 0
 
 # -------------
 # "independent_A" and route_per_layer=true -> fera
@@ -157,23 +154,25 @@ validation_split_num = 0
 # vr_fei_sigma_low_div = 4.0
 
 # -------------
-# REPA v2 — encoder-alignment aux loss (docs/proposal/repa_v2_patchwise_pe_spatial.md).
+# REPA v2 — encoder-alignment aux loss (docs/experimental/repa.md).
 #
 # Aligns a mid-block DiT feature to cached PE-Spatial patch tokens — a training-
 # time regularizer, orthogonal to the routing axes above (composes with the
-# default stack). Off by default. PREREQ: `make preprocess-pe-spatial` to cache
+# default stack). PREREQ: `make preprocess-pe-spatial` to cache
 # {stem}_anima_pe_spatial.safetensors sidecars first.
 #
 #   repa_mode = "relational"  → Gram / relational-KD form (no head, domain-offset
-#                               cancelled). Phase-0 preferred arm.
+#                               cancelled). Phase-0 WINNER (2026-06-12, ~6:4–7:3
+#                               over absolute on eyeballed grids; corroborated by
+#                               iREPA arXiv:2512.10794) — the default.
 #             = "absolute"     → paper-faithful per-token cosine + MLP head.
+#                               Reference only; don't spend runs on it.
 #
-# Phase 0 is a 3-arm A/B (baseline / absolute / relational at weight 0.05); read
-# sample grids for style+anatomy and CMMD-vs-own-PE-Core as the drift tripwire.
-# Style break on the relational arm closes the line (see the proposal's gate).
-# use_repa       = true
-# repa_mode      = "relational"
-# repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
-# repa_layer     = 8            # block to hook (of 28)
-# repa_encoder   = "pe_spatial"
-# repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
+# Phase-1 operating-point work (anneal/cutoff, spatial norm, token-subset Gram):
+# docs/proposal/repa_phase1_operating_point.md.
+use_repa       = true
+repa_mode      = "relational"
+repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
+repa_layer     = 8            # block to hook (of 28)
+repa_encoder   = "pe_spatial"
+repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)

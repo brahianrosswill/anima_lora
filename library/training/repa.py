@@ -3,7 +3,7 @@
 Revives the archived v1 REPA (Yu et al., arXiv:2410.06940; ``_archive/repa/``)
 at the granularity its own docstring pre-planned, with two loss forms selectable
 per run for the Phase-0 three-arm A/B (see
-``docs/proposal/repa_v2_patchwise_pe_spatial.md``):
+``docs/experimental/repa.md``):
 
 - **Arm A — absolute patchwise**: project DiT block tokens → encoder dim with a
   small MLP head, cosine per token in fp32, mean. Paper-faithful REPA at the

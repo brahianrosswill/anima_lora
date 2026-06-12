@@ -1,4 +1,4 @@
-"""REPA v2 adapter + wiring tests (docs/proposal/repa_v2_patchwise_pe_spatial.md).
+"""REPA v2 adapter + wiring tests (docs/experimental/repa.md).
 
 Covers the load-bearing invariants:
   - native_flatten layout-agnosticism: the captured (B,1,seq,1,D) and eager

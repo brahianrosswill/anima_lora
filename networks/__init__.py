@@ -179,7 +179,7 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         "content_router_init_std",
         # Centered-gate λ init for BOTH chimera pools (always-on).
         "chimera_lambda_init",
-        # REPA v2 auxiliary alignment loss (docs/proposal/repa_v2_patchwise_pe_spatial.md).
+        # REPA v2 auxiliary alignment loss (docs/experimental/repa.md).
         # Off by default; the factory builds the head (absolute mode only) and
         # stashes the config on the network for REPAMethodAdapter + _repa_loss.
         "use_repa",
