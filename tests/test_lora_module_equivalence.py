@@ -20,6 +20,13 @@ NOT to paper over a refactor regression)::
 
     python tests/test_lora_module_equivalence.py --write
 
+**Regenerate on Linux only.** The SVD-init variants (ortho / hydra / chimera)
+build their bases via ``torch.svd_lowrank`` → LAPACK, which is not bit-portable
+across BLAS backends (Windows MKL ≠ Linux OpenBLAS, ~1e-2 in bf16). The
+checked-in goldens were written on Linux, and ``torch.equal`` is bit-exact — a
+golden regenerated on Windows can never pass here or in CI. The writer enforces
+this (refuses to run off Linux unless ``--force-platform`` is passed).
+
 The goldens are tiny by construction (r ≤ 8, dim ≤ 64) — a few KB each.
 """
 
@@ -363,7 +370,26 @@ def _golden_path(name: str) -> Path:
     return GOLDEN_DIR / f"{name}.pt"
 
 
+# These goldens are bit-exact (``torch.equal``) fixtures. The SVD-init variants
+# (ortho / hydra / chimera) build their bases via ``torch.svd_lowrank`` →
+# LAPACK, which is NOT bit-reproducible across BLAS backends (Windows MKL vs
+# Linux OpenBLAS diverge at ~1e-2 in bf16). The checked-in goldens were written
+# on Linux; regenerating on another platform produces bytes that can never
+# satisfy ``torch.equal`` here or in CI. A Windows-written ``chimera_frozen.pt``
+# is exactly how this harness was last broken — so the writer refuses to run
+# off the canonical platform unless explicitly forced.
+_CANONICAL_PLATFORM = "linux"
+
+
 def _write_goldens():
+    if sys.platform != _CANONICAL_PLATFORM and "--force-platform" not in sys.argv:
+        raise SystemExit(
+            f"refusing to write goldens on {sys.platform!r}: these are bit-exact "
+            f"fixtures and the SVD-based inits are not reproducible across BLAS "
+            f"backends. Regenerate on {_CANONICAL_PLATFORM!r} (the platform the "
+            f"checked-in goldens were written on), or pass --force-platform if you "
+            f"are deliberately moving the canonical platform."
+        )
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     for name in _VARIANTS:
         torch.save(_capture(name), _golden_path(name))
