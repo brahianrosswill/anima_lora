@@ -22,8 +22,10 @@ from gui._paths import (
     _METHOD_ORDER,
 )
 from gui.validation import (
+    _base_folder_repeats,
     _base_validation_enabled,
     _base_validation_split_num,
+    _variant_folder_repeats_override,
     _variant_validation_override,
     _variant_validation_split_num,
 )
@@ -211,6 +213,7 @@ _GROUPS = {
         "masked_loss",
         "use_valid",
         "validation_split_num",
+        "repeat_by_folder_name",
     },
     "Samples": {
         "sample_prompts",
@@ -259,7 +262,7 @@ _SKIP = {
 # (e.g. ``use_valid`` toggles a `[[datasets]]` validation_split_num override).
 # The save loop in ConfigTab skips these, and per-key apply helpers handle the
 # structured write.
-_VIRTUAL_KEYS = {"use_valid", "validation_split_num"}
+_VIRTUAL_KEYS = {"use_valid", "validation_split_num", "repeat_by_folder_name"}
 
 # Fields shown under the "Basic" section. Everything else falls under the
 # collapsible "Advanced" section. Picked to cover the knobs a first-time user
@@ -474,6 +477,18 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
     else:
         merged["validation_split_num"] = _base_validation_split_num(base)
         origin["validation_split_num"] = "base"
+
+    # Inject `repeat_by_folder_name` (Kohya-style {n}_folder repeats) the same
+    # way — it's a dataset-blueprint key, not a flat TOML key, so the form
+    # surfaces it as a virtual checkbox written back into the variant's
+    # [[datasets]] override.
+    variant_rbf = _variant_folder_repeats_override(meth)
+    if variant_rbf is not None:
+        merged["repeat_by_folder_name"] = variant_rbf
+        origin["repeat_by_folder_name"] = "method"
+    else:
+        merged["repeat_by_folder_name"] = _base_folder_repeats(base)
+        origin["repeat_by_folder_name"] = "base"
 
     # Surface the sample-image knobs as first-class fields even when no TOML in
     # the chain has set them (their argparse defaults are None/None/False, so

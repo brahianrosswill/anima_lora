@@ -50,6 +50,7 @@
   "use_cmmd": "CMMD (PE-Core MMD²)를 검증 신호로 사용. GUI 기본값은 OFF — CMMD는 검증 항목마다 PE 인코더와 샘플링 패스를 추가해 VRAM과 시간 비용이 큼. OFF면 더 저렴한 σ별 FM-MSE 검증으로 대체 (Anima에서 유의미한 신호는 아니지만 무료).",
   "use_valid": "학습 셋에서 검증용 일부(기본 16장 — base.toml의 validation_split_num에서 지정)를 분리. 끄면 전체 풀이 학습에 쓰이고 검증 패스(FM-MSE / CMMD)는 실행되지 않음 — 데이터셋이 매우 작아 한 장도 빼기 싫을 때 유용. 변환 파일의 [[datasets]] 블록에 validation_split_num = 0, validation_split = 0.0 오버라이드를 쓰거나 제거함; base.toml은 건드리지 않음.",
   "validation_split_num": "'use_valid'가 켜져 있을 때 검증용으로 분리할 이미지 수. base.toml 기본값은 16 — paired CMMD가 안정적으로 측정될 만큼 크면서 학습 풀에 거의 영향을 주지 않는 크기. 값을 늘리면 CMMD 곡선이 더 매끄러워지지만 학습 샘플이 줄고 검증 패스도 느려짐. 'use_valid'가 꺼져 있으면 무시됨(0 오버라이드가 우선). 변환 파일의 [[datasets]] 블록에 {validation_split_num = N} 오버라이드를 쓰거나 제거함; base.toml과 같은 값이면 오버라이드가 제거되어 base가 우선됨.",
+  "repeat_by_folder_name": "Kohya 방식 폴더 반복. 켜면 {n}_... 형식 이름의 하위 폴더(예: image_dataset/5_mychar/) 안의 이미지가 num_repeats 대신 에포크당 n회 반복됨; 0_... 폴더는 학습에서 제외됨. 폴더 이름은 전처리 후에도 유지되므로(리사이즈/캐시가 원본 트리 구조를 미러링) 리사이즈된 트리에서도 동작함. 학습 풀에만 적용 — 검증은 항상 1회 반복. 변환 파일의 [[datasets]] 블록에 repeat_by_folder_name 오버라이드를 쓰거나 제거함; base.toml은 건드리지 않음.",
   "pretrained_model_name_or_path": "기본 DiT 모델 가중치 경로 (.safetensors).",
   "qwen3": "텍스트-투-이미지 컨디셔닝용 Qwen3 텍스트 인코더 가중치 경로.",
   "vae": "이미지 인코딩/디코딩용 VAE 모델 경로.",

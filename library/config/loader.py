@@ -56,6 +56,10 @@ def add_config_arguments(parser: argparse.ArgumentParser):
 class BaseSubsetParams:
     image_dir: Optional[str] = None
     num_repeats: int = 1
+    # Kohya-style folder repeats: when true, a `{n}_...` directory component
+    # under image_dir overrides num_repeats with n for the images inside it
+    # (n=0 drops them). Training pool only — validation stays at 1 repeat.
+    repeat_by_folder_name: bool = False
     sample_ratio: float = 1.0
     caption_separator: str = (",",)
     keep_tokens: int = 0
@@ -169,6 +173,7 @@ class ConfigSanitizer:
         ),
         "flip_aug": bool,
         "num_repeats": int,
+        "repeat_by_folder_name": bool,
         "sample_ratio": Any(float, int),
         "random_crop": bool,
         "keep_tokens": int,
@@ -513,6 +518,7 @@ def generate_dataset_group_by_blueprint(
                     image_dir: "{subset.image_dir}"
                     image_count: {subset.img_count}
                     num_repeats: {subset.num_repeats}
+                    repeat_by_folder_name: {subset.repeat_by_folder_name}
                     sample_ratio: {subset.sample_ratio}
                     keep_tokens: {subset.keep_tokens}
                     caption_dropout_rate: {subset.caption_dropout_rate}

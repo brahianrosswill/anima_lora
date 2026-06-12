@@ -50,6 +50,7 @@
   "use_cmmd": "使用CMMD（PE-Core MMD²）作为验证信号。GUI默认关闭 — CMMD为每个保留项增加PE编码器和采样过程，额外消耗显存和时间。关闭则回退到较廉价的per-σ FM-MSE验证（在Anima上无有效信号但免费）。",
   "use_valid": "从训练集中保留一小部分作为验证（默认16张 — 通过base.toml的validation_split_num固定）。关闭时整个池用于训练，不运行验证 — 跳过FM-MSE/CMMD评估，允许极小数据集训练而不损失样本。在变体的[[datasets]]块上写入/删除{validation_split_num = 0, validation_split = 0.0}覆盖；不修改base.toml。",
   "validation_split_num": "'use_valid'开启时保留用于验证的图像数量。base.toml默认为16 — 足够稳定paired CMMD，但对训练池影响极小。增大值可使CMMD曲线更平滑，但减少训练样本并减慢验证过程。'use_valid'关闭时忽略（零覆盖优先）。在变体的[[datasets]]块上写入/删除{validation_split_num = N}覆盖；与base.toml的值相同时删除覆盖，由base优先。",
+  "repeat_by_folder_name": "Kohya风格的文件夹重复。开启后，名为{n}_...的子文件夹（例如image_dataset/5_mychar/）中的图像每个epoch重复n次而不是num_repeats；0_...文件夹将被排除出训练。文件夹名在预处理后仍保留（缩放/缓存镜像源目录树），因此对缩放后的目录树同样有效。仅影响训练池 — 验证始终为1次重复。在变体的[[datasets]]块上写入/删除repeat_by_folder_name覆盖；不修改base.toml。",
   "pretrained_model_name_or_path": "基础DiT模型权重路径（.safetensors）。",
   "qwen3": "用于文本到图像条件的Qwen3文本编码器权重路径。",
   "vae": "用于图像编码/解码的VAE模型路径。",

@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -33,6 +34,33 @@ def _resolve_default_mask_dir() -> Optional[str]:
     for candidate in candidates:
         if os.path.isdir(candidate):
             return candidate
+    return None
+
+
+_FOLDER_REPEAT_RE = re.compile(r"^(\d+)_")
+
+
+def folder_repeat_count(image_path: str, image_dir: str) -> Optional[int]:
+    """Kohya-style per-folder repeat count for ``image_path``.
+
+    Walks the directory components between ``image_dir`` and the image
+    (deepest first) and returns ``n`` from the first component named
+    ``{n}_...`` — so ``image_dir/5_mychar/img.png`` → 5, and a nested
+    ``5_mychar/extra/img.png`` still resolves to 5. Returns ``None`` when no
+    component matches or the image sits directly in ``image_dir``. ``0_...``
+    is a valid result (0) — the loader drops such images from training.
+    """
+    try:
+        rel = os.path.relpath(os.path.dirname(image_path), image_dir)
+    except ValueError:
+        return None
+    if not rel or rel == "." or rel.startswith(".."):
+        return None
+    # glob can mix `/` and `\` on Windows — split on both.
+    for part in reversed(re.split(r"[\\/]", rel)):
+        m = _FOLDER_REPEAT_RE.match(part)
+        if m:
+            return int(m.group(1))
     return None
 
 
@@ -218,10 +246,14 @@ class BaseSubset:
         resize_interpolation: Optional[str] = None,
         recursive: bool = False,
         path_pattern: Optional[str] = None,
+        repeat_by_folder_name: bool = False,
     ) -> None:
         self.image_dir = image_dir
         self.alpha_mask = alpha_mask if alpha_mask is not None else False
         self.num_repeats = num_repeats
+        # Kohya-style folder repeats: a `{n}_...` directory component under
+        # image_dir overrides num_repeats with n for the images inside it.
+        self.repeat_by_folder_name = repeat_by_folder_name
         self.recursive = recursive
         # fnmatch glob applied to each image's path-relative-to-image_dir at
         # enumeration time; `*` / None / empty = no filtering.
@@ -296,6 +328,7 @@ class DreamBoothSubset(BaseSubset):
         text_cache_dir: Optional[str] = None,
         recursive: bool = False,
         path_pattern: Optional[str] = None,
+        repeat_by_folder_name: bool = False,
     ) -> None:
         assert image_dir is not None, "image_dir must be specified"
 
@@ -327,6 +360,7 @@ class DreamBoothSubset(BaseSubset):
             resize_interpolation=resize_interpolation,
             recursive=recursive,
             path_pattern=path_pattern,
+            repeat_by_folder_name=repeat_by_folder_name,
         )
 
         self.is_reg = is_reg

@@ -74,6 +74,14 @@ batch_size = 1
 validation_split_num = 0
 validation_seed = 42
 
+# Kohya-style folder repeats: when true, images under a subfolder named
+# {n}_... (e.g. image_dataset/5_mychar/) are repeated n times per epoch
+# instead of num_repeats; 0_... drops the folder from training. Folder names
+# survive preprocessing (resize/caches mirror the source tree), so this
+# applies to the resized tree too. Training pool only. Kept at the dataset
+# level (subset-ascendable) so the GUI's [[datasets]] override can flip it.
+repeat_by_folder_name = false
+
   [[datasets.subsets]]
   # Templates resolve against top-level path keys (source_image_dir,
   # resized_image_dir, lora_cache_dir) at load time — see
@@ -81,8 +89,8 @@ validation_seed = 42
   image_dir = '{resized_image_dir}'
   cache_dir = '{lora_cache_dir}'
   num_repeats = 1
-  # Walk subfolders under image_dir. Caches and resized output stay flat in
-  # cache_dir / resized_image_dir (stem-keyed filenames), so image stems must
-  # be unique across the entire tree — the trainer enforces this and the
-  # matching preprocess scripts pass --recursive automatically.
+  # Walk subfolders under image_dir. Resized output and caches mirror the
+  # source subdir layout, but image stems must still be unique across the
+  # entire tree — the trainer enforces this and the matching preprocess
+  # scripts pass --recursive automatically.
   recursive = true

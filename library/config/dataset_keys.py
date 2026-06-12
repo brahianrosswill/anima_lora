@@ -35,6 +35,7 @@ _SUBSET_ASCENDABLE_KEYS = frozenset(
         "face_crop_aug_range",
         "flip_aug",
         "num_repeats",
+        "repeat_by_folder_name",
         "sample_ratio",
         "random_crop",
         "keep_tokens",
@@ -51,7 +52,9 @@ _SUBSET_ASCENDABLE_KEYS = frozenset(
         "path_pattern",
     }
 )
-_DB_SUBSET_ASCENDABLE_KEYS = frozenset({"caption_extension", "class_tokens", "cache_info"})
+_DB_SUBSET_ASCENDABLE_KEYS = frozenset(
+    {"caption_extension", "class_tokens", "cache_info"}
+)
 _DB_SUBSET_DISTINCT_KEYS = frozenset(
     {
         "image_dir",

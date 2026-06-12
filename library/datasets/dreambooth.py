@@ -18,6 +18,7 @@ from library.datasets.subsets import (
     DreamBoothSubset,
     ImageInfo,
     filter_paths_by_glob,
+    folder_repeat_count,
     split_train_val,
 )
 
@@ -146,12 +147,8 @@ class DreamBoothDataset(BaseDataset):
                 pattern = getattr(subset, "path_pattern", "*") or "*"
                 if pattern != "*":
                     meta_paths = list(metas.keys())
-                    keep = filter_paths_by_glob(
-                        meta_paths, subset.image_dir, pattern
-                    )
-                    metas = {
-                        p: metas[p] for p, k in zip(meta_paths, keep) if k
-                    }
+                    keep = filter_paths_by_glob(meta_paths, subset.image_dir, pattern)
+                    metas = {p: metas[p] for p, k in zip(meta_paths, keep) if k}
                     logger.info(
                         f"path_pattern={pattern!r} kept {len(metas)}/"
                         f"{len(meta_paths)} cached entries from "
@@ -168,9 +165,7 @@ class DreamBoothDataset(BaseDataset):
                     _assert_unique_stems(img_paths, source_label=subset.image_dir)
                 pattern = getattr(subset, "path_pattern", "*") or "*"
                 if pattern != "*":
-                    keep = filter_paths_by_glob(
-                        img_paths, subset.image_dir, pattern
-                    )
+                    keep = filter_paths_by_glob(img_paths, subset.image_dir, pattern)
                     pre_n = len(img_paths)
                     img_paths = [p for p, k in zip(img_paths, keep) if k]
                     logger.info(
@@ -450,15 +445,58 @@ class DreamBoothDataset(BaseDataset):
                 )
                 continue
 
-            if subset.is_reg:
-                num_reg_images += num_repeats * len(img_paths)
-            else:
-                num_train_images += num_repeats * len(img_paths)
+            # Kohya-style folder repeats: a `{n}_...` directory component
+            # under image_dir overrides num_repeats with n for the images
+            # inside it; `0_...` drops them from the training pool. Training
+            # only — the validation pool stays at 1 repeat (num_repeats above).
+            repeats = [num_repeats] * len(img_paths)
+            if self.is_training_dataset and getattr(
+                subset, "repeat_by_folder_name", False
+            ):
+                repeats = [
+                    n
+                    if (n := folder_repeat_count(p, subset.image_dir)) is not None
+                    else num_repeats
+                    for p in img_paths
+                ]
+                n_overridden = sum(1 for r in repeats if r != num_repeats)
+                n_dropped = sum(1 for r in repeats if r == 0)
+                if n_overridden:
+                    logger.info(
+                        f"repeat_by_folder_name: {n_overridden}/{len(img_paths)} images "
+                        f"take their repeat count from a {{n}}_* folder under "
+                        f"{subset.image_dir}"
+                        + (
+                            f" ({n_dropped} in 0_* folders dropped)"
+                            if n_dropped
+                            else ""
+                        )
+                    )
+                if n_dropped:
+                    kept = [
+                        (p, c, s, r)
+                        for p, c, s, r in zip(img_paths, captions, sizes, repeats)
+                        if r > 0
+                    ]
+                    if not kept:
+                        logger.warning(
+                            f"ignore subset with image_dir='{subset.image_dir}': "
+                            f"all images sit in 0_* folders"
+                        )
+                        continue
+                    img_paths, captions, sizes, repeats = (list(t) for t in zip(*kept))
 
-            for img_path, caption, size in zip(img_paths, captions, sizes):
+            if subset.is_reg:
+                num_reg_images += sum(repeats)
+            else:
+                num_train_images += sum(repeats)
+
+            for img_path, caption, size, image_repeats in zip(
+                img_paths, captions, sizes, repeats
+            ):
                 info = ImageInfo(
                     img_path,
-                    num_repeats,
+                    image_repeats,
                     caption,
                     subset.is_reg,
                     img_path,

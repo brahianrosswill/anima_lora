@@ -66,7 +66,11 @@ from gui.discovery import (
     _imgs,
     _safetensors_in,
 )
-from gui.validation import apply_validation_choice
+from gui.validation import (
+    _base_folder_repeats,
+    apply_folder_repeats_choice,
+    apply_validation_choice,
+)
 from gui.widgets import (
     LazyTabMixin,
     ScaledImageLabel,
@@ -120,6 +124,8 @@ __all__ = [
     "merged_method_preset",
     "merged_gui_variant_preset",
     "apply_validation_choice",
+    "apply_folder_repeats_choice",
+    "_base_folder_repeats",
     "confirm_resumable_checkpoint",
     "confirm_existing_caches",
     "confirm_train_using_cache",

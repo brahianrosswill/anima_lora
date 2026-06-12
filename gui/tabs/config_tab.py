@@ -47,8 +47,10 @@ from gui import (
     _load,
     _load_base,
     _read,
+    _base_folder_repeats,
     _save,
     _widget,
+    apply_folder_repeats_choice,
     apply_validation_choice,
     confirm_existing_caches,
     confirm_resumable_checkpoint,
@@ -890,6 +892,14 @@ class ConfigTab(QWidget):
                 bool(_read(use_valid_w)),
                 split_num=vsn_val,
                 base_split_num=base_vsn,
+            )
+
+        rbf_w = self._w.get("repeat_by_folder_name")
+        if rbf_w is not None:
+            apply_folder_repeats_choice(
+                out,
+                bool(_read(rbf_w)),
+                base_enabled=_base_folder_repeats(base),
             )
 
         # Extra-args textarea: parse as TOML and merge in. Textarea overrides
