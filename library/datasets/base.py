@@ -68,6 +68,65 @@ def enable_high_vram():
     HIGH_VRAM = True
 
 
+def none_or_stack_elements(tensors_list, converter):
+    """Stack a list of per-sample tuples element-wise, or return None.
+
+    Each entry of ``tensors_list`` is a per-sample tuple/list of tensors (e.g.
+    the multi-output of a text encoder). Returns a list whose i-th entry stacks
+    the i-th element across all samples (right-padding ragged lengths with
+    zeros), or None when the batch carries no such outputs. Pure helper — closes
+    over nothing, hoisted out of ``BaseDataset.__getitem__``.
+    """
+    if (
+        len(tensors_list) == 0
+        or tensors_list[0] is None
+        or len(tensors_list[0]) == 0
+        or tensors_list[0][0] is None
+    ):
+        return None
+
+    result = []
+    for i in range(len(tensors_list[0])):
+        tensors = [x[i] for x in tensors_list]
+        if tensors[0] is None:
+            result.append(None)
+            continue
+        if tensors[0].ndim == 0:
+            result.append(torch.stack([converter(x[i]) for x in tensors_list]))
+            continue
+
+        min_len = min([len(x) for x in tensors])
+        max_len = max([len(x) for x in tensors])
+
+        if min_len == max_len:
+            result.append(torch.stack([converter(x) for x in tensors]))
+        else:
+            tensors = [converter(x) for x in tensors]
+            if tensors[0].ndim == 1:
+                result.append(
+                    torch.stack(
+                        [
+                            (torch.nn.functional.pad(x, (0, max_len - x.shape[0])))
+                            for x in tensors
+                        ]
+                    )
+                )
+            else:
+                result.append(
+                    torch.stack(
+                        [
+                            (
+                                torch.nn.functional.pad(
+                                    x, (0, 0, 0, max_len - x.shape[0])
+                                )
+                            )
+                            for x in tensors
+                        ]
+                    )
+                )
+    return result
+
+
 @dataclass
 class SidecarSpec:
     """One per-image sidecar channel: a loader plus its batch collation policy.
@@ -1513,6 +1572,157 @@ class BaseDataset(torch.utils.data.Dataset):
                 out[f"{role}_mask"] = mask
         return out
 
+    def _load_sample(self, subset, image_info, flipped):
+        """Load one sample's pixels-or-latents plus its alpha mask.
+
+        Serves from the in-memory or npz latent cache when present, otherwise
+        decodes the image from disk (with crop/resize, color aug, and mask
+        resolution). Honors ``flipped`` throughout and applies the
+        ``preloaded_alpha_mask`` override (mask_dir is the source of truth).
+
+        Returns ``(image, latents, alpha_mask, original_size, crop_ltrb)``;
+        exactly one of ``image`` / ``latents`` is non-None.
+        """
+        if image_info.latents is not None:
+            original_size = image_info.latents_original_size
+            crop_ltrb = image_info.latents_crop_ltrb
+            if not flipped:
+                latents = image_info.latents
+                alpha_mask = image_info.alpha_mask
+            else:
+                latents = image_info.latents_flipped
+                alpha_mask = (
+                    None
+                    if image_info.alpha_mask is None
+                    else torch.flip(image_info.alpha_mask, [1])
+                )
+
+            image = None
+        elif image_info.latents_npz is not None:
+            latents, original_size, crop_ltrb, flipped_latents, alpha_mask = (
+                self.latents_caching_strategy.load_latents_from_disk(
+                    image_info.latents_npz, image_info.bucket_reso
+                )
+            )
+            if flipped:
+                latents = flipped_latents
+                alpha_mask = None if alpha_mask is None else alpha_mask[:, ::-1].copy()
+                del flipped_latents
+            latents = torch.FloatTensor(latents)
+            if alpha_mask is not None:
+                alpha_mask = torch.FloatTensor(alpha_mask)
+
+            image = None
+        else:
+            img, _, _, _, _ = self.load_image_with_face_info(
+                subset, image_info.absolute_path, subset.alpha_mask
+            )
+
+            img, original_size, crop_ltrb = trim_and_resize_if_required(
+                subset.random_crop,
+                img,
+                image_info.bucket_reso,
+                image_info.resized_size,
+                resize_interpolation=image_info.resize_interpolation,
+            )
+
+            aug = self.aug_helper.get_augmentor(subset.color_aug)
+            if aug is not None:
+                img_rgb = img[:, :, :3]
+                img_rgb = aug(image=img_rgb)["image"]
+                img[:, :, :3] = img_rgb
+
+            if flipped:
+                img = img[:, ::-1, :].copy()
+
+            if image_info.mask_path is not None:
+                if image_info.preloaded_alpha_mask is not None:
+                    # Will be filled in by the post-branch override below.
+                    alpha_mask = None
+                else:
+                    from library.datasets.image_utils import load_mask_from_dir
+
+                    alpha_mask = load_mask_from_dir(
+                        os.path.dirname(image_info.mask_path),
+                        image_info.absolute_path,
+                        (img.shape[1], img.shape[0]),
+                    )
+                    if alpha_mask is None:
+                        alpha_mask = torch.ones(
+                            (img.shape[0], img.shape[1]), dtype=torch.float32
+                        )
+                    if flipped:
+                        alpha_mask = torch.flip(alpha_mask, [1])
+            elif subset.alpha_mask:
+                if img.shape[2] == 4:
+                    alpha_mask = img[:, :, 3]
+                    alpha_mask = alpha_mask.astype(np.float32) / 255.0
+                    alpha_mask = torch.FloatTensor(alpha_mask)
+                else:
+                    alpha_mask = torch.ones(
+                        (img.shape[0], img.shape[1]), dtype=torch.float32
+                    )
+            else:
+                alpha_mask = None
+
+            img = img[:, :, :3]
+
+            latents = None
+            image = self.image_transforms(img)
+            del img
+
+        if image_info.preloaded_alpha_mask is not None:
+            # mask_dir is the source of truth: override any alpha_mask coming
+            # from the latent cache (npz / in-memory) or the raw-image branch.
+            alpha_mask = image_info.preloaded_alpha_mask.float() / 255.0
+            if flipped:
+                alpha_mask = torch.flip(alpha_mask, [1])
+
+        return image, latents, alpha_mask, original_size, crop_ltrb
+
+    def _draw_contrastive_negatives(self, target_stem, subset):
+        """Draw k soft-tokens contrastive negatives for one target, or (None, None).
+
+        Draws k unrelated stems and loads their cached text embeddings.
+        Deterministic per target on the rare chance this dataset is used for
+        validation; random in training. Returns ``(neg_crossattn, neg_jaccard)``
+        — a (k, S, D) stack of negative embeddings and, in jaccard mode, a (k,)
+        tag-overlap weight vector. Either is None when no sampler is attached,
+        the target is absent from the index, or k distinct negatives couldn't be
+        reached (the adapter then skips the contrastive forward).
+        """
+        neg_sampler = self.contrastive_neg_sampler
+        if neg_sampler is None or not neg_sampler.has(target_stem):
+            return None, None
+
+        k = self.contrastive_neg_k
+        mode = self.contrastive_neg_mode
+        nrng = random.Random(self.seed ^ (hash(target_stem) & 0xFFFFFFFF))
+        neg_feats: List[torch.Tensor] = []
+        neg_jacc: List[float] = []
+        for _ in range(k):
+            neg_stem, _lvl = neg_sampler.draw(target_stem, mode, nrng)
+            if neg_stem == target_stem:
+                continue  # no distinct negative reachable
+            feat = self._load_te_for_stem(
+                neg_stem, subset, neg_sampler.rel_dir(neg_stem)
+            )
+            if feat is not None:
+                neg_feats.append(feat)
+                neg_jacc.append(
+                    neg_sampler.tag_jaccard(target_stem, neg_stem)
+                    if mode == "jaccard"
+                    else 0.0
+                )
+        ok = len(neg_feats) == k
+        neg_crossattn = torch.stack(neg_feats, dim=0) if ok else None
+        neg_jaccard = (
+            torch.tensor(neg_jacc, dtype=torch.float32)
+            if (ok and mode == "jaccard")
+            else None
+        )
+        return neg_crossattn, neg_jaccard
+
     def __getitem__(self, index):
         bucket = self.bucket_manager.buckets[self.buckets_indices[index].bucket_index]
         bucket_batch_size = self.buckets_indices[index].bucket_batch_size
@@ -1558,102 +1768,9 @@ class BaseDataset(torch.utils.data.Dataset):
 
             flipped = subset.flip_aug and random.random() < 0.5
 
-            if image_info.latents is not None:
-                original_size = image_info.latents_original_size
-                crop_ltrb = image_info.latents_crop_ltrb
-                if not flipped:
-                    latents = image_info.latents
-                    alpha_mask = image_info.alpha_mask
-                else:
-                    latents = image_info.latents_flipped
-                    alpha_mask = (
-                        None
-                        if image_info.alpha_mask is None
-                        else torch.flip(image_info.alpha_mask, [1])
-                    )
-
-                image = None
-            elif image_info.latents_npz is not None:
-                latents, original_size, crop_ltrb, flipped_latents, alpha_mask = (
-                    self.latents_caching_strategy.load_latents_from_disk(
-                        image_info.latents_npz, image_info.bucket_reso
-                    )
-                )
-                if flipped:
-                    latents = flipped_latents
-                    alpha_mask = (
-                        None if alpha_mask is None else alpha_mask[:, ::-1].copy()
-                    )
-                    del flipped_latents
-                latents = torch.FloatTensor(latents)
-                if alpha_mask is not None:
-                    alpha_mask = torch.FloatTensor(alpha_mask)
-
-                image = None
-            else:
-                img, _, _, _, _ = self.load_image_with_face_info(
-                    subset, image_info.absolute_path, subset.alpha_mask
-                )
-
-                img, original_size, crop_ltrb = trim_and_resize_if_required(
-                    subset.random_crop,
-                    img,
-                    image_info.bucket_reso,
-                    image_info.resized_size,
-                    resize_interpolation=image_info.resize_interpolation,
-                )
-
-                aug = self.aug_helper.get_augmentor(subset.color_aug)
-                if aug is not None:
-                    img_rgb = img[:, :, :3]
-                    img_rgb = aug(image=img_rgb)["image"]
-                    img[:, :, :3] = img_rgb
-
-                if flipped:
-                    img = img[:, ::-1, :].copy()
-
-                if image_info.mask_path is not None:
-                    if image_info.preloaded_alpha_mask is not None:
-                        # Will be filled in by the post-branch override below.
-                        alpha_mask = None
-                    else:
-                        from library.datasets.image_utils import load_mask_from_dir
-
-                        alpha_mask = load_mask_from_dir(
-                            os.path.dirname(image_info.mask_path),
-                            image_info.absolute_path,
-                            (img.shape[1], img.shape[0]),
-                        )
-                        if alpha_mask is None:
-                            alpha_mask = torch.ones(
-                                (img.shape[0], img.shape[1]), dtype=torch.float32
-                            )
-                        if flipped:
-                            alpha_mask = torch.flip(alpha_mask, [1])
-                elif subset.alpha_mask:
-                    if img.shape[2] == 4:
-                        alpha_mask = img[:, :, 3]
-                        alpha_mask = alpha_mask.astype(np.float32) / 255.0
-                        alpha_mask = torch.FloatTensor(alpha_mask)
-                    else:
-                        alpha_mask = torch.ones(
-                            (img.shape[0], img.shape[1]), dtype=torch.float32
-                        )
-                else:
-                    alpha_mask = None
-
-                img = img[:, :, :3]
-
-                latents = None
-                image = self.image_transforms(img)
-                del img
-
-            if image_info.preloaded_alpha_mask is not None:
-                # mask_dir is the source of truth: override any alpha_mask coming
-                # from the latent cache (npz / in-memory) or the raw-image branch.
-                alpha_mask = image_info.preloaded_alpha_mask.float() / 255.0
-                if flipped:
-                    alpha_mask = torch.flip(alpha_mask, [1])
+            image, latents, alpha_mask, original_size, crop_ltrb = self._load_sample(
+                subset, image_info, flipped
+            )
 
             images.append(image)
             latents_list.append(latents)
@@ -1715,97 +1832,63 @@ class BaseDataset(torch.utils.data.Dataset):
                     spec.loader(image_info) if spec.enabled() else None
                 )
 
-            # Soft-tokens contrastive negatives: draw k unrelated stems and load
-            # their cached text embeddings. Deterministic per target on the
-            # rare chance this dataset is used for validation; random in
-            # training. None when no sampler is attached or the target is absent
-            # from the index (the adapter then skips the contrastive forward).
-            neg_sampler = self.contrastive_neg_sampler
-            if neg_sampler is not None and neg_sampler.has(target_stem):
-                k = self.contrastive_neg_k
-                mode = self.contrastive_neg_mode
-                nrng = random.Random(self.seed ^ (hash(target_stem) & 0xFFFFFFFF))
-                neg_feats: List[torch.Tensor] = []
-                neg_jacc: List[float] = []
-                for _ in range(k):
-                    neg_stem, _lvl = neg_sampler.draw(target_stem, mode, nrng)
-                    if neg_stem == target_stem:
-                        continue  # no distinct negative reachable
-                    feat = self._load_te_for_stem(
-                        neg_stem, subset, neg_sampler.rel_dir(neg_stem)
-                    )
-                    if feat is not None:
-                        neg_feats.append(feat)
-                        neg_jacc.append(
-                            neg_sampler.tag_jaccard(target_stem, neg_stem)
-                            if mode == "jaccard"
-                            else 0.0
-                        )
-                ok = len(neg_feats) == k
-                neg_crossattn_list.append(torch.stack(neg_feats, dim=0) if ok else None)
-                neg_jaccard_list.append(
-                    torch.tensor(neg_jacc, dtype=torch.float32)
-                    if (ok and mode == "jaccard")
-                    else None
-                )
-            else:
-                neg_crossattn_list.append(None)
-                neg_jaccard_list.append(None)
+            neg_crossattn, neg_jaccard = self._draw_contrastive_negatives(
+                target_stem, subset
+            )
+            neg_crossattn_list.append(neg_crossattn)
+            neg_jaccard_list.append(neg_jaccard)
 
-        def none_or_stack_elements(tensors_list, converter):
-            if (
-                len(tensors_list) == 0
-                or tensors_list[0] is None
-                or len(tensors_list[0]) == 0
-                or tensors_list[0][0] is None
-            ):
-                return None
+        return self._collate_examples(
+            bucket=bucket,
+            image_index=image_index,
+            custom_attributes=custom_attributes,
+            loss_weights=loss_weights,
+            text_encoder_outputs_list=text_encoder_outputs_list,
+            input_ids_list=input_ids_list,
+            alpha_mask_list=alpha_mask_list,
+            images=images,
+            latents_list=latents_list,
+            cond_latents_list=cond_latents_list,
+            captions=captions,
+            original_sizes_hw=original_sizes_hw,
+            crop_top_lefts=crop_top_lefts,
+            target_sizes_hw=target_sizes_hw,
+            flippeds=flippeds,
+            sidecar_values=sidecar_values,
+            neg_crossattn_list=neg_crossattn_list,
+            neg_jaccard_list=neg_jaccard_list,
+        )
 
-            result = []
-            for i in range(len(tensors_list[0])):
-                tensors = [x[i] for x in tensors_list]
-                if tensors[0] is None:
-                    result.append(None)
-                    continue
-                if tensors[0].ndim == 0:
-                    result.append(torch.stack([converter(x[i]) for x in tensors_list]))
-                    continue
+    def _collate_examples(
+        self,
+        *,
+        bucket,
+        image_index,
+        custom_attributes,
+        loss_weights,
+        text_encoder_outputs_list,
+        input_ids_list,
+        alpha_mask_list,
+        images,
+        latents_list,
+        cond_latents_list,
+        captions,
+        original_sizes_hw,
+        crop_top_lefts,
+        target_sizes_hw,
+        flippeds,
+        sidecar_values,
+        neg_crossattn_list,
+        neg_jaccard_list,
+    ):
+        """Stack the per-sample lists gathered in ``__getitem__`` into one batch.
 
-                min_len = min([len(x) for x in tensors])
-                max_len = max([len(x) for x in tensors])
-
-                if min_len == max_len:
-                    result.append(torch.stack([converter(x) for x in tensors]))
-                else:
-                    tensors = [converter(x) for x in tensors]
-                    if tensors[0].ndim == 1:
-                        result.append(
-                            torch.stack(
-                                [
-                                    (
-                                        torch.nn.functional.pad(
-                                            x, (0, max_len - x.shape[0])
-                                        )
-                                    )
-                                    for x in tensors
-                                ]
-                            )
-                        )
-                    else:
-                        result.append(
-                            torch.stack(
-                                [
-                                    (
-                                        torch.nn.functional.pad(
-                                            x, (0, 0, 0, max_len - x.shape[0])
-                                        )
-                                    )
-                                    for x in tensors
-                                ]
-                            )
-                        )
-            return result
-
+        Owns the tensor-stacking / None-handling for every channel: pixels,
+        latents, cond latents, alpha masks (ragged-fill), text encoder outputs
+        and input ids (via :func:`none_or_stack_elements`), size/crop metadata,
+        registered sidecars, and soft-tokens contrastive negatives. Returns the
+        ``example`` dict consumed by the collator.
+        """
         example = {}
         example["custom_attributes"] = custom_attributes
         example["loss_weights"] = torch.FloatTensor(loss_weights)

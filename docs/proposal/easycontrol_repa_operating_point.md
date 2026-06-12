@@ -149,8 +149,9 @@ In priority order, one lever per run (the LoRA Phase-1 discipline):
 
 - `docs/experimental/easycontrol.md` §"REPA auxiliary loss" — mechanism +
   the original wiring notes.
-- `docs/experimental/repa.md`, `docs/proposal/repa_phase1_operating_point.md`
-  — validated machinery, lever status, the metrics/report tooling.
+- `docs/experimental/repa.md` (§"Annealing plan" for live lever status + the
+  metrics/report tooling); historical plan archived at
+  `_archive/proposals/repa_phase1_operating_point.md`.
 - `networks/methods/easycontrol.py:311–342` — factory stamping;
   `library/datasets/base.py:1393` — sidecar resolution (the colorize trap).
 - `tests/test_repa.py::test_easycontrol_create_network_stamps_repa` and

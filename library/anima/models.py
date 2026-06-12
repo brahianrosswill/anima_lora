@@ -1459,7 +1459,7 @@ class Anima(nn.Module):
         # (not folded into the Sequential) so the [...]-indexing elsewhere stays
         # valid. Gated by enable_pooled_text_sigma_film — off ⇒ bit-exact to the
         # plain head. Zero-init ⇒ identity FiLM (scale=shift=0) at start.
-        # See bench/mod_guidance + docs/experimental/gad.md.
+        # See bench/mod_guidance + _archive/gad/gad.md (archived).
         self.pooled_text_sigma_film = nn.Linear(model_channels, 2 * model_channels)
         self.enable_pooled_text_sigma_film = False
 

@@ -188,7 +188,7 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         "repa_layer",
         "repa_encoder",  # vision-encoder registry name (default pe_spatial)
         "repa_lr_scale",  # head LR multiplier (absolute mode)
-        # Phase-1 operating-point levers (docs/proposal/repa_phase1_operating_point.md).
+        # Phase-1 operating-point levers (docs/experimental/repa.md §"Annealing plan").
         "repa_anneal_steps",  # hard cutoff: (0,1] = fraction of run, >1 = opt steps
         "repa_spatial_norm",  # iREPA target-side spatial standardization (relational)
         # Lever-3 gate diagnostic: probe the alignment-gradient heatmap every N

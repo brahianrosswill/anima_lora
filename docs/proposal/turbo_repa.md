@@ -146,9 +146,10 @@ primary. Don't run both arms blind — pick by Phase-0's σ profile.
 
 ## References
 
-- `docs/experimental/repa.md` — validated mechanism + operating numbers.
-- `docs/proposal/repa_phase1_operating_point.md` — lever status (anneal open,
-  candidate 0.25; spatial_norm on; lever 3 closed by heatmap).
+- `docs/experimental/repa.md` — validated mechanism + operating numbers;
+  §"Annealing plan" carries the live lever status (anneal open, candidate
+  0.25; spatial_norm on; lever 3 closed by heatmap). Historical plan archived
+  at `_archive/proposals/repa_phase1_operating_point.md`.
 - `docs/proposal/turbo_caption_ranking.md` — degradation evidence + the
   shared Phase-1 gate contract.
 - `docs/proposal/turbo_gan.md` — feature-tap API + the adversarial sibling.

@@ -41,8 +41,9 @@ stashed on the network; the adapter reads them off ``ctx.network`` so no new
 ``args`` plumbing is needed. The scalar alignment loss is returned under
 ``aux["repa"]`` and weighted by ``LossComposer`` stage 2 (``losses._repa_loss``).
 
-Phase-1 operating-point levers (``docs/proposal/repa_phase1_operating_point.md``,
-both default-off):
+Phase-1 operating-point levers (``docs/experimental/repa.md`` §"Annealing
+plan"; archived proposal
+``_archive/proposals/repa_phase1_operating_point.md``; both default-off):
 
 - ``repa_anneal_steps`` — hard cutoff (HASTE, arXiv:2505.16792: alignment helps
   early, degrades late). Value in (0, 1] = fraction of ``max_train_steps``;

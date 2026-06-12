@@ -1,8 +1,8 @@
 """Post-hoc REPA read-out of a training ``*.progress.jsonl``.
 
 Companion to the ``repa/align_loss`` / ``repa/active`` step metrics
-(``library/training/repa.py``); supports the Phase-1 lever-1 (anneal) decision
-per ``docs/proposal/repa_phase1_operating_point.md``:
+(``library/training/repa.py``); supports the lever-1 (anneal) decision
+per ``docs/experimental/repa.md`` §"Annealing plan":
 
 - **Effective weight**: per-decile unweighted align loss, total loss, FM-only
   loss (``loss/current`` is the *composed* loss, so FM-only ≈

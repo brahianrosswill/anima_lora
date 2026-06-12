@@ -9,9 +9,10 @@
 > Mod-guidance via AdaLN is a global-tone/contrast lever, not a content lever:
 > GAD-for-mod-guidance ships at `gad_weight=0` (dead) and σ-FiLM is inert even when
 > opted in. The measurement below stands — read it for the *mechanism*, not as open
-> work. Full verdict + reproduce: `docs/experimental/gad.md` → "GAD for
-> mod-guidance". (The GAD machinery is kept; its live home is turbo / DP-DMD.)
-> See [[project_mod_guidance_sigma_film]].
+> work. Full verdict + reproduce: `_archive/gad/gad.md` → "GAD for
+> mod-guidance" (doc archived 2026-06-12; the mod-guidance code ships at
+> `gad_weight=0` and the turbo instantiation was removed 2026-06-10, so GAD
+> has no live home). See [[project_mod_guidance_sigma_film]].
 
 > **TL;DR.** The `pooled_text_proj` head reaches ~2.5% held-out relative error
 > (the "low val loss" it was trained to) yet its *response to a text change* is
@@ -20,7 +21,7 @@
 > pointwise MSE distillation when the text-conditioning signal is small relative
 > to the achievable residual. It is the textbook precondition for a
 > geometry-aware (first-order / JVP) distillation term — which was then wired and
-> run (see the STATUS note above). Mechanism home: `docs/experimental/gad.md`.
+> run (see the STATUS note above). Mechanism home: `_archive/gad/gad.md`.
 
 ## What was measured
 
@@ -85,7 +86,7 @@ teacher's text response is ~99% AC while AdaLN modulation can only push DC, so t
 reachable `cos` ceiling is 0.05–0.17 and the head already sits at it. The "clean
 negative result" branch held — mod-guidance cannot carry a teacher-aligned text
 *direction*; it is a global-tone lever. Full verdict + the σ-FiLM no-op:
-`docs/experimental/gad.md` → "GAD for mod-guidance".
+`_archive/gad/gad.md` → "GAD for mod-guidance".
 
 ## Caveats / how to reproduce
 

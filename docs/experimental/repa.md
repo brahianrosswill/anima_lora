@@ -5,8 +5,10 @@ PE-Spatial patch tokens (REPA, Yu et al., arXiv:2410.06940 — revived from the
 archived v1 at the per-token granularity v1's own docstring pre-planned).
 Design rationale and the pre-registered Phase-0 gate live in
 `_archive/proposals/repa_v2_patchwise_pe_spatial.md` (implemented, archived);
-this doc is the live operating reference. Phase-1 operating-point work is
-proposed in `docs/proposal/repa_phase1_operating_point.md`.
+this doc is the live operating reference. The Phase-1 operating-point plan
+was implemented and its proposal archived
+(`_archive/proposals/repa_phase1_operating_point.md`); the two levers still
+open live in "Annealing plan" below.
 
 This is a **loss-level regularizer**, not a new adapter — it rides the LoRA
 network kwargs and composes with every variant in the LoRA family (the
@@ -24,6 +26,31 @@ All three arms trained at the Phase-0 operating point (~tenth-scale, weight
   sample grids. Combined with B's structural advantages (no head, no resume
   wart, domain-offset cancellation), **relational is the shipped default**;
   the absolute head stays implemented for reference only.
+
+### Phase-1 progress (2026-06-12 evening)
+
+Levers run on the relational arm at the Phase-0 operating point (priority
+order + closed-lever record in the archived proposal,
+`_archive/proposals/repa_phase1_operating_point.md`):
+
+- **Lever 2 — spatial norm: validated, ON by default** (`repa_spatial_norm
+  = true` in lora.toml). iREPA target standardization; eyeball-validated and
+  shipped.
+- **Lever 3 — token-subset Gram: CLOSED without a training run.** The
+  `repa_grad_heatmap` diagnostic (autograd grad of the Gram loss wrt pooled
+  tokens, top-10% position recurrence on a quarter run) came back ~uniform:
+  top-10% mean recurrence **1.51×** vs MaskAlign's ~21× pathology, max single
+  position 3.4× (a corner/edge cluster, not interior content). The shortcut
+  needs pretraining-scale iteration counts to form — don't re-propose unless
+  the regime changes.
+- **Lever 1 — anneal: A/B still open, curve-justified candidate 0.25.**
+  align_loss plateaus by ~17–18% of the run (two quarter runs agree);
+  weighted REPA settles at **~4% of total loss** (≈8% in the first decile).
+  At plateau, w = 0.02 / 0.05 / 0.1 ≈ 1.7% / 4% / 8% of total loss — the
+  frame for the eventual weight sweep (lever 4).
+- Progress curves via `scripts/repa_progress_report.py <progress.jsonl>`
+  (deciles + plateau; on annealed runs, the FM-only before/after-release
+  delta — negative ⇒ REPA was fighting FM late).
 
 ### External validation (same-week literature)
 
@@ -74,9 +101,9 @@ make preprocess-pe-spatial
 #   repa_layer    = 8              # block to hook (of 28)
 #   repa_encoder  = "pe_spatial"
 #   repa_lr_scale = 1.0            # head LR multiplier (absolute mode only)
-# Phase-1 levers (default-off, one A/B at a time — see the proposal):
-#   repa_anneal_steps = 0.5        # hard cutoff: (0,1] = fraction of run, >1 = opt steps
-#   repa_spatial_norm = true       # iREPA target standardization (relational only)
+#   repa_spatial_norm = true       # iREPA target standardization — ON by default (lever 2)
+# Phase-1 lever still open (one A/B at a time — see the proposal):
+#   repa_anneal_steps = 0.25       # hard cutoff: (0,1] = fraction of run, >1 = opt steps
 make lora
 ```
 
@@ -125,17 +152,68 @@ REPA being silently inert is a logged condition, not a quiet no-op.
 - **Spatial norm** (`repa_spatial_norm`): target-side only, relational mode
   only — `(pe − mean_tok) / (std_tok + ε)` across the token axis, applied
   after the CLS drop and before per-token L2-norm. Removes the shared global
-  component that compresses pairwise cosines (iREPA).
+  component that compresses pairwise cosines (iREPA). **On by default.**
+- **Heatmap diagnostic** (`repa_grad_heatmap` = N > 0): read-only probe that
+  every N micro-steps takes the autograd grad of the Gram loss wrt the pooled
+  DiT tokens, accumulates a canonical-grid top-10% recurrence map, dumps
+  `<output_name>_repa_grad_heatmap.npz` next to the checkpoint, and logs
+  `repa/heatmap_conc`. This closed lever 3 (MaskAlign token-subset); it's a
+  diagnostic, not a loss change.
+- **Aux-loss dispatch caveat**: `train.py` routes method-adapter
+  `extra_forwards` (where REPA attaches) through the cached-LLM-adapter path,
+  which only exists when `crossattn_emb is not None`. EasyControl uses the
+  in-model text path (`crossattn_emb=None`) so REPA was silently skipped
+  there pre-fix — **failure signature: `repa/active=1.0` in the progress
+  jsonl WITHOUT `repa/align_loss`.** Check both at launch on any non-default
+  method (see `docs/proposal/easycontrol_repa_operating_point.md`).
 
-## Not implemented (Phase-1 material)
+## Annealing plan (open A/B — next)
 
-See `docs/proposal/repa_phase1_operating_point.md` for the pre-registered
-plan. Levers 1–2 (`repa_anneal_steps`, `repa_spatial_norm`) are implemented
-(default-off) but their A/B runs have not happened — the shipped default is
-still no-anneal / no-spatial-norm. Remaining: loss-side token-subset Gram
-(MaskAlign; gradient-heatmap diagnostic first), weight sweep. Tier 1.5
-artifacts (`bench/repa_v2/` envelope + flag-off byte-identity invariant
-test) are still outstanding and gate graduation.
+Two operating-point levers are implemented and still open. Both run as
+sequential short A/Bs (the Phase-0 recipe: ~tenth-scale, fixed seed/data,
+current default stack — relational, w=0.05, block 8, spatial_norm on), one
+knob at a time vs the current default. The shipped default stays no-anneal
+until an A/B moves it.
+
+**1. Anneal / cutoff — `repa_anneal_steps`, candidate `0.25`.** Hard cutoff
+that drops the REPA term past a fraction of the run; carried from the v2
+proposal ("alignment matters early; the late-run gradient is where style
+drifts") with published support (HASTE: REPA helps early training, degrades
+it late). It attacks the exact v1 failure axis (late-run style leak) for one
+comparison run. The `0.25` candidate is curve-justified: align_loss plateaus
+by ~17–18% of the run (two quarter runs agree), so the term has little left
+to teach past the first quarter. Semantics (already wired): `(0,1]` =
+fraction of `max_train_steps`, `>1` = absolute optimizer steps, `0` = off;
+the adapter keeps its own micro-batch counter (validation excluded) and
+converts via `gradient_accumulation_steps`; past the cutoff the term is
+skipped before the PE transfer. Hard cutoff first (one knob); only if it
+helps, compare linear decay-to-zero as a second variant.
+
+- *Read the curve*: `scripts/repa_progress_report.py <progress.jsonl>` prints
+  deciles + the plateau point, and on an annealed run the FM-only
+  before/after-release delta — **negative ⇒ REPA was fighting FM late**,
+  which is the signal the cutoff is paying off.
+
+**2. Weight sweep — `repa_weight ∈ {0.02, 0.05, 0.1}`.** Run *after* the
+anneal point settles, on the winning cutoff — weight interacts with the
+window (a shorter window tolerates a higher weight). The effective-weight
+frame for reading results: at plateau, `w = 0.02 / 0.05 / 0.1` ≈ `1.7% /
+4% / 8%` of total loss (≈2× that in the first decile, before align plateaus).
+
+**Gates (unchanged from Phase 0, pre-registered):** sample grids first
+(style intact; anatomy — hands/limbs/eyes), CMMD-vs-own-PE-Core as the drift
+tripwire, never FM val loss, never fraction-of-Δ readouts. **Any lever that
+visibly moves style fails regardless of its anatomy delta.**
+
+## Graduation (Tier 1.5, outstanding)
+
+Gated on a settled operating point: `bench/repa_v2/` envelope (`bench/_common.py`;
+grids + CMMD in `result.json`), a flag-off byte-identity invariant test
+(extend `tests/test_repa.py`), one full-length run at the final operating
+point vs baseline, and a `configs/gui-methods/` variant + default-on
+decision. Lever 3 (token-subset Gram) is **closed** — see Phase-1 progress
+above; the `repa_token_keep` knob was never built and shouldn't be unless the
+regime moves to pretraining-scale steps.
 
 ## Guardrails (from the v1 burn)
 
@@ -158,7 +236,9 @@ test) are still outstanding and gate graduation.
   `library/vision/buckets.py::PE_SPATIAL_B16_512_SPEC`.
 - `_archive/proposals/repa_v2_patchwise_pe_spatial.md` — hypothesis, v1
   autopsy, pre-registered Phase-0 gate (implemented; archived on closure).
-- `docs/proposal/repa_phase1_operating_point.md` — Phase-1 plan.
+- `_archive/proposals/repa_phase1_operating_point.md` — Phase-1 plan
+  (implemented; archived on closure — open levers migrated to "Annealing
+  plan" above).
 - `_archive/repa/` — v1 implementation (pooled-global, PE-Core, w=0.5).
 - REPA: Yu et al., arXiv:2410.06940. Relational form cf. Park et al. 2019
   (relational knowledge distillation).

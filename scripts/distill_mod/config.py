@@ -272,7 +272,7 @@ def build_argparser() -> argparse.ArgumentParser:
     # the two extra forwards entirely → bit-for-bit identical to the MSE-only
     # path. Motivation: docs/findings/mod_guidance_text_derivative_orthogonal.md
     # (the distilled head matches pointwise but its text-derivative is orthogonal
-    # to the teacher's). See docs/experimental/gad.md.
+    # to the teacher's). See _archive/gad/gad.md (archived).
     parser.add_argument(
         "--gad_weight",
         type=float,

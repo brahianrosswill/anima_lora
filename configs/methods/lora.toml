@@ -169,8 +169,8 @@ output_name = "anima_repa_normed_quarter"
 #                               Reference only; don't spend runs on it.
 #
 # Phase-1 operating-point levers (anneal/cutoff, spatial norm, token-subset Gram):
-# docs/proposal/repa_phase1_operating_point.md. Levers 1–2 implemented, default
-# OFF pending their A/B runs — run one lever at a time vs the current default.
+# docs/experimental/repa.md §"Annealing plan". spatial_norm is validated + ON
+# below; anneal stays off pending its A/B (candidate 0.25); lever 3 closed.
 use_repa       = true
 repa_mode      = "relational"
 repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
