@@ -389,6 +389,22 @@ STRINGS: dict[str, str] = {
     ),
     # Language
     "language": "Language:",
+    # Settings dialog
+    "settings_btn": "⚙ Settings",
+    "settings_btn_tooltip": "Application settings — language, MCP server registration",
+    "settings_title": "Settings",
+    "settings_mcp_header": "MCP server (agent access)",
+    "settings_mcp_desc": "Expose the local training daemon to MCP clients (Claude Code, "
+    "Claude Desktop, …). Run this in a terminal to register it with Claude Code:",
+    "settings_mcp_desc_json": "For other MCP clients (Claude Desktop, OpenClaw, …), "
+    "the equivalent JSON config:",
+    "settings_mcp_copy": "Copy",
+    "settings_mcp_copied": "Copied ✓",
+    "settings_close": "Close",
+    "settings_lang_apply_title": "Language",
+    "settings_lang_apply_question": "Reload the interface now to apply the language?\n\n"
+    "Unsaved edits in open tabs are lost. Queued/running training jobs live in "
+    "the daemon and are not affected.\n\nChoosing No applies it on next launch.",
     # Guidebook
     "guidebook": "📖 Guidebook",
     "guidebook_tooltip": "Open the end-to-end guide (docs/guidelines/guidebook.md)",

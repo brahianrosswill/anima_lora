@@ -326,6 +326,22 @@ STRINGS: dict[str, str] = {
     ),
     # Language
     "language": "语言:",
+    # Settings dialog
+    "settings_btn": "⚙ 设置",
+    "settings_btn_tooltip": "应用设置 —— 语言、MCP 服务器注册",
+    "settings_title": "设置",
+    "settings_mcp_header": "MCP 服务器（智能体接入）",
+    "settings_mcp_desc": "将本地训练守护进程暴露给 MCP 客户端（Claude Code、Claude Desktop 等）。"
+    "在终端中运行以下命令即可注册到 Claude Code:",
+    "settings_mcp_desc_json": "其他 MCP 客户端（Claude Desktop、OpenClaw 等）"
+    "使用等效的 JSON 配置:",
+    "settings_mcp_copy": "复制",
+    "settings_mcp_copied": "已复制 ✓",
+    "settings_close": "关闭",
+    "settings_lang_apply_title": "语言",
+    "settings_lang_apply_question": "现在重新加载界面以应用新语言吗？\n\n"
+    "标签页中未保存的编辑将丢失。排队/运行中的训练任务在守护进程中运行，不受影响。\n\n"
+    "选择“否”则在下次启动时生效。",
     # Guidebook
     "guidebook": "📖 指南书",
     "guidebook_tooltip": "打开中文综合指南 (docs/guidelines/指南书.md)",

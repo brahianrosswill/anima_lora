@@ -6,16 +6,18 @@ import sys
 from pathlib import Path
 
 import toml
-from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QStackedWidget,
     QTabWidget,
@@ -64,6 +66,10 @@ def _guidebook_path() -> Path:
 
 
 LANG_NAMES = {"en": "English", "ko": "한국어", "cn": "简体中文", "ja": "日本語"}
+
+# Keeps the live MainWindow alive across the in-place rebuild that applies a
+# language change (main() seeds it; MainWindow._reload_ui swaps it).
+_WINDOW: MainWindow | None = None
 
 
 def _dark(app: QApplication):
@@ -178,6 +184,131 @@ class GuidebookDialog(QDialog):
         lay.addLayout(btn_bar)
 
 
+def _mcp_paths() -> tuple[Path, Path]:
+    """(venv python, MCP bridge script) for THIS checkout — real absolute
+    paths, not the <repo> placeholder the docs use (scripts/daemon/README.md)."""
+    venv_python = (
+        _REPO_ROOT
+        / ".venv"
+        / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    )
+    return venv_python, _REPO_ROOT / "scripts" / "daemon" / "mcp.py"
+
+
+def _mcp_add_command() -> str:
+    """The `claude mcp add` one-liner for Claude Code."""
+
+    def q(p: Path) -> str:
+        return f'"{p}"' if " " in str(p) else str(p)
+
+    venv_python, bridge = _mcp_paths()
+    return f"claude mcp add anima-daemon -- {q(venv_python)} {q(bridge)}"
+
+
+def _mcp_json_config() -> str:
+    """The client-agnostic mcpServers JSON block (Claude Desktop, OpenClaw, …).
+    json.dumps so Windows backslashes come out escaped and paste-able."""
+    import json
+
+    venv_python, bridge = _mcp_paths()
+    cfg = {
+        "mcpServers": {
+            "anima-daemon": {"command": str(venv_python), "args": [str(bridge)]}
+        }
+    }
+    return json.dumps(cfg, indent=2)
+
+
+class SettingsDialog(QDialog):
+    """App settings: language + MCP server registration for agent clients."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("settings_title"))
+        self.setMinimumWidth(560)
+        # Set when the user picks a new language and opts into an immediate
+        # reload; MainWindow checks it after exec() and rebuilds itself.
+        self.reload_requested = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(10)
+
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel(t("language")))
+        self.lang_combo = QComboBox()
+        for code in available_languages():
+            self.lang_combo.addItem(LANG_NAMES.get(code, code), code)
+        self.lang_combo.setCurrentIndex(available_languages().index(current_language()))
+        self.lang_combo.currentIndexChanged.connect(self._change_lang)
+        self.lang_combo.setFixedWidth(120)
+        lang_row.addWidget(self.lang_combo)
+        lang_row.addStretch()
+        lay.addLayout(lang_row)
+
+        mcp_group = QGroupBox(t("settings_mcp_header"))
+        mcp_lay = QVBoxLayout(mcp_group)
+        self._add_command_block(
+            mcp_lay, t("settings_mcp_desc"), _mcp_add_command(), height=64
+        )
+        self._add_command_block(
+            mcp_lay, t("settings_mcp_desc_json"), _mcp_json_config(), height=140
+        )
+        lay.addWidget(mcp_group)
+
+        btn_bar = QHBoxLayout()
+        btn_bar.addStretch()
+        close = QPushButton(t("settings_close"))
+        close.clicked.connect(self.close)
+        btn_bar.addWidget(close)
+        lay.addLayout(btn_bar)
+
+    def _add_command_block(
+        self, layout: QVBoxLayout, desc: str, text: str, height: int
+    ) -> None:
+        """A word-wrapped description, a read-only monospace box, and a copy
+        button that flashes confirmation."""
+        label = QLabel(desc)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        edit = QPlainTextEdit(text)
+        edit.setReadOnly(True)
+        mono = QFont("Consolas", 9)
+        mono.setStyleHint(QFont.Monospace)
+        edit.setFont(mono)
+        edit.setFixedHeight(height)
+        layout.addWidget(edit)
+
+        copy_row = QHBoxLayout()
+        copy_row.addStretch()
+        btn = QPushButton(t("settings_mcp_copy"))
+        btn.clicked.connect(lambda: self._copy(text, btn))
+        copy_row.addWidget(btn)
+        layout.addLayout(copy_row)
+
+    def _copy(self, text: str, btn: QPushButton) -> None:
+        QApplication.clipboard().setText(text)
+        btn.setText(t("settings_mcp_copied"))
+        QTimer.singleShot(1500, lambda: btn.setText(t("settings_mcp_copy")))
+
+    def _change_lang(self, idx: int):
+        lang = self.lang_combo.itemData(idx)
+        # save_language also flips the in-process language, so the prompt
+        # below (and a rebuilt MainWindow) already render in the new language.
+        save_language(lang)
+        choice = QMessageBox.question(
+            self,
+            t("settings_lang_apply_title"),
+            t("settings_lang_apply_question"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if choice == QMessageBox.Yes:
+            self.reload_requested = True
+            self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -190,7 +321,7 @@ class MainWindow(QMainWindow):
         main_lay = QVBoxLayout(central)
         main_lay.setContentsMargins(0, 0, 0, 0)
 
-        # Language selector bar
+        # Top button bar (guidebook / models / update / overlays / settings)
         lang_bar = QHBoxLayout()
         if ICON_PATH.exists():
             icon_label = QLabel()
@@ -280,14 +411,10 @@ class MainWindow(QMainWindow):
         lang_bar.addWidget(self.tensorboard_btn)
 
         lang_bar.addStretch()
-        lang_bar.addWidget(QLabel(t("language")))
-        self.lang_combo = QComboBox()
-        for code in available_languages():
-            self.lang_combo.addItem(LANG_NAMES.get(code, code), code)
-        self.lang_combo.setCurrentIndex(available_languages().index(current_language()))
-        self.lang_combo.currentIndexChanged.connect(self._change_lang)
-        self.lang_combo.setFixedWidth(100)
-        lang_bar.addWidget(self.lang_combo)
+        self.settings_btn = QPushButton(t("settings_btn"))
+        self.settings_btn.setToolTip(t("settings_btn_tooltip"))
+        self.settings_btn.clicked.connect(self._open_settings)
+        lang_bar.addWidget(self.settings_btn)
         main_lay.addLayout(lang_bar)
 
         # One tab set holds everything; the TensorBoard / Queue overlays share
@@ -411,16 +538,25 @@ class MainWindow(QMainWindow):
         dlg = GuidebookDialog(path, self)
         dlg.show()
 
-    def _change_lang(self, idx: int):
-        lang = self.lang_combo.itemData(idx)
-        save_language(lang)
-        QMessageBox.information(
-            self,
-            "Language" if lang == "en" else "언어",
-            "Please restart the application to apply the language change."
-            if current_language() == "en"
-            else "언어 변경을 적용하려면 앱을 다시 시작해주세요.",
-        )
+    def _open_settings(self):
+        dlg = SettingsDialog(self)
+        dlg.exec()
+        if dlg.reload_requested:
+            self._reload_ui()
+
+    def _reload_ui(self):
+        """Rebuild the main window in place to apply a language change — every
+        string is resolved at construction, so a fresh window is the cleanest
+        way to retranslate. The daemon owns running jobs, so only local UI
+        state (unsaved edits, overlay subprocesses) resets; closeEvent reaps
+        the old window's TensorBoard/Queue children as usual. New window is
+        shown before the old closes so quitOnLastWindowClosed never fires."""
+        global _WINDOW
+        new = MainWindow()
+        new.setGeometry(self.geometry())
+        new.show()
+        _WINDOW = new
+        self.close()
 
 
 def _ensure_source_image_dir() -> None:
@@ -464,6 +600,7 @@ def main():
     # the queue, the Train button, and re-attach are ready immediately. Best-
     # effort: a failure here never blocks the GUI from opening.
     gui_daemon.ensure_daemon_quietly()
-    win = MainWindow()
-    win.show()
+    global _WINDOW
+    _WINDOW = MainWindow()
+    _WINDOW.show()
     sys.exit(app.exec())

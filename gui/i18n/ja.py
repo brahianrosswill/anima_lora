@@ -338,6 +338,22 @@ STRINGS: dict[str, str] = {
     ),
     # Language
     "language": "言語:",
+    # Settings dialog
+    "settings_btn": "⚙ 設定",
+    "settings_btn_tooltip": "アプリ設定 — 言語、MCP サーバー登録",
+    "settings_title": "設定",
+    "settings_mcp_header": "MCP サーバー（エージェント連携）",
+    "settings_mcp_desc": "ローカル学習デーモンを MCP クライアント（Claude Code、Claude Desktop "
+    "など）に公開します。以下のコマンドをターミナルで実行すると Claude Code に登録されます:",
+    "settings_mcp_desc_json": "他の MCP クライアント（Claude Desktop、OpenClaw など）には、"
+    "同等の JSON 設定を使用します:",
+    "settings_mcp_copy": "コピー",
+    "settings_mcp_copied": "コピーしました ✓",
+    "settings_close": "閉じる",
+    "settings_lang_apply_title": "言語",
+    "settings_lang_apply_question": "今すぐインターフェースを再読み込みして言語を適用しますか？\n\n"
+    "タブの未保存の編集内容は失われます。待機中・実行中の学習ジョブはデーモンで"
+    "動いているため影響ありません。\n\n「いいえ」を選ぶと次回起動時に適用されます。",
     # Guidebook
     "guidebook": "📖 ガイドブック",
     "guidebook_tooltip": "日本語総合ガイドを開きます (docs/guidelines/ガイドブック.md)",
