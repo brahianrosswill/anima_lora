@@ -105,7 +105,10 @@ from library.config.cli_args import (
     verify_training_args,
 )
 from library.training.loop import build_loop_state, run_training_loop
-from library.training.log_dispatch import dispatch_logs
+from library.training.log_dispatch import (
+    dispatch_logs,
+    generate_step_logs as _generate_step_logs,
+)
 from library.training.progress import ProgressSink, run_scope
 from library.training.forward import (
     apply_router_conditioning,
@@ -201,85 +204,23 @@ class AnimaTrainer:
         mean_grad_norm=None,
         mean_combined_norm=None,
     ):
-        logs = {"loss/current": current_loss, "loss/average": avr_loss}
-
-        if keys_scaled is not None:
-            logs["max_norm/keys_scaled"] = keys_scaled
-            logs["max_norm/max_key_norm"] = maximum_norm
-        if mean_norm is not None:
-            logs["norm/avg_key_norm"] = mean_norm
-        if mean_grad_norm is not None:
-            logs["norm/avg_grad_norm"] = mean_grad_norm
-        if mean_combined_norm is not None:
-            logs["norm/avg_combined_norm"] = mean_combined_norm
-
-        if float(getattr(args, "vr_loss_weight", 0.0) or 0.0) > 0.0:
-            lambda_ema = self._state.vr.get("lambda_ema")
-            lambda_batch = self._state.vr.get("lambda_batch")
-            if isinstance(lambda_ema, float):
-                logs["vr/lambda_ema"] = lambda_ema
-            if isinstance(lambda_batch, float):
-                logs["vr/lambda_batch"] = lambda_batch
-
-        lrs = lr_scheduler.get_last_lr()
-        for i, lr in enumerate(lrs):
-            if lr_descriptions is not None:
-                lr_desc = lr_descriptions[i]
-            else:
-                idx = i - (0 if args.network_train_unet_only else -1)
-                if idx == -1:
-                    lr_desc = "textencoder"
-                else:
-                    if len(lrs) > 2:
-                        lr_desc = f"group{idx}"
-                    else:
-                        lr_desc = "unet"
-
-            logs[f"lr/{lr_desc}"] = lr
-
-            if (
-                args.optimizer_type.lower().startswith("DAdapt".lower())
-                or args.optimizer_type.lower() == "Prodigy".lower()
-            ):
-                # tracking d*lr value
-                logs[f"lr/d*lr/{lr_desc}"] = (
-                    lr_scheduler.optimizers[-1].param_groups[i]["d"]
-                    * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-                )
-            if (
-                args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower())
-                and optimizer is not None
-            ):  # tracking d*lr value of unet.
-                logs["lr/d*lr"] = (
-                    optimizer.param_groups[0]["d"] * optimizer.param_groups[0]["lr"]
-                )
-        else:
-            idx = 0
-            if not args.network_train_unet_only:
-                logs["lr/textencoder"] = float(lrs[0])
-                idx = 1
-
-            for i in range(idx, len(lrs)):
-                logs[f"lr/group{i}"] = float(lrs[i])
-                if (
-                    args.optimizer_type.lower().startswith("DAdapt".lower())
-                    or args.optimizer_type.lower() == "Prodigy".lower()
-                ):
-                    logs[f"lr/d*lr/group{i}"] = (
-                        lr_scheduler.optimizers[-1].param_groups[i]["d"]
-                        * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
-                    )
-                if (
-                    args.optimizer_type.lower().endswith(
-                        "ProdigyPlusScheduleFree".lower()
-                    )
-                    and optimizer is not None
-                ):
-                    logs[f"lr/d*lr/group{i}"] = (
-                        optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
-                    )
-
-        return logs
+        # Thin wrapper (same shape as step_logging/epoch_logging below): the
+        # loop calls this on the trainer; the assembly lives in log_dispatch,
+        # with the trainer contributing only its VR λ state.
+        return _generate_step_logs(
+            args,
+            current_loss,
+            avr_loss,
+            lr_scheduler,
+            lr_descriptions,
+            optimizer,
+            keys_scaled,
+            mean_norm,
+            maximum_norm,
+            mean_grad_norm,
+            mean_combined_norm,
+            vr_state=self._state.vr,
+        )
 
     def step_logging(
         self, accelerator: Accelerator, logs: dict, global_step: int, epoch: int
@@ -605,41 +546,10 @@ class AnimaTrainer:
 
         return model, text_encoders
 
-    def get_tokenize_strategy(self, args):
-        tokenize_strategy = strategy_anima.AnimaTokenizeStrategy(
-            qwen3_path=args.qwen3,
-            t5_tokenizer_path=args.t5_tokenizer_path,
-            qwen3_max_length=args.qwen3_max_token_length,
-            t5_max_length=args.t5_max_token_length,
-        )
-        return tokenize_strategy
-
-    def get_latents_caching_strategy(self, args):
-        return strategy_anima.AnimaLatentsCachingStrategy(
-            args.cache_latents_to_disk, args.vae_batch_size, args.skip_cache_check
-        )
-
-    def get_text_encoding_strategy(self, args):
-        return strategy_anima.AnimaTextEncodingStrategy()
-
-    def get_text_encoder_outputs_caching_strategy(self, args):
-        if args.cache_text_encoder_outputs:
-            return strategy_anima.AnimaTextEncoderOutputsCachingStrategy(
-                args.cache_text_encoder_outputs_to_disk,
-                args.text_encoder_batch_size,
-                args.skip_cache_check,
-                False,
-                cache_llm_adapter_outputs=getattr(
-                    args, "cache_llm_adapter_outputs", False
-                ),
-                use_shuffled_caption_variants=getattr(
-                    args, "use_shuffled_caption_variants", False
-                ),
-                use_shuffled_caption_variants_only=getattr(
-                    args, "use_shuffled_caption_variants_only", False
-                ),
-            )
-        return None
+    # Strategy construction + singleton installation lives in
+    # library/anima/strategy.py (setup_training_strategies /
+    # setup_text_encoder_outputs_caching_strategy) — the training-side
+    # counterpart of library/inference/text.py::ensure_text_strategies.
 
     def get_models_for_text_encoding(self, args, accelerator, text_encoders):
         if args.cache_text_encoder_outputs:
@@ -1728,90 +1638,34 @@ class AnimaTrainer:
 
         # Native-shape flattening + per-block torch.compile. COMPILE LAST —
         # after apply_to + load_weights (above) so dynamo traces the adapter's
-        # monkey-patched Linear forwards, not the bare DiT (the invariant
-        # encoded in library/runtime/harness.py). compile_blocks turns on the
-        # flatten (one block graph per token-count family: 4032/4200) and raises
-        # the dynamo cache-size budget itself. Matches the harness order:
-        # block-swap → grad-ckpt → compile.
+        # monkey-patched Linear forwards, not the bare DiT. The full sequence
+        # (partitioner activation-memory budget → per-signature cache
+        # isolation → compile_blocks → EasyControl cond-stream compile) lives
+        # in library/runtime/harness.py with the other compile entry points.
+        # Matches the harness order: block-swap → grad-ckpt → compile.
         if args.torch_compile:
-            # Cap the AOT min-cut partitioner's saved-for-backward set. The
-            # 2026-06-10 custom-autograd removal silently grew it: the old
-            # LoRADownProjectFn was an explicit autograd boundary (save bf16
-            # x + weight, recompute casts in backward), and once the rank path
-            # became plain traceable ops the partitioner chose to save ~0.8 GB
-            # more intermediates per step — first-step OOM on 16 GB at 4200
-            # tokens without grad-ckpt. budget<1.0 makes it recompute cheap
-            # intermediates instead; 0.85 reproduces the pre-removal footprint
-            # at identical step time (1.02 vs 1.01 s/it, bench 2026-06-10).
-            # Set before compile_blocks — partitioning happens at first-forward
-            # compile, and this is a plain module attr (no ContextVar revert,
-            # unlike dynamo's recompile_limit).
-            # Skipped under gradient_checkpointing: the budget repartitions the
-            # joint graph, so checkpoint's recompute pass can select a
-            # different graph than forward → CheckpointError (saved-vs-
-            # recomputed metadata mismatch, torch #166926). Ckpt already
-            # minimizes saved activations, so the cap buys nothing there.
-            budget = float(getattr(args, "activation_memory_budget", 1.0) or 1.0)
-            if budget < 1.0 and not getattr(args, "gradient_checkpointing", False):
-                import torch._functorch.config as _functorch_config
+            from library.runtime.harness import compile_blocks_for_training
 
-                _functorch_config.activation_memory_budget = budget
-                logger.info(
-                    f"torch.compile activation_memory_budget = {budget} "
-                    "(partitioner recomputes cheap intermediates in backward)"
-                )
-            elif budget < 1.0:
-                logger.info(
-                    "activation_memory_budget ignored: incompatible with "
-                    "gradient_checkpointing (and redundant under it)"
-                )
             # Token-family budget derived from the buckets the dataset actually
             # populated (see _derive_token_budget) — not args.target_res, which is
             # a preprocess-only knob and inert at train time.
             n_token_families, seq_range = getattr(
                 self, "_compile_token_budget", (None, None)
             )
-            dynamic_seq = bool(getattr(args, "compile_dynamic_seq", False))
-            # Isolate the persistent compile caches per compile signature — a
-            # cached graph compiled under different seq-range bounds (e.g. an
-            # inference run's canonical 4032-floored range) otherwise poisons
-            # this run's wider dynamic-seq marks with a ConstraintViolationError
-            # (see isolate_compile_cache). Same signature → warm cache reuse.
-            from library.runtime.harness import (
-                compile_signature,
-                isolate_compile_cache,
-            )
-
-            isolate_compile_cache(
-                compile_signature(
-                    n_token_families=n_token_families,
-                    seq_range=seq_range,
-                    dynamic_seq=dynamic_seq,
-                    backend=args.dynamo_backend,
-                    mode=getattr(args, "compile_inductor_mode", None),
-                )
-            )
-            unet.compile_blocks(
-                args.dynamo_backend,
+            compile_blocks_for_training(
+                unet,
+                network,
+                backend=args.dynamo_backend,
                 mode=getattr(args, "compile_inductor_mode", None),
                 n_token_families=n_token_families,
-                dynamic_seq=dynamic_seq,
                 seq_range=seq_range,
+                dynamic_seq=bool(getattr(args, "compile_dynamic_seq", False)),
+                activation_memory_budget=float(
+                    getattr(args, "activation_memory_budget", 1.0) or 1.0
+                ),
+                grad_ckpt=bool(getattr(args, "gradient_checkpointing", False)),
+                logger=logger,
             )
-            # EasyControl's patched Block.forward routes the active cond path
-            # through _two_stream_inner, bypassing the just-compiled
-            # block._forward — so compile_blocks never reaches the cond stream
-            # (incl. the cond LoRA projections).
-            # Compile it explicitly, same backend/mode, preserving the
-            # compile-after-apply order (apply_to already ran above).
-            if hasattr(network, "compile_cond_stream"):
-                network.compile_cond_stream(
-                    args.dynamo_backend,
-                    mode=getattr(args, "compile_inductor_mode", None),
-                    n_token_families=n_token_families,
-                    dynamic_seq=dynamic_seq,
-                    seq_range=seq_range,
-                )
 
         return NetworkBundle(
             network=network,
@@ -2067,15 +1921,17 @@ class AnimaTrainer:
             in ("reduce-overhead", "max-autotune")
         )
 
-        tokenize_strategy = self.get_tokenize_strategy(args)
-        text_strategies.TokenizeStrategy.set_strategy(tokenize_strategy)
+        # Build + install the strategy singletons (tokenize / latents-caching /
+        # text-encoding). Must run before _prepare_dataset — dataset init reads
+        # the tokenize + latents-caching strategies. The TE-OUTPUTS caching
+        # strategy is installed separately below, after assert_extra_args has
+        # had its chance to mutate cache_llm_adapter_outputs.
+        strategies = strategy_anima.setup_training_strategies(args)
+        tokenize_strategy = strategies.tokenize
+        text_encoding_strategy = strategies.text_encoding
         tokenizers = [
             tokenize_strategy.qwen3_tokenizer
         ]  # will be removed after sample_image is refactored
-
-        # prepare caching strategy: this must be set before preparing dataset. because dataset may use this strategy for initialization.
-        latents_caching_strategy = self.get_latents_caching_strategy(args)
-        text_strategies.LatentsCachingStrategy.set_strategy(latents_caching_strategy)
 
         ds = self._prepare_dataset(args)
         train_dataset_group = ds.train_group
@@ -2124,16 +1980,12 @@ class AnimaTrainer:
             args, train_dataset_group, val_dataset_group
         )  # may change some args
 
-        # Set the text-encoder-outputs caching strategy now (before the model
-        # load) so the cache-completeness probe below can use it to decide
-        # whether the Qwen3 text encoder needs loading at all.
-        text_encoder_outputs_caching_strategy = (
-            self.get_text_encoder_outputs_caching_strategy(args)
-        )
-        if text_encoder_outputs_caching_strategy is not None:
-            text_strategies.TextEncoderOutputsCachingStrategy.set_strategy(
-                text_encoder_outputs_caching_strategy
-            )
+        # Install the text-encoder-outputs caching strategy now: after
+        # assert_extra_args (which may flip cache_llm_adapter_outputs, read by
+        # the strategy ctor) and before the model load, so the
+        # cache-completeness probe below can use it to decide whether the
+        # Qwen3 text encoder needs loading at all.
+        strategy_anima.setup_text_encoder_outputs_caching_strategy(args)
 
         # Decide whether the heavy encoders are actually needed. When caching is
         # enabled the caches MUST already be complete on disk (run `make
@@ -2243,10 +2095,8 @@ class AnimaTrainer:
 
             accelerator.wait_for_everyone()
 
-        # cache text encoder outputs if needed: Text Encoder is moved to cpu or gpu
-        text_encoding_strategy = self.get_text_encoding_strategy(args)
-        text_strategies.TextEncodingStrategy.set_strategy(text_encoding_strategy)
-
+        # cache text encoder outputs if needed: Text Encoder is moved to cpu or
+        # gpu (the encoding strategy was installed with the others up top).
         self.cache_text_encoder_outputs_if_needed(
             args,
             accelerator,

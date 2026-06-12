@@ -492,6 +492,116 @@ def isolate_compile_cache(signature: str) -> str:
     return target
 
 
+def _apply_activation_memory_budget(
+    budget: float, *, grad_ckpt: bool, logger: logging.Logger = log
+) -> None:
+    """Cap the AOT min-cut partitioner's saved-for-backward set.
+
+    The 2026-06-10 custom-autograd removal silently grew that set: the old
+    ``LoRADownProjectFn`` was an explicit autograd boundary (save bf16 x +
+    weight, recompute casts in backward), and once the rank path became plain
+    traceable ops the partitioner chose to save ~0.8 GB more intermediates per
+    step — first-step OOM on 16 GB at 4200 tokens without grad-ckpt.
+    ``budget < 1.0`` makes it recompute cheap intermediates instead; 0.85
+    reproduces the pre-removal footprint at identical step time (1.02 vs
+    1.01 s/it, bench 2026-06-10).
+
+    Must be set BEFORE the block compile — partitioning happens at
+    first-forward compile, and this is a plain module attr (no ContextVar
+    revert, unlike dynamo's recompile_limit). Skipped under gradient
+    checkpointing: the budget repartitions the joint graph, so checkpoint's
+    recompute pass can select a different graph than forward →
+    ``CheckpointError`` (saved-vs-recomputed metadata mismatch, torch
+    #166926). Ckpt already minimizes saved activations, so the cap buys
+    nothing there.
+    """
+    if budget < 1.0 and not grad_ckpt:
+        import torch._functorch.config as _functorch_config
+
+        _functorch_config.activation_memory_budget = budget
+        logger.info(
+            "torch.compile activation_memory_budget = %.3g "
+            "(partitioner recomputes cheap intermediates in backward)",
+            budget,
+        )
+    elif budget < 1.0:
+        logger.info(
+            "activation_memory_budget ignored: incompatible with "
+            "gradient_checkpointing (and redundant under it)"
+        )
+
+
+def compile_blocks_for_training(
+    unet: object,
+    network: object,
+    *,
+    backend: str,
+    mode: Optional[str] = None,
+    n_token_families: Optional[int] = None,
+    seq_range: Optional[tuple] = None,
+    dynamic_seq: bool = False,
+    activation_memory_budget: float = 1.0,
+    grad_ckpt: bool = False,
+    logger: logging.Logger = log,
+) -> None:
+    """The LoRA-training (``train.py``) compile sequence, post ``apply_to``.
+
+    Native-shape flattening + per-block torch.compile. COMPILE LAST — run only
+    after ``network.apply_to`` + ``load_weights`` so dynamo traces the
+    adapter's monkey-patched Linear forwards, not the bare DiT (the invariant
+    ``build_anima`` encodes). ``compile_blocks`` turns on the flatten (one
+    block graph per token-count family) and raises the dynamo cache-size
+    budget itself, so unlike :func:`compile_dit_blocks_for_pool` no explicit
+    ``recompile_limit`` pin is needed here.
+
+    Sequence:
+      1. :func:`_apply_activation_memory_budget` — partitioner cap, skipped
+         under grad-ckpt (see its docstring for the history + CheckpointError
+         interaction).
+      2. ``isolate_compile_cache(compile_signature(...))`` — per-signature
+         persistent-cache dir so a stale seq-range guard (e.g. an inference
+         run's canonical 4032-floored range) can't poison this run's wider
+         dynamic-seq marks with a ConstraintViolationError. Same signature →
+         warm cache reuse.
+      3. ``unet.compile_blocks(...)`` with the caller-derived token budget
+         (``train.py::_derive_token_budget`` — the buckets the dataset
+         actually populated, not ``args.target_res``).
+      4. ``network.compile_cond_stream(...)`` when the adapter exposes it:
+         EasyControl's patched ``Block.forward`` routes the active cond path
+         through ``_two_stream_inner``, bypassing the just-compiled
+         ``block._forward`` — so step 3 never reaches the cond stream (incl.
+         the cond LoRA projections). Same backend/mode, same
+         compile-after-apply ordering.
+    """
+    _apply_activation_memory_budget(
+        activation_memory_budget, grad_ckpt=grad_ckpt, logger=logger
+    )
+    isolate_compile_cache(
+        compile_signature(
+            n_token_families=n_token_families,
+            seq_range=seq_range,
+            dynamic_seq=dynamic_seq,
+            backend=backend,
+            mode=mode,
+        )
+    )
+    unet.compile_blocks(
+        backend,
+        mode=mode,
+        n_token_families=n_token_families,
+        dynamic_seq=dynamic_seq,
+        seq_range=seq_range,
+    )
+    if hasattr(network, "compile_cond_stream"):
+        network.compile_cond_stream(
+            backend,
+            mode=mode,
+            n_token_families=n_token_families,
+            dynamic_seq=dynamic_seq,
+            seq_range=seq_range,
+        )
+
+
 @dataclass
 class PoolCompileResult:
     """What :func:`compile_dit_blocks_for_pool` derived, for caller-side logging.
@@ -562,26 +672,11 @@ def compile_dit_blocks_for_pool(
     if not enabled:
         return result
 
-    # (2) Partitioner saved-activation cap. Must be set BEFORE compile_dit_blocks —
-    # partitioning happens at first-forward compile and this is a plain module
-    # attr (no ContextVar revert). Skipped under grad_ckpt: the budget repartitions
-    # the joint graph, so checkpoint's recompute pass can pick a different graph
-    # than forward → CheckpointError (torch #166926); ckpt already minimizes saved
-    # activations, so the cap buys nothing there.
-    if activation_memory_budget < 1.0 and not grad_ckpt:
-        import torch._functorch.config as _functorch_config
-
-        _functorch_config.activation_memory_budget = activation_memory_budget
-        logger.info(
-            "torch.compile activation_memory_budget = %.3g "
-            "(partitioner recomputes cheap intermediates in backward)",
-            activation_memory_budget,
-        )
-    elif activation_memory_budget < 1.0 and grad_ckpt:
-        logger.info(
-            "activation_memory_budget ignored: incompatible with grad_ckpt "
-            "(and redundant under it)"
-        )
+    # (2) Partitioner saved-activation cap — see _apply_activation_memory_budget
+    # for the ordering constraint and the grad-ckpt CheckpointError interaction.
+    _apply_activation_memory_budget(
+        activation_memory_budget, grad_ckpt=grad_ckpt, logger=logger
+    )
 
     # (3) Isolate the persistent compile caches per signature — entries compiled
     # under different seq-range bounds otherwise poison this run's dynamic-seq
