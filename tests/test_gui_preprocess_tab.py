@@ -65,6 +65,49 @@ def test_preprocess_tab_persists_default_target_res_to_variant():
             tab.deleteLater()
 
 
+def test_preprocess_tab_source_dir_editable_and_persists():
+    """The source image dir must be editable again and round-trip to the variant.
+
+    Regression for the path-scoping change that locked the field read-only
+    (setReadOnly(True)) with no save path, leaving the raw image root
+    un-revisable from the GUI. It now edits the *base* root (preprocess-owned),
+    persists onto the variant, and path_scope is appended on top at submit time.
+    """
+    from gui import _load
+
+    tab = None
+    with _temporary_custom_variant("__pytest_preprocess_source_dir__") as (
+        variant,
+        path,
+    ):
+        tab = _make_tab()
+        tab.set_variant(variant, method="lora")
+
+        # Editable + dirty-tracked (was read-only, never marked dirty before).
+        assert not tab.source_dir_edit.isReadOnly()
+        assert not tab._dirty
+        tab.source_dir_edit.setText("/data/myset")
+        assert tab._dirty
+
+        assert tab._save_all()
+        assert _load(path)["variant"]["source_image_dir"] == "/data/myset"
+
+        # path_scope is layered on top of the edited base, not the hard default.
+        path.write_text(
+            '[variant]\nfamily = "lora"\n'
+            'source_image_dir = "/data/myset"\n'
+            'path_scope = "group1"\n',
+            encoding="utf-8",
+        )
+        tab.set_variant(variant, method="lora")
+        assert tab.source_dir_edit.text() == "/data/myset"
+        snapshot = tab.preprocess_config_snapshot()
+        assert snapshot["source_image_dir"] == "/data/myset/group1"
+
+        if tab is not None:
+            tab.deleteLater()
+
+
 def test_preprocess_tab_persists_masking_settings_to_variant():
     from gui import _load
 

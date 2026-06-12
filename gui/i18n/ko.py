@@ -24,9 +24,10 @@ STRINGS: dict[str, str] = {
     "preprocess_image_prep": "이미지 전처리 (리사이즈 / 필터)",
     "preprocess_source_image_dir": "소스 이미지 폴더:",
     "preprocess_source_image_dir_tip": (
-        "선택한 GUI method의 실제 원본 이미지 루트입니다. method 경로와 "
-        "path_scope를 따라가며, 저장 위치를 바꾸지 않고 일부만 전처리하려면 "
-        "아래 전처리 경로 필터를 사용하세요."
+        "선택한 GUI method의 베이스 원본 이미지 루트입니다 (기본값은 configs/preprocess.toml; "
+        "편집 내용은 해당 variant에 저장됩니다). 실행 시 path_scope가 이 위에 "
+        "덧붙여지므로, 여기서 표시되는 것은 최종 스코프 경로가 아닌 스코프 없는 루트입니다. "
+        "파일 저장 위치를 바꾸지 않고 트리의 일부만 전처리하려면 아래 전처리 경로 필터를 사용하세요."
     ),
     "preprocess_path_pattern": "전처리 경로 필터:",
     "preprocess_path_pattern_tip": (

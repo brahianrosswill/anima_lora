@@ -25,9 +25,10 @@ STRINGS: dict[str, str] = {
     "preprocess_image_prep": "画像前処理 (リサイズ / フィルター)",
     "preprocess_source_image_dir": "ソース画像フォルダー:",
     "preprocess_source_image_dir_tip": (
-        "選択中の GUI method で実際に使われる元画像ルートです。"
-        "method のパスと path_scope に従います。保存先を変えずに一部だけ"
-        "前処理する場合は下の前処理パスフィルターを使用してください。"
+        "選択中の GUI method のベース元画像ルートです (デフォルトは configs/preprocess.toml; "
+        "編集内容は該当 variant に保存されます)。実行時に path_scope がこの上に付加されるため、"
+        "ここに表示されるのはスコープ後の最終パスではなくスコープなしのルートです。"
+        "ファイルの保存先を変えずにツリーの一部だけ前処理する場合は、下の前処理パスフィルターを使用してください。"
     ),
     "preprocess_path_pattern": "前処理パスフィルター:",
     "preprocess_path_pattern_tip": (

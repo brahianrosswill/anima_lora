@@ -28,9 +28,10 @@ STRINGS: dict[str, str] = {
     "preprocess_image_prep": "图像预处理 (调整大小 / 过滤)",
     "preprocess_source_image_dir": "源图像目录:",
     "preprocess_source_image_dir_tip": (
-        "所选 GUI method 的实际原始图像根目录。它跟随 method 路径和 "
-        "path_scope；若只想预处理其中一部分且不改变文件保存位置，请使用下方"
-        "预处理路径过滤器。"
+        "所选 GUI method 的基础原始图像根目录（默认来自 configs/preprocess.toml；"
+        "编辑结果保存到对应 variant）。运行时 path_scope 会追加到此路径之上，"
+        "因此此处显示的是未加作用域的根目录，而非最终的作用域路径。"
+        "若只想预处理目录树的一部分且不改变文件保存位置，请使用下方预处理路径过滤器。"
     ),
     "preprocess_path_pattern": "预处理路径过滤器:",
     "preprocess_path_pattern_tip": (

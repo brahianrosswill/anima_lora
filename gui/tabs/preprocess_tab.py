@@ -97,6 +97,7 @@ DEFAULT_RUN_SAM_MASK = True
 DEFAULT_RUN_MIT_MASK = True
 PREPROCESS_METHODS = ["lora", "tlora", "hydralora"]
 _GUI_PREPROCESS_KEYS = {
+    "source_image_dir",
     "preprocess_path_pattern",
     "drop_lowres_images",
     "min_pixels",
@@ -467,7 +468,6 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         )
         self.source_dir_edit.setPlaceholderText(DEFAULT_SOURCE_IMAGE_DIR)
         self.source_dir_edit.setToolTip(t("preprocess_source_image_dir_tip"))
-        self.source_dir_edit.setReadOnly(True)
         img_form.addRow(
             self._field_label("source_image_dir", t("preprocess_source_image_dir")),
             self.source_dir_edit,
@@ -717,13 +717,14 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         settings = _load_settings()
         pp_cfg = _load_preprocess_toml()
 
-        try:
-            merged, _ = merged_gui_variant_preset(variant, "default")
-            source_dir = ConfigTab._gui_scoped_paths(merged).get(
-                "source_image_dir", DEFAULT_SOURCE_IMAGE_DIR
-            )
-        except Exception:
-            source_dir = DEFAULT_SOURCE_IMAGE_DIR
+        # The base source dir is preprocess-owned (configs/preprocess.toml is the
+        # global default; a gui-method variant may override it). path_scope is
+        # layered on top at submit time by _gui_scoped_paths, so this field shows
+        # and edits the *unscoped* root, not the scoped run path.
+        source_dir = meta.get(
+            "source_image_dir",
+            pp_cfg.get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR),
+        )
 
         target_res = meta.get(
             "target_res", pp_cfg.get("target_res", DEFAULT_TARGET_RES)
@@ -840,6 +841,7 @@ class PreprocessingTab(LazyTabMixin, QWidget):
 
     def _connect_dirty_signals(self) -> None:
         for widget in (
+            self.source_dir_edit,
             self.preprocess_path_pattern_edit,
             self.drop_lowres_chk,
             self.min_pixels_spin,
@@ -1041,6 +1043,11 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         """
         variant = self._variant or "lora"
         merged, _ = merged_gui_variant_preset(variant, "default")
+        # Seed the base source dir from the (editable) field before scoping so
+        # path_scope is appended onto the user-chosen root, not the hard default.
+        source_dir = self.source_dir_edit.text().strip()
+        if source_dir:
+            merged["source_image_dir"] = source_dir
         snapshot = ConfigTab._gui_scoped_paths(copy.deepcopy(merged))
         snapshot.update(self.preprocess_overrides())
         for key in (
@@ -1115,6 +1122,17 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         meta = data.get("variant")
         if not isinstance(meta, dict):
             meta = {}
+
+        # Base source dir: persist on the variant only when it diverges from the
+        # global preprocess.toml default, so a plain checkout keeps an empty meta.
+        pp_default = str(
+            _load_preprocess_toml().get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR)
+        )
+        source_dir = self.source_dir_edit.text().strip() or pp_default
+        if source_dir == pp_default:
+            meta.pop("source_image_dir", None)
+        else:
+            meta["source_image_dir"] = source_dir
 
         path_pattern = (
             self.preprocess_path_pattern_edit.text().strip()

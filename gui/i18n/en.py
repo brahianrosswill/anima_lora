@@ -25,9 +25,11 @@ STRINGS: dict[str, str] = {
     "preprocess_image_prep": "Image preprocessing (resize / filter)",
     "preprocess_source_image_dir": "Source image dir:",
     "preprocess_source_image_dir_tip": (
-        "Effective raw image root for the selected GUI method. It follows the "
-        "method paths and path_scope; use the preprocess path filter below to "
-        "run only part of this tree without changing where files are stored."
+        "Base raw-image root for the selected GUI method (defaults to "
+        "configs/preprocess.toml; edits save onto the variant). path_scope is "
+        "appended on top at run time, so this is the unscoped root, not the final "
+        "scoped path. Use the preprocess path filter below to run only part of "
+        "this tree without changing where files are stored."
     ),
     "preprocess_path_pattern": "Preprocess path filter:",
     "preprocess_path_pattern_tip": (

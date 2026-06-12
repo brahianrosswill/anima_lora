@@ -613,6 +613,8 @@ class ConfigTab(QWidget):
         for w in self._w.values():
             self._connect_dirty_signal(w)
 
+        self._wire_validation_widgets(int(merged.get("validation_split_num") or 0))
+
         self._clear_dirty()
 
         self._refresh_config_warnings(variant)
@@ -667,6 +669,51 @@ class ConfigTab(QWidget):
         self._reload()  # rebuilds the form + re-runs the banner against disk
         if not removed:
             QMessageBox.warning(self, t("error"), t("config_remove_keys_none"))
+
+    def _wire_validation_widgets(self, current_split_num: int) -> None:
+        """Keep the ``use_valid`` checkbox and ``validation_split_num`` spinbox
+        in sync so the held-out count round-trips faithfully.
+
+        The spinbox is the source of truth for the count; the checkbox is its
+        on/off mirror. Ticking the box surfaces a positive default in the spinbox
+        *up front* instead of silently coercing 0→16 only at save time, and an
+        explicit 0 in the spinbox reads back as "validation off". Without this an
+        enabled checkbox + a 0 count was saved as 16 (``_DEFAULT_VALIDATION_SPLIT_NUM``),
+        which surprised users who set 0 deliberately to disable validation.
+        """
+        from PySide6.QtWidgets import QCheckBox, QSpinBox
+
+        from gui.validation import _DEFAULT_VALIDATION_SPLIT_NUM
+
+        use_valid_w = self._w.get("use_valid")
+        vsn_w = self._w.get("validation_split_num")
+        if not isinstance(use_valid_w, QCheckBox) or not isinstance(vsn_w, QSpinBox):
+            return
+        # Count to restore when the box is (re-)ticked: the variant/base value if
+        # it was positive, else the historical default.
+        default_split = (
+            current_split_num
+            if current_split_num > 0
+            else _DEFAULT_VALIDATION_SPLIT_NUM
+        )
+
+        def _on_use_valid(checked: bool) -> None:
+            vsn_w.blockSignals(True)
+            if checked and vsn_w.value() == 0:
+                vsn_w.setValue(default_split)
+            elif not checked:
+                vsn_w.setValue(0)
+            vsn_w.blockSignals(False)
+
+        def _on_split_changed(value: int) -> None:
+            want = value > 0
+            if use_valid_w.isChecked() != want:
+                use_valid_w.blockSignals(True)
+                use_valid_w.setChecked(want)
+                use_valid_w.blockSignals(False)
+
+        use_valid_w.toggled.connect(_on_use_valid)
+        vsn_w.valueChanged.connect(_on_split_changed)
 
     # ── Dirty tracking ──
 
