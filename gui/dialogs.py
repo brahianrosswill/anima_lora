@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 
 from gui._paths import ROOT
 from gui.i18n import t
-from library.datasets.subsets import filter_paths_by_glob
+from library.datasets.path_filter import filter_paths_by_glob
 
 
 def confirm_resumable_checkpoint(parent: QWidget | None, merged: dict) -> bool:

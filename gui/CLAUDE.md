@@ -4,7 +4,7 @@ Guidance for the PySide6 (Qt6) desktop GUI. Scoped to `gui/` — read the root `
 
 ## What it is
 
-A thin **front-end over the existing pipeline** — it edits TOML configs and submits jobs to the daemon; it does **not** contain training/torch logic. `config_io.py` and `_paths.py` are deliberately **Qt-free** (no PySide6 import) so they stay headless-unit-testable; keep them that way. The only `library/` import is the dataset-key linter (`library.config.dataset_keys.lint_dataset_sections`) — don't pull torch/training code into the GUI or you slow startup.
+A thin **front-end over the existing pipeline** — it edits TOML configs and submits jobs to the daemon; it does **not** contain training/torch logic. `config_io.py` and `_paths.py` are deliberately **Qt-free** (no PySide6 import) so they stay headless-unit-testable; keep them that way. The only `library/` imports are torch-free leaves (`library.config.dataset_keys`, `library.config.io`, `library.datasets.path_filter`) — don't pull torch/cv2-importing modules into the GUI or you slow startup by seconds (verify with `python -X importtime -c "import gui.app"`; torch must not appear).
 
 ## Launch
 

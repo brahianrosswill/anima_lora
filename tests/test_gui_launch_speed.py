@@ -1,0 +1,86 @@
+"""GUI launch-speed regression guards.
+
+The GUI process must stay light (gui/CLAUDE.md): a single careless import of a
+torch/cv2-backed ``library`` module adds ~2.4s warm — and 10-30s after a cold
+boot — to every launch (this regressed once via ``library.datasets.subsets``).
+
+Two layers, both in a fresh interpreter (an in-process check would be polluted
+by other tests that legitimately import torch):
+
+* ``test_gui_app_import_stays_torch_free`` — the root-cause guard. Fails the
+  moment a heavy import sneaks back into the ``gui.app`` chain, regardless of
+  how fast the machine is.
+* ``test_gui_launch_under_budget`` — end-to-end wall clock: import ``gui.app``,
+  build and show ``MainWindow`` offscreen. Budget is generous vs. the ~1.6s
+  measured worst case (daemon down: 3 × 0.25s health-probe timeouts) so a
+  loaded machine doesn't flake it, while a torch-sized regression still trips.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+LAUNCH_BUDGET_S = 2.5
+
+# Heavyweight modules that must never load in the GUI process.
+_FORBIDDEN = ("torch", "cv2")
+
+
+def _run_in_fresh_interpreter(code: str, **env_extra: str) -> str:
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        env={**os.environ, **env_extra},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"child interpreter failed (rc={proc.returncode})\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )
+    return proc.stdout
+
+
+def test_gui_app_import_stays_torch_free():
+    out = _run_in_fresh_interpreter(
+        "import sys\n"
+        "import gui.app  # noqa: F401\n"
+        f"leaked = [m for m in {_FORBIDDEN!r} if m in sys.modules]\n"
+        "print('LEAKED=' + ','.join(leaked))\n"
+    )
+    line = next(ln for ln in out.splitlines() if ln.startswith("LEAKED="))
+    leaked = line.removeprefix("LEAKED=")
+    assert not leaked, (
+        f"importing gui.app pulled in {leaked} — a heavy module re-entered the "
+        "GUI import chain. Find it with: python -X importtime -c 'import gui.app'"
+    )
+
+
+def test_gui_launch_under_budget():
+    out = _run_in_fresh_interpreter(
+        "import time\n"
+        "t0 = time.perf_counter()\n"
+        "import sys\n"
+        "from PySide6.QtWidgets import QApplication\n"
+        "import gui.app as ga\n"
+        "app = QApplication(sys.argv)\n"
+        "ga._dark(app)\n"
+        "win = ga.MainWindow()\n"
+        "win.show()\n"
+        "print(f'ELAPSED={time.perf_counter() - t0:.3f}')\n",
+        QT_QPA_PLATFORM="offscreen",
+    )
+    line = next(ln for ln in out.splitlines() if ln.startswith("ELAPSED="))
+    elapsed = float(line.removeprefix("ELAPSED="))
+    assert elapsed < LAUNCH_BUDGET_S, (
+        f"GUI launch (import + MainWindow build) took {elapsed:.2f}s, "
+        f"budget is {LAUNCH_BUDGET_S}s. Profile imports with "
+        "`python -X importtime -c 'import gui.app'` and window construction "
+        "with cProfile around MainWindow()."
+    )

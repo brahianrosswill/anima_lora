@@ -71,7 +71,7 @@ from gui.explanations import preprocess_field_help, preprocess_guide
 from gui.i18n import t
 from gui.progress import TQDM_RE, TqdmProgressTracker, make_progress_bar
 from gui.tabs.config_tab import ClickableLabel, ConfigTab, SplitButtonStyle
-from library.datasets.subsets import filter_paths_by_glob
+from library.datasets.path_filter import filter_paths_by_glob
 
 SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
 PREPROCESS_TOML = ROOT / "configs" / "preprocess.toml"
@@ -1164,9 +1164,7 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             meta["mask_path_pattern"] = mask_path_pattern
             meta["mask_rules"] = list(rules or [])
             meta["mit_text_threshold"] = float(
-                DEFAULT_MIT_TEXT_THRESHOLD
-                if mit_threshold is None
-                else mit_threshold
+                DEFAULT_MIT_TEXT_THRESHOLD if mit_threshold is None else mit_threshold
             )
             meta["mit_dilate"] = int(self.mit_dilate_spin.value())
 

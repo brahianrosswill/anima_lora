@@ -9,6 +9,7 @@ both the ComfyUI node and ``make daemon`` rely on.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import time
 import urllib.error
@@ -138,6 +139,19 @@ class DaemonClient:
     # ----- typed endpoints -----
 
     def health(self, *, timeout: float = 3.0) -> Optional[dict]:
+        # Fast-fail when nothing is listening. On Windows, a TCP connect to a
+        # closed port isn't refused immediately — the stack retransmits SYN
+        # for ~2s before erroring — so a bare urlopen turns every "is the
+        # daemon up?" probe into a 2s stall (the GUI makes several at launch
+        # and on poll timers, on the UI thread). A raw connect with a short
+        # timeout bounds the daemon-down answer at 0.25s; when the daemon is
+        # up, loopback connects in microseconds and we proceed to the real
+        # request with the caller's (generous) timeout.
+        try:
+            with socket.create_connection((config.HOST, self.port), timeout=0.25):
+                pass
+        except OSError:
+            return None
         try:
             return self._request("GET", "/health", timeout=timeout)
         except (urllib.error.URLError, OSError, ValueError):
