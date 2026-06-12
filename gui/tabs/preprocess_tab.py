@@ -31,7 +31,8 @@ from pathlib import Path
 
 import toml
 import yaml
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -431,10 +432,20 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         self._progress_tracker = TqdmProgressTracker(self.progress)
         outer.addWidget(self.progress)
 
-        # Status one-liner stays directly under the progress bar.
+        # Status one-liner stays directly under the progress bar, with a small
+        # button to open the post_image_dataset/ folder (resized + caches) in
+        # the OS file manager.
+        status_row = QHBoxLayout()
         self.status_lbl = QLabel("")
         self.status_lbl.setStyleSheet("color:#dcdcdc; padding: 2px 0;")
-        outer.addWidget(self.status_lbl)
+        status_row.addWidget(self.status_lbl)
+        status_row.addStretch()
+        self.open_dataset_btn = QToolButton()
+        self.open_dataset_btn.setText("📂 " + t("preprocess_open_dataset_dir"))
+        self.open_dataset_btn.setToolTip(t("preprocess_open_dataset_dir_tooltip"))
+        self.open_dataset_btn.clicked.connect(self._open_dataset_dir)
+        status_row.addWidget(self.open_dataset_btn)
+        outer.addLayout(status_row)
 
         # ── Body: vertical splitter (form+explain top, log bottom) ──
         vsplit = QSplitter(Qt.Vertical)
@@ -954,6 +965,21 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             t("preprocess_status_masks", masks=mask_n),
         ]
         self.status_lbl.setText("  |  ".join(lines))
+
+    def _open_dataset_dir(self) -> None:
+        """Open the post_image_dataset/ folder (resized + caches) in the OS file manager."""
+        snapshot = self.preprocess_config_snapshot()
+        raw = snapshot.get("resized_image_dir")
+        resized = (
+            (Path(str(raw)) if Path(str(raw)).is_absolute() else ROOT / str(raw))
+            if raw
+            else RESIZED_DIR
+        )
+        # post_image_dataset/ is the parent of resized/ (and lora/, masks/).
+        target = resized.parent
+        if not target.is_dir():
+            target = ROOT
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     # ── SAM rule cards ─────────────────────────────────────────────
 
