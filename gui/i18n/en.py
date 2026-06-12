@@ -9,7 +9,7 @@ STRINGS: dict[str, str] = {
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
-    "tab_methods": "Methods",
+    "tab_experimental": "Experimental",
     "tab_images": "Dataset",
     "tab_merge": "Merge",
     "tab_queue": "Queue",
@@ -410,9 +410,6 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "New release {v} available — click to view release notes",
     "report_issue": "Report Issue",
     "report_issue_tooltip": "Open the GitHub issue tracker in your browser",
-    "experimental_features": "🧪 Experimental",
-    "experimental_features_tooltip": "Open Postfix and EasyControl tabs (image-conditioning methods)",
-    "experimental_features_title": "Experimental Features",
     # Models dialog
     "models_title": "Download Models",
     "models_intro": "Pick a model group below or use 'Download all' for the standard set "

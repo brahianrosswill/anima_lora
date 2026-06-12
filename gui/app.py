@@ -237,32 +237,31 @@ class MainWindow(QMainWindow):
         )
         lang_bar.addWidget(self.issues_btn)
 
-        self.experimental_btn = QPushButton(t("experimental_features"))
-        self.experimental_btn.setToolTip(t("experimental_features_tooltip"))
-        self.experimental_btn.setCheckable(True)
-        # Two visual states: idle (purple, advertises the toggle) vs active
-        # (orange, signals "you're currently in experimental mode — click to
-        # return"). Style is reapplied in `_update_experimental_btn_style`.
-        self._experimental_idle_style = (
-            "QPushButton { background:#8e44ad; color:white; "
-            "font-weight:bold; padding:4px 12px; border:1px solid #8e44ad; "
+        # The Queue view is a top-bar toggle because the daemon job queue is
+        # global — it spans every method, so it lives as an overlay over the
+        # tab set rather than a tab inside it. Like TensorBoard; the two
+        # overlays are mutually exclusive.
+        self.queue_btn = QPushButton(t("tab_queue"))
+        self.queue_btn.setCheckable(True)
+        self._queue_idle_style = (
+            "QPushButton { background:#5d6d7e; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #5d6d7e; "
             "border-radius:3px; }"
-            "QPushButton:hover { background:#9b59b6; }"
+            "QPushButton:hover { background:#6b7c8c; }"
         )
-        self._experimental_active_style = (
-            "QPushButton { background:#e67e22; color:white; "
-            "font-weight:bold; padding:4px 12px; border:1px solid #e67e22; "
+        self._queue_active_style = (
+            "QPushButton { background:#34495e; color:white; "
+            "font-weight:bold; padding:4px 12px; border:1px solid #34495e; "
             "border-radius:3px; }"
-            "QPushButton:hover { background:#f39c12; }"
+            "QPushButton:hover { background:#3d566e; }"
         )
-        self.experimental_btn.toggled.connect(self._toggle_experimental)
-        lang_bar.addWidget(self.experimental_btn)
+        self.queue_btn.toggled.connect(self._toggle_queue_view)
+        lang_bar.addWidget(self.queue_btn)
 
-        # TensorBoard lives next to the experimental toggle because the run list
-        # is shared across every method (standard + experimental) — a single
-        # global view rather than a per-tab-set duplicate. Toggling it on swaps
-        # the whole tab area for the TensorBoard panel; toggling off returns to
-        # whichever set the experimental button currently selects.
+        # TensorBoard is a top-bar toggle because the run list is shared across
+        # every method — a single global view rather than a per-tab duplicate.
+        # Toggling it on swaps the whole tab area for the TensorBoard panel;
+        # toggling off returns to the tab set.
         self.tensorboard_btn = QPushButton(t("tab_tensorboard"))
         self.tensorboard_btn.setCheckable(True)
         self._tensorboard_idle_style = (
@@ -291,20 +290,15 @@ class MainWindow(QMainWindow):
         lang_bar.addWidget(self.lang_combo)
         main_lay.addLayout(lang_bar)
 
-        # Two parallel tab sets share a QStackedWidget so the experimental
-        # button swaps the visible tab bar in place — same window, no popup.
-        # Both sets stay alive across switches so subprocess state and log
-        # buffers survive toggling between modes.
-        # Standard set: the official adapter families — plain LoRA (with
-        # hardware variants), T-LoRA (stacked with OrthoLoRA by default, plus
-        # a low-VRAM sibling), and HydraLoRA. Postfix and the
-        # image-conditioning adapter (EasyControl) live behind the
-        # experimental toggle.
+        # One tab set holds everything; the TensorBoard / Queue overlays share
+        # a QStackedWidget with it so toggling swaps the visible view in place
+        # — same window, no popup. All widgets stay alive across switches so
+        # subprocess state and log buffers survive toggling.
         # The TensorBoard runs panel is a single shared instance (the run list
         # is method-agnostic). It's reached via the top-bar TensorBoard toggle
-        # rather than a tab in each set. Both ConfigTab and MethodsTab keep a
-        # reference to its `.panel` so either can sync the log dir on variant
-        # switch / launch / run_start.
+        # rather than a tab. Both ConfigTab and MethodsTab keep a reference to
+        # its `.panel` so either can sync the log dir on variant switch /
+        # launch / run_start.
         self._tb_tab = TensorBoardTab()
 
         # Built before ConfigTab so the Train auto-chain can flush this tab's
@@ -323,40 +317,40 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._preprocess_tab, t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
-        self.tabs.addTab(QueueTab(), t("tab_queue"))
+        # Experimental tabs sit at the end of the same set (the old top-bar
+        # toggle that swapped a separate tab bar is gone). MethodsTab folds
+        # every trainable experimental method behind one dropdown — FeRA /
+        # ChimeraHydra / Soft Tokens (flat train.py methods) plus SPD / Turbo
+        # (bespoke distill loops) — so they don't need a tab each. EasyControl
+        # has its own preprocess/dataset lifecycle, so it keeps a dedicated tab.
+        self.tabs.addTab(MethodsTab(tb_panel=self._tb_tab.panel), t("tab_experimental"))
+        self.tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
 
-        # Experimental set: a unified Methods picker + image-conditioning
-        # adapters. MethodsTab folds every trainable experimental method behind
-        # one dropdown — FeRA / ChimeraHydra / Soft Tokens (flat train.py
-        # methods) plus SPD / Turbo (bespoke distill loops) — so they no longer
-        # need a tab each. EasyControl has its own preprocess/dataset
-        # lifecycle, so it keeps a dedicated tab.
-        self.experimental_tabs = QTabWidget()
-        self.experimental_tabs.addTab(
-            MethodsTab(tb_panel=self._tb_tab.panel), t("tab_methods")
-        )
-        self.experimental_tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
+        # The Queue view is a global overlay reached via the top-bar toggle
+        # (like TensorBoard), not a tab — the daemon queue spans every method.
+        # Lives in the stack below.
+        self._queue_tab = QueueTab()
 
         self.tab_stack = QStackedWidget()
         self.tab_stack.addWidget(self.tabs)
-        self.tab_stack.addWidget(self.experimental_tabs)
         self.tab_stack.addWidget(self._tb_tab)
+        self.tab_stack.addWidget(self._queue_tab)
         main_lay.addWidget(self.tab_stack)
         self.setCentralWidget(central)
 
-        self._update_experimental_btn_style(False)
         self._update_tensorboard_btn_style(False)
+        self._update_queue_btn_style(False)
 
     def closeEvent(self, event):
         # Without this, closing the window leaves training subprocesses
         # (accelerate → train.py) orphaned and still holding VRAM.
-        for tabs in (self.tabs, self.experimental_tabs):
-            for i in range(tabs.count()):
-                cleanup = getattr(tabs.widget(i), "cleanup_subprocess", None)
-                if callable(cleanup):
-                    cleanup()
-        # The shared TensorBoard tab lives in the stack, not a tab set above.
+        for i in range(self.tabs.count()):
+            cleanup = getattr(self.tabs.widget(i), "cleanup_subprocess", None)
+            if callable(cleanup):
+                cleanup()
+        # The shared TensorBoard + Queue views live in the stack, not a tab set.
         self._tb_tab.cleanup_subprocess()
+        self._queue_tab.cleanup_subprocess()
         super().closeEvent(event)
 
     def _show_update_available(self, latest_tag: str) -> None:
@@ -368,39 +362,43 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background:#d97706; }"
         )
 
-    def _toggle_experimental(self, on: bool):
-        # Switching method set implies leaving the TensorBoard view; drop its
-        # toggle so the stack lands on the chosen tab set rather than staying on
-        # TensorBoard (the setChecked(False) re-runs _toggle_tensorboard, but the
-        # explicit setCurrentWidget below has the final say).
-        if self.tensorboard_btn.isChecked():
-            self.tensorboard_btn.blockSignals(True)
-            self.tensorboard_btn.setChecked(False)
-            self.tensorboard_btn.blockSignals(False)
-            self._update_tensorboard_btn_style(False)
-        self.tab_stack.setCurrentWidget(self.experimental_tabs if on else self.tabs)
-        self._update_experimental_btn_style(on)
-
-    def _update_experimental_btn_style(self, on: bool):
-        self.experimental_btn.setStyleSheet(
-            self._experimental_active_style if on else self._experimental_idle_style
-        )
+    def _clear_overlay_toggle(self, btn: QPushButton, style_fn) -> None:
+        """Silently un-check an overlay toggle (TensorBoard / Queue) and repaint
+        it, without re-firing its toggled handler."""
+        if btn.isChecked():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+            style_fn(False)
 
     def _toggle_tensorboard(self, on: bool):
         if on:
+            # TensorBoard and Queue are mutually-exclusive overlays.
+            self._clear_overlay_toggle(self.queue_btn, self._update_queue_btn_style)
             self.tab_stack.setCurrentWidget(self._tb_tab)
         else:
-            # Return to whichever method set the experimental toggle selects.
-            self.tab_stack.setCurrentWidget(
-                self.experimental_tabs
-                if self.experimental_btn.isChecked()
-                else self.tabs
-            )
+            self.tab_stack.setCurrentWidget(self.tabs)
         self._update_tensorboard_btn_style(on)
 
     def _update_tensorboard_btn_style(self, on: bool):
         self.tensorboard_btn.setStyleSheet(
             self._tensorboard_active_style if on else self._tensorboard_idle_style
+        )
+
+    def _toggle_queue_view(self, on: bool):
+        if on:
+            # Queue and TensorBoard are mutually-exclusive overlays.
+            self._clear_overlay_toggle(
+                self.tensorboard_btn, self._update_tensorboard_btn_style
+            )
+            self.tab_stack.setCurrentWidget(self._queue_tab)
+        else:
+            self.tab_stack.setCurrentWidget(self.tabs)
+        self._update_queue_btn_style(on)
+
+    def _update_queue_btn_style(self, on: bool):
+        self.queue_btn.setStyleSheet(
+            self._queue_active_style if on else self._queue_idle_style
         )
 
     def _open_guidebook(self):

@@ -80,6 +80,9 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
 
         # ── Top bar: title + file path + Save / Preprocess / Train / Stop ──
         top = QHBoxLayout()
+        # Exposed so MethodsTab can mount its Method picker inline at the
+        # front of this row when this editor is the active page.
+        self._top_bar = top
         title = QLabel(self.METHOD_LABEL)
         title.setStyleSheet("font-weight:bold;font-size:14px;")
         top.addWidget(title)
@@ -196,7 +199,9 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
             self._fl.addWidget(general)
         for key, item in self._doc.body:
             if key is not None and isinstance(item, Table):
-                box = self._build_box(str(key).strip(), item.value.body, str(key).strip())
+                box = self._build_box(
+                    str(key).strip(), item.value.body, str(key).strip()
+                )
                 if box is not None:
                     self._fl.addWidget(box)
 
@@ -247,9 +252,7 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
             if tip:
                 lbl.setToolTip(tip)
                 w.setToolTip(tip)
-            lbl.clicked.connect(
-                lambda _n=name, _t=tip: self._show_explain(_n, _t)
-            )
+            lbl.clicked.connect(lambda _n=name, _t=tip: self._show_explain(_n, _t))
             form.addRow(lbl, w)
             self._fields.append((section, name, w, orig))
             added += 1
@@ -401,7 +404,9 @@ class _DistillConfigTab(LazyTabMixin, QWidget):
             return
         job_id = resp.get("job_id") if isinstance(resp, dict) else None
         if not job_id:
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(resp)))
+            QMessageBox.warning(
+                self, t("error"), t("daemon_submit_failed", err=str(resp))
+            )
             self._restore_idle()
             return
         self._log(t("daemon_queued", job_id=job_id))

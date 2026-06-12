@@ -13,7 +13,7 @@ STRINGS: dict[str, str] = {
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
-    "tab_methods": "方法",
+    "tab_experimental": "实验功能",
     "tab_images": "数据集",
     "tab_merge": "合并",
     "tab_queue": "队列状况",
@@ -347,9 +347,6 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "有新版本 {v} 可用 — 点击查看发布说明",
     "report_issue": "提交问题",
     "report_issue_tooltip": "在浏览器中打开 GitHub 问题追踪",
-    "experimental_features": "🧪 实验功能",
-    "experimental_features_tooltip": "打开 Postfix 和 EasyControl 选项卡 (图像条件方法)",
-    "experimental_features_title": "实验功能",
     # Models dialog
     "models_title": "下载模型",
     "models_intro": "在下方选择模型组,或使用「全部下载」获取标准套件 "

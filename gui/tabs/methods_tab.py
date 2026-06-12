@@ -60,21 +60,17 @@ class MethodsTab(QWidget):
         # Distill method key → editor widget.
         self._distill: dict[str, QWidget] = {"spd": self._spd, "turbo": self._turbo}
 
-        # Method selector lives in a defined header band (padding + bottom
-        # border) so it reads as an intentional selector strip instead of a
-        # control jammed into the top-left corner above the editor's own row.
-        header = QWidget()
-        header.setObjectName("methodHeader")
-        header.setStyleSheet(
-            "#methodHeader { background:#323232; border-bottom:1px solid #454545; }"
-        )
-        top = QHBoxLayout(header)
-        top.setContentsMargins(12, 8, 12, 8)
-        top.setSpacing(8)
+        # The Method picker rides *inside* whichever editor page is active —
+        # mounted at the front of that page's own top bar (`_top_bar`) so it
+        # sits inline next to Variant / Save / Train exactly like ConfigTab's
+        # native picker does on the standard tabs, instead of on its own row
+        # above the editor. insertWidget reparents it automatically when the
+        # page switches.
+        self._picker = QWidget()
+        picker_row = QHBoxLayout(self._picker)
+        picker_row.setContentsMargins(0, 0, 0, 0)
         # "Method" matches ConfigTab's own (hardcoded) picker label.
-        method_lbl = QLabel("Method")
-        method_lbl.setStyleSheet("font-weight:bold;")
-        top.addWidget(method_lbl)
+        picker_row.addWidget(QLabel("Method"))
         self._combo = QComboBox()
         self._combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self._combo.setMinimumContentsLength(
@@ -82,9 +78,7 @@ class MethodsTab(QWidget):
         )
         self._combo.addItems([*self._FLAT_METHODS, *self._distill])
         self._combo.currentTextChanged.connect(self._on_method)
-        top.addWidget(self._combo)
-        top.addStretch()
-        lay.addWidget(header)
+        picker_row.addWidget(self._combo)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._config)  # one page serves all flat methods
@@ -97,10 +91,13 @@ class MethodsTab(QWidget):
 
     def _on_method(self, method: str) -> None:
         editor = self._distill.get(method)
+        page = editor if editor is not None else self._config
+        self._stack.setCurrentWidget(page)
+        # Move the picker into the active page's top bar (reparents away from
+        # the previous page).
+        page._top_bar.insertWidget(0, self._picker)
         if editor is not None:
-            self._stack.setCurrentWidget(editor)
             return
-        self._stack.setCurrentWidget(self._config)
         # Drive the embedded ConfigTab to the chosen flat method (its hidden
         # combo still emits currentTextChanged → _reload).
         if self._config.method_combo.currentText() != method:

@@ -124,6 +124,11 @@ class QueueTab(LazyTabMixin, QWidget):
         self._selected_job_id: str | None = None
         self._last_log_text: str | None = None
         self._paused: bool = False
+        # While False, refresh() auto-follows the live (running/queued) job so the
+        # progress bar tracks the active run. A manual click in the job list pins
+        # the selection (sets this True) so the user can inspect a finished job
+        # without the view jumping back to whatever is training.
+        self._user_pinned: bool = False
 
         outer = QVBoxLayout(self)
 
@@ -224,6 +229,28 @@ class QueueTab(LazyTabMixin, QWidget):
             return
 
         self._jobs = list(reversed(jobs))
+
+        # If the pinned job has fallen off the list (e.g. cleared/expired),
+        # drop the pin so auto-follow resumes.
+        if self._user_pinned and not any(j.get("id") == selected for j in self._jobs):
+            self._user_pinned = False
+
+        # Unless the user has pinned a selection, follow the live job so the
+        # progress bar tracks the run the daemon is actually executing — this is
+        # what keeps the bar moving when the queue advances from one job to the
+        # next (a finished selection would otherwise leave it frozen).
+        desired = selected
+        if not self._user_pinned:
+            live = next(
+                (j.get("id") for j in self._jobs if j.get("state") == "running"),
+                None,
+            ) or next(
+                (j.get("id") for j in self._jobs if j.get("state") == "queued"),
+                None,
+            )
+            if live is not None:
+                desired = live
+
         self.job_list.blockSignals(True)
         self.job_list.clear()
         selected_row = -1
@@ -238,7 +265,7 @@ class QueueTab(LazyTabMixin, QWidget):
             elif state in {"error", "stopped"}:
                 item.setForeground(Qt.GlobalColor.red)
             self.job_list.addItem(item)
-            if selected and job.get("id") == selected:
+            if desired and job.get("id") == desired:
                 selected_row = row
         if selected_row < 0 and self._jobs:
             selected_row = 0
@@ -284,6 +311,10 @@ class QueueTab(LazyTabMixin, QWidget):
         self.refresh()
 
     def _selection_changed(self, current: QListWidgetItem | None, _prev) -> None:
+        # Only genuine user clicks reach here — refresh() rebuilds the list under
+        # blockSignals — so a change of selection means the user picked a job to
+        # inspect. Pin it so auto-follow stops yanking the view to the live job.
+        self._user_pinned = current is not None
         self._selected_job_id = current.data(Qt.UserRole) if current else None
         self._last_log_text = None
         self._update_selected_view()

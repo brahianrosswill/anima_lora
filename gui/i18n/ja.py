@@ -9,7 +9,7 @@ STRINGS: dict[str, str] = {
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
-    "tab_methods": "手法",
+    "tab_experimental": "実験機能",
     "tab_images": "データセット",
     "tab_merge": "マージ",
     "tab_queue": "キュー状況",
@@ -359,9 +359,6 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "新しいリリース {v} があります — クリックしてリリースノートを確認",
     "report_issue": "問題を報告",
     "report_issue_tooltip": "ブラウザで GitHub Issue トラッカーを開きます",
-    "experimental_features": "🧪 実験的機能",
-    "experimental_features_tooltip": "Postfix および EasyControl タブを開きます (画像条件付け手法)",
-    "experimental_features_title": "実験的機能",
     # Models dialog
     "models_title": "モデルのダウンロード",
     "models_intro": "以下からモデルグループを選択するか、「すべてダウンロード」で標準セット "

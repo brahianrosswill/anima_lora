@@ -181,6 +181,9 @@ class ConfigTab(QWidget):
         # shows only lora; the experimental tab mounts a method picker for
         # postfix). When only one method is allowed, the picker hides itself.
         top = QHBoxLayout()
+        # Exposed so MethodsTab can mount its own Method picker inline at the
+        # front of this row (next to Variant) when it embeds this tab.
+        self._top_bar = top
         method_items = methods if methods is not None else list_methods()
         self._method_label = QLabel("Method")
         top.addWidget(self._method_label)
@@ -268,9 +271,7 @@ class ConfigTab(QWidget):
             lambda _checked=False: self._queue_preprocess(train_after=True)
         )
         train_only_action = queue_menu.addAction(t("queue_train_only"))
-        train_only_action.triggered.connect(
-            lambda _checked=False: self._queue_train()
-        )
+        train_only_action.triggered.connect(lambda _checked=False: self._queue_train())
         self.train_btn.setMenu(queue_menu)
         # Always enabled — when no cache exists yet, clicking Train silently
         # chains a Preprocess run first (see _start_training). It stays enabled

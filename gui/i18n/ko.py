@@ -9,7 +9,7 @@ STRINGS: dict[str, str] = {
     "tab_easycontrol": "EasyControl",
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
-    "tab_methods": "메소드",
+    "tab_experimental": "실험기능",
     "tab_images": "데이터셋",
     "tab_merge": "병합",
     "tab_queue": "큐 현황",
@@ -398,9 +398,6 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "새 릴리스 {v} 가 있습니다 — 클릭하여 릴리스 노트 보기",
     "report_issue": "이슈 신고",
     "report_issue_tooltip": "브라우저에서 GitHub 이슈 트래커 열기",
-    "experimental_features": "🧪 실험 기능",
-    "experimental_features_tooltip": "Postfix 및 EasyControl 탭 열기 (이미지 조건부 방식)",
-    "experimental_features_title": "실험 기능",
     # Models dialog
     "models_title": "모델 다운로드",
     "models_intro": "아래에서 모델 그룹을 선택하거나 '전체 다운로드'로 표준 세트 "
