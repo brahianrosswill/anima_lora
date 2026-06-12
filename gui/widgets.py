@@ -15,6 +15,7 @@ from typing import Any
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -235,7 +236,11 @@ class _SamplePromptRow(QFrame):
                     self.flow_shift,
                     t("sample_prompt_tip_shift"),
                 ),
-                (t("sample_prompt_col_extra"), self.extra, t("sample_prompt_tip_extra")),
+                (
+                    t("sample_prompt_col_extra"),
+                    self.extra,
+                    t("sample_prompt_tip_extra"),
+                ),
             )
         ):
             label = QLabel(label_text)
@@ -431,9 +436,7 @@ class _SamplePromptsWidget(QWidget):
         self.scroll.setMinimumHeight(height)
         self.scroll.setMaximumHeight(height)
         self.expand_btn.setText(
-            t("sample_prompt_collapse")
-            if self._expanded
-            else t("sample_prompt_expand")
+            t("sample_prompt_collapse") if self._expanded else t("sample_prompt_expand")
         )
 
     def _toggle_expanded(self) -> None:
@@ -551,9 +554,7 @@ class SamplePromptsDialog(QDialog):
         lay = QVBoxLayout(self)
         self._editor = _SamplePromptsWidget(prompts, fill=True)
         lay.addWidget(self._editor, 1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
@@ -732,3 +733,40 @@ class ScaledImageLabel(QLabel):
                     self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
             )
+
+
+class ImageViewerDialog(QDialog):
+    """Magnified view of a single gallery image (the 🔍 link in the sample /
+    test-output galleries).
+
+    Opens at the image's native size clamped to ~90% of the screen, rescales
+    live with the dialog via ScaledImageLabel; Esc closes (QDialog default).
+    Non-modal — open it with show().
+    """
+
+    def __init__(self, path, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle(getattr(path, "name", None) or str(path))
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        pm = QPixmap(str(path))
+        if pm.isNull():
+            err = QLabel(str(path))
+            err.setAlignment(Qt.AlignCenter)
+            err.setMargin(20)
+            lay.addWidget(err)
+            return
+        img = ScaledImageLabel()
+        img.set_source(pm)
+        lay.addWidget(img)
+        screen = self.screen() or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        scale = min(
+            1.0,
+            avail.width() * 0.9 / pm.width(),
+            avail.height() * 0.9 / pm.height(),
+        )
+        self.resize(
+            max(1, round(pm.width() * scale)), max(1, round(pm.height() * scale))
+        )

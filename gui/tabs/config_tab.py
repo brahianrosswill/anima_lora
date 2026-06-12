@@ -11,8 +11,8 @@ from typing import Any
 import html
 
 import toml
-from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPen, QTextCursor
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPen, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -67,6 +67,7 @@ from gui import daemon as gui_daemon
 from gui.explanations import field_help, method_guide
 from gui.i18n import t
 from gui.process import kill_process_tree, setup_kill_safe
+from gui.widgets import ImageViewerDialog
 from gui.progress import (
     TQDM_RE,
     JsonlProgressReader,
@@ -382,11 +383,19 @@ class ConfigTab(QWidget):
         hsplit.addWidget(sc)
 
         self._explain = QTextBrowser()
-        self._explain.setOpenExternalLinks(True)
+        # Links are handled manually (setOpenLinks off so the browser never
+        # navigates away from the rendered HTML): ``magnify:`` anchors from the
+        # image galleries open the zoom dialog, everything else goes to the OS.
+        self._explain.setOpenLinks(False)
+        self._explain.anchorClicked.connect(self._on_explain_anchor)
         self._explain.setStyleSheet(
             "QTextBrowser { font-size: 13px; padding: 12px; background: #2b2b2b; color: #e0e0e0; }"
         )
         self._explain.setMinimumWidth(320)
+        # Identity of the gallery render currently showing (None = panel holds
+        # something other than a gallery). Lets the 400ms job poll skip setHtml
+        # when nothing changed — a setHtml resets the scroll position to top.
+        self._gallery_sig: tuple | None = None
         self._show_explain_placeholder()
         hsplit.addWidget(self._explain)
         hsplit.setStretchFactor(0, 3)
@@ -729,32 +738,77 @@ class ConfigTab(QWidget):
         variant = self._current_variant() if hasattr(self, "variant_combo") else ""
         guide = method_guide(variant) or method_guide(method)
         if guide:
-            self._explain.setHtml(guide)
+            self._set_explain_html(guide)
             return
-        self._explain.setHtml(
+        self._set_explain_html(
             f"<p style='color:#888; font-style:italic;'>{html.escape(t('click_field_for_help'))}</p>"
         )
 
+    def _set_explain_html(
+        self, content: str, *, gallery_sig: tuple | None = None
+    ) -> None:
+        """Single chokepoint for writing the explanation panel — records which
+        gallery render (if any) is now showing so _render_image_gallery can
+        tell an identical poll-driven refresh from a real content change."""
+        self._gallery_sig = gallery_sig
+        self._explain.setHtml(content)
+
+    def _on_explain_anchor(self, url: QUrl) -> None:
+        """Explanation-panel link clicks. ``magnify:`` is the gallery zoom
+        scheme — a file URI with the scheme swapped; in-document fragments
+        scroll, everything else opens externally (guides carry http links)."""
+        if url.scheme() == "magnify":
+            fileurl = QUrl(url)
+            fileurl.setScheme("file")
+            ImageViewerDialog(Path(fileurl.toLocalFile()), self.window()).show()
+        elif url.isRelative() and url.hasFragment():
+            self._explain.scrollToAnchor(url.fragment())
+        else:
+            QDesktopServices.openUrl(url)
+
     def _render_image_gallery(self, title_key: str, empty_key: str, imgs: list) -> None:
         """Render the newest few images into the explanation panel as an HTML
-        ``<img>`` stack (shared by test-output and training-sample views)."""
+        ``<img>`` stack (shared by test-output and training-sample views).
+
+        The live job poll calls this every 400ms, so two scroll-preserving
+        measures: an unchanged image set skips the setHtml entirely (setHtml
+        resets the scroll position to top), and a genuine refresh (new sample
+        landed on disk) restores the previous scroll offset after rendering.
+        Each image carries a ``magnify:`` anchor (the image itself + a small 🔍
+        next to the filename) opening it in ImageViewerDialog."""
+
+        def _mtime(p: Path):
+            try:
+                return p.stat().st_mtime_ns
+            except OSError:
+                return None
+
+        sig = (title_key, tuple((str(p), _mtime(p)) for p in imgs))
+        if sig == self._gallery_sig:
+            return
         title = html.escape(t(title_key))
         if not imgs:
-            self._explain.setHtml(
+            self._set_explain_html(
                 f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"
-                f"<p style='color:#888; font-style:italic;'>{html.escape(t(empty_key))}</p>"
+                f"<p style='color:#888; font-style:italic;'>{html.escape(t(empty_key))}</p>",
+                gallery_sig=sig,
             )
             return
         parts = [f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"]
         for p in imgs:
             url = p.resolve().as_uri()
+            magnify = "magnify" + url[len("file") :]
             parts.append(
                 f"<p style='margin:0 0 10px 0;'>"
-                f"<img src='{url}' style='max-width:100%;'/><br/>"
-                f"<span style='color:#aaa; font-size:11px;'>{html.escape(p.name)}</span>"
+                f"<a href='{magnify}'><img src='{url}' style='max-width:100%;'/></a><br/>"
+                f"<span style='color:#aaa; font-size:11px;'>{html.escape(p.name)}</span> "
+                f"<a href='{magnify}' style='text-decoration:none; font-size:12px;'>🔍</a>"
                 f"</p>"
             )
-        self._explain.setHtml("".join(parts))
+        sb = self._explain.verticalScrollBar()
+        pos = sb.value()
+        self._set_explain_html("".join(parts), gallery_sig=sig)
+        sb.setValue(min(pos, sb.maximum()))
 
     @staticmethod
     def _newest_images(d: Path, limit: int = 4) -> list:
@@ -819,7 +873,7 @@ class ConfigTab(QWidget):
             parts.append(
                 f"<p style='color:#aaa; font-style:italic; margin-top:12px;'>• {html.escape(note)}</p>"
             )
-        self._explain.setHtml("".join(parts))
+        self._set_explain_html("".join(parts))
 
     # ── Save ──
 

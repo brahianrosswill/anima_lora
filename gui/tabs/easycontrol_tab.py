@@ -263,7 +263,7 @@ class EasyControlTab(ConfigTab):
         rel = path.relative_to(ROOT)
         self._desc_doc = tomlkit.parse(path.read_text(encoding="utf-8"))
         if hasattr(self, "_explain"):
-            self._explain.setHtml(t("easycontrol_descriptor_note", path=str(rel)))
+            self._set_explain_html(t("easycontrol_descriptor_note", path=str(rel)))
 
         header = QLabel(t("easycontrol_descriptor_form_header", path=str(rel)))
         header.setWordWrap(True)
