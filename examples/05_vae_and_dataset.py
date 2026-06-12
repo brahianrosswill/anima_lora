@@ -8,7 +8,7 @@ Two things a scripts/ author repeatedly needs:
      pixels in [-1, 1].
 
   B. Iterate the preprocessed cache that training actually consumes.
-     CachedDataset (library/datasets/distill.py) yields
+     CachedDataset (library/datasets/cache.py) yields
      (idx, latent, crossattn_emb, pooled_text) straight from the
      `{stem}_{WxH}_anima.npz` + `{stem}_anima_te.safetensors` files under
      post_image_dataset/lora/ — no DiT/encoder needed, it's all on disk.
@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
-from library.datasets.distill import CachedDataset
+from library.datasets.cache import CachedDataset
 from library.env import default_checkpoints
 from library.models import qwen_vae
 

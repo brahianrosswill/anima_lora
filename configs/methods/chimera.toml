@@ -67,13 +67,14 @@ network_content_router_lr_scale = 10.0
 # Content routing is always the network-level ContentRouter fed the pooled
 # crossattn_emb (the per-Linear lx_c router was removed).
 content_router_layer_norm = true   # parameterless LN on the pooled input
-# ContentRouter output init magnitude (default 0.0 = zero-init → uniform π_c,
-# ΔW_c=0 at init). Non-zero tilts π_c off uniform to kick the router off the
-# "usage uniform, content_margin≈0" plateau. 0.02 → ~±1.7% gate deviation from
-# 1/K_c and a ~1e-4-scale ΔW perturbation at init (negligible); bump to 0.05 if
-# content_margin stays flat. (content_input_var reaches ~0.2 by ~100 steps, so
-# the per-prompt content signal is real — this is a true plateau-kick.)
-content_router_init_std = 1e-4
+
+use_repa       = true
+repa_mode      = "relational"
+repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
+repa_layer     = 8            # block to hook (of 28)
+repa_encoder   = "pe_spatial"
+repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
+repa_spatial_norm = true
 
 # Freq-pool routing mode.
 #   "fei"     — hardwire π_f = normalize(FEI ** (1/freq_router_tau)) directly.

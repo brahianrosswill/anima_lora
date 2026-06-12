@@ -48,7 +48,7 @@ from tqdm import tqdm  # noqa: E402
 from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
 from library.datasets.cache import make_cached_collate  # noqa: E402
-from library.datasets.distill import CachedDataset  # noqa: E402
+from library.datasets.cache import CachedDataset  # noqa: E402
 from library.io.cache import (  # noqa: E402
     LATENT_CACHE_SUFFIX,
     discover_cached_pairs,

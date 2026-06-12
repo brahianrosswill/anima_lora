@@ -55,7 +55,7 @@ from bench._anima import DEFAULT_DIT
 from bench._common import make_run_dir, write_result
 from library.anima import weights as anima_utils
 from library.anima.models import Anima
-from library.datasets.distill import CachedDataset
+from library.datasets.cache import CachedDataset
 from library.runtime.harness import compile_dit_blocks
 from library.training.forward import from_dit_5d, make_padding_mask, to_dit_5d
 from library.inference.uncond import (

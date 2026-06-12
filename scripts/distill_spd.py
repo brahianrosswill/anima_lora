@@ -41,7 +41,7 @@ from library.anima import weights as anima_utils  # noqa: E402
 from library.anima.models import Anima  # noqa: E402
 from library.config.io import toml_get as _flatten  # noqa: E402
 from library.datasets.cache import make_cached_collate  # noqa: E402
-from library.datasets.distill import CachedDataset  # noqa: E402
+from library.datasets.cache import CachedDataset  # noqa: E402
 from library.runtime.harness import (  # noqa: E402
     compile_dit_blocks_for_pool,
     enable_training_grad_ckpt,
