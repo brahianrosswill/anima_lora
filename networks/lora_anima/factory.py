@@ -148,6 +148,8 @@ def create_network(
         network._repa_layer = int(kwargs.get("repa_layer", 8))
         network._repa_encoder = str(kwargs.get("repa_encoder", "pe_spatial"))
         network._repa_lr_scale = float(kwargs.get("repa_lr_scale", 1.0) or 1.0)
+        network._repa_anneal_steps = float(kwargs.get("repa_anneal_steps", 0.0) or 0.0)
+        network._repa_spatial_norm = _as_bool(kwargs.get("repa_spatial_norm"))
         if network._repa_mode == "absolute":
             from library.training.repa import REPAHead
             from library.vision.encoders import get_encoder_info
@@ -160,7 +162,9 @@ def create_network(
             network._training_only_prefixes.add("repa_head.")
         logger.info(
             f"REPA[{network._repa_mode}]: weight={network._repa_weight}, "
-            f"layer={network._repa_layer}, encoder={network._repa_encoder}"
+            f"layer={network._repa_layer}, encoder={network._repa_encoder}, "
+            f"anneal_steps={network._repa_anneal_steps:g}, "
+            f"spatial_norm={network._repa_spatial_norm}"
         )
     else:
         network._repa_weight = 0.0

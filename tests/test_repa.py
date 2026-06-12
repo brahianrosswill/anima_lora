@@ -14,6 +14,7 @@ import types
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from library.training.repa import REPAHead, REPAMethodAdapter
 from library.vision.buckets import get_bucket_spec
@@ -136,6 +137,168 @@ def test_composer_gate_off_by_default():
     net._repa_weight = 0.05
     comp = build_loss_composer(args, net)
     assert "repa" in comp.active_losses
+
+
+def test_easycontrol_create_network_stamps_repa():
+    """EasyControl's factory mirrors the LoRA factory's _repa_* stamping.
+
+    Everything downstream (build_method_adapters, _repa_loss, the dataset PE
+    loader gate in train.py) keys off network._repa_weight, so the stamp is
+    the whole integration on the network side.
+    """
+    from networks.methods.easycontrol import create_network
+
+    common = dict(vae=None, text_encoders=[], unet=None)
+    net = create_network(1.0, 8, 8.0, **common, use_repa="true")
+    assert net._repa_weight == pytest.approx(0.05)
+    assert net._repa_mode == "relational"
+    assert net._repa_layer == 8
+    assert net._repa_encoder == "pe_spatial"
+
+    # Off by default — and the adapter-attach predicate stays false.
+    net_off = create_network(1.0, 8, 8.0, **common)
+    assert net_off._repa_weight == 0.0
+
+    # The absolute arm needs a repa_head EasyControlNetwork doesn't carry.
+    with pytest.raises(ValueError, match="relational"):
+        create_network(1.0, 8, 8.0, **common, use_repa="true", repa_mode="absolute")
+
+
+def _train_ctx(max_train_steps=10, accum=1):
+    args = types.SimpleNamespace(
+        max_train_steps=max_train_steps, gradient_accumulation_steps=accum
+    )
+    return types.SimpleNamespace(
+        args=args, accelerator=types.SimpleNamespace(device="cpu"), network=None
+    )
+
+
+def test_anneal_hard_cutoff_fraction():
+    """Lever 1: fraction-of-run cutoff — term active before, skipped after."""
+    a = _make_adapter("relational")
+    a._anneal_steps = 0.5
+    _spec, pe, latents = _square_inputs()
+    batch = {"repa_pe_features": pe}
+    cap = torch.randn(2, 1, 32, 32, 64)
+    ctx = _train_ctx(max_train_steps=10)
+
+    for step in range(10):
+        a.prime_for_forward(ctx, batch, latents, is_train=True)
+        a._captured = cap  # the block hook would fire during the forward
+        out = a.extra_forwards(ctx, _primary(latents))
+        if step < 5:
+            assert out is not None and torch.isfinite(out["repa"]), step
+        else:
+            assert out is None, step
+
+
+def test_anneal_absolute_steps_with_accumulation():
+    """>1 = absolute optimizer steps; micro-batches convert via accum."""
+    a = _make_adapter("relational")
+    a._anneal_steps = 2  # optimizer steps
+    _spec, pe, latents = _square_inputs()
+    batch = {"repa_pe_features": pe}
+    cap = torch.randn(2, 1, 32, 32, 64)
+    ctx = _train_ctx(max_train_steps=100, accum=2)
+
+    # accum=2 → micro-batches 0..3 are optimizer steps 0–1 (active), 4+ off.
+    for micro in range(6):
+        a.prime_for_forward(ctx, batch, latents, is_train=True)
+        a._captured = cap
+        out = a.extra_forwards(ctx, _primary(latents))
+        assert (out is not None) == (micro < 4), micro
+
+
+def test_anneal_clock_ignores_validation():
+    """Validation passes must not advance the optimizer-step clock."""
+    a = _make_adapter("relational")
+    a._anneal_steps = 2.0  # 2 optimizer steps
+    _spec, pe, latents = _square_inputs()
+    batch = {"repa_pe_features": pe}
+    ctx = _train_ctx(max_train_steps=100)
+
+    a.prime_for_forward(ctx, batch, latents, is_train=True)  # step 0
+    for _ in range(5):
+        a.prime_for_forward(ctx, batch, latents, is_train=False)
+    assert a._train_micro_steps == 1
+    a.prime_for_forward(ctx, batch, latents, is_train=True)  # step 1 — last active
+    assert a._pe_features is not None
+    a.prime_for_forward(ctx, batch, latents, is_train=True)  # step 2 — cut off
+    assert a._pe_features is None
+
+
+def test_anneal_off_by_default():
+    a = _make_adapter("relational")
+    assert a._anneal_steps == 0.0
+    assert not a._past_anneal_cutoff(_train_ctx().args, micro_step=10**6)
+
+
+def test_spatial_norm_cancels_global_offset():
+    """Lever 2: with spatial_norm a shared additive token direction is exactly
+    removed from the target; without it the loss shifts."""
+    _spec, pe, latents = _square_inputs()
+    cap = torch.randn(2, 1, 32, 32, 64)
+    # Large common direction added to every PE token (CLS row irrelevant).
+    pe_shifted = pe + 5.0 * torch.randn(1, 1, pe.shape[-1])
+
+    def _loss(adapter, target):
+        adapter._captured, adapter._pe_features, adapter._latent_hw = (
+            cap,
+            target,
+            (64, 64),
+        )
+        return adapter.extra_forwards(_ctx(), _primary(latents))["repa"]
+
+    a_on = _make_adapter("relational")
+    a_on._spatial_norm = True
+    assert torch.allclose(_loss(a_on, pe), _loss(a_on, pe_shifted), atol=1e-5)
+
+    a_off = _make_adapter("relational")
+    assert not torch.allclose(_loss(a_off, pe), _loss(a_off, pe_shifted), atol=1e-3)
+
+
+def test_spatial_norm_off_is_bit_identical_to_legacy():
+    """Default-off flag must not perturb the existing relational loss."""
+    _spec, pe, latents = _square_inputs()
+    cap = torch.randn(2, 1, 32, 32, 64)
+    a = _make_adapter("relational")
+    a._captured, a._pe_features, a._latent_hw = cap, pe, (64, 64)
+    loss_default = a.extra_forwards(_ctx(), _primary(latents))["repa"]
+
+    # Recompute the legacy formula by hand.
+    tokens = cap.reshape(2, -1, 64)
+    dit_grid = tokens.reshape(2, 32, 32, 64).permute(0, 3, 1, 2)
+    dit_tok = (
+        F.adaptive_avg_pool2d(dit_grid.float(), (32, 32)).flatten(2).transpose(1, 2)
+    )
+    dit_hat = F.normalize(dit_tok, dim=-1)
+    pe_hat = F.normalize(pe[:, 1:, :].float(), dim=-1)
+    g_dit = torch.bmm(dit_hat, dit_hat.transpose(1, 2))
+    g_pe = torch.bmm(pe_hat, pe_hat.transpose(1, 2))
+    expected = F.mse_loss(g_dit, g_pe)
+    assert torch.equal(loss_default, expected)
+
+
+def test_factory_stamps_phase1_levers():
+    """Both factories stamp the lever kwargs (default-off)."""
+    from networks.methods.easycontrol import create_network
+
+    common = dict(vae=None, text_encoders=[], unet=None)
+    net = create_network(
+        1.0,
+        8,
+        8.0,
+        **common,
+        use_repa="true",
+        repa_anneal_steps="0.5",
+        repa_spatial_norm="true",
+    )
+    assert net._repa_anneal_steps == pytest.approx(0.5)
+    assert net._repa_spatial_norm is True
+
+    net_default = create_network(1.0, 8, 8.0, **common, use_repa="true")
+    assert net_default._repa_anneal_steps == 0.0
+    assert net_default._repa_spatial_norm is False
 
 
 def test_repa_loss_handler_weighting():

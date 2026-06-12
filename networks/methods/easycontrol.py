@@ -207,6 +207,7 @@ class _LoRAProj(nn.Module):
             inv_scale = _absorb_channel_scale(self.lora_down.weight.data, channel_scale)
             self.register_buffer("inv_scale", inv_scale, persistent=True)
             self._has_channel_scale = True
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
             # Activation-dtype GEMMs: bit-identical under the trainer's
@@ -291,7 +292,7 @@ def create_network(
     )
     mlp_ratio = DEFAULT_MLP_RATIO  # Anima default; not exposed on the unet attr
 
-    return EasyControlNetwork(
+    network = EasyControlNetwork(
         num_blocks=num_blocks,
         hidden_size=hidden_size,
         num_heads=num_heads,
@@ -306,6 +307,41 @@ def create_network(
         channel_scaling_alpha=channel_scaling_alpha,
         channel_scales=channel_scales,
     )
+
+    # REPA v2 auxiliary alignment loss, mirroring networks.lora_anima.factory.
+    # Stash the config on the network: REPAMethodAdapter / losses._repa_loss /
+    # build_method_adapters all key off network._repa_weight, so no args
+    # plumbing is needed. The DiT is frozen here, so the alignment gradient
+    # reaches the cond LoRA only through the extended self-attention in blocks
+    # <= repa_layer — a conditioning-utilization pressure rather than the LoRA
+    # family's representation shaping. The block hook captures patched_forward's
+    # return value, which is the target stream alone (cond_x rides side
+    # channels), so REPAMethodAdapter works unchanged.
+    from networks.lora_anima.config import _as_bool
+
+    if _as_bool(kwargs.get("use_repa")):
+        repa_mode = str(kwargs.get("repa_mode", "relational")).lower()
+        if repa_mode != "relational":
+            raise ValueError(
+                "EasyControl supports repa_mode='relational' only (the absolute "
+                "arm needs a repa_head, which EasyControlNetwork does not carry)."
+            )
+        network._repa_mode = repa_mode
+        network._repa_weight = float(kwargs.get("repa_weight", 0.05) or 0.0)
+        network._repa_layer = int(kwargs.get("repa_layer", 8))
+        network._repa_encoder = str(kwargs.get("repa_encoder", "pe_spatial"))
+        network._repa_anneal_steps = float(kwargs.get("repa_anneal_steps", 0.0) or 0.0)
+        network._repa_spatial_norm = _as_bool(kwargs.get("repa_spatial_norm"))
+        logger.info(
+            f"EasyControl REPA[{repa_mode}]: weight={network._repa_weight}, "
+            f"layer={network._repa_layer}, encoder={network._repa_encoder}, "
+            f"anneal_steps={network._repa_anneal_steps:g}, "
+            f"spatial_norm={network._repa_spatial_norm}"
+        )
+    else:
+        network._repa_weight = 0.0
+
+    return network
 
 
 def create_network_from_weights(

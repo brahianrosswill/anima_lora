@@ -74,6 +74,9 @@ make preprocess-pe-spatial
 #   repa_layer    = 8              # block to hook (of 28)
 #   repa_encoder  = "pe_spatial"
 #   repa_lr_scale = 1.0            # head LR multiplier (absolute mode only)
+# Phase-1 levers (default-off, one A/B at a time — see the proposal):
+#   repa_anneal_steps = 0.5        # hard cutoff: (0,1] = fraction of run, >1 = opt steps
+#   repa_spatial_norm = true       # iREPA target standardization (relational only)
 make lora
 ```
 
@@ -108,20 +111,31 @@ REPA being silently inert is a logged condition, not a quiet no-op.
   `repa_lr_scale × unet_lr` (`networks/lora_anima/network.py`); the head is
   deleted from the state dict at save so adapters stay inference-clean.
 - **Config plumbing**: kwargs (`use_repa` / `repa_mode` / `repa_weight` /
-  `repa_layer` / `repa_encoder` / `repa_lr_scale`) are parsed in
-  `networks/lora_anima/factory.py` and stashed on the network; they are
-  registered in the `NETWORK_KWARGS` allowlist (`networks/__init__.py`) —
-  any new key must be added there or it's silently inert.
+  `repa_layer` / `repa_encoder` / `repa_lr_scale` / `repa_anneal_steps` /
+  `repa_spatial_norm`) are parsed in `networks/lora_anima/factory.py` and
+  stashed on the network; they are registered in the `NETWORK_KWARGS`
+  allowlist (`networks/__init__.py`) — any new key must be added there or
+  it's silently inert.
+- **Anneal clock** (`repa_anneal_steps` > 0): the adapter counts train
+  micro-batches in `prime_for_forward` and divides by
+  `gradient_accumulation_steps` (the `step_contrastive_warmup` pattern) —
+  validation passes don't tick it. Past the cutoff the term is skipped
+  before the PE transfer (one log line at the cutoff step). Fractional
+  values resolve against `args.max_train_steps`.
+- **Spatial norm** (`repa_spatial_norm`): target-side only, relational mode
+  only — `(pe − mean_tok) / (std_tok + ε)` across the token axis, applied
+  after the CLS drop and before per-token L2-norm. Removes the shared global
+  component that compresses pairwise cosines (iREPA).
 
 ## Not implemented (Phase-1 material)
 
 See `docs/proposal/repa_phase1_operating_point.md` for the pre-registered
-plan. In priority order: anneal/cutoff (`repa_anneal_steps`, HASTE-backed —
-the weight is currently constant over the run), iREPA-style spatial
-normalization of the PE target, loss-side token-subset Gram (MaskAlign;
-gradient-heatmap diagnostic first), weight sweep. Tier 1.5 artifacts
-(`bench/repa_v2/` envelope + flag-off byte-identity invariant test) are
-still outstanding and gate graduation.
+plan. Levers 1–2 (`repa_anneal_steps`, `repa_spatial_norm`) are implemented
+(default-off) but their A/B runs have not happened — the shipped default is
+still no-anneal / no-spatial-norm. Remaining: loss-side token-subset Gram
+(MaskAlign; gradient-heatmap diagnostic first), weight sweep. Tier 1.5
+artifacts (`bench/repa_v2/` envelope + flag-off byte-identity invariant
+test) are still outstanding and gate graduation.
 
 ## Guardrails (from the v1 burn)
 

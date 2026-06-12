@@ -1,6 +1,7 @@
 # REPA Phase 1 — operating point on the relational arm
 
-Status: **proposal / not started**. Phase 0 closed 2026-06-12 — see
+Status: **levers 1–2 implemented (2026-06-12, default-off) — A/B runs not
+started**. Phase 0 closed 2026-06-12 — see
 `docs/experimental/repa.md` (live doc) and
 `_archive/proposals/repa_v2_patchwise_pe_spatial.md` (the implemented v2
 proposal this succeeds). Relational (Arm B) is the validated arm and the
@@ -35,7 +36,7 @@ Each is a small, independent knob on the relational loss in
 `library/training/repa.py::extra_forwards`. All default-off; new kwargs need
 `NETWORK_KWARGS` registration in `networks/__init__.py`.
 
-### 1. Anneal / cutoff — `repa_anneal_steps`
+### 1. Anneal / cutoff — `repa_anneal_steps` ✅ implemented
 
 Carried over from the v2 proposal ("alignment matters early; the late-run
 gradient is where style drifts"), now with published support (HASTE). Hard
@@ -47,7 +48,13 @@ zero; hard cutoff first (one knob).
 Highest prior of the three: it attacks the exact v1 failure axis (late-run
 style drift) and costs one comparison run.
 
-### 2. Spatial normalization of the PE target — `repa_spatial_norm`
+*Implemented semantics*: value in (0, 1] = fraction of `max_train_steps`,
+value > 1 = absolute optimizer steps, 0 = off (default). The adapter keeps
+its own micro-batch counter (validation passes excluded) and converts via
+`gradient_accumulation_steps`; past the cutoff the term is skipped before
+the PE-feature transfer.
+
+### 2. Spatial normalization of the PE target — `repa_spatial_norm` ✅ implemented
 
 iREPA's second modification, transplanted to the target side of the Gram:
 
@@ -65,6 +72,9 @@ exactly this raises spatial-structure metrics and generation quality.
 
 Cheap (two lines, no params). Risk: changes the target geometry mid-line —
 run as its own A/B, not bundled with lever 1.
+
+*Implemented*: relational mode only, applied after the CLS drop and before
+per-token L2-norm (ε = 1e-6, γ = 1).
 
 ### 3. Token-subset Gram (MaskAlign, loss-side only) — `repa_token_keep`
 

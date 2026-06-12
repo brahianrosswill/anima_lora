@@ -267,6 +267,24 @@ CFG dropout for image conditioning (independent of text):
   Patched `Block.forward` then falls through to the original baseline DiT
   behavior. Lets inference do image-CFG independently of text-CFG.
 
+REPA auxiliary loss (optional, `network_args = ["use_repa=true", ...]`):
+- Relational (Gram) alignment of mid-block target-stream hiddens to cached
+  PE-Spatial patch tokens of the clean target image — same machinery as the
+  LoRA family's REPA v2 (`library/training/repa.py`; knobs `repa_weight` /
+  `repa_layer` / `repa_encoder`, relational mode only). Because the DiT is
+  frozen, the alignment gradient reaches the cond LoRA solely through the
+  extended self-attention in blocks ≤ `repa_layer`, so the term acts as a
+  *conditioning-utilization* pressure: the only way to satisfy it is to pull
+  clean spatial structure from the reference. First wired for the sanitize
+  (near_twins) task, where the structural-consistency signal lands exactly on
+  the edit region (see `configs/easycontrol/near_twins.toml`); for ref==target
+  subject control it would instead reward layout copying — use with care.
+  Needs `{stem}_anima_pe_spatial.safetensors` sidecars next to the TE caches
+  (near_twins: `[preprocess] pe_encoder = "pe_spatial"` → re-run
+  `make easycontrol-preprocess EASYADAPTER=near_twin`). On cond-dropped steps
+  the term has no trainable path (frozen target stream) — keep `drop_p` low or
+  zero when using it.
+
 ### Inference
 
 ```bash

@@ -51,6 +51,10 @@ dit = 'models/diffusion_models/anima-base-v1.0.safetensors'
 caption_shuffle_variants = 4
 caption_tag_dropout_rate = 0.1
 target_res = [896, 1024]
+# PE-Spatial sidecars for the REPA auxiliary loss (use_repa below). Re-run
+# `make easycontrol-preprocess EASYADAPTER=near_twin` after adding this —
+# idempotent, only encodes missing sidecars.
+pe_encoder = "pe_spatial"
 
 # Training overrides for `make easycontrol EASYADAPTER=near_twin` (optional).
 # Each key is folded in as a `--key value` CLI override on top of
@@ -70,7 +74,20 @@ network_args = [
     "cond_scale=1.0",
     "apply_ffn_lora=1",
     "cond_res_scale=1.0",
+    # REPA relational (Gram) alignment of mid-block target hiddens to cached
+    # PE-Spatial patch tokens of the clean _no_tags target. With the DiT
+    # frozen, the gradient reaches the cond LoRA only through the extended
+    # attention — pressure to pull clean structure from the reference, i.e. a
+    # structural-consistency signal in the edit region on top of the per-pixel
+    # cond_diff_loss. Needs the pe_encoder sidecars from [preprocess]. For the
+    # baseline A/B arm: drop the use_repa line and restore the plain
+    # output_name below.
+    "use_repa=true",
+    "repa_weight=0.05",
+    "repa_layer=8",
 ]
+# Keep the REPA arm from clobbering the baseline checkpoint during the A/B.
+output_name = "anima_easycontrol_sanitize_repa"
 
 learning_rate = 5e-5
 max_train_epochs = 12
@@ -87,7 +104,6 @@ easycontrol_drop_p=0.0
 # gradient on the edit instead of the copy-through the extended attention gives
 # for free. Knobs: cond_diff_loss_floor=0.2 / _blur=1.5 / _quantile=0.9.
 cond_diff_loss = true
-cond_diff_loss_floor = 0.01
 
 [general]
 caption_extension = '.txt'

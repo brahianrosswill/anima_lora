@@ -50,34 +50,8 @@ def _ensure_shortcut_icon() -> Path | None:
     return dst
 
 
-def cmd_gui_shortcut(_extra):
-    """Create a Windows desktop shortcut ('Anima LoRA GUI.lnk') that launches the GUI.
-
-    Targets ``pythonw.exe`` from the active venv with ``tasks.py gui``, so it runs
-    without flashing a console window. Honors the OneDrive-redirected Desktop when
-    present.
-    """
-    if sys.platform != "win32":
-        print("gui-shortcut is Windows-only.", file=sys.stderr)
-        sys.exit(1)
-
-    # Prefer the local Desktop. Only fall back to a OneDrive-redirected one if
-    # the local folder doesn't exist (i.e., OneDrive backup has actually moved it).
-    user = Path(os.environ.get("USERPROFILE", ""))
-    candidates = [user / "Desktop", user / "OneDrive" / "Desktop"]
-    desktop = next((d for d in candidates if d.is_dir()), None)
-    if desktop is None:
-        print(
-            f"Could not locate a Desktop folder (checked: {', '.join(map(str, candidates))})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    shortcut_path = desktop / "Anima LoRA GUI.lnk"
-    pyw = Path(PY).with_name("pythonw.exe")
-    target = pyw if pyw.exists() else Path(PY)
-    icon = _ensure_shortcut_icon() or target
-
+def _write_shortcut(shortcut_path: Path, target: Path, icon: Path) -> bool:
+    """Write a single ``.lnk`` via PowerShell + WScript.Shell. Returns success."""
     # Pass paths via env vars to sidestep PowerShell quoting on user paths.
     env = {
         **os.environ,
@@ -102,6 +76,59 @@ def cmd_gui_shortcut(_extra):
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", ps], cwd=ROOT, env=env
     )
-    if result.returncode != 0:
-        sys.exit(result.returncode)
-    print(f"  > Done. Double-click '{shortcut_path.name}' on your desktop to launch.")
+    return result.returncode == 0
+
+
+def cmd_gui_shortcut(_extra):
+    """Create Windows shortcuts ('Anima LoRA GUI.lnk') that launch the GUI.
+
+    Always writes one into the install dir (``ROOT``) — this is policy-proof and
+    works even when locked-down login policies or OneDrive redirection prevent
+    writing to the Desktop. Additionally writes one to the Desktop on a
+    best-effort basis. Targets ``pythonw.exe`` from the active venv with
+    ``tasks.py gui``, so it runs without flashing a console window.
+    """
+    if sys.platform != "win32":
+        print("gui-shortcut is Windows-only.", file=sys.stderr)
+        sys.exit(1)
+
+    pyw = Path(PY).with_name("pythonw.exe")
+    target = pyw if pyw.exists() else Path(PY)
+    icon = _ensure_shortcut_icon() or target
+
+    # The install-dir shortcut is the policy-proof fallback: it never depends on
+    # a writable Desktop, so it's the one we treat as load-bearing.
+    install_shortcut = ROOT / "Anima LoRA GUI.lnk"
+    install_ok = _write_shortcut(install_shortcut, target, icon)
+
+    # Best-effort Desktop shortcut. Prefer the local Desktop; only fall back to a
+    # OneDrive-redirected one if the local folder doesn't exist.
+    user = Path(os.environ.get("USERPROFILE", ""))
+    candidates = [user / "Desktop", user / "OneDrive" / "Desktop"]
+    desktop = next((d for d in candidates if d.is_dir()), None)
+    desktop_ok = False
+    if desktop is None:
+        print(
+            f"  > note: no Desktop folder found (checked: {', '.join(map(str, candidates))}).",
+            file=sys.stderr,
+        )
+    else:
+        desktop_ok = _write_shortcut(desktop / "Anima LoRA GUI.lnk", target, icon)
+        if not desktop_ok:
+            print(
+                "  > note: could not write the Desktop shortcut (login/OneDrive policy?).",
+                file=sys.stderr,
+            )
+
+    if not install_ok and not desktop_ok:
+        print("Failed to create any shortcut.", file=sys.stderr)
+        sys.exit(1)
+
+    if desktop_ok:
+        print("  > Done. Double-click 'Anima LoRA GUI' on your desktop to launch.")
+    else:
+        print(
+            f"  > Done. Desktop shortcut unavailable — use the one in the install "
+            f"folder instead:\n  >   {install_shortcut}\n"
+            "  > (You can copy it to your desktop manually.)"
+        )

@@ -327,6 +327,28 @@ def _near_twins_preprocess(cfg: dict, base: str, extra) -> None:
             *recursive,
         ]
     )
+    # 3.5. Optional vision-encoder sidecars for the REPA auxiliary loss
+    #      ([training] network_args "use_repa=1"). Gated on [preprocess]
+    #      pe_encoder so plain runs skip the encoder pass. Writes
+    #      {stem}_anima_<encoder>.safetensors next to the TE caches (where
+    #      datasets._try_load_repa_pe resolves them); idempotent (pre-skips
+    #      cached). Encodes the _tags twins too — harmless, only _no_tags
+    #      targets are dataset items.
+    pe_encoder = pp.get("pe_encoder")
+    if pe_encoder:
+        run(
+            [
+                PY,
+                "scripts/preprocess/cache_pe_encoder.py",
+                "--dir",
+                resized,
+                "--cache_dir",
+                cache,
+                "--encoder",
+                str(pe_encoder),
+                *recursive,
+            ]
+        )
     # 4. Pair the cond/ tree (the _tags reference latent for each _no_tags target).
     _near_twins_build_cond(pp, base)
 

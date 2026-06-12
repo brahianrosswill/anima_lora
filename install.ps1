@@ -201,13 +201,15 @@ trampoline .exe files. To fix:
   Die 'dependency install incomplete'
 }
 
-# 6. desktop shortcut (best-effort — never abort the install over this) ------
-Say 'creating desktop shortcut (Anima LoRA GUI)'
+# 6. shortcuts (best-effort — never abort the install over this) -------------
+# Always lands an 'Anima LoRA GUI.lnk' in the install dir (policy-proof), and a
+# desktop copy when login/OneDrive policy allows it.
+Say 'creating shortcuts (Anima LoRA GUI)'
 try {
   uv run python tasks.py gui-shortcut
   if ($LASTEXITCODE -ne 0) { throw "gui-shortcut exited $LASTEXITCODE" }
 } catch {
-  Say 'desktop shortcut skipped; create it later with: uv run python tasks.py gui-shortcut'
+  Say "shortcut skipped; find 'Anima LoRA GUI.lnk' in $Dir or run: uv run python tasks.py gui-shortcut"
 }
 
 Write-Host ""

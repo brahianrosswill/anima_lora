@@ -40,6 +40,20 @@ Config rides the LoRA network kwargs (``use_repa`` / ``repa_mode`` /
 stashed on the network; the adapter reads them off ``ctx.network`` so no new
 ``args`` plumbing is needed. The scalar alignment loss is returned under
 ``aux["repa"]`` and weighted by ``LossComposer`` stage 2 (``losses._repa_loss``).
+
+Phase-1 operating-point levers (``docs/proposal/repa_phase1_operating_point.md``,
+both default-off):
+
+- ``repa_anneal_steps`` — hard cutoff (HASTE, arXiv:2505.16792: alignment helps
+  early, degrades late). Value in (0, 1] = fraction of ``max_train_steps``;
+  value > 1 = absolute optimizer steps. The adapter keeps its own train
+  micro-batch counter and converts via ``gradient_accumulation_steps`` (the
+  ``step_contrastive_warmup`` pattern) — past the cutoff the term is skipped
+  entirely (no PE transfer, no Gram).
+- ``repa_spatial_norm`` — iREPA-style (arXiv:2512.10794) spatial
+  standardization of the *target* tokens, ``(pe − mean_tok) / (std_tok + ε)``
+  before per-token L2-norm + Gram. Cancels the shared global component that
+  compresses pairwise cosines. Relational mode only.
 """
 
 from __future__ import annotations
@@ -106,12 +120,19 @@ class REPAMethodAdapter(MethodAdapter):
         self._layer = 8
         self._patch = 2
         self._spec = None
+        self._anneal_steps = 0.0
+        self._spatial_norm = False
+        # Optimizer-step clock: train micro-batches seen, converted with
+        # gradient_accumulation_steps at the anneal gate.
+        self._train_micro_steps = 0
 
     # ------------------------------------------------------------------ setup
     def on_network_built(self, ctx: SetupCtx) -> None:
         net = ctx.network
         self._mode = str(getattr(net, "_repa_mode", "relational")).lower()
         self._layer = int(getattr(net, "_repa_layer", 8))
+        self._anneal_steps = float(getattr(net, "_repa_anneal_steps", 0.0) or 0.0)
+        self._spatial_norm = bool(getattr(net, "_repa_spatial_norm", False))
         encoder = str(getattr(net, "_repa_encoder", "pe_spatial"))
         self._spec = get_bucket_spec(encoder)
         self._patch = int(ctx.unet.patch_spatial)
@@ -147,10 +168,17 @@ class REPAMethodAdapter(MethodAdapter):
             )
         else:
             head_desc = "; no head (Gram)"
+        anneal_desc = (
+            f", anneal={self._anneal_steps:g}"
+            f"{' (fraction)' if 0 < self._anneal_steps <= 1.0 else ' steps' if self._anneal_steps > 1 else ''}"
+            if self._anneal_steps > 0
+            else ""
+        )
         ctx.accelerator.print(
             f"REPA[{self._mode}]: hook on block {self._layer}/{len(blocks)}, "
             f"encoder={encoder} grid≤{self._spec.t_max_patches}tok, "
-            f"weight={weight}{head_desc}"
+            f"weight={weight}{anneal_desc}"
+            f"{', spatial_norm' if self._spatial_norm else ''}{head_desc}"
         )
 
     # ------------------------------------------------------------------- step
@@ -163,6 +191,13 @@ class REPAMethodAdapter(MethodAdapter):
         self._latent_hw = None
         if not is_train:
             return
+        # Advance the optimizer-step clock on every train micro-batch (even
+        # ones missing PE features) so it stays in lockstep with the trainer's
+        # global_step; validation passes don't tick it.
+        micro_step = self._train_micro_steps
+        self._train_micro_steps += 1
+        if self._past_anneal_cutoff(ctx.args, micro_step):
+            return
         feats = batch.get("repa_pe_features") if isinstance(batch, dict) else None
         if feats is None:
             # Batch lacks PE features (some sample missing its sidecar, or the
@@ -170,6 +205,38 @@ class REPAMethodAdapter(MethodAdapter):
             return
         self._pe_features = feats.to(ctx.accelerator.device, dtype=torch.float32)
         self._latent_hw = (int(latents.shape[-2]), int(latents.shape[-1]))
+
+    def _past_anneal_cutoff(self, args, micro_step: int) -> bool:
+        """Hard anneal cutoff (lever 1): True once the optimizer-step clock
+        passes ``repa_anneal_steps`` — (0, 1] is a fraction of
+        ``max_train_steps``, > 1 is absolute optimizer steps. 0 = off."""
+        if self._anneal_steps <= 0:
+            return False
+        cutoff = self._anneal_steps
+        if cutoff <= 1.0:
+            max_steps = int(getattr(args, "max_train_steps", 0) or 0)
+            if max_steps <= 0:
+                if not getattr(self, "_warned_no_max_steps", False):
+                    logger.warning(
+                        "REPA: repa_anneal_steps=%g is a fraction but "
+                        "max_train_steps is unset — anneal disabled.",
+                        self._anneal_steps,
+                    )
+                    self._warned_no_max_steps = True
+                return False
+            cutoff = cutoff * max_steps
+        accum = int(getattr(args, "gradient_accumulation_steps", 1) or 1)
+        if micro_step // accum < cutoff:
+            return False
+        if not getattr(self, "_anneal_cutoff_logged", False):
+            logger.info(
+                "REPA: anneal cutoff reached at optimizer step %d "
+                "(repa_anneal_steps=%g) — alignment loss off for the rest of the run.",
+                micro_step // accum,
+                self._anneal_steps,
+            )
+            self._anneal_cutoff_logged = True
+        return True
 
     def _pe_grid(self, n_pe: int, h_lat: int, w_lat: int) -> tuple[int, int]:
         """Resolve the encoder ``(gh, gw)`` patch grid for ``n_pe`` patch tokens.
@@ -240,6 +307,15 @@ class REPAMethodAdapter(MethodAdapter):
         else:
             # Relational (Gram): per-token L2-norm within each space, then match
             # the N×N affinity structure. Dimensions never need to align.
+            if self._spatial_norm:
+                # Lever 2 (iREPA): standardize the target across the token axis
+                # before per-token L2-norm. Pretrained patch tokens share a
+                # large global component that the Gram cancels only imperfectly
+                # (it still sits inside every token's normalization); removing
+                # it sharpens the target affinity contrast.
+                pe = (pe - pe.mean(dim=1, keepdim=True)) / (
+                    pe.std(dim=1, keepdim=True) + 1e-6
+                )
             dit_hat = F.normalize(dit_tok, dim=-1)
             pe_hat = F.normalize(pe, dim=-1)
             g_dit = torch.bmm(dit_hat, dit_hat.transpose(1, 2))  # (B, N, N)
