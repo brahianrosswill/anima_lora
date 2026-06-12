@@ -113,6 +113,27 @@ The job record plus two live fields:
 - `latest` — last event from `progress.jsonl` (training progress; `null` for command jobs)
 - `stale_for` — seconds since the last progress tick (heartbeat staleness)
 
+### `GET /jobs/{id}/progress` — query the structured progress stream
+
+Filtered view of the job's `progress.jsonl` (train jobs only) — the surface to
+**debug or analyze a run from**: loss/lr/metric curves (`step`), validation CMMD
+(`val`), checkpoint saves (`ckpt`), mirrored WARNING+ log records (`log`), and
+the run outcome (`run_start`/`run_end`). Query params, all optional:
+
+| param | meaning |
+|-------|---------|
+| `events` | comma-separated `ev` kinds to keep, e.g. `events=step,val` or `events=log,run_end` |
+| `since_step` | keep events at/after this `global_step` (step-less events inherit the preceding step) |
+| `every_nth` | thin `step` events to every n-th (the latest step is always kept) |
+| `last_n` | trailing cap on returned events (default 200) |
+
+Returns `{job_id, state, progress_path, count, events}`. Example — the loss
+curve at 1-in-50 resolution plus any warnings:
+
+```
+GET /jobs/{id}/progress?events=step,log&every_nth=50
+```
+
 ### `POST /jobs/{id}/stop` — abort
 
 Stops a running or queued job (tree-kills the process). Returns `{job_id, state}`.
@@ -259,7 +280,11 @@ verbatim — one source of truth), with two deviations:
 
 - `tail_logs` (SSE) is replaced by **`tail_log`** `{id, lines=80}` — last N
   lines + current state in one call; it reads the on-disk `job.json` +
-  `stdout.log` as fallback, so it answers even with the daemon down.
+  `stdout.log` as fallback, so it answers even with the daemon down. tqdm
+  `\r`-redraws are collapsed to their final rendering, so a progress bar
+  counts as one line.
+- **`get_progress`** is served from the on-disk `progress.jsonl` (same filters
+  as the HTTP endpoint above), so it too answers even with the daemon down.
 - Only `submit_training` / `submit_command` auto-start the daemon; every other
   tool is passive, so an agent asking "is anything running?" never boots a
   daemon as a side effect (`health` returns `{"up": false}` instead of erroring).

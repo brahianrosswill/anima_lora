@@ -14,6 +14,8 @@ Endpoints
                                  chain_train?}                                 → {job_id}
     GET  /jobs              → [job, …]
     GET  /jobs/{id}         → job (+ latest progress event, stale_for)
+    GET  /jobs/{id}/progress → filtered progress.jsonl events
+                            ?events=step,val&since_step=N&every_nth=N&last_n=N
     POST /jobs/{id}/stop    → {job}
     POST /queue/start       → {ok, paused:false}  (resume a paused queue)
     POST /queue/pause       → {ok, paused:true}   (hold queued jobs)
@@ -31,6 +33,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -42,6 +45,7 @@ logger = logging.getLogger("anima.daemon")
 _JOB_RE = re.compile(r"^/jobs/(?P<id>[^/]+)$")
 _JOB_STOP_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/stop$")
 _JOB_LOGS_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/logs$")
+_JOB_PROGRESS_RE = re.compile(r"^/jobs/(?P<id>[^/]+)/progress$")
 
 _README = Path(__file__).resolve().parent / "README.md"
 
@@ -175,6 +179,43 @@ TOOLS = [
         },
     },
     {
+        "name": "get_progress",
+        "description": (
+            "Query a train job's structured progress.jsonl — events are "
+            "run_start | step (loss/lr/metrics) | val (cmmd) | ckpt | log "
+            "(mirrored WARNING+ records) | run_end. Filters keep the payload "
+            "small on long runs; returns {job_id, state, count, events}. "
+            "This is the surface to debug/analyze a run from (loss curve, "
+            "warnings, checkpoints) — stdout is only for raw crash output."
+        ),
+        "method": "GET",
+        "path": "/jobs/{id}/progress",
+        "input_schema": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Job id from submit_*."},
+                "events": {
+                    "type": "string",
+                    "description": "Comma-separated ev kinds to keep, e.g. 'step,val' or 'log,run_end'. Omit for all.",
+                },
+                "since_step": {
+                    "type": "integer",
+                    "description": "Keep events at/after this global_step (step-less events inherit the preceding step).",
+                },
+                "every_nth": {
+                    "type": "integer",
+                    "description": "Thin step events to every n-th (latest step always kept).",
+                },
+                "last_n": {
+                    "type": "integer",
+                    "default": 200,
+                    "description": "Trailing cap on returned events.",
+                },
+            },
+        },
+    },
+    {
         "name": "stop_job",
         "description": "Abort a running or queued job (tree-kills the process). Returns {job_id, state}.",
         "method": "POST",
@@ -302,7 +343,7 @@ class _Handler(BaseHTTPRequestHandler):
     # ----- routing -----
 
     def do_GET(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
         if path in ("/", "/readme"):
             self._handle_readme()
         elif path == "/tools":
@@ -315,6 +356,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_events()
         elif m := _JOB_LOGS_RE.match(path):
             self._handle_logs(m.group("id"))
+        elif m := _JOB_PROGRESS_RE.match(path):
+            self._handle_progress(m.group("id"), query)
         elif m := _JOB_RE.match(path):
             self._handle_get(m.group("id"))
         else:
@@ -411,6 +454,43 @@ class _Handler(BaseHTTPRequestHandler):
         out["latest"] = tail.last_event(job.progress_path)
         out["stale_for"] = self.manager.stale_for(job)
         self._send_json(out)
+
+    def _handle_progress(self, job_id: str, query: str) -> None:
+        job = self.manager.get(job_id)
+        if job is None:
+            self._send_json({"error": "no such job", "job_id": job_id}, 404)
+            return
+        params = urllib.parse.parse_qs(query)
+
+        def _int(name: str, default=None):
+            raw = (params.get(name) or [None])[0]
+            try:
+                return int(raw) if raw is not None else default
+            except ValueError:
+                return default
+
+        raw_events = (params.get("events") or [None])[0]
+        kinds = (
+            [s.strip() for s in raw_events.split(",") if s.strip()]
+            if raw_events
+            else None
+        )
+        evs = tail.read_events(
+            job.progress_path,
+            events=kinds,
+            since_step=_int("since_step"),
+            every_nth=_int("every_nth"),
+            last_n=_int("last_n", 200),
+        )
+        self._send_json(
+            {
+                "job_id": job.id,
+                "state": job.state,
+                "progress_path": job.progress_path,
+                "count": len(evs),
+                "events": evs,
+            }
+        )
 
     def _handle_stop(self, job_id: str) -> None:
         job = self.manager.stop(job_id)

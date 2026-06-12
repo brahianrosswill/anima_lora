@@ -2372,6 +2372,9 @@ class AnimaTrainer:
                     pid=os.getpid(),
                     log_dir=resolve_run_log_dir(args),
                 )
+                # Mirror WARNING+ records into the stream so a reader debugging
+                # the run gets them structured instead of buried in tqdm stdout.
+                self.progress_sink.attach_log_mirror()
 
         if (args.save_n_epoch_ratio is not None) and (args.save_n_epoch_ratio > 0):
             args.save_every_n_epochs = (

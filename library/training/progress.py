@@ -10,8 +10,15 @@ line-buffered, main-process only. One event per line:
     {"ev": "step", "ts": ..., "global_step": ..., "epoch": ..., "loss": ..., ...}
     {"ev": "val",  "ts": ..., "global_step": ..., "epoch": ..., "cmmd": ...}
     {"ev": "ckpt", "ts": ..., "global_step": ..., "path": ...}
+    {"ev": "log",  "ts": ..., "level": "WARNING|ERROR|...", "logger": ...,
+     "msg": ...}
     {"ev": "run_end", "ts": ..., "status": "ok|error|stopped", "final_step": ...,
      "error": ...}
+
+``log`` events mirror WARNING+ records from the root logger (see
+:meth:`ProgressSink.attach_log_mirror`) so a debugging reader gets the run's
+warnings/errors from this one structured file instead of grepping the
+tqdm-noisy stdout capture.
 
 A reader tails the file: missing file = not started; last line ``run_end`` =
 done. Every write is wrapped so a logging failure can never crash training.
@@ -78,6 +85,37 @@ def _find_cmmd(logs: dict) -> Optional[float]:
     return None
 
 
+class _SinkLogHandler(logging.Handler):
+    """Mirrors log records into a :class:`ProgressSink` as ``log`` events.
+
+    Capped so a record emitted every step can't bloat the stream — after
+    ``max_events`` a final notice is written and the rest are dropped (they
+    still reach the normal console/stdout handlers).
+    """
+
+    def __init__(self, sink: "ProgressSink", *, max_events: int = 500) -> None:
+        super().__init__(level=logging.WARNING)
+        self._sink = sink
+        self._remaining = max_events
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._remaining <= 0:
+            return
+        self._remaining -= 1
+        try:
+            msg = record.getMessage()
+        except Exception:
+            msg = str(record.msg)
+        self._sink._emit("log", level=record.levelname, logger=record.name, msg=msg)
+        if self._remaining == 0:
+            self._sink._emit(
+                "log",
+                level="WARNING",
+                logger=__name__,
+                msg="log-event cap reached; further records go to stdout only",
+            )
+
+
 class ProgressSink:
     """Append-only JSONL progress writer. Construct on the main process only."""
 
@@ -97,6 +135,7 @@ class ProgressSink:
         self._t0 = t0 if t0 is not None else time.time()
         self._fh = None
         self._closed = False
+        self._log_handler: Optional[_SinkLogHandler] = None
 
     @staticmethod
     def resolve_path(args) -> Optional[str]:
@@ -211,7 +250,27 @@ class ProgressSink:
     def ckpt(self, *, global_step: int, path: str) -> None:
         self._emit("ckpt", global_step=global_step, path=path)
 
+    def attach_log_mirror(self, *, max_events: int = 500) -> None:
+        """Mirror WARNING+ records from the root logger as ``log`` events.
+
+        Call after :meth:`run_start` (no-op while the stream is unopened).
+        The handler sits on the root logger so anything that propagates —
+        ``library.*``, ``networks.*``, third-party warnings routed through
+        ``logging`` — lands in the stream. Detached automatically on
+        :meth:`close`.
+        """
+        if self._fh is None or self._closed or self._log_handler is not None:
+            return
+        self._log_handler = _SinkLogHandler(self, max_events=max_events)
+        logging.getLogger().addHandler(self._log_handler)
+
     def close(self) -> None:
+        if self._log_handler is not None:
+            try:
+                logging.getLogger().removeHandler(self._log_handler)
+            except Exception:
+                pass
+            self._log_handler = None
         if self._fh is not None:
             try:
                 self._fh.close()

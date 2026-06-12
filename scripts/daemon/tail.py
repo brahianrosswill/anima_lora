@@ -14,6 +14,73 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 
+def read_events(
+    progress_path: Optional[str],
+    *,
+    events: Optional[list[str]] = None,
+    since_step: Optional[int] = None,
+    every_nth: Optional[int] = None,
+    last_n: Optional[int] = None,
+) -> list[dict]:
+    """Parse + filter a ``progress.jsonl`` stream into a list of event dicts.
+
+    The query surface behind ``GET /jobs/{id}/progress`` (and the MCP
+    ``get_progress`` tool): a long run's stream is megabytes of ``step`` lines,
+    so callers thin it server-side instead of downloading the file.
+
+    - ``events``: keep only these ``ev`` kinds (e.g. ``["step", "val"]``).
+    - ``since_step``: keep events at/after this ``global_step``. Events that
+      carry no ``global_step`` (``run_start``, ``log``, ``run_end``) inherit
+      the most recent step seen before them in the stream.
+    - ``every_nth``: thin ``step`` events to every n-th (the latest ``step``
+      is always kept so the caller sees where the run currently is).
+    - ``last_n``: final cap — keep only the trailing n events.
+    """
+    if not progress_path:
+        return []
+    p = Path(progress_path)
+    if not p.is_file():
+        return []
+    wanted = set(events) if events else None
+    picked: list[dict] = []
+    step_seen = 0  # most recent global_step, inherited by step-less events
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue  # half-written tail line
+                if not isinstance(rec, dict):
+                    continue
+                gs = rec.get("global_step")
+                if isinstance(gs, (int, float)):
+                    step_seen = int(gs)
+                if wanted is not None and rec.get("ev") not in wanted:
+                    continue
+                if since_step is not None and step_seen < since_step:
+                    continue
+                picked.append(rec)
+    except OSError:
+        return []
+    if every_nth and every_nth > 1:
+        steps = [i for i, rec in enumerate(picked) if rec.get("ev") == "step"]
+        keep_steps = set(steps[::every_nth])
+        if steps:
+            keep_steps.add(steps[-1])
+        picked = [
+            rec
+            for i, rec in enumerate(picked)
+            if rec.get("ev") != "step" or i in keep_steps
+        ]
+    if last_n is not None and last_n >= 0:
+        picked = picked[len(picked) - min(last_n, len(picked)) :]
+    return picked
+
+
 def last_event(progress_path: Optional[str]) -> Optional[dict]:
     """Parse the last complete JSON line of ``progress.jsonl`` (or ``None``)."""
     if not progress_path:

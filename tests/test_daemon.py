@@ -382,6 +382,8 @@ def test_command_job_build_cmd():
     assert "train.py" not in cmd
     assert env["CAPTION_SHUFFLE_VARIANTS"] == "7"
     assert env["PYTHONUNBUFFERED"] == "1"
+    # tqdm throttled so stdout.log stays tail-readable (redraws every 10s, not 0.1s)
+    assert env["TQDM_MININTERVAL"] == "10"
 
 
 def test_command_job_loads_with_train_default():
@@ -712,3 +714,127 @@ def test_tail_while_write(tmp_path):
         ev = tail.last_event(str(p))
         assert ev["ev"] == "step" and ev["global_step"] == 5
     assert tail.last_ckpt_path(str(p)) is None
+
+
+# --------------------------------------------------------------------------
+# structured progress queries (get_progress) + agent-readable log tails
+# --------------------------------------------------------------------------
+
+
+def test_read_events_filters(tmp_path):
+    from scripts.daemon import tail
+
+    p = tmp_path / "progress.jsonl"
+    stream = [{"ev": "run_start", "ts": 0.0}]
+    for i in range(1, 11):
+        stream.append({"ev": "step", "ts": float(i), "global_step": i, "loss": 1.0 / i})
+    stream += [
+        {"ev": "log", "ts": 10.5, "level": "WARNING", "logger": "x", "msg": "boom"},
+        {"ev": "ckpt", "ts": 11.0, "global_step": 10, "path": "/tmp/x.safetensors"},
+        {"ev": "run_end", "ts": 12.0, "status": "ok", "final_step": 10},
+    ]
+    with open(p, "w", encoding="utf-8") as f:
+        for ev in stream:
+            f.write(json.dumps(ev) + "\n")
+
+    assert len(tail.read_events(str(p))) == len(stream)
+
+    # ev-kind filter
+    steps = tail.read_events(str(p), events=["step"])
+    assert [e["global_step"] for e in steps] == list(range(1, 11))
+
+    # since_step — step-less events inherit the preceding step
+    late = tail.read_events(str(p), since_step=8)
+    assert [e["ev"] for e in late] == ["step", "step", "step", "log", "ckpt", "run_end"]
+
+    # every_nth thins step events but always keeps the latest one
+    thinned = tail.read_events(str(p), events=["step"], every_nth=4)
+    assert [e["global_step"] for e in thinned] == [1, 5, 9, 10]
+
+    # last_n trailing cap
+    assert [e["ev"] for e in tail.read_events(str(p), last_n=2)] == ["ckpt", "run_end"]
+
+    # a half-written tail line is skipped, not fatal
+    with open(p, "a", encoding="utf-8") as f:
+        f.write('{"ev": "step", "global_st')
+    assert len(tail.read_events(str(p))) == len(stream)
+
+    # missing / unset path → empty
+    assert tail.read_events(None) == []
+    assert tail.read_events(str(tmp_path / "nope.jsonl")) == []
+
+
+def test_progress_endpoint_http(daemon):
+    import urllib.error
+
+    cl, _ = daemon
+    jid = cl.submit(method="lora", overrides={"duration": 0.2})["job_id"]
+    assert _wait_until(lambda: cl.get(jid)["state"] == "done", timeout=15)
+
+    out = cl._request("GET", f"/jobs/{jid}/progress")
+    assert out["job_id"] == jid and out["state"] == "done"
+    kinds = [e["ev"] for e in out["events"]]
+    assert kinds == ["run_start", "step", "ckpt", "run_end"]
+    assert out["count"] == 4
+
+    out = cl._request("GET", f"/jobs/{jid}/progress?events=step,run_end&last_n=1")
+    assert [e["ev"] for e in out["events"]] == ["run_end"]
+
+    with pytest.raises(urllib.error.HTTPError):
+        cl._request("GET", "/jobs/nope/progress")
+
+
+def test_mcp_get_progress(daemon):
+    cl, _ = daemon
+    srv = _mcp_for(cl)
+    _, payload = _call_tool(
+        srv, "submit_training", {"method": "lora", "overrides": {"duration": 0.2}}
+    )
+    jid = payload["job_id"]
+
+    def done():
+        _, job = _call_tool(srv, "get_job", {"id": jid})
+        return job["state"] == "done"
+
+    assert _wait_until(done, timeout=15)
+
+    # registered in the catalog (rides in from server.TOOLS)
+    tools = srv.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
+    assert "get_progress" in {t["name"] for t in tools["result"]["tools"]}
+
+    result, payload = _call_tool(srv, "get_progress", {"id": jid})
+    assert result["isError"] is False
+    assert [e["ev"] for e in payload["events"]] == [
+        "run_start",
+        "step",
+        "ckpt",
+        "run_end",
+    ]
+
+    # filters ride through (comma-string form, as in the manifest schema)
+    _, payload = _call_tool(srv, "get_progress", {"id": jid, "events": "step"})
+    assert [e["ev"] for e in payload["events"]] == ["step"]
+
+    # …and it survives the daemon going away (reads progress.jsonl from disk)
+    down = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    result, payload = _call_tool(down, "get_progress", {"id": jid})
+    assert result["isError"] is False
+    assert payload["events"][-1]["ev"] == "run_end"
+
+    result, payload = _call_tool(down, "get_progress", {"id": "nope"})
+    assert payload.get("error") == "no such job"
+
+
+def test_tail_lines_collapse_tqdm_redraws(tmp_path):
+    """One tqdm bar = one tail line: \\r redraw runs collapse to the final
+    rendering instead of flooding the window with bar updates."""
+    from scripts.daemon.mcp import _tail_lines
+
+    p = tmp_path / "stdout.log"
+    bar = "\r".join(f"caching:  {i}%|██| {i}/100" for i in range(0, 101, 10))
+    p.write_text("starting\n" + bar + "\nwarn: thing happened\n\n", encoding="utf-8")
+    assert _tail_lines(str(p), 10) == [
+        "starting",
+        "caching:  100%|██| 100/100",
+        "warn: thing happened",
+    ]

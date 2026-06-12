@@ -12,7 +12,7 @@
 # shape-agnostic; only the learned behavior is coupled to the schedule below,
 # so it is snapshotted into the safetensors metadata (R2).
 
-output_name = "anima_spd_snrgate"
+output_name = "anima_spd_snrgate128"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -33,8 +33,8 @@ compile_dynamic_seq = true
 activation_memory_budget = 0.99
 
 [network]
-rank = 64
-alpha = 64
+rank = 128
+alpha = 128
 attn_mode = "flash"
 channel_scaling_alpha = 0.5
 

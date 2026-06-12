@@ -550,6 +550,12 @@ class JobManager:
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        # tqdm redraws ride "\r"; at the default 0.1s cadence a cached-dataset
+        # scan writes thousands of bar updates into stdout.log, drowning the
+        # lines a reader actually tails for (warnings, tracebacks). One redraw
+        # per 10s is plenty: the GUI's TqdmProgressTracker only parses the
+        # latest line, and training progress has its own progress.jsonl stream.
+        env.setdefault("TQDM_MININTERVAL", "10")
 
         # Command jobs (preprocess / mask) are a plain task invocation. Launch
         # under pythonw.exe (windowless): a uv-venv python.exe is a trampoline

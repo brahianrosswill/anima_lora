@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 from typing import Any, Callable, Optional
 
-from . import config
+from . import config, tail
 from .client import DaemonClient, ensure_daemon
 from .server import TOOLS
 
@@ -75,7 +75,13 @@ TAIL_LOG_TOOL = {
 
 
 def _tail_lines(path: str, n: int, *, max_bytes: int = 262_144) -> list[str]:
-    """Last ``n`` lines of a (possibly huge) log, decoded leniently."""
+    """Last ``n`` lines of a (possibly huge) log, decoded leniently.
+
+    tqdm redraws a bar in place with ``\\r`` on one physical line, so naive
+    ``splitlines()`` turns one progress bar into thousands of "lines" and the
+    tail window fills with redraws. Keep only the final rendering of each
+    physical line and drop blank ones.
+    """
     try:
         p = Path(path)
         size = p.stat().st_size
@@ -85,7 +91,14 @@ def _tail_lines(path: str, n: int, *, max_bytes: int = 262_144) -> list[str]:
             data = f.read()
     except OSError:
         return []
-    return data.decode("utf-8", errors="replace").splitlines()[-n:]
+    lines: list[str] = []
+    for raw in data.decode("utf-8", errors="replace").split("\n"):
+        if "\r" in raw:
+            raw = next((s for s in reversed(raw.split("\r")) if s.strip()), "")
+        raw = raw.rstrip()
+        if raw:
+            lines.append(raw)
+    return lines[-n:]
 
 
 def _error_result(message: str) -> dict:
@@ -194,6 +207,11 @@ class MCPServer:
     def _invoke(self, name: str, tool: dict, args: dict) -> Any:
         if name == "tail_log":
             return self._tail_log(args)
+        if name == "get_progress":
+            # Handled locally: the generic GET dispatch below drops query
+            # args, and reading the on-disk progress.jsonl directly also
+            # works with the daemon down.
+            return self._get_progress(args)
         if name in _ENSURE:
             client = self._ensure()
         else:
@@ -217,32 +235,74 @@ class MCPServer:
             return client._request("GET", path)
         return client._request("POST", path, args)
 
+    def _job_record(self, job_id: str) -> Optional[dict]:
+        """The job record via the daemon, or the on-disk ``job.json`` when the
+        daemon is down (or doesn't know the id)."""
+        client = self._client_factory()
+        if client.health() is not None:
+            try:
+                return client.get(job_id)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
+        try:
+            return json.loads(
+                (config.job_dir(job_id) / "job.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+
     def _tail_log(self, args: dict) -> dict:
         job_id = str(args.get("id") or "")
         if not job_id:
             raise RuntimeError("missing required argument: id")
         n = max(1, int(args.get("lines") or 80))
-        job: Optional[dict] = None
-        client = self._client_factory()
-        if client.health() is not None:
-            try:
-                job = client.get(job_id)
-            except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    raise
-        if job is None:  # daemon down (or 404) → the on-disk record is authoritative
-            try:
-                job = json.loads(
-                    (config.job_dir(job_id) / "job.json").read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError):
-                return {"error": "no such job", "job_id": job_id}
+        job = self._job_record(job_id)
+        if job is None:
+            return {"error": "no such job", "job_id": job_id}
         stdout_path = job.get("stdout_path")
         return {
             "job_id": job_id,
             "state": job.get("state"),
             "error": job.get("error"),
             "lines": _tail_lines(stdout_path, n) if stdout_path else [],
+        }
+
+    def _get_progress(self, args: dict) -> dict:
+        job_id = str(args.get("id") or "")
+        if not job_id:
+            raise RuntimeError("missing required argument: id")
+        job = self._job_record(job_id)
+        if job is None:
+            return {"error": "no such job", "job_id": job_id}
+        raw_events = args.get("events")
+        if isinstance(raw_events, str):
+            kinds = [s.strip() for s in raw_events.split(",") if s.strip()] or None
+        elif isinstance(raw_events, list):
+            kinds = [str(s) for s in raw_events] or None
+        else:
+            kinds = None
+
+        def _int(name: str, default=None):
+            val = args.get(name)
+            try:
+                return int(val) if val is not None else default
+            except (TypeError, ValueError):
+                return default
+
+        evs = tail.read_events(
+            job.get("progress_path"),
+            events=kinds,
+            since_step=_int("since_step"),
+            every_nth=_int("every_nth"),
+            last_n=_int("last_n", 200),
+        )
+        return {
+            "job_id": job_id,
+            "state": job.get("state"),
+            "progress_path": job.get("progress_path"),
+            "count": len(evs),
+            "events": evs,
         }
 
 
