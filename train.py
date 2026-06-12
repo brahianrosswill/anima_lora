@@ -72,6 +72,7 @@ from library.training import (
     AcceleratedBundle,
     CheckpointSaver,
     DatasetBundle,
+    LivenessLedger,
     LossContext,
     NetworkBundle,
     OptimizerBundle,
@@ -111,8 +112,9 @@ from library.training.log_dispatch import (
 )
 from library.training.progress import ProgressSink, run_scope
 from library.training.forward import (
+    ForwardConditioning,
     apply_router_conditioning,
-    build_forward_kwargs,
+    build_forward_conditioning,
     compute_inversion_func_loss,
     prepare_text_conds,
     run_vr_reference_forward,
@@ -187,6 +189,10 @@ class AnimaTrainer:
         self._adapters: list[MethodAdapter] = []
         # Feature-specific per-run state — see ``RuntimeState``.
         self._state = RuntimeState()
+        # Liveness ledger (issues.md P1.1): counts aux consumption per
+        # skip-if-missing loss; the loop audits it (step-25 early check +
+        # run end) and flags configured-but-dead features with `LIVENESS:`.
+        self._liveness = LivenessLedger()
 
     # region logging helpers
 
@@ -617,68 +623,59 @@ class AnimaTrainer:
         )
         return noise_scheduler
 
-    def get_noise_pred_and_target(
-        self,
-        ctx: TrainCtx,
-        latents,
-        batch,
-        text_encoder_conds,
-        *,
-        is_train=True,
-    ):
+    # ------------------------------------------------------------------
+    # Per-step forward phases (issues.md P2.1)
+    #
+    # ``get_noise_pred_and_target`` is a flat sequence of named phases; the
+    # conditional logic of each phase lives INSIDE it, never as lexical
+    # nesting around it. "Always per step" is therefore structurally evident
+    # at the call site — the silent-REPA dispatch bug was exactly an
+    # always-phase written inside a sometimes-branch.
+    # ------------------------------------------------------------------
+
+    def _step_ctx(self, ctx: TrainCtx) -> StepCtx:
+        return StepCtx(
+            args=ctx.args,
+            accelerator=ctx.accelerator,
+            network=ctx.network,
+            weight_dtype=ctx.weight_dtype,
+        )
+
+    def _prime_adapters(self, ctx: TrainCtx, batch, latents, *, is_train) -> None:
+        """ALWAYS per step. Method-adapter pre-forward priming.
+
+        IP-Adapter encodes the reference image and primes per-block K/V;
+        EasyControl runs the cond pre-pass and primes per-block (K_c, V_c).
+        Both run on the 4D latent layout the patched DiT forward expects. The
+        patched cross-attn / self-attn closures consume the primed tensors
+        during attention."""
+        if not self._adapters:
+            return
+        step_ctx = self._step_ctx(ctx)
+        for adapter in self._adapters:
+            adapter.prime_for_forward(step_ctx, batch, latents, is_train=is_train)
+
+    def _sample_noisy_input(self, ctx: TrainCtx, latents, noise, *, is_train):
+        """ALWAYS per step. Draw (noisy input, timesteps, sigmas) via the
+        sampler registry (M1) and run per-step network router conditioning
+        (timestep masks, σ/FEI routers, balance-loss warmup)."""
         args = ctx.args
-        accelerator = ctx.accelerator
-        noise_scheduler = ctx.noise_scheduler
-        unet = ctx.unet
-        network = ctx.network
-        weight_dtype = ctx.weight_dtype
-        anima: anima_models.Anima = unet
-
-        # Reset per-step adapter aux so stale tensors from a prior step can't
-        # leak into the loss composer.
-        self._state.extras_for_step = {}
-
-        # Sample noise
-        if latents.ndim == 5:  # Fallback for 5D latents (old cache)
-            latents = latents.squeeze(2)  # [B, C, 1, H, W] -> [B, C, H, W]
-
-        # Method-adapter pre-forward priming. IP-Adapter encodes the reference
-        # image and primes per-block K/V; EasyControl runs the cond pre-pass
-        # and primes per-block (K_c, V_c). Both run on the 4D latent layout
-        # the patched DiT forward expects. The patched cross-attn / self-attn
-        # closures consume the primed tensors during attention.
-        if self._adapters:
-            step_ctx = StepCtx(
-                args=args,
-                accelerator=accelerator,
-                network=network,
-                weight_dtype=weight_dtype,
-            )
-            for adapter in self._adapters:
-                adapter.prime_for_forward(step_ctx, batch, latents, is_train=is_train)
-        noise = torch.randn_like(latents)
-
-        # Draw noisy input + timesteps via the sampler registry (M1).
         sampler_fn = SAMPLER_REGISTRY[getattr(args, "sampler", "default") or "default"]
         sampler_out = sampler_fn(
             SamplerContext(
                 args=args,
-                noise_scheduler=noise_scheduler,
+                noise_scheduler=ctx.noise_scheduler,
                 latents=latents,
                 noise=noise,
-                device=accelerator.device,
-                weight_dtype=weight_dtype,
+                device=ctx.accelerator.device,
+                weight_dtype=ctx.weight_dtype,
             )
         )
-        noisy_model_input = sampler_out.noisy_input
-        timesteps = sampler_out.timesteps  # [0,1]-scaled, float32
-        sigmas = sampler_out.sigmas
-
-        # Per-step network conditioning: timestep masks, σ/FEI routers, balance-loss warmup.
+        # timesteps are [0,1]-scaled, float32.
         self._hydra_warmup_step = apply_router_conditioning(
-            network=network,
-            noisy_model_input=noisy_model_input,
-            timesteps=timesteps,
+            network=ctx.network,
+            noisy_model_input=sampler_out.noisy_input,
+            timesteps=sampler_out.timesteps,
             is_train=is_train,
             warmup_step=int(getattr(self, "_hydra_warmup_step", 0)),
             max_train_steps=int(getattr(args, "max_train_steps", 0) or 0),
@@ -686,6 +683,18 @@ class AnimaTrainer:
                 getattr(args, "gradient_accumulation_steps", 1) or 1
             ),
         )
+        return sampler_out.noisy_input, sampler_out.timesteps, sampler_out.sigmas
+
+    def _prepare_conditioning(
+        self, ctx: TrainCtx, batch, text_encoder_conds, noisy_model_input
+    ):
+        """ALWAYS per step. Returns the device-resident ``PreparedTextConds``
+        (both text-conditioning modes; normalized to one uniform
+        ``ForwardConditioning`` at the forward call site); fires the
+        text-conditioned routers (each gated internally on cached crossattn);
+        marks grad-checkpointing inputs."""
+        args = ctx.args
+        network = ctx.network
 
         # Gradient checkpointing support
         if args.gradient_checkpointing:
@@ -703,27 +712,22 @@ class AnimaTrainer:
             batch=batch,
             text_encoding_strategy=ctx.text_encoding_strategy,
             network=network,
-            device=accelerator.device,
-            weight_dtype=weight_dtype,
+            device=ctx.accelerator.device,
+            weight_dtype=ctx.weight_dtype,
             uncond_crossattn_emb=self._state.uncond_crossattn_1,
         )
-        crossattn_emb = tc.crossattn_emb
-        prompt_embeds = tc.prompt_embeds
-        attn_mask = tc.attn_mask
-        t5_input_ids = tc.t5_input_ids
-        t5_attn_mask = tc.t5_attn_mask
 
         # ChimeraHydra global content router (chimera with
         # ``content_router_source="crossattn"``): fire ONCE per step on the
-        # pooled crossattn_emb. apply_router_conditioning above ran before
-        # text conds were materialized, so the content router lives outside
-        # that helper. No-op on non-chimera networks or per-Linear chimera.
+        # pooled crossattn_emb. apply_router_conditioning ran before text
+        # conds were materialized, so the content router lives outside that
+        # helper. No-op on non-chimera networks or per-Linear chimera.
         if (
             getattr(network, "use_content_router", False)
-            and crossattn_emb is not None
+            and tc.crossattn_emb is not None
             and hasattr(network, "set_content")
         ):
-            network.set_content(crossattn_emb)
+            network.set_content(tc.crossattn_emb)
 
         # Network-level GlobalRouter routed on pooled text
         # (``router_source="crossattn_emb"``, route_per_layer=False). Same
@@ -731,140 +735,213 @@ class AnimaTrainer:
         # on the materialized cross-attn text features. No-op otherwise.
         if (
             getattr(network, "use_crossattn_router", False)
-            and crossattn_emb is not None
+            and tc.crossattn_emb is not None
             and hasattr(network, "set_crossattn_routing")
         ):
-            network.set_crossattn_routing(crossattn_emb)
+            network.set_crossattn_routing(tc.crossattn_emb)
 
-        # Create padding mask
+        return tc
+
+    def _get_padding_mask(self, latents, *, weight_dtype, device):
         bs = latents.shape[0]
         h_latent = latents.shape[-2]
         w_latent = latents.shape[-1]
-        padding_mask_key = (bs, h_latent, w_latent, weight_dtype, accelerator.device)
+        padding_mask_key = (bs, h_latent, w_latent, weight_dtype, device)
         padding_mask = self._padding_mask_cache.get(padding_mask_key)
         if padding_mask is None:
             padding_mask = torch.zeros(
-                bs, 1, h_latent, w_latent, dtype=weight_dtype, device=accelerator.device
+                bs, 1, h_latent, w_latent, dtype=weight_dtype, device=device
             )
             self._padding_mask_cache[padding_mask_key] = padding_mask
+        return padding_mask
 
-        # Call model
+    def _run_primary_forward(
+        self, ctx: TrainCtx, *, anima, noisy_model_input, timesteps, tc, padding_mask
+    ):
+        """ALWAYS per step. Single, branch-free forward call site (issues.md
+        P2.3): both text-conditioning modes normalize to ONE uniform
+        ``ForwardConditioning`` (cond, kw) bundle first — the mode split is
+        data prep in ``build_forward_conditioning``, not control flow around
+        the call. The normalization (postfix splice runs learned modules)
+        must happen inside the primary forward's autocast / grad scope, which
+        is why it lives here rather than in ``_prepare_conditioning``.
+        Returns ``(model_pred, cond)``; ``cond`` is also consumed by the
+        aux-loss and adapter-dispatch phases after the forward."""
+        cond = build_forward_conditioning(
+            network=ctx.network, tc=tc, timesteps=timesteps
+        )
+        model_pred = anima(
+            noisy_model_input,
+            timesteps,
+            cond.cond,
+            padding_mask=padding_mask,
+            **cond.kw,
+        )
+        return model_pred, cond
+
+    def _attach_aux_losses(
+        self,
+        ctx: TrainCtx,
+        *,
+        anima,
+        batch,
+        latents,
+        noise,
+        sigmas,
+        timesteps,
+        noisy_model_input,
+        cond: ForwardConditioning,
+        padding_mask,
+        is_train,
+    ) -> None:
+        """Trainer-owned aux-loss producers riding the primary forward (func
+        inversion loss, VR control variate). Every gate lives INSIDE this
+        phase — including the cached-text requirement (``cond.crossattn_emb
+        is not None``), which used to be implied by lexical position inside
+        the else-branch. Must run inside the primary forward's autocast /
+        grad scope (extra ``anima(...)`` calls)."""
+        args = ctx.args
+
+        # Functional MSE loss against a sampled stochastic inversion run.
+        # The captures dict is populated by trainer-owned forward hooks
+        # on cross_attn.output_proj at ``self._func_blocks``.
+        self._func_loss = None
+        if (
+            is_train
+            and getattr(self, "_func_blocks", None)
+            and cond.crossattn_emb is not None
+        ):
+            self._func_loss = compute_inversion_func_loss(
+                anima_call=anima,
+                captures=self._func_captures,
+                block_indices=self._func_blocks,
+                batch=batch,
+                noisy_model_input=noisy_model_input,
+                timesteps=timesteps,
+                padding_mask=padding_mask,
+                has_postfix=cond.has_postfix,
+                kw=cond.kw,
+                device=ctx.accelerator.device,
+                dtype=ctx.weight_dtype,
+            )
+
+        # Variance-reduced FM control variate (AsymFlow §5.2). Stash the
+        # residual `z` so the loss composer can blend `(y + λ·z)²`.
+        if (
+            is_train
+            and float(getattr(args, "vr_loss_weight", 0.0) or 0.0) > 0.0
+            and cond.crossattn_emb is not None
+        ):
+            z_residual = run_vr_reference_forward(
+                anima_call=anima,
+                network=ctx.network,
+                latents=latents,
+                noise=noise,
+                sigmas=sigmas,
+                timesteps=timesteps,
+                crossattn_emb=cond.crossattn_emb,
+                padding_mask=padding_mask,
+                forward_kwargs=cond.kw,
+                weight_dtype=ctx.weight_dtype,
+                fei_sigma_low_div=float(args.vr_fei_sigma_low_div),
+            )
+            self._state.extras_for_step["vr"] = {
+                "z": z_residual.detach(),
+                "state": self._state.vr,
+            }
+
+    def _dispatch_adapter_extras(
+        self, ctx: TrainCtx, primary: ForwardArtifacts
+    ) -> None:
+        """ALWAYS per step — both text-conditioning paths. Method-adapter
+        extra forwards (soft-tokens, REPA, …).
+
+        This dispatch used to live inside the cached-crossattn else-branch
+        only, which silently skipped every adapter's aux loss on the in-model
+        text path (crossattn_emb=None — EasyControl's default; REPA trained
+        as baseline). Each adapter sees the primary forward's inputs + 5D
+        output and may run additional anima(...) calls inside the same
+        autocast / grad scope, returning aux loss tensors keyed for the
+        LossComposer."""
+        if not self._adapters:
+            return
+        step_ctx = self._step_ctx(ctx)
+        for adapter in self._adapters:
+            out = adapter.extra_forwards(step_ctx, primary)
+            if out:
+                self._state.extras_for_step.update(out)
+
+    def get_noise_pred_and_target(
+        self,
+        ctx: TrainCtx,
+        latents,
+        batch,
+        text_encoder_conds,
+        *,
+        is_train=True,
+    ):
+        accelerator = ctx.accelerator
+        anima: anima_models.Anima = ctx.unet
+
+        # Reset per-step adapter aux so stale tensors from a prior step can't
+        # leak into the loss composer.
+        self._state.extras_for_step = {}
+
+        if latents.ndim == 5:  # Fallback for 5D latents (old cache)
+            latents = latents.squeeze(2)  # [B, C, 1, H, W] -> [B, C, H, W]
+
+        self._prime_adapters(ctx, batch, latents, is_train=is_train)
+        noise = torch.randn_like(latents)
+        noisy_model_input, timesteps, sigmas = self._sample_noisy_input(
+            ctx, latents, noise, is_train=is_train
+        )
+        tc = self._prepare_conditioning(
+            ctx, batch, text_encoder_conds, noisy_model_input
+        )
+        padding_mask = self._get_padding_mask(
+            latents, weight_dtype=ctx.weight_dtype, device=accelerator.device
+        )
         noisy_model_input = noisy_model_input.unsqueeze(
             2
         )  # 4D to 5D, [B, C, H, W] -> [B, C, 1, H, W]
 
         with torch.set_grad_enabled(is_train), accelerator.autocast():
-            if crossattn_emb is None:
-                # In-model text path (no cached LLM-adapter outputs, e.g.
-                # EasyControl). kw is also consumed by the shared method-
-                # adapter dispatch below the branch.
-                kw = dict(
-                    target_input_ids=t5_input_ids,
-                    target_attention_mask=t5_attn_mask,
-                    source_attention_mask=attn_mask,
-                )
-                model_pred = anima(
-                    noisy_model_input,
-                    timesteps,
-                    prompt_embeds,
-                    padding_mask=padding_mask,
-                    **kw,
-                )
-            else:
-                # crossattn_emb is already in target (T5-compatible) space.
-                # Postfix splice kwargs.
-                fk = build_forward_kwargs(
-                    network=network,
-                    crossattn_emb=crossattn_emb,
-                    t5_attn_mask=t5_attn_mask,
-                    timesteps=timesteps,
-                )
-                crossattn_emb = fk.crossattn_emb
-                kw = fk.kw
-                has_postfix = fk.has_postfix
-                model_pred = anima(
-                    noisy_model_input,
-                    timesteps,
-                    crossattn_emb,
-                    padding_mask=padding_mask,
-                    **kw,
-                )
-
-                # Functional MSE loss against a sampled stochastic inversion run.
-                # The captures dict is populated by trainer-owned forward hooks
-                # on cross_attn.output_proj at ``self._func_blocks``.
-                self._func_loss = None
-                if is_train and getattr(self, "_func_blocks", None):
-                    self._func_loss = compute_inversion_func_loss(
-                        anima_call=anima,
-                        captures=self._func_captures,
-                        block_indices=self._func_blocks,
-                        batch=batch,
-                        noisy_model_input=noisy_model_input,
-                        timesteps=timesteps,
-                        padding_mask=padding_mask,
-                        has_postfix=has_postfix,
-                        kw=kw,
-                        device=accelerator.device,
-                        dtype=weight_dtype,
-                    )
-
-                # Variance-reduced FM control variate (AsymFlow §5.2). Stash the
-                # residual `z` so the loss composer can blend `(y + λ·z)²`.
-                if (
-                    is_train
-                    and float(getattr(args, "vr_loss_weight", 0.0) or 0.0) > 0.0
-                ):
-                    z_residual = run_vr_reference_forward(
-                        anima_call=anima,
-                        network=network,
-                        latents=latents,
-                        noise=noise,
-                        sigmas=sigmas,
-                        timesteps=timesteps,
-                        crossattn_emb=crossattn_emb,
-                        padding_mask=padding_mask,
-                        forward_kwargs=kw,
-                        weight_dtype=weight_dtype,
-                        fei_sigma_low_div=float(args.vr_fei_sigma_low_div),
-                    )
-                    self._state.extras_for_step["vr"] = {
-                        "z": z_residual.detach(),
-                        "state": self._state.vr,
-                    }
-
-            # Method-adapter extra forwards (soft-tokens, REPA, …). Sits
-            # OUTSIDE the crossattn_emb branch on purpose: the in-model text
-            # path (crossattn_emb=None — EasyControl's default, no cached
-            # LLM-adapter outputs) must dispatch too. It used to live inside
-            # the else-branch only, which silently skipped every adapter's
-            # aux loss on that path (REPA trained as baseline). Each adapter
-            # sees the primary forward's inputs + 5D output and may run
-            # additional anima(...) calls inside this same autocast / grad
-            # scope, returning aux loss tensors keyed for the LossComposer.
-            if self._adapters:
-                primary = ForwardArtifacts(
+            model_pred, cond = self._run_primary_forward(
+                ctx,
+                anima=anima,
+                noisy_model_input=noisy_model_input,
+                timesteps=timesteps,
+                tc=tc,
+                padding_mask=padding_mask,
+            )
+            self._attach_aux_losses(
+                ctx,
+                anima=anima,
+                batch=batch,
+                latents=latents,
+                noise=noise,
+                sigmas=sigmas,
+                timesteps=timesteps,
+                noisy_model_input=noisy_model_input,
+                cond=cond,
+                padding_mask=padding_mask,
+                is_train=is_train,
+            )
+            self._dispatch_adapter_extras(
+                ctx,
+                ForwardArtifacts(
                     anima_call=anima,
                     noisy_model_input=noisy_model_input,
                     timesteps=timesteps,
-                    crossattn_emb=crossattn_emb,
+                    crossattn_emb=cond.crossattn_emb,
                     padding_mask=padding_mask,
-                    forward_kwargs=kw,
+                    forward_kwargs=cond.kw,
                     model_pred=model_pred,
                     noise=noise,
                     latents=latents,
                     is_train=is_train,
-                )
-                step_ctx = StepCtx(
-                    args=args,
-                    accelerator=accelerator,
-                    network=network,
-                    weight_dtype=weight_dtype,
-                )
-                for adapter in self._adapters:
-                    out = adapter.extra_forwards(step_ctx, primary)
-                    if out:
-                        self._state.extras_for_step.update(out)
+                ),
+            )
         model_pred = model_pred.squeeze(2)  # 5D to 4D, [B, C, 1, H, W] -> [B, C, H, W]
 
         # Note: do NOT clear timestep mask here -- gradient checkpointing recomputes the forward
@@ -875,7 +952,7 @@ class AnimaTrainer:
 
         # Loss weighting
         weighting = anima_train_utils.compute_loss_weighting_for_anima(
-            weighting_scheme=args.weighting_scheme, sigmas=sigmas
+            weighting_scheme=ctx.args.weighting_scheme, sigmas=sigmas
         )
 
         return model_pred, target, timesteps, weighting
@@ -1118,7 +1195,9 @@ class AnimaTrainer:
         if func_loss is not None:
             loss_aux["func_loss"] = func_loss
 
-        composer = build_loss_composer(args, getattr(self, "_network", network))
+        composer = build_loss_composer(
+            args, getattr(self, "_network", network), ledger=self._liveness
+        )
 
         def _build_loss_ctx(aux: dict) -> LossContext:
             return LossContext(
@@ -1225,12 +1304,7 @@ class AnimaTrainer:
     def on_step_start(self, ctx: TrainCtx, batch, *, is_train: bool = True):
         if not self._adapters:
             return
-        step_ctx = StepCtx(
-            args=ctx.args,
-            accelerator=ctx.accelerator,
-            network=ctx.network,
-            weight_dtype=ctx.weight_dtype,
-        )
+        step_ctx = self._step_ctx(ctx)
         for adapter in self._adapters:
             adapter.on_step_start(step_ctx, batch, is_train=is_train)
 
@@ -1239,12 +1313,7 @@ class AnimaTrainer:
         ``accelerator.backward`` and gradient clipping)."""
         if not self._adapters:
             return
-        step_ctx = StepCtx(
-            args=ctx.args,
-            accelerator=ctx.accelerator,
-            network=ctx.network,
-            weight_dtype=ctx.weight_dtype,
-        )
+        step_ctx = self._step_ctx(ctx)
         for adapter in self._adapters:
             adapter.after_backward(step_ctx)
 
@@ -2398,7 +2467,11 @@ class AnimaTrainer:
 
         # run_scope emits the matching run_end (ok / stopped / error) on exit;
         # run_start already fired when the sink was constructed above.
-        with run_scope(self.progress_sink, final_step=lambda: loop_state.global_step):
+        with run_scope(
+            self.progress_sink,
+            final_step=lambda: loop_state.global_step,
+            extra_fields=self._liveness.run_end_fields,
+        ):
             run_training_loop(self, loop_state)
 
             accelerator.end_training()

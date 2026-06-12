@@ -43,6 +43,7 @@ from library.training.samplers import (
 
 # === registries: losses ===
 from library.training.losses import (
+    LivenessLedger,
     LossContext,
     LossComposer,
     LOSS_REGISTRY,
@@ -157,6 +158,7 @@ __all__ = [
     "SamplerOut",
     "SAMPLER_REGISTRY",
     # losses
+    "LivenessLedger",
     "LossContext",
     "LossComposer",
     "LOSS_REGISTRY",

@@ -146,6 +146,7 @@ These sit between Tier 1 and Tier 2: no new paper or new docs page is required, 
    - For a kernel rewrite: a numerical-equivalence test against the previous path within a stated tolerance.
    - For a schedule revision: a test that the new schedule reduces to the old one under a documented config flag, so the change can be A/B'd.
    - For a memory optimization: an assertion on peak allocator usage on a small fixture, if feasible.
+   - For a gated feature (off-by-default flag): both directions — an inertness test (flag off ⇒ identical training) **and** a liveness signal (flag on ⇒ measurably on). Aux losses get the latter for free from the `LossComposer` liveness ledger (the `LIVENESS:` audit in `library/training/losses.py`); any other producer that can silently skip should emit a `<name>/active` metric.
 
    Add the test to `tests/`, following the patterns in `test_network_registry.py` and `test_lora_dtype_policy.py`. If exact equivalence is impossible (e.g. a deliberately different algorithm), state the tolerance and what would constitute a regression.
 

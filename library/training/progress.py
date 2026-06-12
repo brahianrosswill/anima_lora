@@ -211,9 +211,16 @@ class ProgressSink:
         )
 
     def run_end(
-        self, *, status: str, final_step: int, error: Optional[str] = None
+        self,
+        *,
+        status: str,
+        final_step: int,
+        error: Optional[str] = None,
+        **fields: Any,
     ) -> None:
-        self._emit("run_end", status=status, final_step=final_step, error=error)
+        self._emit(
+            "run_end", status=status, final_step=final_step, error=error, **fields
+        )
         self.close()
 
     # endregion
@@ -281,30 +288,52 @@ class ProgressSink:
 
 
 @contextmanager
-def run_scope(sink: Optional[ProgressSink], *, final_step: Callable[[], int]):
+def run_scope(
+    sink: Optional[ProgressSink],
+    *,
+    final_step: Callable[[], int],
+    extra_fields: Optional[Callable[[], dict]] = None,
+):
     """Emit the matching ``run_end`` when the wrapped training block exits.
 
     ``run_start`` must already have fired (the sink is constructed earlier so it
     can be handed to the checkpoint saver). On block exit this maps the outcome
     to a status: normal return → ``ok``; ``KeyboardInterrupt`` → ``stopped``;
     any other exception → ``error`` (re-raised either way). ``final_step`` is
-    read lazily at exit so the event records where training actually stopped.
+    read lazily at exit so the event records where training actually stopped;
+    ``extra_fields`` likewise — its dict (e.g. the liveness summary) is merged
+    into the ``run_end`` event, and a failure inside it is swallowed so it can
+    neither crash a clean exit nor mask the real exception.
     A ``None`` sink makes this a transparent pass-through.
     """
+
+    def _extra() -> dict:
+        if extra_fields is None:
+            return {}
+        try:
+            fields = dict(extra_fields() or {})
+            for reserved in ("ev", "ts", "status", "final_step", "error"):
+                fields.pop(reserved, None)
+            return fields
+        except Exception as exc:
+            logger.debug("run_end extra_fields failed: %s", exc)
+            return {}
+
     if sink is None:
         yield
         return
     try:
         yield
     except KeyboardInterrupt:
-        sink.run_end(status="stopped", final_step=final_step())
+        sink.run_end(status="stopped", final_step=final_step(), **_extra())
         raise
     except BaseException as exc:
         sink.run_end(
             status="error",
             final_step=final_step(),
             error=f"{type(exc).__name__}: {exc}",
+            **_extra(),
         )
         raise
     else:
-        sink.run_end(status="ok", final_step=final_step())
+        sink.run_end(status="ok", final_step=final_step(), **_extra())

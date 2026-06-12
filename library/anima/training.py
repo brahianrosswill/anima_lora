@@ -557,6 +557,19 @@ def add_anima_training_arguments(parser: argparse.ArgumentParser):
         help="Comma-separated DiT block indices at which to capture cross_attn.output_proj "
         "outputs for functional MSE loss.",
     )
+
+    # Liveness audit (issues.md P1.1). The audit itself is always on: a
+    # configured-ON aux loss (repa / functional / vr / fera_fecl /
+    # soft_tokens_contrastive) that never consumes its aux input ERROR-logs
+    # with a greppable `LIVENESS:` prefix at step 25 and at run end.
+    parser.add_argument(
+        "--liveness_strict",
+        action="store_true",
+        help="Escalate the LIVENESS audit from ERROR log to hard abort: if a "
+        "configured-ON aux loss has consumed its aux input on 0 train batches "
+        "by the step-25 early check (or by run end), raise instead of training "
+        "on as a silent baseline. Partial coverage only warns either way.",
+    )
     parser.add_argument(
         "--functional_loss_num_runs",
         type=int,

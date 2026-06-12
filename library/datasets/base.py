@@ -163,8 +163,9 @@ class BaseDataset(torch.utils.data.Dataset):
         # REPA v2 PE feature loading. Set via `dataset.load_repa_pe = True`
         # (+ `repa_pe_encoder`) after construction; off disables. Loads the
         # cached {stem}_anima_{encoder}.safetensors patch tokens into
-        # batch["repa_pe_features"] for REPAMethodAdapter. The sidecar lives in
-        # the same cache dir as the TE npz (where make preprocess-pe wrote it).
+        # batch["repa_pe_features"] for REPAMethodAdapter. Sidecar resolution
+        # walks a fallback chain (TE-cache dir → subset latent-cache dir →
+        # image dir) — see _repa_pe_sidecar_candidates.
         self.load_repa_pe: bool = False
         self.repa_pe_encoder: str = "pe_spatial"
 
@@ -210,9 +211,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.register_sidecar(
             SidecarSpec(
                 name="repa_pe",
-                loader=lambda info: self._try_load_repa_pe(
-                    info.absolute_path, info.text_encoder_outputs_npz
-                ),
+                loader=self._try_load_repa_pe,
                 out_key="repa_pe_features",
                 policy="all_or_nothing",
                 # All samples in a bucket share the latent resolution → same
@@ -1390,31 +1389,65 @@ class BaseDataset(torch.utils.data.Dataset):
             runs.append(t.float())
         return torch.stack(runs, dim=0)  # [N_runs, S, D]
 
-    def _try_load_repa_pe(
-        self, image_abs_path: str, te_npz: Optional[str]
-    ) -> Optional[torch.Tensor]:
+    def _repa_pe_sidecar_candidates(self, info: ImageInfo) -> List[str]:
+        """Candidate paths for the ``{stem}_anima_{encoder}.safetensors``
+        sidecar, in resolution order (issues.md P2.2):
+
+        1. next to the TE cache (the common case — TE and PE caches share
+           ``subset.cache_dir``, and the TE npz path already encodes any
+           nested-subdir mirroring),
+        2. the subset latent-cache dir, replicating the writer's nesting rule
+           (``make preprocess-pe`` resolves via ``resolve_cache_path`` with
+           ``cache_dir``+``image_dir``) — needed when ``text_cache_dir``
+           redirects only the TE cache (colorize) so candidate 1 lands in a
+           directory with no sidecars,
+        3. next to the image (legacy no-cache_dir layout).
+        """
+        stem = os.path.splitext(os.path.basename(info.absolute_path))[0]
+        name = f"{stem}_anima_{self.repa_pe_encoder}.safetensors"
+        candidates: List[str] = []
+        if info.text_encoder_outputs_npz:
+            candidates.append(
+                os.path.join(os.path.dirname(info.text_encoder_outputs_npz), name)
+            )
+        subset = self.image_to_subset.get(info.image_key)
+        cache_dir = getattr(subset, "cache_dir", None) if subset is not None else None
+        if cache_dir:
+            from library.io.cache import resolve_cache_path
+
+            candidates.append(
+                resolve_cache_path(
+                    info.absolute_path,
+                    f"_anima_{self.repa_pe_encoder}.safetensors",
+                    cache_dir=cache_dir,
+                    image_dir=getattr(subset, "image_dir", None),
+                )
+            )
+        candidates.append(os.path.join(os.path.dirname(info.absolute_path), name))
+        return list(dict.fromkeys(candidates))
+
+    def _try_load_repa_pe(self, info: ImageInfo) -> Optional[torch.Tensor]:
         """Load cached ``{stem}_anima_{encoder}.safetensors`` patch tokens.
 
         Returns the ``[T, d_enc]`` feature tensor (CLS still at index 0), or
         None when loading is off / the sidecar is missing (the adapter then
-        skips the REPA term for that batch). The sidecar lives in the same dir
-        as the TE cache (where ``make preprocess-pe --encoder <enc>`` wrote it),
-        mirroring ``library.training.cmmd.resolve_pe_sidecar``.
+        skips the REPA term for that batch). Resolution walks the fallback
+        chain in ``_repa_pe_sidecar_candidates`` because the TE cache can be
+        redirected away from where ``make preprocess-pe`` wrote the sidecar
+        (``text_cache_dir`` — colorize). Mirrors
+        ``library.training.cmmd.resolve_pe_sidecar`` for candidate 1.
         """
         if not self.load_repa_pe:
             return None
-        stem = os.path.splitext(os.path.basename(image_abs_path))[0]
-        cache_dir = (
-            os.path.dirname(te_npz) if te_npz else os.path.dirname(image_abs_path)
-        )
-        p = os.path.join(cache_dir, f"{stem}_anima_{self.repa_pe_encoder}.safetensors")
-        if not os.path.exists(p):
-            return None
-        from safetensors.torch import load_file
+        for p in self._repa_pe_sidecar_candidates(info):
+            if not os.path.exists(p):
+                continue
+            from safetensors.torch import load_file
 
-        sd = load_file(p)
-        feats = sd.get("image_features")
-        return feats.float() if feats is not None else None
+            sd = load_file(p)
+            feats = sd.get("image_features")
+            return feats.float() if feats is not None else None
+        return None
 
     def restrict_to_byg_tuples(self) -> tuple[int, int]:
         """Drop images lacking a BYG edit-tuple sidecar, then rebuild buckets.
