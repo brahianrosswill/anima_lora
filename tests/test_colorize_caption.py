@@ -8,6 +8,7 @@ adapter learns to steer on.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -132,19 +133,36 @@ def test_copyright_protected_from_dropout():
         assert "blue hair" not in v and "red dress" not in v and "green eyes" not in v
 
 
-def test_original_excluded_from_loaded_copyright_vocab():
+def _write_index(tmp_path):
+    # Minimal typed-tag caption index — the live corpus index rotates with the
+    # user's dataset, so tests pin their own copyright group instead.
+    index = {
+        "groups": {
+            "copyright": {
+                "Genshin Impact": [1],
+                "Original": [1, 2],
+                "original character": [3],
+            }
+        }
+    }
+    p = tmp_path / "caption_index.json"
+    p.write_text(json.dumps(index), encoding="utf-8")
+    return p
+
+
+def test_original_excluded_from_loaded_copyright_vocab(tmp_path):
     # "original" is Danbooru's "no franchise" copyright tag — it must NOT be
     # loaded as a copyright tag, so it's neither kept nor dropout-protected.
-    vocab = load_copyright_tags()  # default corpus index
+    vocab = load_copyright_tags(_write_index(tmp_path))
     assert "original" not in vocab
     assert _NON_SERIES_COPYRIGHT.isdisjoint(vocab)
-    # A real series tag from the same group still loads.
+    # A real series tag from the same group still loads (lowercased).
     assert "genshin impact" in vocab
 
 
-def test_original_not_kept_as_copyright_prefix():
+def test_original_not_kept_as_copyright_prefix(tmp_path):
     # With "original" excluded, an original-tagged caption collapses to colors.
-    vocab = load_copyright_tags()
+    vocab = load_copyright_tags(_write_index(tmp_path))
     out = filter_to_colors_and_copyright("original, 1girl, pink hair, blue eyes", vocab)
     assert out == "pink hair, blue eyes"
 
