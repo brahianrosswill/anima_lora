@@ -109,6 +109,11 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
         # reduction (mean gates per pool, not argmax-histogram) and different
         # entropy normalization (per-pool log(K_pool)). Same lifecycle.
         self._chimera_router_stats_cache: Optional[Dict[str, object]] = None
+        # State-dict prefixes of training-only submodules (e.g. the REPA
+        # projection head). ``save_weights`` strips them so attaching an aux
+        # head to the network is inference-safe by default — register the
+        # prefix wherever the submodule is attached.
+        self._training_only_prefixes: set = set()
 
         # Local aliases read by the closure body.
         module_class = cfg.module_class
@@ -2016,11 +2021,13 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
             metadata["ss_chimera_centered_gate"] = "true"
 
         state_dict = self.state_dict()
-        # REPA projection head is training-only (Arm A). Strip it so the saved
-        # adapter stays inference-clean; a warm start re-inits it (it re-converges
-        # in a few hundred steps). See library/training/repa.py.
-        for key in [k for k in state_dict if k.startswith("repa_head.")]:
-            del state_dict[key]
+        # Training-only submodules (e.g. the REPA projection head — a warm
+        # start re-inits it; see library/training/repa.py) never belong in the
+        # inference artifact. Attach-side code registers its prefix in
+        # ``_training_only_prefixes`` and the strip here is automatic.
+        for prefix in getattr(self, "_training_only_prefixes", ()):
+            for key in [k for k in state_dict if k.startswith(prefix)]:
+                del state_dict[key]
         lora_save.save_network_weights(
             state_dict,
             file=file,

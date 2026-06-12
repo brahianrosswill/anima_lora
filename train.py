@@ -363,17 +363,12 @@ class AnimaTrainer:
                 val_dataset_group.refresh_concat_state()
 
         # REPA v2: load cached PE-Spatial patch tokens into batches when
-        # use_repa is set. The flag rides the network kwargs, so it may be on
-        # args (top-level TOML key) or only in --network_args — check both.
-        def _repa_kwarg(key: str, default: str = "") -> str:
-            for na in getattr(args, "network_args", None) or []:
-                if na.startswith(f"{key}="):
-                    return na.split("=", 1)[1]
-            val = getattr(args, key, None)
-            return default if val is None else str(val)
-
-        if _repa_kwarg("use_repa").lower() in ("true", "1", "yes"):
-            repa_encoder = _repa_kwarg("repa_encoder", "pe_spatial") or "pe_spatial"
+        # use_repa is set. The flag rides the network kwargs; read the resolved
+        # merged view (--network_args + top-level TOML keys) rather than
+        # re-scanning both intake paths.
+        net_kwargs = resolve_network_kwargs(args)
+        if net_kwargs.get("use_repa", "").lower() in ("true", "1", "yes"):
+            repa_encoder = net_kwargs.get("repa_encoder") or "pe_spatial"
             for dataset in train_dataset_group.datasets:
                 dataset.load_repa_pe = True
                 dataset.repa_pe_encoder = repa_encoder
@@ -385,23 +380,16 @@ class AnimaTrainer:
 
         # Soft-tokens contrastive negatives. The objective's knobs live in
         # ``network_args`` (see configs/methods/soft_tokens.toml); preview them
-        # here to decide whether
+        # via the resolved kwargs view to decide whether
         # the dataset should surface cached negative text embeddings. Off unless
         # contrastive_weight > 0. See docs/proposal/soft_tokens_contrastive.md.
         if str(getattr(args, "network_module", "") or "") == (
             "networks.methods.soft_tokens"
         ):
-            net_arg_preview: dict[str, str] = {}
-            for na in args.network_args or []:
-                if "=" in na:
-                    pk, pv = na.split("=", 1)
-                    net_arg_preview[pk] = pv
-            con_weight = float(net_arg_preview.get("contrastive_weight", 0.0) or 0.0)
+            con_weight = float(net_kwargs.get("contrastive_weight", 0.0) or 0.0)
             if con_weight > 0.0:
-                con_k = int(net_arg_preview.get("contrastive_k", 1) or 1)
-                con_mode = str(
-                    net_arg_preview.get("contrastive_negative_mode", "shuffled")
-                )
+                con_k = int(net_kwargs.get("contrastive_k", 1) or 1)
+                con_mode = str(net_kwargs.get("contrastive_negative_mode", "shuffled"))
                 # The negative grouping always comes from the shared caption
                 # index `make caption-index` writes — not a user knob.
                 con_index = "post_image_dataset/captions/caption_index.json"
@@ -1147,6 +1135,12 @@ class AnimaTrainer:
         self._network = (
             network  # composer reads _network for ortho / balance regularizers
         )
+        # Aux-loss gating convention (library/training/losses.py docstring):
+        # handlers read network._<name>_weight. functional's weight is a
+        # top-level training arg, so the trainer stamps it here.
+        network._functional_loss_weight = float(
+            getattr(args, "functional_loss_weight", 0.0) or 0.0
+        )
         self._func_loss = None
         self._func_hooks = []
         self._func_captures = {}
@@ -1578,26 +1572,11 @@ class AnimaTrainer:
 
             accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
 
-        # prepare network
-        net_kwargs = {}
-        if args.network_args is not None:
-            for net_arg in args.network_args:
-                key, value = net_arg.split("=", 1)
-                net_kwargs[key] = value
-
-        # Forward known network-arg keys from top-level config (TOML) to net_kwargs.
-        # CLI --network_args take precedence over top-level config keys.
-        # Source of truth: `networks.all_network_kwargs()` (the flat
-        # `NETWORK_KWARGS` allowlist), plus a small tail of top-level training
-        # args the network modules still want to read (e.g. postfix
-        # contrastive's step-boundary window).
-        for key in NETWORK_KWARG_ALLOWLIST + _EXTRA_FORWARDED_TOP_LEVEL_ARGS:
-            if (
-                key not in net_kwargs
-                and hasattr(args, key)
-                and getattr(args, key) is not None
-            ):
-                net_kwargs[key] = str(getattr(args, key))
+        # prepare network — one resolved view of both config-intake paths
+        # (--network_args + allowlisted top-level keys). Copied so the dropout
+        # default below stays a factory-call detail, not part of the cached
+        # ``args._network_kwargs`` view other consumers read.
+        net_kwargs = dict(resolve_network_kwargs(args))
 
         if args.dim_from_weights:
             network, _ = network_module.create_network_from_weights(
@@ -2502,6 +2481,44 @@ _EXTRA_FORWARDED_TOP_LEVEL_ARGS: tuple[str, ...] = (
     # boundary, so it needs the grad-accum window.
     "gradient_accumulation_steps",
 )
+
+
+def resolve_network_kwargs(args) -> dict[str, str]:
+    """The single intake for network kwargs, merging both config paths.
+
+    A network kwarg can arrive as ``--network_args k=v`` (CLI / method TOML
+    ``network_args`` list) or as an allowlisted top-level config key landing
+    on ``args``; CLI ``--network_args`` win on overlap. Consumers outside the
+    network factory (e.g. the REPA dataset-sidecar enable in
+    ``assert_extra_args``) must see the same merged view the factory gets, so
+    the result is cached on ``args._network_kwargs`` — read a kwarg from here
+    rather than scanning ``args.network_args`` with a ``getattr(args, …)``
+    fallback. All values are strings, as ``create_network(**kwargs)`` expects.
+    """
+    cached = getattr(args, "_network_kwargs", None)
+    if cached is not None:
+        return cached
+
+    net_kwargs: dict[str, str] = {}
+    for net_arg in getattr(args, "network_args", None) or []:
+        key, value = net_arg.split("=", 1)
+        net_kwargs[key] = value
+
+    # Forward known network-arg keys from top-level config (TOML). Source of
+    # truth: `networks.all_network_kwargs()` (the flat `NETWORK_KWARGS`
+    # allowlist), plus a small tail of top-level training args the network
+    # modules still want to read (e.g. postfix contrastive's step-boundary
+    # window).
+    for key in NETWORK_KWARG_ALLOWLIST + _EXTRA_FORWARDED_TOP_LEVEL_ARGS:
+        if (
+            key not in net_kwargs
+            and hasattr(args, key)
+            and getattr(args, key) is not None
+        ):
+            net_kwargs[key] = str(getattr(args, key))
+
+    args._network_kwargs = net_kwargs
+    return net_kwargs
 
 
 def build_network_extras() -> dict[str, _config_schema.ConfigKey]:

@@ -4,7 +4,8 @@ import os
 import random
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import imagesize
 import numpy as np
@@ -65,6 +66,37 @@ def _caption_has_artist(caption: Optional[str], needle: str) -> bool:
 def enable_high_vram():
     global HIGH_VRAM
     HIGH_VRAM = True
+
+
+@dataclass
+class SidecarSpec:
+    """One per-image sidecar channel: a loader plus its batch collation policy.
+
+    Generalizes the load/append/stack/None dance that used to be hand-copied
+    per feature (inversion runs, BYG tuples, REPA PE). Register via
+    ``BaseDataset.register_sidecar``; ``__getitem__`` then owns the per-sample
+    loop and collation for every registered spec.
+
+    Policies:
+      - ``"all_or_nothing"``: ``example[out_key]`` is the stacked ``[B, ...]``
+        tensor when every sample in the batch loaded (and, with
+        ``uniform_shape``, all shapes match); ``None`` otherwise.
+      - ``"masked"``: missing samples get zero placeholders and
+        ``example[mask_key]`` carries a ``[B]`` bool validity mask; both keys
+        are ``None`` when no sample loaded.
+      - ``"dict"``: the loader returns a ``dict[str, Tensor]`` per sample;
+        every key present in *all* samples' dicts is stacked into
+        ``example[f"{out_key}{key}"]``. Nothing is emitted (keys absent, not
+        ``None``) unless all samples loaded.
+    """
+
+    name: str
+    loader: Callable[[ImageInfo], Optional[Any]]
+    out_key: str
+    policy: str = "all_or_nothing"
+    enabled: Callable[[], bool] = lambda: True
+    mask_key: Optional[str] = None
+    uniform_shape: bool = False
 
 
 class BaseDataset(torch.utils.data.Dataset):
@@ -147,6 +179,50 @@ class BaseDataset(torch.utils.data.Dataset):
         self.contrastive_neg_sampler = None  # IdentityPairSampler | None
         self.contrastive_neg_k: int = 1
         self.contrastive_neg_mode: str = "shuffled"
+
+        # Per-image sidecar registry: each spec bundles a loader with its batch
+        # collation policy, so a new sidecar channel is one register_sidecar()
+        # call instead of a hand-copied loop/stack/None dance in __getitem__.
+        # The toggles above (inversion_dir / byg_text_dir / load_repa_pe) stay
+        # the public enable surface; `enabled` closures read them live. The
+        # soft-tokens contrastive negatives stay bespoke — they are drawn by a
+        # sampler from *other* stems, not loaded from a per-image file.
+        self._sidecar_specs: List[SidecarSpec] = []
+        self.register_sidecar(
+            SidecarSpec(
+                name="inversion_runs",
+                loader=lambda info: self._try_load_inversion_runs(info.absolute_path),
+                out_key="inversion_runs",
+                policy="masked",
+                mask_key="inversion_mask",
+                enabled=lambda: bool(self.inversion_dir),
+            )
+        )
+        self.register_sidecar(
+            SidecarSpec(
+                name="byg",
+                loader=lambda info: self._try_load_byg_tuple(info.absolute_path),
+                out_key="byg_",
+                policy="dict",
+                enabled=lambda: bool(self.byg_text_dir),
+            )
+        )
+        self.register_sidecar(
+            SidecarSpec(
+                name="repa_pe",
+                loader=lambda info: self._try_load_repa_pe(
+                    info.absolute_path, info.text_encoder_outputs_npz
+                ),
+                out_key="repa_pe_features",
+                policy="all_or_nothing",
+                # All samples in a bucket share the latent resolution → same
+                # aspect → same encoder bucket, so equal token counts are the
+                # norm; the shape guard skips the term on the rare
+                # aspect-rounding edge instead of crashing the epoch.
+                uniform_shape=True,
+                enabled=lambda: self.load_repa_pe,
+            )
+        )
 
         # caching
         self.caching_mode = None  # None, 'latents', 'text'
@@ -1250,6 +1326,47 @@ class BaseDataset(torch.utils.data.Dataset):
             f"requires cache_llm_adapter_outputs=true. Re-run `make preprocess-te`."
         )
 
+    def register_sidecar(self, spec: SidecarSpec) -> None:
+        """Attach a per-image sidecar channel (see ``SidecarSpec``)."""
+        self._sidecar_specs.append(spec)
+
+    @staticmethod
+    def _collate_sidecar(
+        spec: SidecarSpec, values: List[Optional[Any]], example: dict
+    ) -> None:
+        loaded = bool(values) and all(v is not None for v in values)
+        if spec.policy == "masked":
+            valid = [v for v in values if v is not None]
+            if valid:
+                ref_shape = valid[0].shape
+                example[spec.out_key] = torch.stack(
+                    [
+                        v
+                        if v is not None
+                        else torch.zeros(ref_shape, dtype=torch.float32)
+                        for v in values
+                    ],
+                    dim=0,
+                )
+                example[spec.mask_key] = torch.tensor(
+                    [v is not None for v in values], dtype=torch.bool
+                )
+            else:
+                example[spec.out_key] = None
+                example[spec.mask_key] = None
+        elif spec.policy == "dict":
+            if loaded:
+                for key in values[0]:
+                    if all(key in v for v in values):
+                        example[f"{spec.out_key}{key}"] = torch.stack(
+                            [v[key] for v in values], dim=0
+                        )
+        else:  # "all_or_nothing"
+            ok = loaded
+            if ok and spec.uniform_shape:
+                ok = len({tuple(v.shape) for v in values}) == 1
+            example[spec.out_key] = torch.stack(values, dim=0) if ok else None
+
     def _try_load_inversion_runs(self, image_abs_path: str) -> Optional[torch.Tensor]:
         """Load <stem>_inverted_run{0..N-1}.safetensors from self.inversion_dir.
 
@@ -1388,16 +1505,15 @@ class BaseDataset(torch.utils.data.Dataset):
         flippeds = []
         text_encoder_outputs_list = []
         custom_attributes = []
-        inversion_runs_list: List[Optional[torch.Tensor]] = []
         # Soft-tokens contrastive negatives: per-image (k, S, D) stack of cached
         # negative text embeddings, or None when no sampler is attached.
         neg_crossattn_list: List[Optional[torch.Tensor]] = []
         # Per-image (k,) tag-overlap weights for jaccard mode; None otherwise.
         neg_jaccard_list: List[Optional[torch.Tensor]] = []
-        # BYG per-image edit-tuple dicts (role embeddings + masks), or None.
-        byg_tuple_list: List[Optional[dict]] = []
-        # REPA v2 per-image PE patch tokens [T, d_enc], or None.
-        repa_pe_list: List[Optional[torch.Tensor]] = []
+        # Registered per-image sidecars (inversion runs, BYG tuples, REPA PE…).
+        sidecar_values: Dict[str, List[Optional[Any]]] = {
+            spec.name: [] for spec in self._sidecar_specs
+        }
 
         for image_key in bucket[image_index : image_index + bucket_batch_size]:
             image_info = self.image_data[image_key]
@@ -1561,29 +1677,10 @@ class BaseDataset(torch.utils.data.Dataset):
             input_ids_list.append(input_ids)
             captions.append(caption)
 
-            if self.byg_text_dir:
-                byg_tuple_list.append(
-                    self._try_load_byg_tuple(image_info.absolute_path)
+            for spec in self._sidecar_specs:
+                sidecar_values[spec.name].append(
+                    spec.loader(image_info) if spec.enabled() else None
                 )
-            else:
-                byg_tuple_list.append(None)
-
-            if self.inversion_dir:
-                inversion_runs_list.append(
-                    self._try_load_inversion_runs(image_info.absolute_path)
-                )
-            else:
-                inversion_runs_list.append(None)
-
-            if self.load_repa_pe:
-                repa_pe_list.append(
-                    self._try_load_repa_pe(
-                        image_info.absolute_path,
-                        image_info.text_encoder_outputs_npz,
-                    )
-                )
-            else:
-                repa_pe_list.append(None)
 
             # Soft-tokens contrastive negatives: draw k unrelated stems and load
             # their cached text embeddings. Deterministic per target on the
@@ -1747,27 +1844,12 @@ class BaseDataset(torch.utils.data.Dataset):
             [self.network_multiplier] * len(captions)
         )
 
-        # Inversion runs for functional-loss supervision (postfix-func).
-        # If any sample in the batch has inversions loaded, stack them; samples
-        # without matching inversions get zero-tensor placeholders and mask=False.
-        valid_inversions = [t for t in inversion_runs_list if t is not None]
-        if valid_inversions:
-            ref_shape = valid_inversions[0].shape  # [N_runs, S, D]
-            stacked = torch.stack(
-                [
-                    t if t is not None else torch.zeros(ref_shape, dtype=torch.float32)
-                    for t in inversion_runs_list
-                ],
-                dim=0,
-            )
-            mask = torch.tensor(
-                [t is not None for t in inversion_runs_list], dtype=torch.bool
-            )
-            example["inversion_runs"] = stacked  # [B, N_runs, S, D]
-            example["inversion_mask"] = mask  # [B]
-        else:
-            example["inversion_runs"] = None
-            example["inversion_mask"] = None
+        # Registered sidecars: inversion_runs/_mask (masked — placeholder zeros
+        # for absent samples), byg_{role}_emb/_mask (dict — keys absent unless
+        # every sample carries a tuple, so the BYG adapter fails loudly),
+        # repa_pe_features (all-or-nothing + shape guard). See SidecarSpec.
+        for spec in self._sidecar_specs:
+            self._collate_sidecar(spec, sidecar_values[spec.name], example)
 
         # Soft-tokens contrastive negatives: (B, k, S, D) cached text embeddings.
         # All cached crossattn_emb share the padded sequence length, so a plain
@@ -1783,35 +1865,6 @@ class BaseDataset(torch.utils.data.Dataset):
             example["neg_jaccard"] = torch.stack(neg_jaccard_list, dim=0)
         else:
             example["neg_jaccard"] = None
-
-        # BYG edit-tuple text conditionings. All samples in a bucket share the
-        # padded TE sequence length, so a plain stack works. Keys absent when no
-        # byg_text_dir is set; the BYG adapter raises if any sample's tuple is
-        # missing (None placeholder → stack fails loudly, which is intended).
-        if byg_tuple_list and all(t is not None for t in byg_tuple_list):
-            for role in self._byg_roles:
-                example[f"byg_{role}_emb"] = torch.stack(
-                    [t[f"{role}_emb"] for t in byg_tuple_list], dim=0
-                )
-                if all(f"{role}_mask" in t for t in byg_tuple_list):
-                    example[f"byg_{role}_mask"] = torch.stack(
-                        [t[f"{role}_mask"] for t in byg_tuple_list], dim=0
-                    )
-
-        # REPA v2 PE patch tokens. All-or-nothing per batch: stack only when
-        # every sample resolved its sidecar AND they share a token count (same
-        # latent bucket → same aspect → same encoder bucket, so equal T is the
-        # norm; guard the rare aspect-rounding edge so a mismatch skips the term
-        # instead of crashing the epoch). The adapter skips when the key is absent.
-        if (
-            self.load_repa_pe
-            and repa_pe_list
-            and all(t is not None for t in repa_pe_list)
-            and len({t.shape[0] for t in repa_pe_list}) == 1
-        ):
-            example["repa_pe_features"] = torch.stack(repa_pe_list, dim=0)
-        else:
-            example["repa_pe_features"] = None
 
         if self.debug_dataset:
             example["image_keys"] = bucket[image_index : image_index + self.batch_size]

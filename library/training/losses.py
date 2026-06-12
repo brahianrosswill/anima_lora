@@ -19,6 +19,19 @@ The composer does not own forward passes. Functional-loss forwards still
 happen inside the trainer (they need `anima()` and post_process_network
 hooks). Those forwards stash their aux tensors on `LossContext.aux`, and the
 composer consumes them.
+
+Aux-loss gating convention: a stage-2 handler gates on
+``ctx.network._<name>_weight`` (or a documented network attr), stamped at
+enable time by whoever owns the knob — the network factory
+(`networks/lora_anima/factory.py`) for network kwargs (ortho_reg,
+hydra_balance, repa), the network itself for live-updated weights
+(soft_tokens warmup), or the trainer for top-level training args
+(`train.py::post_process_network` stamps ``_functional_loss_weight``).
+Handlers must NOT read ``ctx.args.*`` for their weight — a knob readable from
+two places is how a feature works from TOML and silently no-ops from
+``--network_args`` (or vice versa). ``build_loss_composer`` below and the
+stage-3 multiscale blend in ``LossComposer.compose`` are the only spots that
+consult ``args``, and only to decide activation.
 """
 
 from __future__ import annotations
@@ -371,7 +384,10 @@ def _hydra_balance_loss(ctx: LossContext) -> torch.Tensor:
 
 
 def _functional_loss(ctx: LossContext) -> torch.Tensor:
-    weight = float(getattr(ctx.args, "functional_loss_weight", 0.0) or 0.0)
+    # Stamped by the trainer at hook-install time (the weight is a top-level
+    # training arg, so train.py::post_process_network owns the stamp) — see
+    # the gating convention in the module docstring.
+    weight = float(getattr(ctx.network, "_functional_loss_weight", 0.0) or 0.0)
     func_loss = ctx.aux.get("func_loss")
     if weight <= 0.0 or func_loss is None:
         return ctx.model_pred.new_zeros(())

@@ -155,6 +155,9 @@ def create_network(
             enc_dim = get_encoder_info(network._repa_encoder).d_enc
             dit_dim = int(unet.model_channels)
             network.repa_head = REPAHead(dit_dim, dit_dim, enc_dim)
+            # Training-only: save_weights strips registered prefixes from the
+            # checkpoint state_dict.
+            network._training_only_prefixes.add("repa_head.")
         logger.info(
             f"REPA[{network._repa_mode}]: weight={network._repa_weight}, "
             f"layer={network._repa_layer}, encoder={network._repa_encoder}"
