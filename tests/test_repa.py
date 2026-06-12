@@ -96,6 +96,23 @@ def test_relational_zero_when_identical_structure():
     assert loss.item() < 1e-6
 
 
+def test_metrics_surface_align_loss():
+    """extra_forwards stashes the unweighted scalar for the loggers."""
+    a = _make_adapter("relational")
+    _spec, pe, latents = _square_inputs()
+    a._captured, a._pe_features, a._latent_hw = (
+        torch.randn(2, 1, 32, 32, 64),
+        pe,
+        (64, 64),
+    )
+    loss = a.extra_forwards(_ctx(), _primary(latents))["repa"]
+    m = a.metrics(_ctx())
+    assert m["repa/align_loss"] == pytest.approx(float(loss.detach()))
+    # metrics() returns a copy — mutating it must not poison the adapter stash.
+    m["repa/align_loss"] = -1.0
+    assert a.metrics(_ctx())["repa/align_loss"] != -1.0
+
+
 def test_pe_grid_orientation_disambiguation():
     a = _make_adapter("relational")
     # 1058 patches is shared by (46,23) portrait and (23,46) landscape.
@@ -299,6 +316,102 @@ def test_factory_stamps_phase1_levers():
     net_default = create_network(1.0, 8, 8.0, **common, use_repa="true")
     assert net_default._repa_anneal_steps == 0.0
     assert net_default._repa_spatial_norm is False
+
+
+def test_grad_heatmap_accumulates_and_loss_unchanged():
+    """Lever-3 diagnostic: probing must not perturb the loss, and counts
+    accumulate exactly k per sample (top-10% of the canonical 32x32 grid)."""
+    _spec, pe, latents = _square_inputs()
+    cap = torch.randn(2, 1, 32, 32, 64)
+
+    a_off = _make_adapter("relational")
+    a_off._captured, a_off._pe_features, a_off._latent_hw = cap, pe, (64, 64)
+    loss_off = a_off.extra_forwards(_ctx(), _primary(latents))["repa"]
+
+    a_on = _make_adapter("relational")
+    a_on._grad_heatmap_every = 1
+    cap_g = cap.clone().requires_grad_(True)
+    a_on._captured, a_on._pe_features, a_on._latent_hw = cap_g, pe, (64, 64)
+    loss_on = a_on.extra_forwards(_ctx(), _primary(latents))["repa"]
+
+    assert torch.equal(loss_on, loss_off)
+    k = round(0.10 * 32 * 32)  # 102 per sample
+    assert a_on._heat_counts is not None
+    assert a_on._heat_counts.sum().item() == pytest.approx(2 * k)
+    assert a_on._heat_samples == 2
+    conc = a_on.metrics(_ctx())["repa/heatmap_conc"]
+    assert conc >= 0.99  # max freq is at least the uniform expectation
+    # retain_graph kept the main backward alive.
+    loss_on.backward()
+    assert cap_g.grad is not None and torch.isfinite(cap_g.grad).all()
+
+
+def test_grad_heatmap_off_by_default():
+    _spec, pe, latents = _square_inputs()
+    a = _make_adapter("relational")
+    assert a._grad_heatmap_every == 0
+    cap = torch.randn(2, 1, 32, 32, 64, requires_grad=True)
+    a._captured, a._pe_features, a._latent_hw = cap, pe, (64, 64)
+    a.extra_forwards(_ctx(), _primary(latents))
+    assert a._heat_counts is None
+    assert "repa/heatmap_conc" not in a.metrics(_ctx())
+
+
+def test_grad_heatmap_every_n_cadence():
+    _spec, pe, latents = _square_inputs()
+    a = _make_adapter("relational")
+    a._grad_heatmap_every = 2
+    for _ in range(3):  # probes fire on runs 0 and 2
+        cap = torch.randn(2, 1, 32, 32, 64, requires_grad=True)
+        a._captured, a._pe_features, a._latent_hw = cap, pe, (64, 64)
+        a.extra_forwards(_ctx(), _primary(latents))
+    assert a._heat_samples == 4
+
+
+def test_grad_heatmap_no_grad_path_is_safe():
+    """A detached capture must warn-and-skip, never crash the step."""
+    _spec, pe, latents = _square_inputs()
+    a = _make_adapter("relational")
+    a._grad_heatmap_every = 1
+    cap = torch.randn(2, 1, 32, 32, 64)  # no requires_grad
+    a._captured, a._pe_features, a._latent_hw = cap, pe, (64, 64)
+    out = a.extra_forwards(_ctx(), _primary(latents))
+    assert out is not None and torch.isfinite(out["repa"])
+    assert a._heat_counts is None
+
+
+def test_grad_heatmap_epoch_dump(tmp_path):
+    import numpy as np
+
+    _spec, pe, latents = _square_inputs()
+    a = _make_adapter("relational")
+    a._grad_heatmap_every = 1
+    cap = torch.randn(2, 1, 32, 32, 64, requires_grad=True)
+    a._captured, a._pe_features, a._latent_hw = cap, pe, (64, 64)
+    a.extra_forwards(_ctx(), _primary(latents))
+
+    ctx = types.SimpleNamespace(
+        args=types.SimpleNamespace(output_dir=str(tmp_path), output_name="probe"),
+        accelerator=types.SimpleNamespace(is_main_process=True),
+        network=None,
+        weight_dtype=torch.float32,
+    )
+    a.on_epoch_end(ctx)
+    data = np.load(tmp_path / "probe_repa_grad_heatmap.npz")
+    assert data["counts"].shape == (32, 32)
+    assert int(data["n_samples"]) == 2
+    assert data["counts"].sum() == pytest.approx(2 * round(0.10 * 32 * 32))
+    assert float(data["concentration"]) >= 0.99
+
+
+def test_factory_stamps_grad_heatmap():
+    from networks.methods.easycontrol import create_network
+
+    common = dict(vae=None, text_encoders=[], unet=None)
+    net = create_network(1.0, 8, 8.0, **common, use_repa="true", repa_grad_heatmap="1")
+    assert net._repa_grad_heatmap == pytest.approx(1.0)
+    net_default = create_network(1.0, 8, 8.0, **common, use_repa="true")
+    assert net_default._repa_grad_heatmap == 0.0
 
 
 def test_repa_loss_handler_weighting():

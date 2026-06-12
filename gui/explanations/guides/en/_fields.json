@@ -6,6 +6,7 @@
   "use_ortho": "Enable OrthoLoRA: SVD-based orthogonal parameterization of the update matrix (linear layers only). Regularizes toward structured updates; saved as plain LoRA via thin SVD at checkpoint time.",
   "use_moe_style": "MoE expert layout: 'shared_A' (HydraLoRA — one shared lora_down + N per-expert lora_up heads), 'independent_A' (FeRA — N fully-independent down/up pairs), or false (no MoE). Produces a *_moe.safetensors sibling for router-live inference; requires cache_llm_adapter_outputs=true.",
   "route_per_layer": "If true, each layer owns its own router (per-layer routing). If false, a single network-level GlobalRouter broadcasts gate weights to every routed module.",
+  "use_repa": "Enable REPA v2: a training-only auxiliary loss aligning a mid-block DiT feature to cached PE-Spatial patch tokens (default encoder pe_spatial) at every sampled σ. Improves representation quality without changing inference. Requires {stem}_anima_pe_spatial.safetensors sidecars (run preprocess-pe). Tune via repa_mode / repa_weight / repa_layer.",
   "router_source": "Routing signal: 'sigma' (sinusoidal embedding of the denoising timestep), 'fei' (mean-pooled rank features from preceding LoRA modules), or 'pooled_text' (pooled T5 caption embedding).",
   "num_experts": "HydraLoRA expert count. More experts = more capacity but more VRAM and slower training. Typical: 2–8.",
   "balance_loss_weight": "HydraLoRA load-balancing loss weight. Discourages router collapse onto a single expert. Typical: 0.01.",

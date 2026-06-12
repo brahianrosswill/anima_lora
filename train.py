@@ -755,14 +755,20 @@ class AnimaTrainer:
 
         with torch.set_grad_enabled(is_train), accelerator.autocast():
             if crossattn_emb is None:
+                # In-model text path (no cached LLM-adapter outputs, e.g.
+                # EasyControl). kw is also consumed by the shared method-
+                # adapter dispatch below the branch.
+                kw = dict(
+                    target_input_ids=t5_input_ids,
+                    target_attention_mask=t5_attn_mask,
+                    source_attention_mask=attn_mask,
+                )
                 model_pred = anima(
                     noisy_model_input,
                     timesteps,
                     prompt_embeds,
                     padding_mask=padding_mask,
-                    target_input_ids=t5_input_ids,
-                    target_attention_mask=t5_attn_mask,
-                    source_attention_mask=attn_mask,
+                    **kw,
                 )
             else:
                 # crossattn_emb is already in target (T5-compatible) space.
@@ -783,35 +789,6 @@ class AnimaTrainer:
                     padding_mask=padding_mask,
                     **kw,
                 )
-
-                # Method-adapter extra forwards (soft-tokens, …).
-                # Each adapter sees the primary forward's inputs + 5D output
-                # and may run additional anima(...) calls inside this same
-                # autocast / grad scope, returning aux loss tensors keyed for
-                # the LossComposer.
-                if self._adapters:
-                    primary = ForwardArtifacts(
-                        anima_call=anima,
-                        noisy_model_input=noisy_model_input,
-                        timesteps=timesteps,
-                        crossattn_emb=crossattn_emb,
-                        padding_mask=padding_mask,
-                        forward_kwargs=kw,
-                        model_pred=model_pred,
-                        noise=noise,
-                        latents=latents,
-                        is_train=is_train,
-                    )
-                    step_ctx = StepCtx(
-                        args=args,
-                        accelerator=accelerator,
-                        network=network,
-                        weight_dtype=weight_dtype,
-                    )
-                    for adapter in self._adapters:
-                        out = adapter.extra_forwards(step_ctx, primary)
-                        if out:
-                            self._state.extras_for_step.update(out)
 
                 # Functional MSE loss against a sampled stochastic inversion run.
                 # The captures dict is populated by trainer-owned forward hooks
@@ -855,6 +832,39 @@ class AnimaTrainer:
                         "z": z_residual.detach(),
                         "state": self._state.vr,
                     }
+
+            # Method-adapter extra forwards (soft-tokens, REPA, …). Sits
+            # OUTSIDE the crossattn_emb branch on purpose: the in-model text
+            # path (crossattn_emb=None — EasyControl's default, no cached
+            # LLM-adapter outputs) must dispatch too. It used to live inside
+            # the else-branch only, which silently skipped every adapter's
+            # aux loss on that path (REPA trained as baseline). Each adapter
+            # sees the primary forward's inputs + 5D output and may run
+            # additional anima(...) calls inside this same autocast / grad
+            # scope, returning aux loss tensors keyed for the LossComposer.
+            if self._adapters:
+                primary = ForwardArtifacts(
+                    anima_call=anima,
+                    noisy_model_input=noisy_model_input,
+                    timesteps=timesteps,
+                    crossattn_emb=crossattn_emb,
+                    padding_mask=padding_mask,
+                    forward_kwargs=kw,
+                    model_pred=model_pred,
+                    noise=noise,
+                    latents=latents,
+                    is_train=is_train,
+                )
+                step_ctx = StepCtx(
+                    args=args,
+                    accelerator=accelerator,
+                    network=network,
+                    weight_dtype=weight_dtype,
+                )
+                for adapter in self._adapters:
+                    out = adapter.extra_forwards(step_ctx, primary)
+                    if out:
+                        self._state.extras_for_step.update(out)
         model_pred = model_pred.squeeze(2)  # 5D to 4D, [B, C, 1, H, W] -> [B, C, H, W]
 
         # Note: do NOT clear timestep mask here -- gradient checkpointing recomputes the forward

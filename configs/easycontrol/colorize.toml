@@ -69,6 +69,9 @@ network_args = [
     "cond_scale=1.0",
     "apply_ffn_lora=1",
     "cond_res_scale=1.0",
+    "use_repa=true",
+    "repa_weight=0.05",
+    "repa_layer=8",
 ]
 blocks_to_swap = 0
 output_name = "anima_colorize2"

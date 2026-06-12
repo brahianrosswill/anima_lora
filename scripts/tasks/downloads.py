@@ -63,6 +63,9 @@ def cmd_download_pe(_extra):
             "models/pe",
         ]
     )
+    # PE-Spatial-B16-512 is the default REPA alignment encoder, so fetch it
+    # alongside PE-Core whenever PE is downloaded.
+    cmd_download_pe_spatial(_extra)
 
 
 def cmd_download_pe_spatial(_extra):

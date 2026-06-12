@@ -191,6 +191,9 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         # Phase-1 operating-point levers (docs/proposal/repa_phase1_operating_point.md).
         "repa_anneal_steps",  # hard cutoff: (0,1] = fraction of run, >1 = opt steps
         "repa_spatial_norm",  # iREPA target-side spatial standardization (relational)
+        # Lever-3 gate diagnostic: probe the alignment-gradient heatmap every N
+        # micro-steps (0 = off); dumps <output_name>_repa_grad_heatmap.npz.
+        "repa_grad_heatmap",
     }
 )
 

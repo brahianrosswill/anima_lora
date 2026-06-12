@@ -54,11 +54,25 @@ both default-off):
   standardization of the *target* tokens, ``(pe − mean_tok) / (std_tok + ε)``
   before per-token L2-norm + Gram. Cancels the shared global component that
   compresses pairwise cosines. Relational mode only.
+
+Diagnostic (lever-3 gate, ``repa_grad_heatmap = N`` = probe every N train
+micro-steps, 0 = off): MaskAlign (arXiv:2606.08788, Fig. 2a) shows full-token
+alignment concentrates gradient norm at *stable spatial positions* (~21×
+uniform recurrence) — the shortcut their token-subset loss breaks. The probe
+takes ``autograd.grad`` of the alignment scalar w.r.t. the pooled DiT tokens
+(the subgraph is just normalize → Gram → MSE, near-free), bilinearly resizes
+the per-token grad-norm map to a canonical 32×32 grid (aspect buckets give
+varying ``(gh, gw)``), and accumulates top-10% membership counts across steps.
+``on_epoch_end`` dumps ``<output_name>_repa_grad_heatmap.npz`` (counts / freq /
+concentration) and ``repa/heatmap_conc`` (max-position recurrence vs uniform)
+rides the step metrics. Decision rule per the Phase-1 proposal: ~uniform
+(concentration ≲ 3×) ⇒ close lever 3 without a training run.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import torch
@@ -74,6 +88,11 @@ from library.training.method_adapter import (
 from library.vision.buckets import get_bucket_spec
 
 logger = logging.getLogger(__name__)
+
+# Grad-heatmap diagnostic canonical grid + MaskAlign's top-k membership
+# fraction (their Fig. 2a statistic uses the top-10% positions).
+_HEATMAP_GRID = 32
+_HEATMAP_TOPK_FRAC = 0.10
 
 
 class REPAHead(nn.Module):
@@ -125,6 +144,21 @@ class REPAMethodAdapter(MethodAdapter):
         # Optimizer-step clock: train micro-batches seen, converted with
         # gradient_accumulation_steps at the anneal gate.
         self._train_micro_steps = 0
+        # Grad-heatmap diagnostic (lever-3 gate): probe cadence in train
+        # micro-steps (0 = off), flat (32*32,) top-10% membership counts,
+        # samples accumulated, and the probe-tick counter.
+        self._grad_heatmap_every = 0
+        self._heat_counts: Optional[torch.Tensor] = None
+        self._heat_samples = 0
+        self._heat_runs = 0
+        # Last-step diagnostics surfaced to TensorBoard/W&B via metrics().
+        # ``repa/align_loss`` is the *unweighted* alignment scalar — watch this
+        # curve to choose ``repa_anneal_steps`` (anneal off → the term runs
+        # every step → the curve is fresh; pick the cutoff where it plateaus /
+        # stops helping sample quality). ``repa/active`` is 1.0 while the term
+        # contributes, 0.0 once past the anneal cutoff or when PE features were
+        # missing this step.
+        self._metrics: dict[str, float] = {}
 
     # ------------------------------------------------------------------ setup
     def on_network_built(self, ctx: SetupCtx) -> None:
@@ -133,6 +167,16 @@ class REPAMethodAdapter(MethodAdapter):
         self._layer = int(getattr(net, "_repa_layer", 8))
         self._anneal_steps = float(getattr(net, "_repa_anneal_steps", 0.0) or 0.0)
         self._spatial_norm = bool(getattr(net, "_repa_spatial_norm", False))
+        self._grad_heatmap_every = int(
+            float(getattr(net, "_repa_grad_heatmap", 0) or 0)
+        )
+        if self._grad_heatmap_every > 0 and self._mode != "relational":
+            logger.warning(
+                "REPA: repa_grad_heatmap targets the relational loss (lever-3 "
+                "gate); ignored in %s mode.",
+                self._mode,
+            )
+            self._grad_heatmap_every = 0
         encoder = str(getattr(net, "_repa_encoder", "pe_spatial"))
         self._spec = get_bucket_spec(encoder)
         self._patch = int(ctx.unet.patch_spatial)
@@ -178,7 +222,9 @@ class REPAMethodAdapter(MethodAdapter):
             f"REPA[{self._mode}]: hook on block {self._layer}/{len(blocks)}, "
             f"encoder={encoder} grid≤{self._spec.t_max_patches}tok, "
             f"weight={weight}{anneal_desc}"
-            f"{', spatial_norm' if self._spatial_norm else ''}{head_desc}"
+            f"{', spatial_norm' if self._spatial_norm else ''}"
+            f"{f', grad_heatmap/{self._grad_heatmap_every}' if self._grad_heatmap_every else ''}"
+            f"{head_desc}"
         )
 
     # ------------------------------------------------------------------- step
@@ -197,12 +243,15 @@ class REPAMethodAdapter(MethodAdapter):
         micro_step = self._train_micro_steps
         self._train_micro_steps += 1
         if self._past_anneal_cutoff(ctx.args, micro_step):
+            self._metrics["repa/active"] = 0.0
             return
         feats = batch.get("repa_pe_features") if isinstance(batch, dict) else None
         if feats is None:
             # Batch lacks PE features (some sample missing its sidecar, or the
             # loader was off this step) — skip the term rather than crash.
+            self._metrics["repa/active"] = 0.0
             return
+        self._metrics["repa/active"] = 1.0
         self._pe_features = feats.to(ctx.accelerator.device, dtype=torch.float32)
         self._latent_hw = (int(latents.shape[-2]), int(latents.shape[-1]))
 
@@ -322,4 +371,102 @@ class REPAMethodAdapter(MethodAdapter):
             g_pe = torch.bmm(pe_hat, pe_hat.transpose(1, 2))
             loss = F.mse_loss(g_dit, g_pe)
 
+            if self._grad_heatmap_every > 0:
+                if self._heat_runs % self._grad_heatmap_every == 0:
+                    self._accumulate_grad_heatmap(loss, dit_tok, gh, gw)
+                self._heat_runs += 1
+
+        self._metrics["repa/align_loss"] = float(loss.detach())
         return {"repa": loss}
+
+    # ------------------------------------------------- grad-heatmap diagnostic
+    def _accumulate_grad_heatmap(
+        self, loss: torch.Tensor, dit_tok: torch.Tensor, gh: int, gw: int
+    ) -> None:
+        """MaskAlign Fig. 2a statistic: top-10% alignment-gradient positions.
+
+        ``autograd.grad`` of the scalar w.r.t. the pooled tokens only traverses
+        normalize → Gram → MSE (near-free); ``retain_graph`` keeps the main
+        backward intact. Per-token grad-norm maps are resized to the canonical
+        ``_HEATMAP_GRID``² so counts accumulate across aspect buckets with a
+        fixed top-k per sample.
+        """
+        if not (loss.requires_grad and dit_tok.requires_grad):
+            # No grad path (e.g. captured feature detached) — diagnostic only,
+            # never fail the step over it.
+            if not getattr(self, "_warned_heatmap_no_grad", False):
+                logger.warning(
+                    "REPA: grad-heatmap probe skipped — alignment loss has no "
+                    "grad path to the pooled tokens."
+                )
+                self._warned_heatmap_no_grad = True
+            return
+        (g,) = torch.autograd.grad(loss, dit_tok, retain_graph=True)
+        with torch.no_grad():
+            b = g.shape[0]
+            norms = g.norm(dim=-1).reshape(b, 1, gh, gw)
+            canon = F.interpolate(
+                norms,
+                size=(_HEATMAP_GRID, _HEATMAP_GRID),
+                mode="bilinear",
+                align_corners=False,
+            ).flatten(1)  # (B, 32*32)
+            k = max(1, round(_HEATMAP_TOPK_FRAC * canon.shape[1]))
+            hits = torch.zeros_like(canon)
+            hits.scatter_(1, canon.topk(k, dim=1).indices, 1.0)
+            if self._heat_counts is None:
+                self._heat_counts = torch.zeros(canon.shape[1], dtype=torch.float64)
+            self._heat_counts += hits.sum(dim=0).double().cpu()
+            self._heat_samples += b
+            freq = self._heat_counts / self._heat_samples
+            # Recurrence of the most-hit position vs the uniform expectation
+            # (every position lands in the top-10% a fraction topk_frac of the
+            # time under no concentration). MaskAlign's pathology is ~21×.
+            self._metrics["repa/heatmap_conc"] = float(freq.max() / _HEATMAP_TOPK_FRAC)
+
+    def on_epoch_end(self, ctx: StepCtx) -> None:
+        """Dump the accumulated grad-heatmap (overwritten each epoch)."""
+        if self._heat_counts is None or self._heat_samples == 0:
+            return
+        if not ctx.accelerator.is_main_process:
+            return
+        import numpy as np
+
+        out_dir = str(getattr(ctx.args, "output_dir", "") or ".")
+        name = str(getattr(ctx.args, "output_name", "") or "anima")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"{name}_repa_grad_heatmap.npz")
+        counts = self._heat_counts.reshape(_HEATMAP_GRID, _HEATMAP_GRID).cpu().numpy()
+        freq = counts / self._heat_samples
+        conc = float(freq.max() / _HEATMAP_TOPK_FRAC)
+        np.savez(
+            path,
+            counts=counts,
+            freq=freq,
+            n_samples=self._heat_samples,
+            grid=_HEATMAP_GRID,
+            topk_frac=_HEATMAP_TOPK_FRAC,
+            concentration=conc,
+        )
+        logger.info(
+            "REPA: grad-heatmap → %s (n=%d, concentration=%.2fx vs uniform; "
+            "MaskAlign pathology ~21x, ≲3x ⇒ close lever 3)",
+            path,
+            self._heat_samples,
+            conc,
+        )
+
+    # ---------------------------------------------------------------- metrics
+    def metrics(self, ctx) -> dict[str, float]:
+        """Surface the last train-step alignment scalar to the loggers.
+
+        ``repa/align_loss`` is the *unweighted* loss (Gram MSE in relational
+        mode, mean ``1 − cos`` in absolute) — its weighted contribution is
+        ``align_loss * repa_weight``. Snapshot of the last step that ran the
+        term (mirrors BYG / soft-tokens); not updated on steps where REPA was
+        inactive, so read it alongside ``repa/active``. With the grad-heatmap
+        probe on, ``repa/heatmap_conc`` carries the running max-position
+        recurrence vs uniform.
+        """
+        del ctx
+        return dict(self._metrics)

@@ -85,9 +85,10 @@ network_args = [
     "use_repa=true",
     "repa_weight=0.05",
     "repa_layer=8",
+    "repa_spatial_norm=true"
 ]
 # Keep the REPA arm from clobbering the baseline checkpoint during the A/B.
-output_name = "anima_easycontrol_sanitize_repa"
+output_name = "anima_easycontrol_sanitize_repa_normed"
 
 learning_rate = 5e-5
 max_train_epochs = 12
@@ -103,7 +104,7 @@ easycontrol_drop_p=0.0
 # scaled, floor outside the edit region, per-image mean-normalized). Concentrates
 # gradient on the edit instead of the copy-through the extended attention gives
 # for free. Knobs: cond_diff_loss_floor=0.2 / _blur=1.5 / _quantile=0.9.
-cond_diff_loss = true
+cond_diff_loss = false
 
 [general]
 caption_extension = '.txt'

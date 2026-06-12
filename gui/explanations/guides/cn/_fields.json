@@ -6,6 +6,7 @@
   "use_ortho": "启用OrthoLoRA：基于SVD的更新矩阵正交参数化（仅限线性层）。正则化为结构化更新；保存时通过thin SVD转换为普通LoRA。",
   "use_moe_style": "MoE专家布局：'shared_A'（HydraLoRA — 共享lora_down + N个专家各自的lora_up头）、'independent_A'（FeRA — N对完全独立的down/up）或false（无MoE）。生成*_moe.safetensors附属文件用于路由器实时推理；需要cache_llm_adapter_outputs=true。",
   "route_per_layer": "若为true，每层拥有独立路由器（逐层路由）。若为false，单个网络级GlobalRouter向所有路由模块广播门控权重。",
+  "use_repa": "启用REPA v2：仅训练阶段的辅助损失，在每个采样的σ处将DiT中间块特征与缓存的PE-Spatial补丁标记（默认编码器pe_spatial）对齐。在不改变推理的情况下提升表示质量。需要{stem}_anima_pe_spatial.safetensors附属文件（运行preprocess-pe）。通过repa_mode / repa_weight / repa_layer调整。",
   "router_source": "路由信号：'sigma'（去噪时间步的正弦嵌入）、'fei'（前置LoRA模块的均值池化秩特征）或'pooled_text'（T5字幕池化嵌入）。",
   "num_experts": "HydraLoRA专家数量。越多容量越大，但显存占用越多，训练越慢。典型值：2–8。",
   "balance_loss_weight": "HydraLoRA负载均衡损失权重。防止路由器坍缩到单一专家。典型值：0.01。",

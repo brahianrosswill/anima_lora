@@ -21,10 +21,10 @@
 # Per-variant dim/alpha/lr/epochs are experiment drift, not calibrated
 # defaults — tune freely.
 
-network_alpha = 16
-network_dim = 16
+network_alpha = 32
+network_dim = 32
 
-learning_rate = 5e-5
+learning_rate = 2e-5
 max_train_epochs = 3
 save_every_n_epochs = 3
 checkpointing_epochs = 3
@@ -33,7 +33,7 @@ use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
-output_name = "anima_repa_normed_tenth"
+output_name = "anima_repa_normed_quarter"
 # sigmoid_bias = 0.5
 # path_pattern = "channel_(caststation)/*"
 
@@ -177,9 +177,16 @@ repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where styl
 repa_layer     = 8            # block to hook (of 28)
 repa_encoder   = "pe_spatial"
 repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
-# Lever 1 — hard cutoff (HASTE): (0,1] = fraction of the run, >1 = absolute
-# optimizer steps, 0 = off. Candidate: 0.5.
-#repa_anneal_steps = 0.5
-# Lever 2 — iREPA spatial standardization of the PE target before the Gram
-# (relational mode only). Run as its own A/B, not bundled with lever 1.
 repa_spatial_norm = true
+
+# Lever 1 — hard cutoff (HASTE): (0,1] = fraction of the run, >1 = absolute
+# optimizer steps, 0 = off. Candidate: 0.25 — the quarter-run align_loss curve
+# plateaus by ~18% of the run (anima_repa_normed_quarter, 2026-06-12).
+# repa_anneal_steps = 0.25
+
+# Lever-3 GATE (diagnostic, read-only): alignment-gradient heatmap, probe every
+# N micro-steps (near-free at 1). Dumps <output_name>_repa_grad_heatmap.npz next
+# to the checkpoint + logs repa/heatmap_conc (max-position top-10% recurrence vs
+# uniform). MaskAlign's pathology is ~21x; ≲3x ⇒ close lever 3 without a run.
+repa_grad_heatmap = 1
+

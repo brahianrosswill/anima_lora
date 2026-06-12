@@ -332,6 +332,7 @@ def create_network(
         network._repa_encoder = str(kwargs.get("repa_encoder", "pe_spatial"))
         network._repa_anneal_steps = float(kwargs.get("repa_anneal_steps", 0.0) or 0.0)
         network._repa_spatial_norm = _as_bool(kwargs.get("repa_spatial_norm"))
+        network._repa_grad_heatmap = float(kwargs.get("repa_grad_heatmap", 0) or 0)
         logger.info(
             f"EasyControl REPA[{repa_mode}]: weight={network._repa_weight}, "
             f"layer={network._repa_layer}, encoder={network._repa_encoder}, "

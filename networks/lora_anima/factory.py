@@ -150,6 +150,7 @@ def create_network(
         network._repa_lr_scale = float(kwargs.get("repa_lr_scale", 1.0) or 1.0)
         network._repa_anneal_steps = float(kwargs.get("repa_anneal_steps", 0.0) or 0.0)
         network._repa_spatial_norm = _as_bool(kwargs.get("repa_spatial_norm"))
+        network._repa_grad_heatmap = float(kwargs.get("repa_grad_heatmap", 0) or 0)
         if network._repa_mode == "absolute":
             from library.training.repa import REPAHead
             from library.vision.encoders import get_encoder_info

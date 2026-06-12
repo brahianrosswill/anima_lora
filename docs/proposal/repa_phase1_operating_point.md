@@ -1,7 +1,9 @@
 # REPA Phase 1 — operating point on the relational arm
 
-Status: **levers 1–2 implemented (2026-06-12, default-off) — A/B runs not
-started**. Phase 0 closed 2026-06-12 — see
+Status: **levers 1–2 implemented (2026-06-12, default-off); lever 2
+(spatial_norm) eyeball-validated and ON in lora.toml; lever 3 CLOSED by the
+gradient-heatmap diagnostic (~uniform, see below); lever 1 (anneal) A/B not
+started — curve-justified candidate 0.25**. Phase 0 closed 2026-06-12 — see
 `docs/experimental/repa.md` (live doc) and
 `_archive/proposals/repa_v2_patchwise_pe_spatial.md` (the implemented v2
 proposal this succeeds). Relational (Arm B) is the validated arm and the
@@ -95,6 +97,18 @@ pathology isn't there.
 gradient-norm heatmap (top-10% position frequency, MaskAlign Fig. 2a) on a
 current-default run. If the distribution is ~uniform in our regime, close
 lever 3 without a training run.
+
+**Result (2026-06-12, `repa_grad_heatmap=1` on `anima_repa_normed_quarter`,
+2292 samples): ~UNIFORM — lever 3 CLOSED without a training run.** Top-10%
+mean recurrence 1.51× uniform (paper pathology ~21×); no position recurs
+>50% of steps (max single-position freq 0.34 = 3.4× uniform, confined to a
+top-right corner/edge cluster — flat-background/edge effect, not interior
+content positions); every position lands in the top-10% at least once;
+coarse 4×4 map flat (0.083–0.135). The shortcut needs pretraining-scale
+iteration counts to form, exactly as suspected above. Artifact:
+`output/ckpt/anima_repa_normed_quarter_repa_grad_heatmap.npz`; rerun via the
+`repa_grad_heatmap` knob (lora.toml, default off) if the regime changes
+(much longer runs / different weight).
 
 ### 4. Weight sweep — `repa_weight ∈ {0.02, 0.05, 0.1}`
 

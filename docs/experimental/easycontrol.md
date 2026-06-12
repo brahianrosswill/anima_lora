@@ -284,6 +284,15 @@ REPA auxiliary loss (optional, `network_args = ["use_repa=true", ...]`):
   `make easycontrol-preprocess EASYADAPTER=near_twin`). On cond-dropped steps
   the term has no trainable path (frozen target stream) — keep `drop_p` low or
   zero when using it.
+- **Launch sanity (load-bearing)**: confirm `repa/align_loss` appears in the
+  progress jsonl from the first logged step, alongside `repa/active = 1.0`.
+  Runs before the 2026-06-12 train.py dispatch fix trained as silent
+  baselines (the adapter `extra_forwards` dispatch only ran on the
+  cached-crossattn branch, which EasyControl doesn't use) — the
+  `anima_easycontrol_sanitize_repa{,_normed}` checkpoints are
+  baseline-equivalent. `active=1.0` *without* `align_loss` is exactly that
+  failure signature. Operating-point plan:
+  `docs/proposal/easycontrol_repa_operating_point.md`.
 
 ### Inference
 
