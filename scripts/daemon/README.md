@@ -25,8 +25,14 @@ The daemon auto-starts on first submit — you rarely start it by hand. But:
 ```bash
 python tasks.py daemon            # start it, detached, wait for /health
 python -m scripts.daemon          # equivalent (what the spawner runs)
+python tasks.py daemon-status     # one JSON object: health + resolved base_url
+                                  # + compact job summaries (--full for raw
+                                  # records); passive, exit 1 when down
 curl -s 127.0.0.1:8765/health     # {"ok":true,"pid":…,"active_job":…,"paused":…}
 ```
+
+`daemon-status` is the one-shot answer to "is anything running and where do I
+talk to it" — scripts and agents should start there instead of assuming a port.
 
 The port is **not** guaranteed to be 8765: if a stranger holds that port the
 daemon falls back to an OS-chosen one and records it in the pidfile. Always
@@ -226,10 +232,34 @@ thread.
 - **Command-job progress.** `latest`/`progress.jsonl` are training-only; a
   command job exposes only `state` + `stdout.log` until it exits.
 
-## Wrapping this as an MCP server
+## MCP bridge (`mcp.py`)
 
-The endpoints map directly onto MCP tools — a thin shim over `DaemonClient`:
-`submit_training`, `submit_command`, `list_jobs`, `get_job`, `stop_job`,
-`pause_queue`/`start_queue`, and a `tail_logs` that drains `stream_logs` until
-the `eof` event. No new transport or auth to build; `server.py` already names the
-MCP server as an anticipated trusted caller.
+A stdio MCP server over this same surface — pure stdlib, newline-delimited
+JSON-RPC, no new deps. Register it with any MCP client (Claude Code, Claude
+Desktop, OpenClaw, …) as a **command, never an address**: the bridge resolves
+the daemon itself via the pidfile, so it survives port drift and daemon
+restarts without reconfiguration.
+
+```bash
+# Claude Code (use your checkout's absolute paths; any cwd works)
+claude mcp add anima-daemon -- <repo>/.venv/Scripts/python.exe <repo>/scripts/daemon/mcp.py
+```
+
+For other clients, the equivalent JSON config:
+
+```json
+{"mcpServers": {"anima-daemon": {
+  "command": "<repo>/.venv/Scripts/python.exe",
+  "args": ["<repo>/scripts/daemon/mcp.py"]
+}}}
+```
+
+The tool catalog **is** the `GET /tools` manifest (`server.TOOLS`, registered
+verbatim — one source of truth), with two deviations:
+
+- `tail_logs` (SSE) is replaced by **`tail_log`** `{id, lines=80}` — last N
+  lines + current state in one call; it reads the on-disk `job.json` +
+  `stdout.log` as fallback, so it answers even with the daemon down.
+- Only `submit_training` / `submit_command` auto-start the daemon; every other
+  tool is passive, so an agent asking "is anything running?" never boots a
+  daemon as a side effect (`health` returns `{"up": false}` instead of erroring).

@@ -19,7 +19,12 @@ import psutil
 import pytest
 
 from scripts.daemon import config, gpu, jobs, proc
+
+# Bound at import time so tests that monkeypatch the client module's attribute
+# can still build a real (dead) client without recursing into their own patch.
+from scripts.daemon.client import DaemonClient as _RealDaemonClient
 from scripts.daemon.manager import JobManager
+from scripts.daemon.mcp import MCPServer
 from scripts.daemon.server import serve
 from scripts.tasks._common import build_method_args
 
@@ -483,6 +488,215 @@ def test_serve_defers_to_a_live_sibling_daemon(daemon):
     port = cl.port
     with pytest.raises(OSError):
         serve_with_fallback(JobManager.__new__(JobManager), port=port)
+
+
+# --------------------------------------------------------------------------
+# MCP stdio bridge (scripts/daemon/mcp.py)
+# --------------------------------------------------------------------------
+
+
+def _mcp_for(cl):
+    """A bridge wired to an in-process daemon client (no pidfile discovery)."""
+    return MCPServer(client_factory=lambda: cl, ensure=lambda: cl)
+
+
+def _call_tool(srv, name, arguments=None, msg_id=1):
+    resp = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}},
+        }
+    )
+    result = resp["result"]
+    payload = json.loads(result["content"][0]["text"])
+    return result, payload
+
+
+def _dead_client():
+    """A client pointed at a port nothing listens on (health → None fast)."""
+    return _RealDaemonClient(port=1)
+
+
+def test_mcp_initialize_and_tools_list():
+    srv = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    resp = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+        }
+    )
+    res = resp["result"]
+    assert res["protocolVersion"] == "2025-06-18"
+    assert "tools" in res["capabilities"]
+    # notifications get no response
+    assert srv.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+
+    tools = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in tools["result"]["tools"]}
+    assert {
+        "submit_training",
+        "submit_command",
+        "list_jobs",
+        "get_job",
+        "stop_job",
+        "tail_log",
+        "pause_queue",
+        "start_queue",
+        "health",
+        "shutdown",
+    } <= names
+    assert "tail_logs" not in names  # SSE endpoint replaced, not registered
+    for t in tools["result"]["tools"]:
+        assert t["inputSchema"]["type"] == "object"
+
+
+def test_mcp_unknown_method_and_tool():
+    srv = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    resp = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "nope/nope"})
+    assert resp["error"]["code"] == -32601
+    result = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "no_such_tool", "arguments": {}},
+        }
+    )["result"]
+    assert result["isError"] is True
+
+
+def test_mcp_daemon_down_is_reported_not_spawned():
+    srv = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    # health degrades gracefully…
+    result, payload = _call_tool(srv, "health")
+    assert result["isError"] is False
+    assert payload["up"] is False
+    # …while other passive tools error with a hint instead of booting a daemon
+    result = srv.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "list_jobs", "arguments": {}},
+        }
+    )["result"]
+    assert result["isError"] is True
+    assert "no daemon is running" in result["content"][0]["text"]
+
+
+def test_mcp_submit_train_get_stop_roundtrip(daemon):
+    cl, _ = daemon
+    srv = _mcp_for(cl)
+
+    result, payload = _call_tool(
+        srv, "submit_training", {"method": "lora", "overrides": {"duration": 0.5}}
+    )
+    assert result["isError"] is False
+    jid = payload["job_id"]
+
+    def done():
+        _, job = _call_tool(srv, "get_job", {"id": jid})
+        return job["state"] == "done"
+
+    assert _wait_until(done, timeout=15)
+    _, job = _call_tool(srv, "get_job", {"id": jid})
+    assert job["latest"]["ev"] == "run_end"
+
+    result, payload = _call_tool(srv, "health")
+    assert payload["ok"] is True
+
+    # stopping an already-done job is a clean no-op response, not a crash
+    result, payload = _call_tool(srv, "stop_job", {"id": jid})
+    assert result["isError"] is False
+
+
+def test_mcp_get_job_404_is_tool_error(daemon):
+    cl, _ = daemon
+    result = _mcp_for(cl).handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "get_job", "arguments": {"id": "nope"}},
+        }
+    )["result"]
+    assert result["isError"] is True
+    assert "404" in result["content"][0]["text"]
+
+
+def test_mcp_submit_command_and_tail_log(real_cmd_daemon):
+    cl, _ = real_cmd_daemon
+    srv = _mcp_for(cl)
+
+    # the bridge injects kind="command" so the daemon doesn't treat it as train
+    result, payload = _call_tool(
+        srv,
+        "submit_command",
+        {"label": "echo", "argv": ["-c", "print('hello-mcp')"]},
+    )
+    assert result["isError"] is False
+    jid = payload["job_id"]
+
+    def done():
+        _, job = _call_tool(srv, "get_job", {"id": jid})
+        return job["state"] == "done"
+
+    assert _wait_until(done, timeout=15)
+
+    result, payload = _call_tool(srv, "tail_log", {"id": jid, "lines": 5})
+    assert result["isError"] is False
+    assert payload["state"] == "done"
+    assert any("hello-mcp" in line for line in payload["lines"])
+
+    # tail_log survives the daemon going away (reads job.json + stdout.log)
+    down = MCPServer(client_factory=_dead_client, ensure=_dead_client)
+    result, payload = _call_tool(down, "tail_log", {"id": jid})
+    assert result["isError"] is False
+    assert payload["state"] == "done"
+    assert any("hello-mcp" in line for line in payload["lines"])
+
+
+# --------------------------------------------------------------------------
+# daemon-status CLI verb
+# --------------------------------------------------------------------------
+
+
+def test_daemon_status_json(daemon, monkeypatch, capsys):
+    import scripts.daemon.client as daemon_client
+    from scripts.tasks import daemon as daemon_tasks
+
+    cl, _ = daemon
+    monkeypatch.setattr(daemon_client, "DaemonClient", lambda port=None: cl)
+    jid = cl.submit(method="lora", overrides={"duration": 0.3})["job_id"]
+
+    daemon_tasks.cmd_daemon_status([])
+    out = json.loads(capsys.readouterr().out)
+    assert out["up"] is True
+    assert out["base_url"] == cl.base
+    assert any(j["id"] == jid for j in out["jobs"])
+    # compact by default: heavy record fields are stripped…
+    assert "argv" not in out["jobs"][0] and "extra_env" not in out["jobs"][0]
+
+    # …and --full restores the raw records
+    daemon_tasks.cmd_daemon_status(["--full"])
+    full = json.loads(capsys.readouterr().out)
+    assert "argv" in full["jobs"][0]
+
+
+def test_daemon_status_down_exits_1(monkeypatch, capsys):
+    import scripts.daemon.client as daemon_client
+    from scripts.tasks import daemon as daemon_tasks
+
+    monkeypatch.setattr(daemon_client, "DaemonClient", lambda port=None: _dead_client())
+    with pytest.raises(SystemExit) as ei:
+        daemon_tasks.cmd_daemon_status([])
+    assert ei.value.code == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["up"] is False
 
 
 def test_tail_while_write(tmp_path):

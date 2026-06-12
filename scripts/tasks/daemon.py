@@ -16,6 +16,7 @@ they never touch a PID-reused stranger.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -53,6 +54,60 @@ def cmd_daemon(extra):
         "  make daemon-attach        # follow events\n"
         "  make daemon-kill          # abort the running job\n"
         "  make daemon-terminate     # stop the daemon"
+    )
+
+
+# The compact per-job view daemon-status prints by default. Full records run
+# ~1KB each (argv, env, paths) and the history grows unboundedly — an agent
+# polling status needs "what's queued/running/failed", not the whole record
+# (GET /jobs/{id} has that). Keep this the summary an LLM can read in one go.
+_STATUS_JOB_FIELDS = (
+    "id",
+    "method",
+    "kind",
+    "preset",
+    "state",
+    "submitted_at",
+    "started_at",
+    "ended_at",
+    "error",
+    "ckpt_path",
+    "chained_job_id",
+)
+
+
+def cmd_daemon_status(extra):
+    """Daemon status as one JSON object on stdout — the agent/script surface.
+
+    ``{"up", "base_url", "pid", "port", "root", "paused", "active_job",
+    "jobs"}``. Passive: never starts a daemon (safe to poll); ``up: false`` +
+    exit 1 when nothing answers ``/health``. ``base_url`` is resolved from the
+    pidfile each call, so it follows a fallback-to-ephemeral port — read it
+    from here rather than assuming 8765. Jobs are compact summaries
+    (id/state/error/ckpt_path/…); pass ``--full`` for the raw records.
+    """
+    cl = _client.DaemonClient()
+    health = cl.health()
+    if health is None:
+        print(json.dumps({"up": False, "base_url": None, "jobs": []}))
+        sys.exit(1)
+    jobs = cl.list_jobs()
+    if "--full" not in (extra or []):
+        jobs = [{k: j.get(k) for k in _STATUS_JOB_FIELDS} for j in jobs]
+    print(
+        json.dumps(
+            {
+                "up": True,
+                "base_url": cl.base,
+                "pid": health.get("pid"),
+                "port": health.get("port"),
+                "root": health.get("root"),
+                "paused": health.get("paused"),
+                "active_job": health.get("active_job"),
+                "jobs": jobs,
+            },
+            indent=2,
+        )
     )
 
 

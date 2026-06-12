@@ -73,6 +73,12 @@ COMMANDS = {
         daemon.cmd_daemon,
         "Start the local training-job daemon (idempotent; detached, waits for /health).",
     ),
+    "daemon-status": (
+        daemon.cmd_daemon_status,
+        "Daemon status as JSON (health + resolved base_url + compact job "
+        "summaries; --full for raw records). Passive — never starts a daemon; "
+        "exit 1 when down.",
+    ),
     "daemon-attach": (
         daemon.cmd_daemon_attach,
         "Follow the daemon (read-only). JOB=<id> tails that job's stdout; "
