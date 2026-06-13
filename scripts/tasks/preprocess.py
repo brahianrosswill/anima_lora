@@ -98,6 +98,30 @@ def _preprocess_path_pattern_args(extra) -> list[str]:
     return ["--path_pattern", pattern]
 
 
+def _repa_pe_encoder() -> str | None:
+    """The REPA vision encoder to cache, or ``None`` when REPA is off.
+
+    Reads ``use_repa`` / ``repa_encoder`` from the merged config chain (the same
+    ``_path_overrides`` the path knobs use — populated from ``METHOD`` /
+    ``METHODS_SUBDIR`` or a GUI ``CONFIG_FILE`` snapshot). This lets the ConfigTab
+    Train auto-chain — and any ``make preprocess METHOD=<repa-variant>`` — cache
+    the ``{stem}_anima_pe_spatial.safetensors`` (or ``_anima_pe``) sidecars in the
+    same pass, so a ``use_repa=true`` run doesn't bounce off train.py's
+    "PE features absent" error. Plain ``make preprocess`` (no variant config in
+    scope) sees no ``use_repa`` and returns ``None`` — the default stays fast.
+    """
+    from ._common import _path_overrides
+
+    overrides = _path_overrides()
+    raw = overrides.get("use_repa")
+    # TOML/snapshot bools arrive as real bools; tolerate a stringified value too.
+    enabled = raw is True or str(raw).strip().lower() in ("1", "true", "yes")
+    if not enabled:
+        return None
+    encoder = str(overrides.get("repa_encoder") or "pe_spatial").strip()
+    return encoder or "pe_spatial"
+
+
 def _pop_target_res(extra) -> list[str]:
     """Strip ``--target_res E1 E2 …`` (a resize-only flag) from ``extra``.
 
@@ -373,10 +397,12 @@ _CAPTION_INDEX_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
 
 
 def cmd_preprocess(extra):
-    # PE features are intentionally NOT cached here — only CMMD validation /
-    # DCW v4 need them, and those paths chain `preprocess-pe` explicitly.
-    # Leaving PE out keeps the default LoRA preprocess fast on machines that
-    # won't ever use the vision tower.
+    # PE features are NOT cached here by default — only CMMD validation / DCW v4
+    # need them, and those paths chain `preprocess-pe` explicitly. Leaving PE out
+    # keeps the default LoRA preprocess fast on machines that won't use the vision
+    # tower. The one exception is a `use_repa=true` variant in scope: REPA aligns
+    # against PE features every step, so they're chained in at the end (see the
+    # `_repa_pe_encoder()` block below).
     cmd_preprocess_resize(extra)
     # The VAE/TE steps read on-disk shapes — strip the low-res convenience flags
     # AND the resize-only --target_res so their argparse never sees an arg it
@@ -413,6 +439,20 @@ def cmd_preprocess(extra):
             f"`make download-tagger`, then `make caption-index` "
             f"(soft-tokens contrastive training needs it)."
         )
+
+    # REPA arm: when the variant config in scope has `use_repa=true`, cache the
+    # vision-encoder PE sidecars REPA aligns against in this same pass. train.py
+    # errors out asking for them otherwise; chaining here means the ConfigTab
+    # "Train" auto-preprocess (and `make preprocess METHOD=<repa-variant>`)
+    # builds them without a second manual step. Idempotent — cache_pe_encoder.py
+    # skips images already cached. PE-less variants never pay for the tower.
+    encoder = _repa_pe_encoder()
+    if encoder is not None:
+        print(f"  [preprocess] use_repa=true → caching REPA PE features ({encoder})")
+        if encoder == "pe_spatial":
+            cmd_preprocess_pe_spatial([])
+        else:
+            cmd_preprocess_pe([])
 
 
 def cmd_preprocess_config(extra):

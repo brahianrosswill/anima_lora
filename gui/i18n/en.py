@@ -67,6 +67,7 @@ STRINGS: dict[str, str] = {
         "shuffle variants ≤ 0."
     ),
     "preprocess_run_te": "Run caching (VAE + text)",
+    "preprocess_run_pe": "Run PE caching",
     "preprocess_add_to_queue": "Add to queue",
     "preprocess_queued": "Queued {label} (job {job_id}) — watch it in the Queue tab.",
     "preprocess_masking_sam": "SAM3 masking (text bubbles)",

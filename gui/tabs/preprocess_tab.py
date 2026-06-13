@@ -410,6 +410,16 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         )
         top.addWidget(self.run_te_btn)
 
+        # Standalone PE (vision-encoder) caching — caches the REPA encoder
+        # configured on the selected variant (pe_spatial by default; PE-Core for
+        # CMMD / DCW v4). A use_repa=true variant also pulls this in automatically
+        # via `tasks.py preprocess`, but the button lets the user pre-build / refresh
+        # PE sidecars without re-running the whole VAE+text pass.
+        self.run_pe_btn = self._make_run_button(
+            t("preprocess_run_pe"), run_step_style, self._run_pe
+        )
+        top.addWidget(self.run_pe_btn)
+
         self.run_mask_btn = self._make_run_button(
             t("preprocess_run_mask"), run_step_style, self._run_mask
         )
@@ -1298,6 +1308,29 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         self._submit(
             label="preprocess",
             argv=["tasks.py", "preprocess"],
+            extra_env=self.preprocess_env(),
+            config_snapshot=snapshot,
+            attach=not queue,
+        )
+
+    def _run_pe(self, *, queue: bool = False) -> None:
+        # Cache vision-encoder (PE) features for the selected variant. The
+        # encoder follows the variant's `repa_encoder` (pe_spatial by default;
+        # `pe` = PE-Core for CMMD / DCW v4), so the button matches whatever a
+        # use_repa run will read. The config_snapshot carries the variant's
+        # resolved paths to the task (the daemon exposes it as CONFIG_FILE).
+        if not self._save_all():
+            return
+        variant = self._variant or "lora"
+        merged, _ = merged_gui_variant_preset(variant, "default")
+        encoder = (
+            str(merged.get("repa_encoder") or "pe_spatial").strip() or "pe_spatial"
+        )
+        task = "preprocess-pe-spatial" if encoder == "pe_spatial" else "preprocess-pe"
+        snapshot = self.preprocess_config_snapshot()
+        self._submit(
+            label="preprocess-pe",
+            argv=["tasks.py", task],
             extra_env=self.preprocess_env(),
             config_snapshot=snapshot,
             attach=not queue,

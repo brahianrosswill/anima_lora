@@ -66,6 +66,7 @@ STRINGS: dict[str, str] = {
         "シャッフルバリアント ≤ 0 の場合は無視されます。"
     ),
     "preprocess_run_te": "キャッシュ実行 (VAE + テキスト)",
+    "preprocess_run_pe": "PE キャッシュ実行",
     "preprocess_add_to_queue": "キューに追加",
     "preprocess_queued": "{label} をキューに追加しました (ジョブ {job_id}) — キュータブで確認できます。",
     "preprocess_masking_sam": "SAM3 マスキング (テキストバブル)",

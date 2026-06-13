@@ -63,6 +63,7 @@ STRINGS: dict[str, str] = {
         "셔플 변형 수가 0 이하이면 무시됩니다."
     ),
     "preprocess_run_te": "캐싱 실행 (VAE + 텍스트)",
+    "preprocess_run_pe": "PE 캐싱 실행",
     "preprocess_add_to_queue": "큐에 추가",
     "preprocess_queued": "{label} 큐에 추가됨 (작업 {job_id}) — 큐 탭에서 확인하세요.",
     "preprocess_masking_sam": "SAM3 마스킹 (말풍선)",

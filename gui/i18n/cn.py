@@ -66,6 +66,7 @@ STRINGS: dict[str, str] = {
         "当随机变体数 ≤ 0 时忽略。"
     ),
     "preprocess_run_te": "运行缓存 (VAE + 文本)",
+    "preprocess_run_pe": "运行 PE 缓存",
     "preprocess_add_to_queue": "加入队列",
     "preprocess_queued": "已将 {label} 加入队列 (任务 {job_id}) — 可在队列标签页查看。",
     "preprocess_masking_sam": "SAM3 蒙版 (对话气泡)",
