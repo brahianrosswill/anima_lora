@@ -237,7 +237,7 @@ def cmd_easycontrol_download(extra):
     )
 
 
-def _near_twins_preprocess(cfg: dict, base: str, extra) -> None:
+def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     """Resize + VAE/TE caching for the mined near-twin pair tree.
 
     Every knob is read from the ``[preprocess]`` table of
@@ -404,15 +404,30 @@ def _near_twins_build_cond(pp: dict, base: str) -> None:
     )
 
 
-def _near_twins_stage(cfg: dict, base: str, extra) -> None:
-    """Mine the in-artist near-twin pair tree (the near_twins staging step).
+def _near_twins_stage(adapter: str, cfg: dict, base: str, extra) -> None:
+    """Mine the in-artist near-twin pair tree (the near_twins/sanitize staging step).
 
-    The miner self-reads its ``[staging]`` table + ``name`` slug from
-    ``configs/easycontrol/near_twins.toml`` (via its ``--config`` default) and
-    rewrites the blueprint tail there, so ``cfg``/``base`` are unused here — the
-    signature just matches the registry contract. User ``extra`` argv overrides
-    the ``[staging]`` table (CLI > toml > default in the miner)."""
-    run([PY, "-m", "easycontrol_adapters.tools.near_twins", *extra])
+    The miner self-reads its ``[staging]`` table + ``name`` slug from the
+    descriptor and rewrites the blueprint tail back into the *same* file, so we
+    point both ``--config`` (read) and ``--config-out`` (write) at
+    ``configs/easycontrol/<adapter>.toml`` — otherwise the miner falls back to its
+    near_twins.toml default and a ``sanitize`` run would mine into the wrong file.
+    ``cfg``/``base`` are unused (the miner re-reads the file itself); the signature
+    just matches the registry contract. User ``extra`` argv wins last (the miner's
+    precedence is CLI > toml > default), so an explicit ``--config`` still overrides."""
+    cfg_path = str(_easy_cfg_path(adapter))
+    run(
+        [
+            PY,
+            "-m",
+            "easycontrol_adapters.tools.near_twins",
+            "--config",
+            cfg_path,
+            "--config-out",
+            cfg_path,
+            *extra,
+        ]
+    )
 
 
 def _colorize_prep_paths(base: str) -> list[str]:
@@ -433,7 +448,7 @@ def _colorize_prep_paths(base: str) -> list[str]:
     ]
 
 
-def _colorize_stage(cfg: dict, base: str, extra) -> None:
+def _colorize_stage(adapter: str, cfg: dict, base: str, extra) -> None:
     """Colorize staging: synthesize the synthetic B&W manga condition tree.
 
     Runs only prep.py's mangafy stage (``--skip_encode --skip_text``) over the
@@ -454,7 +469,7 @@ def _colorize_stage(cfg: dict, base: str, extra) -> None:
     )
 
 
-def _colorize_preprocess(cfg: dict, base: str, extra) -> None:
+def _colorize_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     """Colorize preprocess: cache cond latents + color-only text over the staged tree.
 
     Runs prep.py's encode + color-text stages (``--skip_mangafy`` — mangafy is the
@@ -479,8 +494,14 @@ def _colorize_preprocess(cfg: dict, base: str, extra) -> None:
 # the base easycontrol method); only these two steps differ per adapter:
 #   stage      — data generation that materializes the training/condition tree
 #   preprocess — VAE/TE caching over that tree
+# Both receive ``(adapter, cfg, base, extra)`` (adapter = the registry key / the
+# ``configs/easycontrol/<adapter>.toml`` stem). ``sanitize`` is the text/bubble-
+# removal project; it reuses the near-twin miner stage/preprocess wholesale (same
+# pair-mining pipeline, different discriminator tags) — the only per-adapter bit is
+# the descriptor file the miner reads, keyed off ``adapter``.
 _EASY_ADAPTERS = {
     "near_twins": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
+    "sanitize": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
     "colorize": {"stage": _colorize_stage, "preprocess": _colorize_preprocess},
 }
 
@@ -502,7 +523,7 @@ def cmd_easycontrol_preprocess(extra):
     adapter = _easyadapter()
     if adapter in _EASY_ADAPTERS:
         cfg, _name, base = _easy_load(adapter)
-        _EASY_ADAPTERS[adapter]["preprocess"](cfg, base, extra)
+        _EASY_ADAPTERS[adapter]["preprocess"](adapter, cfg, base, extra)
         return
 
     src = "easycontrol-dataset"
@@ -576,4 +597,4 @@ def cmd_easycontrol_staging(extra):
             "(The default EasyControl reads easycontrol-dataset/ directly.)"
         )
     cfg, _name, base = _easy_load(adapter)
-    spec["stage"](cfg, base, extra)
+    spec["stage"](adapter, cfg, base, extra)

@@ -61,7 +61,7 @@ balance_loss_weight = 1.0
 # denoise ~0.1) so it shapes usage rather than forcing flat uniformity — the
 # symmetry-break now comes mainly from content_router_init_std below. Raise
 # toward 1e-3 if experts still die; lower if usage pins uniform with margin flat.
-balance_w_content = 1e-4
+balance_w_content = 5e-4
 network_content_router_lr_scale = 10.0
 
 # Content routing is always the network-level ContentRouter fed the pooled
@@ -74,7 +74,7 @@ repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where styl
 repa_layer     = 8            # block to hook (of 28)
 repa_encoder   = "pe_spatial"
 repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
-repa_spatial_norm = true
+repa_target_dog= true
 
 # Freq-pool routing mode.
 #   "fei"     — hardwire π_f = normalize(FEI ** (1/freq_router_tau)) directly.

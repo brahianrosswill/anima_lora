@@ -74,7 +74,7 @@ network_args = [        # Do not use whitespace in each arg
     "use_repa=true",
     "repa_weight=0.05",
     "repa_layer=8",
-    "repa_spatial_norm=true",
+    "repa_target_dog=true"
 ]
 blocks_to_swap = 0
 output_name = "anima_colorize_comic2"

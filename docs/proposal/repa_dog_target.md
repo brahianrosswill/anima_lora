@@ -1,10 +1,33 @@
 # REPA-DoG — band-pass the alignment target before the Gram match
 
-Status: **PROPOSED — Phase 0 not yet run.** Data-only σ-sweep probe is the gate
-(below); no training compute until it passes. Builds on the shipped relational
-arm + `repa_spatial_norm` (`docs/experimental/repa.md`, REPA v2 Phase 0 closed
-2026-06-12, `[[project_repa_v2_relational_won]]`). Supersedes the global-anchor
-line (`_archive/proposals/repa_global_anchor.md`, **refuted** — see Why now).
+Status: **PHASE 1 WIRED 2026-06-13.** Phase 0 (data-only σ-sweep probe,
+`bench/repa/probe_dog_target.py`, 3000 PE-Spatial sidecars) PASSED, so the
+training arm is now implemented: `dog_standardize` in `library/training/repa.py`
++ the `repa_target_dog` / `repa_dog_sigma1_div` / `repa_dog_sigma2_div` /
+`repa_dog_norm_std` knobs (`configs/methods/lora.toml`, allowlisted in
+`networks/__init__.py`). **Default off** (`repa_target_dog = false`) — when on it
+*replaces* the `spatial_norm` block in the relational target preprocess (DoG at
+σ₁→0 *is* DC removal, same family). The A/B run + readout (below) is still open;
+hold `repa_dog_norm_std = 0` (empirical std, = shipped `spatial_norm`) so the only
+change vs baseline is the band-pass — the paper's std confound. Builds on the
+shipped relational arm + `repa_spatial_norm` (`docs/experimental/repa.md`, REPA v2
+Phase 0 closed 2026-06-12, `[[project_repa_v2_relational_won]]`). Supersedes —
+and removes — the global-anchor line (`repa_global_weight`, **refuted**,
+`_archive/proposals/repa_global_anchor.md`); that arm's code, config, calib, and
+`bench/pe_cls_probe/build_calib.py` were deleted with this change. See Why now.
+
+**Phase 0 result** (`bench/repa/results/20260613-*-dog-axis-full/`, stable over
+two 3000-sample runs). Best +1a (broad low-band strip, `σ_lp = min(gh,gw)/16–32`)
+beats the shipped DC-only `spatial_norm` baseline on **all 3 content axes** —
+character +0.034 (0.717→0.751 AUC), copyright +0.055, artist +0.046 — and the
+DoG direction is the live one (✓ the paper's RMSC↔discriminability link replicates
+on PE-Spatial, the encoder-mismatch caveat). **Surprise:** point 0 (DC-only
+removal, what we ship) is a **local dip** — it scores *below* even the keep-DC
+(−1) endpoint on every axis, so the win isn't only "DoG > spatial_norm" but
+"spatial_norm is leaving contrast on the table; broad low-band strip recovers it."
+**+1b ≈ +1a** at the winning σ_lp (mild harm at small σ_lp) → keep **σ₂ off**, as
+the proposal predicted. Open: the A/B's CMMD + style gate, and the std confound
+(`repa_dog_norm_std`), still untested — discriminability ≠ generation quality.
 
 Source: *Spectrum Matching: a Unified Perspective for Superior Diffusability in
 Latent Diffusion* (arXiv:2603.14645v1, repo root). The DoG-on-REPA idea is §3.5
@@ -90,10 +113,15 @@ rolloff hurts → pin σ₂→∞ permanently.
 Target-side preprocessing in `library/training/repa.py`, composing with the
 existing relational path — **byte-identical no-op when off**:
 
-1. **New transform** `dog_standardize(pe, gh, gw, σ₁, σ₂)`: reshape
-   `(B, N, d) → (B, d, gh, gw)`, `gaussian_blur_2d(·, σ₁) − gaussian_blur_2d(·, σ₂)`
-   (σ₂≤0 ⇒ low-pass-subtract only, the +1a corner), `/ (std + ε)`, flatten back.
-   Reuses `library/runtime/fei.py::gaussian_blur_2d` — no new conv code.
+1. **New transform** `dog_standardize(pe, gh, gw, sigma1_div, sigma2_div, norm_std)`
+   *(implemented)*: reshape `(B, N, d) → (B, d, gh, gw)` row-major, apply `H(Z)`,
+   `/ (std + ε)`, flatten back. `σ₁ = min(gh,gw)/sigma1_div` is the **outer** kernel
+   (broad low band removed); `σ₂ = min(gh,gw)/sigma2_div` the **inner** tighter one.
+   `H(Z) = Z − LP(Z, σ₁)` when `sigma2_div ≤ 0` (high-pass / +1a corner), else
+   `LP(Z, σ₂) − LP(Z, σ₁)` (band-pass / +1b). Reuses
+   `library/runtime/fei.py::gaussian_blur_2d` (kernel clamped to the grid) — no new
+   conv code. `norm_std = 0` ⇒ empirical per-channel std (= `spatial_norm`); `> 0` ⇒
+   fixed const (the paper's regime, optional ablation).
 2. **Slot-in** in `relational_align_loss` / the adapter's `extra_forwards`:
    when `repa_target_dog` is on, apply `dog_standardize` to `pe` (after CLS-drop,
    on the resolved grid) **instead of** the `spatial_norm` mean/std block in

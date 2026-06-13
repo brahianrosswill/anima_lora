@@ -1901,24 +1901,6 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                         f"({repa_scale}x repa_lr_scale of unet_lr={base_lr})"
                     )
 
-        # REPA global-anchor projection head (same repa_lr_scale × unet_lr).
-        # Training-only — stripped from saved adapters by lora_save.
-        if getattr(self, "repa_global_head", None) is not None:
-            gh_params = list(self.repa_global_head.parameters())
-            if len(gh_params) > 0:
-                repa_scale = float(getattr(self, "_repa_lr_scale", 1.0))
-                base_lr = unet_lr if unet_lr is not None else default_lr
-                if base_lr is None or base_lr == 0:
-                    logger.info("REPA global head: no base LR, skipping param group")
-                else:
-                    gh_lr = float(base_lr) * repa_scale
-                    all_params.append({"params": gh_params, "lr": gh_lr})
-                    lr_descriptions.append("repa global head")
-                    logger.info(
-                        f"REPA global-anchor head param group: lr={gh_lr:.2e} "
-                        f"({repa_scale}x repa_lr_scale of unet_lr={base_lr})"
-                    )
-
         return all_params, lr_descriptions
 
     def enable_gradient_checkpointing(self):

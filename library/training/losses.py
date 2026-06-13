@@ -422,25 +422,6 @@ def _repa_loss(ctx: LossContext) -> torch.Tensor:
     return weight * repa.float()
 
 
-def _repa_global_loss(ctx: LossContext) -> torch.Tensor:
-    """REPA global-anchor term (docs/proposal/repa_global_anchor.md).
-
-    Complementary to the relational ``repa`` arm: the scalar ``1 − cos`` against
-    the patch-mean target is computed by ``REPAMethodAdapter`` and stashed under
-    ``aux["repa_global"]``; this handler applies ``network._repa_global_weight``
-    (independent of the relational ``repa_weight``). Training-only.
-    """
-    if not ctx.is_train:
-        return ctx.model_pred.new_zeros(())
-    weight = float(getattr(ctx.network, "_repa_global_weight", 0.0) or 0.0)
-    if weight <= 0.0:
-        return ctx.model_pred.new_zeros(())
-    g = ctx.aux.get("repa_global")
-    if g is None:
-        return ctx.model_pred.new_zeros(())
-    return weight * g.float()
-
-
 def _soft_tokens_contrastive_loss(ctx: LossContext) -> torch.Tensor:
     """SoftREPA-style contrastive term on the soft-tokens bank.
 
@@ -594,7 +575,6 @@ LOSS_REGISTRY: dict[str, LossFn] = {
     "fera_fecl": _fera_fecl_loss,
     "soft_tokens_contrastive": _soft_tokens_contrastive_loss,
     "repa": _repa_loss,
-    "repa_global": _repa_global_loss,
 }
 
 
@@ -624,7 +604,6 @@ _LIVENESS_PROBES: dict[str, Callable[[dict], bool]] = {
         aux.get("soft_tokens_contrastive") is not None
     ),
     "repa": lambda aux: aux.get("repa") is not None,
-    "repa_global": lambda aux: aux.get("repa_global") is not None,
 }
 
 
@@ -721,7 +700,6 @@ _STAGE_SCALAR_BROADCAST = (
     "fera_fecl",
     "soft_tokens_contrastive",
     "repa",
-    "repa_global",
 )
 _STAGE_SCALAR_POST = ("multiscale",)
 # _STAGE_SCALAR_POST is consulted by LossComposer.compose via the hard-coded
@@ -873,9 +851,5 @@ def build_loss_composer(
     # REPA v2: active iff the factory stamped a positive weight (use_repa=true).
     if float(getattr(network, "_repa_weight", 0.0) or 0.0) > 0.0:
         active.append("repa")
-    # REPA global-anchor arm: independent weight, composes with the relational
-    # arm (or stands alone — both ride the same REPAMethodAdapter extra forward).
-    if float(getattr(network, "_repa_global_weight", 0.0) or 0.0) > 0.0:
-        active.append("repa_global")
 
     return LossComposer(active_losses=active, ledger=ledger)

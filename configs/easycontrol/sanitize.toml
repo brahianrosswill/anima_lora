@@ -1,7 +1,11 @@
-# near-twin tag-gap miner config. Edit the [staging] table, then run the two
-# pipeline steps (knobs for each live in their own table here):
-#   make easycontrol-staging    EASYADAPTER=near_twin   # [staging] → mine pair tree
-#   make easycontrol-preprocess EASYADAPTER=near_twin   # [preprocess] → VAE/TE caches
+# sanitize (text/bubble removal) descriptor — a near-twin tag-gap miner project.
+# Pasted from near_twins.toml: mines in-artist pairs that differ only by a
+# text/bubble tag, then trains EasyControl to remove the text (cond = the _tags
+# member, target = the clean _no_tags twin). Edit the [staging] table, then run
+# the two pipeline steps (knobs for each live in their own table here):
+#   make easycontrol-staging    EASYADAPTER=sanitize   # [staging] → mine pair tree
+#   make easycontrol-preprocess EASYADAPTER=sanitize   # [preprocess] → VAE/TE caches
+#   make easycontrol            EASYADAPTER=sanitize   # train (folds [training] in)
 # CLI flags override these. Paths support {CAPTION_CORPUS_DIR}/$VARS/~ expansion
 # ({CAPTION_CORPUS_DIR} comes from anima_lora/.env).
 
@@ -9,11 +13,11 @@
 # pipeline lives under post_image_dataset/easycontrol/<name>/{staging,resized,
 # cache,cond} and checkpoints save as anima_easycontrol_<name>. The blueprint
 # paths below reference {name} and are interpolated at train time, so changing
-# this (e.g. name = "sanitize" → easycontrol/sanitize/) + re-running preprocess →
-# train reroutes everything with no path edit. Defaults to "near_twins" if omitted.
+# this (+ re-running preprocess → train) reroutes everything with no path edit.
+# Defaults to the file stem ("sanitize") if omitted.
 name = "sanitize"
 
-# Mining run knobs (read by `python -m easycontrol_adapters.tools.near_twin`;
+# Mining run knobs (read by `python -m easycontrol_adapters.tools.near_twins`;
 # legacy name [miner] still accepted). Any --flag dest works as a key here.
 [staging]
 # Discriminator — set exactly one of: tag_any / tag / region (bool) / signal.
@@ -28,7 +32,7 @@ cell_match_min = 0.9
 max_extra_diff = 25
 
 # Resize + VAE/TE caching pass over the mined pair tree (read by
-# `make easycontrol-preprocess EASYADAPTER=near_twin`). The native-res staging
+# `make easycontrol-preprocess EASYADAPTER=sanitize`). The native-res staging
 # tree is first resized into constant-token buckets under resized_dir (that
 # resized tree is the training image_dir below), then VAE/TE-encoded into
 # cache_dir. The tree is nested <artist>/<pair_id>_{tags,no_tags} so recursive =
@@ -52,11 +56,11 @@ caption_shuffle_variants = 4
 caption_tag_dropout_rate = 0.1
 target_res = [896, 1024]
 # PE-Spatial sidecars for the REPA auxiliary loss (use_repa below). Re-run
-# `make easycontrol-preprocess EASYADAPTER=near_twin` after adding this —
+# `make easycontrol-preprocess EASYADAPTER=sanitize` after adding this —
 # idempotent, only encodes missing sidecars.
 pe_encoder = "pe_spatial"
 
-# Training overrides for `make easycontrol EASYADAPTER=near_twin` (optional).
+# Training overrides for `make easycontrol EASYADAPTER=sanitize` (optional).
 # Each key is folded in as a `--key value` CLI override on top of
 # configs/easycontrol/easycontrol.toml — CLI wins the merge chain, so anything here
 # beats the shipped method default; bools become bare flags, lists spread.
@@ -120,3 +124,13 @@ batch_size = 1
   recursive = true                 # tree is nested <artist>/<pair_id>_{tags,no_tags}; caches mirror the nesting
   flip_aug = false                 # latents can't be flipped post-hoc; the cond cache has no flipped variant
   num_repeats = 1
+
+# GUI dropdown metadata (EasyControl tab). Presence of this block is what surfaces
+# the descriptor in the GUI variant list (near_twins ships none → stays CLI-only).
+# This is a file-edited launcher: the tab renders the knob tables as a form and the
+# Preprocess / Train buttons drive staging → preprocess → descriptor-folded train.
+[variant]
+family = "easycontrol"
+label = "Sanitize (remove text / bubbles)"
+description = "Remove on-page text, speech/thought bubbles and SFX. Mines in-artist near-twin pairs that differ only by a text tag; cond = the texted member, target = the clean twin. Configured in configs/easycontrol/sanitize.toml (edit the file directly)."
+order = 30

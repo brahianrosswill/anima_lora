@@ -73,6 +73,7 @@ rides the step metrics. Decision rule per the Phase-1 proposal: ~uniform
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Optional
 
@@ -174,6 +175,76 @@ def relational_gram_loss(
     return F.mse_loss(g_dit, g_pe)
 
 
+def _safe_blur(grid: torch.Tensor, sigma: float, gh: int, gw: int) -> torch.Tensor:
+    """``gaussian_blur_2d`` guarded against a kernel wider than the grid.
+
+    ``gaussian_blur_2d`` reflect-pads by ``ceil(3σ)``; reflect padding needs
+    ``pad ≤ min_dim − 1``. On the coarse PE grid (~28–46 patches/side) the
+    REPA-DoG divisors (≥16) never trigger this, but clamp σ defensively so an
+    aggressive small divisor degrades to the widest valid blur instead of
+    crashing — same guard as the Phase-0 probe (``bench/repa/probe_dog_target.py``).
+    """
+    from library.runtime.fei import gaussian_blur_2d
+
+    if sigma <= 0:
+        return grid
+    max_pad = min(gh, gw) - 1
+    if math.ceil(3.0 * sigma) > max_pad:
+        sigma = max(1e-3, (max_pad - 0.01) / 3.0)
+    return gaussian_blur_2d(grid, sigma)
+
+
+def dog_standardize(
+    pe: torch.Tensor,
+    gh: int,
+    gw: int,
+    sigma1_div: float,
+    sigma2_div: float = 0.0,
+    norm_std: float = 0.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Difference-of-Gaussians band-pass of the target tokens (REPA-DoG).
+
+    Generalizes ``spatial_norm``'s DC removal to a broader low-band strip
+    (arXiv:2603.14645v1 §3.5, ``docs/proposal/repa_dog_target.md``). Phase 0
+    (``bench/repa/probe_dog_target.py``) found this lifts target
+    discriminability on all 3 content axes (best ``σ₁ = min/16``). ``pe`` is
+    ``(B, N, d)`` with ``N == gh*gw`` (CLS already dropped); reshaped to the
+    ``(gh, gw)`` grid in row-major order, band-passed, standardized, and
+    flattened back for the per-token L2-norm + Gram match — so it slots in
+    **instead of** ``relational_gram_loss``'s ``spatial_norm`` block.
+
+    Filter ``H(Z)`` on the per-channel feature map ``Z`` ``(B, d, gh, gw)``:
+
+    * ``sigma2_div <= 0``  → ``Z − LP(Z, σ₁)``            high-pass (the +1a corner)
+    * ``sigma2_div > 0``   → ``LP(Z, σ₂) − LP(Z, σ₁)``    band-pass (+1b)
+
+    with ``σ₁ = min(gh,gw)/sigma1_div`` (outer, the broad low band removed) and
+    ``σ₂ = min(gh,gw)/sigma2_div`` (inner, tighter ⇒ ``sigma2_div > sigma1_div`` ⇒
+    ``σ₂ < σ₁``, rolling off the very-high tail). At ``σ₁→0`` this reduces to the
+    shipped DC removal, so ``spatial_norm`` is its degenerate special case.
+
+    ``norm_std`` is the paper's std-normalization confound (Table 6): ``0``
+    (default) divides by the empirical per-channel spatial std — *identical to
+    the shipped ``spatial_norm`` std*, so an A/B attributes the delta to the
+    band-pass alone. ``> 0`` divides by that fixed constant instead (the paper's
+    ``normalization_std`` regime), for an optional follow-up ablation.
+    """
+    b, n, d = pe.shape
+    grid = pe.transpose(1, 2).reshape(b, d, gh, gw)  # row-major (B, d, gh, gw)
+    s1 = float(min(gh, gw)) / float(sigma1_div)
+    if sigma2_div > 0:
+        s2 = float(min(gh, gw)) / float(sigma2_div)
+        h = _safe_blur(grid, s2, gh, gw) - _safe_blur(grid, s1, gh, gw)
+    else:
+        h = grid - _safe_blur(grid, s1, gh, gw)
+    denom = (
+        (h.std(dim=(2, 3), keepdim=True) + eps) if norm_std <= 0 else float(norm_std)
+    )
+    h = h / denom
+    return h.reshape(b, d, n).transpose(1, 2)  # back to (B, N, d)
+
+
 def relational_align_loss(
     captured: torch.Tensor,
     pe: torch.Tensor,
@@ -182,6 +253,10 @@ def relational_align_loss(
     spec,
     *,
     spatial_norm: bool = False,
+    dog: bool = False,
+    dog_sigma1_div: float = 16.0,
+    dog_sigma2_div: float = 0.0,
+    dog_norm_std: float = 0.0,
 ) -> torch.Tensor:
     """One-shot relational alignment: CLS-drop → grid-match → pool → Gram MSE.
 
@@ -190,12 +265,19 @@ def relational_align_loss(
     carries one. This is the probe entry point (``bench/turbo_repa/``); the
     training adapter composes the same pieces itself because it also needs the
     pooled tokens (absolute arm head, grad-heatmap probe).
+
+    ``dog`` applies the REPA-DoG band-pass (:func:`dog_standardize`) to the
+    target **instead of** ``spatial_norm`` (the two are the same family — DoG at
+    ``σ₁→0`` is DC removal — so they're mutually exclusive; ``dog`` wins).
     """
     n_pe = pe.shape[1] - (1 if spec.use_cls else 0)
     gh, gw = resolve_pe_grid(spec, n_pe, latent_hw[0], latent_hw[1])
     if spec.use_cls:
         pe = pe[:, 1:, :]
     dit_tok = pool_dit_tokens_to_grid(captured, latent_hw, patch, gh, gw)
+    if dog:
+        pe = dog_standardize(pe, gh, gw, dog_sigma1_div, dog_sigma2_div, dog_norm_std)
+        return relational_gram_loss(dit_tok, pe, spatial_norm=False)
     return relational_gram_loss(dit_tok, pe, spatial_norm=spatial_norm)
 
 
@@ -219,81 +301,6 @@ class REPAHead(nn.Module):
         x = F.silu(self.fc1(x))
         x = F.silu(self.fc2(x))
         return self.fc3(x)
-
-
-class REPAGlobalHead(nn.Module):
-    """Tiny 2-layer MLP projecting the pooled DiT global vector → encoder dim.
-
-    The global-anchor arm (``docs/proposal/repa_global_anchor.md``) re-injects
-    the per-image global component that ``spatial_norm`` strips from the
-    relational arm. The DiT side is one vector (mean over the pooled grid),
-    projected here to ``d_enc`` so it can be z-scored by the shared patch-mean
-    calib and cosine-matched to the PE patch-mean target. Last layer is
-    small-init so step-0 output is near the calib mean (unbiased start).
-    """
-
-    def __init__(self, dit_dim: int, encoder_dim: int) -> None:
-        super().__init__()
-        self.fc1 = nn.Linear(dit_dim, dit_dim)
-        self.fc2 = nn.Linear(dit_dim, encoder_dim)
-        nn.init.normal_(self.fc2.weight, std=1e-3)
-        nn.init.zeros_(self.fc2.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.fc2(F.silu(self.fc1(x)))
-
-
-# Default vendored patch-mean calib (per-dim z-score affine for the global
-# target). Regenerate via ``bench/pe_cls_probe/build_calib.py``.
-DEFAULT_PATCHMEAN_CALIB = "networks/calibration/pe_patchmean_stats.safetensors"
-
-
-def load_patchmean_calib(path: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Load the patch-mean ``(mean, std)`` z-score affine (fp32 ``(d_enc,)``).
-
-    Resolves ``path`` under the repo home so it works from any CWD. Raises a
-    clear error if the calib is missing — the global-anchor arm is opt-in
-    (``repa_global_weight > 0``), so a missing file means a real misconfig.
-    """
-    from safetensors.torch import load_file
-
-    from library.env import resolve_under_home
-
-    resolved = resolve_under_home(path)
-    if not resolved.is_file():
-        raise FileNotFoundError(
-            f"REPA global-anchor calib missing at {resolved}. Regenerate with:\n"
-            f"  uv run python bench/pe_cls_probe/build_calib.py --out {path}"
-        )
-    sd = load_file(str(resolved))
-    return sd["mean"].float(), sd["std"].float()
-
-
-def global_anchor_loss(
-    dit_global: torch.Tensor,
-    pe_patch: torch.Tensor,
-    mean: Optional[torch.Tensor],
-    std: Optional[torch.Tensor],
-) -> torch.Tensor:
-    """Global-anchor term: ``1 − cos(dit_global, pe_global)`` in fp32.
-
-    ``dit_global`` is the head-projected DiT global vector ``(B, d_enc)``;
-    ``pe_patch`` the CLS-dropped PE patch tokens ``(B, N, d_enc)`` (the target is
-    their mean). Both sides pass through the **same** per-dim z-score affine
-    (``mean``/``std``, the shared patch-mean calib) then L2-norm, so they live in
-    one comparable space. ``mean``/``std`` ``None`` ⇒ no affine (raw target).
-    """
-    pe_global = pe_patch.float().mean(dim=1)  # (B, d_enc)
-    dit_global = dit_global.float()
-    if mean is not None and std is not None:
-        mean = mean.to(dit_global)
-        std = std.to(dit_global)
-        dit_global = (dit_global - mean) / std
-        pe_global = (pe_global - mean) / std
-    dit_hat = F.normalize(dit_global, dim=-1)
-    pe_hat = F.normalize(pe_global, dim=-1)
-    cos = (dit_hat * pe_hat).sum(dim=-1)  # (B,)
-    return (1.0 - cos).mean()
 
 
 class REPAMethodAdapter(MethodAdapter):
@@ -320,12 +327,13 @@ class REPAMethodAdapter(MethodAdapter):
         self._spec = None
         self._anneal_steps = 0.0
         self._spatial_norm = False
-        # Global-anchor arm (docs/proposal/repa_global_anchor.md): re-inject the
-        # per-image global component spatial_norm strips. Off (weight 0) ⇒ inert.
-        self._global_weight = 0.0
-        self._global_norm = "zscore"
-        self._global_mean: Optional[torch.Tensor] = None
-        self._global_std: Optional[torch.Tensor] = None
+        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md): a broader
+        # low-band strip than spatial_norm's DC removal. Off (dog False) ⇒ inert
+        # — when on it replaces the spatial_norm block in the relational loss.
+        self._dog = False
+        self._dog_sigma1_div = 16.0
+        self._dog_sigma2_div = 0.0
+        self._dog_norm_std = 0.0
         # Optimizer-step clock: train micro-batches seen, converted with
         # gradient_accumulation_steps at the anneal gate.
         self._train_micro_steps = 0
@@ -366,25 +374,20 @@ class REPAMethodAdapter(MethodAdapter):
         self._spec = get_bucket_spec(encoder)
         self._patch = int(ctx.unet.patch_spatial)
 
-        # Global-anchor arm — opt-in via repa_global_weight > 0. Needs the
-        # train-only projection head (built by the factory) + the patch-mean
-        # z-score calib. Load the affine once here (when on).
-        self._global_weight = float(getattr(net, "_repa_global_weight", 0.0) or 0.0)
-        self._global_norm = str(getattr(net, "_repa_global_norm", "zscore")).lower()
-        if self._global_weight > 0.0:
-            if getattr(net, "repa_global_head", None) is None:
-                logger.warning(
-                    "REPA: repa_global_weight=%g but the network has no "
-                    "'repa_global_head' (built by the LoRA factory when "
-                    "repa_global_weight>0) — global-anchor term is inert.",
-                    self._global_weight,
-                )
-                self._global_weight = 0.0
-            elif self._global_norm == "zscore":
-                calib = str(
-                    getattr(net, "_repa_global_calib", "") or DEFAULT_PATCHMEAN_CALIB
-                )
-                self._global_mean, self._global_std = load_patchmean_calib(calib)
+        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md). Replaces
+        # the spatial_norm DC-removal block in the relational loss when on
+        # (relational mode only — it preprocesses the target, no head needed).
+        self._dog = bool(getattr(net, "_repa_target_dog", False))
+        self._dog_sigma1_div = float(getattr(net, "_repa_dog_sigma1_div", 16.0) or 16.0)
+        self._dog_sigma2_div = float(getattr(net, "_repa_dog_sigma2_div", 0.0) or 0.0)
+        self._dog_norm_std = float(getattr(net, "_repa_dog_norm_std", 0.0) or 0.0)
+        if self._dog and self._mode != "relational":
+            logger.warning(
+                "REPA: repa_target_dog is a relational target-preprocessing "
+                "lever; ignored in %s mode.",
+                self._mode,
+            )
+            self._dog = False
 
         if self._mode == "absolute" and getattr(net, "repa_head", None) is None:
             raise ValueError(
@@ -427,9 +430,9 @@ class REPAMethodAdapter(MethodAdapter):
             f"REPA[{self._mode}]: hook on block {self._layer}/{len(blocks)}, "
             f"encoder={encoder} grid≤{self._spec.t_max_patches}tok, "
             f"weight={weight}{anneal_desc}"
-            f"{', spatial_norm' if self._spatial_norm else ''}"
+            f"{', spatial_norm' if self._spatial_norm and not self._dog else ''}"
             f"{f', grad_heatmap/{self._grad_heatmap_every}' if self._grad_heatmap_every else ''}"
-            f"{f', global_anchor(w={self._global_weight:g}, norm={self._global_norm})' if self._global_weight > 0 else ''}"
+            f"{f', dog(σ1=min/{self._dog_sigma1_div:g}, σ2={"off" if self._dog_sigma2_div <= 0 else f"min/{self._dog_sigma2_div:g}"}, norm_std={"empirical" if self._dog_norm_std <= 0 else self._dog_norm_std})' if self._dog else ''}"
             f"{head_desc}"
         )
 
@@ -531,7 +534,22 @@ class REPAMethodAdapter(MethodAdapter):
             cos = F.cosine_similarity(proj, pe, dim=-1)  # (B, N)
             loss = (1.0 - cos).mean()
         else:
-            loss = relational_gram_loss(dit_tok, pe, spatial_norm=self._spatial_norm)
+            if self._dog:
+                # REPA-DoG: band-pass the target instead of spatial_norm's DC
+                # removal (mutually exclusive — DoG at σ₁→0 *is* DC removal).
+                pe_t = dog_standardize(
+                    pe,
+                    gh,
+                    gw,
+                    self._dog_sigma1_div,
+                    self._dog_sigma2_div,
+                    self._dog_norm_std,
+                )
+                loss = relational_gram_loss(dit_tok, pe_t, spatial_norm=False)
+            else:
+                loss = relational_gram_loss(
+                    dit_tok, pe, spatial_norm=self._spatial_norm
+                )
 
             if self._grad_heatmap_every > 0:
                 if self._heat_runs % self._grad_heatmap_every == 0:
@@ -539,23 +557,7 @@ class REPAMethodAdapter(MethodAdapter):
                 self._heat_runs += 1
 
         self._metrics["repa/align_loss"] = float(loss.detach())
-        out = {"repa": loss}
-
-        # Global-anchor term (complementary to the relational arm above):
-        # pool the SAME grid tokens to one vector, project to d_enc, z-score by
-        # the shared patch-mean calib, cosine-match to the PE patch-mean.
-        if self._global_weight > 0.0:
-            head = getattr(ctx.network, "repa_global_head", None)
-            if head is not None:
-                head_dtype = next(head.parameters()).dtype
-                dit_global = head(dit_tok.mean(dim=1).to(head_dtype))  # (B, d_enc)
-                g_loss = global_anchor_loss(
-                    dit_global, pe, self._global_mean, self._global_std
-                )
-                self._metrics["repa/global_loss"] = float(g_loss.detach())
-                out["repa_global"] = g_loss
-
-        return out
+        return {"repa": loss}
 
     # ------------------------------------------------- grad-heatmap diagnostic
     def _accumulate_grad_heatmap(
