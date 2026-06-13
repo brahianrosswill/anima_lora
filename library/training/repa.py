@@ -221,6 +221,81 @@ class REPAHead(nn.Module):
         return self.fc3(x)
 
 
+class REPAGlobalHead(nn.Module):
+    """Tiny 2-layer MLP projecting the pooled DiT global vector → encoder dim.
+
+    The global-anchor arm (``docs/proposal/repa_global_anchor.md``) re-injects
+    the per-image global component that ``spatial_norm`` strips from the
+    relational arm. The DiT side is one vector (mean over the pooled grid),
+    projected here to ``d_enc`` so it can be z-scored by the shared patch-mean
+    calib and cosine-matched to the PE patch-mean target. Last layer is
+    small-init so step-0 output is near the calib mean (unbiased start).
+    """
+
+    def __init__(self, dit_dim: int, encoder_dim: int) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(dit_dim, dit_dim)
+        self.fc2 = nn.Linear(dit_dim, encoder_dim)
+        nn.init.normal_(self.fc2.weight, std=1e-3)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(F.silu(self.fc1(x)))
+
+
+# Default vendored patch-mean calib (per-dim z-score affine for the global
+# target). Regenerate via ``bench/pe_cls_probe/build_calib.py``.
+DEFAULT_PATCHMEAN_CALIB = "networks/calibration/pe_patchmean_stats.safetensors"
+
+
+def load_patchmean_calib(path: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """Load the patch-mean ``(mean, std)`` z-score affine (fp32 ``(d_enc,)``).
+
+    Resolves ``path`` under the repo home so it works from any CWD. Raises a
+    clear error if the calib is missing — the global-anchor arm is opt-in
+    (``repa_global_weight > 0``), so a missing file means a real misconfig.
+    """
+    from safetensors.torch import load_file
+
+    from library.env import resolve_under_home
+
+    resolved = resolve_under_home(path)
+    if not resolved.is_file():
+        raise FileNotFoundError(
+            f"REPA global-anchor calib missing at {resolved}. Regenerate with:\n"
+            f"  uv run python bench/pe_cls_probe/build_calib.py --out {path}"
+        )
+    sd = load_file(str(resolved))
+    return sd["mean"].float(), sd["std"].float()
+
+
+def global_anchor_loss(
+    dit_global: torch.Tensor,
+    pe_patch: torch.Tensor,
+    mean: Optional[torch.Tensor],
+    std: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Global-anchor term: ``1 − cos(dit_global, pe_global)`` in fp32.
+
+    ``dit_global`` is the head-projected DiT global vector ``(B, d_enc)``;
+    ``pe_patch`` the CLS-dropped PE patch tokens ``(B, N, d_enc)`` (the target is
+    their mean). Both sides pass through the **same** per-dim z-score affine
+    (``mean``/``std``, the shared patch-mean calib) then L2-norm, so they live in
+    one comparable space. ``mean``/``std`` ``None`` ⇒ no affine (raw target).
+    """
+    pe_global = pe_patch.float().mean(dim=1)  # (B, d_enc)
+    dit_global = dit_global.float()
+    if mean is not None and std is not None:
+        mean = mean.to(dit_global)
+        std = std.to(dit_global)
+        dit_global = (dit_global - mean) / std
+        pe_global = (pe_global - mean) / std
+    dit_hat = F.normalize(dit_global, dim=-1)
+    pe_hat = F.normalize(pe_global, dim=-1)
+    cos = (dit_hat * pe_hat).sum(dim=-1)  # (B,)
+    return (1.0 - cos).mean()
+
+
 class REPAMethodAdapter(MethodAdapter):
     """Bridges REPA into AnimaTrainer's adapter dispatch.
 
@@ -245,6 +320,12 @@ class REPAMethodAdapter(MethodAdapter):
         self._spec = None
         self._anneal_steps = 0.0
         self._spatial_norm = False
+        # Global-anchor arm (docs/proposal/repa_global_anchor.md): re-inject the
+        # per-image global component spatial_norm strips. Off (weight 0) ⇒ inert.
+        self._global_weight = 0.0
+        self._global_norm = "zscore"
+        self._global_mean: Optional[torch.Tensor] = None
+        self._global_std: Optional[torch.Tensor] = None
         # Optimizer-step clock: train micro-batches seen, converted with
         # gradient_accumulation_steps at the anneal gate.
         self._train_micro_steps = 0
@@ -284,6 +365,26 @@ class REPAMethodAdapter(MethodAdapter):
         encoder = str(getattr(net, "_repa_encoder", "pe_spatial"))
         self._spec = get_bucket_spec(encoder)
         self._patch = int(ctx.unet.patch_spatial)
+
+        # Global-anchor arm — opt-in via repa_global_weight > 0. Needs the
+        # train-only projection head (built by the factory) + the patch-mean
+        # z-score calib. Load the affine once here (when on).
+        self._global_weight = float(getattr(net, "_repa_global_weight", 0.0) or 0.0)
+        self._global_norm = str(getattr(net, "_repa_global_norm", "zscore")).lower()
+        if self._global_weight > 0.0:
+            if getattr(net, "repa_global_head", None) is None:
+                logger.warning(
+                    "REPA: repa_global_weight=%g but the network has no "
+                    "'repa_global_head' (built by the LoRA factory when "
+                    "repa_global_weight>0) — global-anchor term is inert.",
+                    self._global_weight,
+                )
+                self._global_weight = 0.0
+            elif self._global_norm == "zscore":
+                calib = str(
+                    getattr(net, "_repa_global_calib", "") or DEFAULT_PATCHMEAN_CALIB
+                )
+                self._global_mean, self._global_std = load_patchmean_calib(calib)
 
         if self._mode == "absolute" and getattr(net, "repa_head", None) is None:
             raise ValueError(
@@ -328,6 +429,7 @@ class REPAMethodAdapter(MethodAdapter):
             f"weight={weight}{anneal_desc}"
             f"{', spatial_norm' if self._spatial_norm else ''}"
             f"{f', grad_heatmap/{self._grad_heatmap_every}' if self._grad_heatmap_every else ''}"
+            f"{f', global_anchor(w={self._global_weight:g}, norm={self._global_norm})' if self._global_weight > 0 else ''}"
             f"{head_desc}"
         )
 
@@ -437,7 +539,23 @@ class REPAMethodAdapter(MethodAdapter):
                 self._heat_runs += 1
 
         self._metrics["repa/align_loss"] = float(loss.detach())
-        return {"repa": loss}
+        out = {"repa": loss}
+
+        # Global-anchor term (complementary to the relational arm above):
+        # pool the SAME grid tokens to one vector, project to d_enc, z-score by
+        # the shared patch-mean calib, cosine-match to the PE patch-mean.
+        if self._global_weight > 0.0:
+            head = getattr(ctx.network, "repa_global_head", None)
+            if head is not None:
+                head_dtype = next(head.parameters()).dtype
+                dit_global = head(dit_tok.mean(dim=1).to(head_dtype))  # (B, d_enc)
+                g_loss = global_anchor_loss(
+                    dit_global, pe, self._global_mean, self._global_std
+                )
+                self._metrics["repa/global_loss"] = float(g_loss.detach())
+                out["repa_global"] = g_loss
+
+        return out
 
     # ------------------------------------------------- grad-heatmap diagnostic
     def _accumulate_grad_heatmap(

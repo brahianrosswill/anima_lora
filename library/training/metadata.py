@@ -142,7 +142,6 @@ def _build_subset_metadata(subset) -> dict[str, Any]:
         "color_aug": bool(subset.color_aug),
         "flip_aug": bool(subset.flip_aug),
         "random_crop": bool(subset.random_crop),
-        "keep_tokens": subset.keep_tokens,
         "keep_tokens_separator": subset.keep_tokens_separator,
         "secondary_separator": subset.secondary_separator,
         "enable_wildcard": bool(subset.enable_wildcard),

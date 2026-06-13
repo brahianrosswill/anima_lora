@@ -314,14 +314,23 @@ def stage_mangafy(
     text_mask_dilate: int,
     sd_match: list[str],
     sd_max_aspect: float,
+    only_stems: frozenset[str] | None = None,
     exclude_stems: frozenset[str] = frozenset(),
 ) -> tuple[int, int]:
     images = walk_images(src, recursive=recursive)
-    if exclude_stems:
+    # Tag selection: keep only_stems (None = all), then drop exclude_stems.
+    if only_stems is not None or exclude_stems:
         pre = len(images)
-        images = [p for p in images if p.stem not in exclude_stems]
+        images = [
+            p
+            for p in images
+            if (only_stems is None or p.stem in only_stems)
+            and p.stem not in exclude_stems
+        ]
         if len(images) != pre:
-            print(f"Excluding {pre - len(images)} monochrome-tagged images")
+            print(
+                f"Tag filter: keeping {len(images)}/{pre} images for the colorize set"
+            )
     if limit:
         images = images[:limit]
     # Selective routing: primary engine isn't sd, but ``sd_match`` paths get SD anyway.
@@ -656,6 +665,25 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=None, help="cap #images (QA)")
     parser.add_argument(
+        "--only_data_includes",
+        nargs="*",
+        default=[],
+        metavar="TAG",
+        help="restrict the colorize set to pages whose caption (in --caption_src) "
+        "carries one of these standalone tags (e.g. `genshin_impact`). Empty/omitted "
+        "= all pages eligible. Applied before --exclude_data_includes.",
+    )
+    parser.add_argument(
+        "--exclude_data_includes",
+        nargs="*",
+        default=[],
+        metavar="TAG",
+        help="drop any page whose caption (in --caption_src) carries one of these "
+        "standalone tags (e.g. `comic monochrome`). Net set = only_data_includes − "
+        "exclude_data_includes. Filtered pages get no condition synthesized, so the "
+        "train-time loader pairs them out automatically.",
+    )
+    parser.add_argument(
         "--mask_dir",
         default="post_image_dataset/masks",
         help="text/speech-bubble masks (black=text); the source grayscale is pasted "
@@ -770,12 +798,22 @@ def main() -> None:
         else []
     )
 
-    # Drop pure-B&W pages from the colorize set — they have no color to learn and
-    # would teach "B&W in → B&W out". Stems are matched against the caption master
-    # (--caption_src); the train-time loader applies the same exclusion by stem.
-    from library.datasets.dreambooth import monochrome_stems
+    # Select which pages enter the colorize set, by caption tags (matched against the
+    # caption master, --caption_src): net set = only_data_includes − exclude_data_includes.
+    #   • --only_data_includes  — if given, restrict to pages carrying one of these
+    #     tags (empty/omitted = all pages eligible);
+    #   • --exclude_data_includes — then drop pages carrying one of these.
+    # A page filtered out here gets no cond latent, and the train-time loader pairs only
+    # against cached cond latents, so the selection carries through to training with no
+    # second tag scan.
+    from library.datasets.dreambooth import stems_with_any_tag
 
-    exclude_stems = monochrome_stems(args.caption_src)
+    only_stems = (
+        stems_with_any_tag(args.caption_src, args.only_data_includes)
+        if args.only_data_includes
+        else None
+    )
+    exclude_stems = stems_with_any_tag(args.caption_src, args.exclude_data_includes)
 
     if not args.skip_mangafy:
         sd_kwargs = dict(
@@ -798,6 +836,7 @@ def main() -> None:
             text_mask_dilate=args.text_mask_dilate,
             sd_match=sd_match,
             sd_max_aspect=args.sd_max_aspect,
+            only_stems=only_stems,
             exclude_stems=exclude_stems,
         )
         print(

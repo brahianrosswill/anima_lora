@@ -38,7 +38,7 @@ compile_dynamic_seq = true
 # when use_custom_down_autograd is off and torch_compile is on. Only applies when
 # torch_compile is on AND grad_ckpt is off (the two repartition the same joint
 # graph and conflict → CheckpointError). 1.0 = off (default; no behavior change).
-activation_memory_budget = 0.75
+activation_memory_budget = 0.99
 
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step

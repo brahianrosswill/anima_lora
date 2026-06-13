@@ -151,24 +151,41 @@ def create_network(
         network._repa_anneal_steps = float(kwargs.get("repa_anneal_steps", 0.0) or 0.0)
         network._repa_spatial_norm = _as_bool(kwargs.get("repa_spatial_norm"))
         network._repa_grad_heatmap = float(kwargs.get("repa_grad_heatmap", 0) or 0)
+        # Global-anchor arm (docs/proposal/repa_global_anchor.md): re-inject the
+        # global component via a patch-mean target + train-only projection head.
+        network._repa_global_weight = float(
+            kwargs.get("repa_global_weight", 0.0) or 0.0
+        )
+        network._repa_global_norm = str(
+            kwargs.get("repa_global_norm", "zscore")
+        ).lower()
+        network._repa_global_calib = str(kwargs.get("repa_global_calib", "") or "")
+        from library.vision.encoders import get_encoder_info
+
+        enc_dim = get_encoder_info(network._repa_encoder).d_enc
+        dit_dim = int(unet.model_channels)
         if network._repa_mode == "absolute":
             from library.training.repa import REPAHead
-            from library.vision.encoders import get_encoder_info
 
-            enc_dim = get_encoder_info(network._repa_encoder).d_enc
-            dit_dim = int(unet.model_channels)
             network.repa_head = REPAHead(dit_dim, dit_dim, enc_dim)
             # Training-only: save_weights strips registered prefixes from the
             # checkpoint state_dict.
             network._training_only_prefixes.add("repa_head.")
+        if network._repa_global_weight > 0.0:
+            from library.training.repa import REPAGlobalHead
+
+            network.repa_global_head = REPAGlobalHead(dit_dim, enc_dim)
+            network._training_only_prefixes.add("repa_global_head.")
         logger.info(
             f"REPA[{network._repa_mode}]: weight={network._repa_weight}, "
             f"layer={network._repa_layer}, encoder={network._repa_encoder}, "
             f"anneal_steps={network._repa_anneal_steps:g}, "
-            f"spatial_norm={network._repa_spatial_norm}"
+            f"spatial_norm={network._repa_spatial_norm}, "
+            f"global_weight={network._repa_global_weight:g}"
         )
     else:
         network._repa_weight = 0.0
+        network._repa_global_weight = 0.0
 
     if cfg.use_timestep_mask:
         logger.info(

@@ -194,6 +194,11 @@ NETWORK_KWARGS: frozenset[str] = frozenset(
         # Lever-3 gate diagnostic: probe the alignment-gradient heatmap every N
         # micro-steps (0 = off); dumps <output_name>_repa_grad_heatmap.npz.
         "repa_grad_heatmap",
+        # Global-anchor arm (docs/proposal/repa_global_anchor.md): re-inject the
+        # per-image global component spatial_norm strips, via a patch-mean target.
+        "repa_global_weight",  # 0.0 = off; the factory builds repa_global_head when >0
+        "repa_global_norm",  # "zscore" (calib affine) | "none" (raw target)
+        "repa_global_calib",  # patch-mean z-score calib (safetensors), repo-relative
     }
 )
 

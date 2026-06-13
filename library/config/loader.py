@@ -62,7 +62,6 @@ class BaseSubsetParams:
     repeat_by_folder_name: bool = False
     sample_ratio: float = 1.0
     caption_separator: str = (",",)
-    keep_tokens: int = 0
     keep_tokens_separator: str = (None,)
     secondary_separator: Optional[str] = None
     enable_wildcard: bool = False
@@ -176,7 +175,6 @@ class ConfigSanitizer:
         "repeat_by_folder_name": bool,
         "sample_ratio": Any(float, int),
         "random_crop": bool,
-        "keep_tokens": int,
         "keep_tokens_separator": str,
         "secondary_separator": str,
         "caption_separator": str,
@@ -520,7 +518,6 @@ def generate_dataset_group_by_blueprint(
                     num_repeats: {subset.num_repeats}
                     repeat_by_folder_name: {subset.repeat_by_folder_name}
                     sample_ratio: {subset.sample_ratio}
-                    keep_tokens: {subset.keep_tokens}
                     caption_dropout_rate: {subset.caption_dropout_rate}
                     caption_dropout_every_n_epochs: {subset.caption_dropout_every_n_epochs}
                     caption_tag_dropout_rate: {subset.caption_tag_dropout_rate}

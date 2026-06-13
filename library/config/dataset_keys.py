@@ -38,7 +38,6 @@ _SUBSET_ASCENDABLE_KEYS = frozenset(
         "repeat_by_folder_name",
         "sample_ratio",
         "random_crop",
-        "keep_tokens",
         "keep_tokens_separator",
         "secondary_separator",
         "caption_separator",

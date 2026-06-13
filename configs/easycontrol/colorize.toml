@@ -34,6 +34,17 @@ name = "colorize"
 # math on a CPU ProcessPool; sd = learned sketch2manga screening (on-manifold
 # tones, needs `make easycontrol-download EASYADAPTER=colorize`).
 engine = "gpu"
+# Tag selection for the colorize set, matched against captions in image_dataset/.
+# Net set = only_data_includes − exclude_data_includes. Pages filtered out get no
+# condition synthesized, and the train-time loader pairs only against cached
+# conditions, so the selection carries end-to-end with no second scan. Edit then
+# re-run `make easycontrol-staging EASYADAPTER=colorize`.
+#   only_data_includes    — restrict to pages carrying one of these tags ([] = all).
+#   exclude_data_includes — then drop pages carrying one of these (e.g. monochrome
+#                           pure-B&W pages with nothing to colorize, or comic/4koma
+#                           panel pages whose tone the manga cond can't convey).
+only_data_includes = ["comic"]
+exclude_data_includes = ["monochrome"]
 # sd-engine-only knobs (uncomment when engine = "sd"):
 # steps = 40
 # cfg = 9.0
@@ -61,8 +72,8 @@ text_keep_comic = true
 # (network_module, use_easycontrol, blocks_to_swap, gradient/offload checkpointing)
 # are inherited from the base easycontrol method.
 [training]
-network_dim = 48
-network_alpha = 48
+network_dim = 32
+network_alpha = 32
 target_res = [896, 1024]
 network_args = [
     "b_cond_init=-6.0",
@@ -72,10 +83,11 @@ network_args = [
     "use_repa=true",
     "repa_weight=0.05",
     "repa_layer=8",
-    "repa_spatial_norm=true"
+    "repa_spatial_norm=true",
+    "repa_anneal_steps = 0.5"
 ]
 blocks_to_swap = 0
-output_name = "anima_colorize3"
+output_name = "anima_colorize_comic"
 sigmoid_bias = 0
 masked_loss=false
 
@@ -90,10 +102,9 @@ checkpointing_epochs = 4
 easycontrol_cond_noise_max = 0.0
 easycontrol_drop_p = 0.0
 
-caption_dropout_rate = 0.2
+caption_dropout_rate = 1.0
 use_shuffled_caption_variants = true
 use_shuffled_caption_variants_only = true
-
 
 # === dataset blueprint =======================================================
 # target = the existing COLOR illustrations — latents + TE already cached under
@@ -107,7 +118,6 @@ use_shuffled_caption_variants_only = true
 
 [general]
 caption_extension = '.txt'
-keep_tokens = 3
 
 [[datasets]]
 batch_size = 1

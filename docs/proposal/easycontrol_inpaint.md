@@ -109,7 +109,6 @@ text override:
 ```toml
 [general]
 caption_extension = '.txt'
-keep_tokens = 3
 
 [[datasets]]
 batch_size = 1
