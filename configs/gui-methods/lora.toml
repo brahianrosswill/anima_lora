@@ -10,14 +10,6 @@ caption_dropout_rate = 0.1
 output_name = "anima"
 blocks_to_swap = 0
 use_cmmd = false
-sample_prompts = []
-sample_every_n_epochs = 0
-sample_at_first = false
-sample_decode_inline = "false"
-use_repa = true
-[[datasets]]
-validation_split_num = 0
-validation_split = 0.0
 
 [variant]
 family = "lora"
@@ -25,13 +17,3 @@ label = "LoRA"
 description = "Plain classic LoRA — simplest baseline."
 order = 10
 target_res = [ 896, 1024,]
-run_sam_mask = true
-run_mit_mask = true
-mask_path_pattern = "*"
-mit_text_threshold = 0.8
-mit_dilate = 5
-[[variant.mask_rules]]
-prompts = [ "speech bubble", "text bubble",]
-threshold = 0.5
-dilate = 5
-
