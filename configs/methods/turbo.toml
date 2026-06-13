@@ -23,9 +23,6 @@ use_masked_loss = true
 
 channel_scaling_alpha = 0.5
 
-gradient_checkpointing = false
-unsloth_offload_checkpointing = false
-
 # Dynamo per-_forward graph budget. The loop traces the compiled block under
 # grad_mode × token-family × num_threads combos that land at the default 8 and
 # spill to eager; 64 gives ample headroom. Logged at startup.
@@ -169,7 +166,7 @@ ratio_normalization = true      # per-τ histogram normalization of r
 # and soft-rank (text axis). No new trainable params (the Gram form is
 # head-free). weight = 0 keeps the whole path OFF → byte-identical DP-DMD.
 [repa]
-weight = 0.05                   # λ on the Gram align loss. 0 = off; first live value 0.05 (LoRA-validated scale)
+weight = 0.0                    # λ on the Gram align loss. 0 = off; first live value 0.05 (LoRA-validated scale)
 layer = 8                       # DiT block tap (matches LoRA-family REPA)
 encoder = "pe_spatial"          # sidecar {stem}_anima_{encoder}.safetensors next to the TE cache
 every_n = 4                     # run the term every N student steps (amortization; ~0.08 partial fwd/step)

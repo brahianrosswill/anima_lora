@@ -1,7 +1,11 @@
 # Turbo × REPA — relational alignment for the DP-DMD student
 
 Status: **Phase 0 PASSED (DRIFT confirmed) — Phase 1 wired; first A/B arm
-INVALID (view bug, fixed 2026-06-13); retrain pending.** The `[repa]` section
+INVALID (view bug, fixed 2026-06-13); post-fix retrain (`repa2`) FAILED — REPA
+*amplifies* visual drift 5–10× instead of reducing it, with a train-loss /
+probe contradiction that points at the grad path, not the loss (see "Phase 1 —
+first results" below). Line blocked pending a grad-path diagnostic.** The
+`[repa]` section
 is live in `configs/methods/turbo.toml` (`weight = 0.0` default ⇒
 byte-identical; `--repa_weight 0.05` is the A/B arm); PE sidecars ride the
 distill `CachedDataset` (`load_repa_pe`), `train/repa_align_loss` +
@@ -157,6 +161,62 @@ right). Pre-registered gates, in order:
 
 If both this and soft-rank individually pass, a third composed run (both on)
 decides whether they stack.
+
+## Phase 1 — first results (2026-06-13): FAILED, blocked on a grad-path bug
+
+Post-fix retrain `anima_turbo_N_repa2` (`repa_weight=0.05`, `layer=8`,
+`pe_spatial`, `every_n=4`, `spatial_norm=true`, `per_step_expert=false`,
+`student_steps=4`; TB `output/logs/turbo/20260613-115205`). This is the
+**retrain after the view-bug fix**, so it should be a clean read of the arm.
+It is not — REPA made the very thing it optimizes worse.
+
+**Alignment-drift probe** (`bench/turbo_repa/probe_alignment_drift.py`, the
+unweighted relational Gram align loss to PE-Spatial — REPA's *own* objective;
+lower = better, "excess" = (student−base)/base):
+
+| σ | base | no-REPA `turbo_N_1250` | `repa2_625` | `repa2_1250` |
+|---|---|---|---|---|
+| 0.25 | 0.391 | +8.9% | +16.0% | +26.6% |
+| 0.50 | 0.207 | +21.2% | **+147.7%** | +161% |
+| 0.75 | 0.131 | +21.8% | **+194.8%** | +214% |
+| 0.97 | 0.137 | +12.7% | +53.8% | +65.1% |
+| 1.00 | 0.242 | −3.0% | −43.9% | −40.4% |
+
+REPA amplifies drift **5–10×** at every signal-bearing σ (0.25–0.97) vs the
+no-REPA baseline, and only improves alignment at pure noise (σ=1.0). The
+profile is **baked in by step 625 and flat through 1250** — same shape, same
+magnitude — so it is not a late-run blow-up that an earlier stop would dodge.
+(Runs: `bench/turbo_repa/results/20260613-1501` (1250), `…-1530` (625);
+baseline `…20260612-2244`.)
+
+**The smoking gun — train loss ≠ checkpoint reality.** `train/repa_align_loss`
+logged **0.080** at step 630 (below base — looks like it is working), but the
+offline probe of that exact checkpoint measures **0.39–0.51** at mid-σ
+(catastrophically *above* base). A healthy-looking forward loss sitting on a
+checkpoint that didn't move is the signature of
+[[project_turbo_view_ckpt_recompute_hazard]] (set_view/set_student_step are
+global; a ckpt'd forward must backward while its view is live or recompute
+silently corrupts grads — loss values stay healthy). The REPA forward
+(`distill.py:~1101`) runs under `selective_block_grad_ckpt` right after a
+`set_student_step()`, and the one consistent improvement — σ=1.0 (−44%) — fits:
+only the noise-end head gets a clean gradient, everywhere with image content
+drifts further off-manifold. **The 2026-06-13 view-bug "fix" did not resolve
+this** — either it was incomplete or the cause is elsewhere on the grad path.
+
+**Caption-ranking probe** (`bench/dpdmd/.../20260613-1517`, vs no-REPA
+`…20260611-2020`) is a wash-to-worse: REPA nudged up the σ≈1 *shuffled* tail
+(0.750→0.792 @1.0, the originally-flagged hotspot) but made the **hard**
+(semantically-close contrastive) rank@1 worse at every σ (e.g. 0.75:
+0.941→0.824; 0.97: 0.882→0.706). Both probe gates still fire DEGRADATION/DRIFT.
+
+**Next step (blocking).** Before any further training or weight sweep, confirm
+the REPA gradient actually lands on the deployed student: rerun a short REPA
+stint with grad-ckpt off for the REPA forward (or assert view-liveness at the
+REPA backward) and check whether the step-N checkpoint's *probed* align loss
+tracks the *logged* `train/repa_align_loss`. If they reconcile, the
+ckpt-recompute view corruption is confirmed and fixable; if they don't, the
+drift is real and the arm is dead. Do not interpret any weight/anneal sweep
+until this contradiction is closed.
 
 ## Secondary arm (fallback only)
 
