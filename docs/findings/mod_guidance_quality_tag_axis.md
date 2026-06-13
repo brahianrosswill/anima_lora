@@ -1,5 +1,7 @@
 # Mod guidance: the pooled-text "quality axis" — DEMOTED (geometry-only); replaced by image-space channel attribution
 
+<!-- check-docs: ignore-flags (historical record of a demoted probe; the flags below are not live) -->
+
 > **STATUS (2026-05-30): the "quality axis" framing is demoted. Read this first.**
 >
 > Two load-bearing claims in this doc were never tested the way they were

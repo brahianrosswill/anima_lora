@@ -108,7 +108,7 @@ of the total softmax mass, and is freely learnable.
 `b_cond` is a per-block scalar `nn.Parameter`. Init −10 is set via
 `network_args = ["b_cond_init=-10.0", ...]` in `configs/easycontrol/easycontrol.toml`.
 
-The same script's **Section B** (`--skip_sweep`) verifies the equivalence
+The same (since-removed) bench's **Section B** verifies the equivalence
 holds under the live two-stream layout — separate cond Q/K/V, cond's own
 RoPE at smaller S_c, cond's own self-attention. Result: rel_l2_max = 2.6e-5
 in fp32 / 8.0e-4 in bf16, α ≈ 1.0 — same EXACT verdict.

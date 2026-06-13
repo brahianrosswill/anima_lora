@@ -44,10 +44,10 @@ python inference.py --dcw                                      \
     ...  # other inference args
 ```
 
-v4 mode (auto-resolves the most-recent `fusion_head.safetensors` under `post_image_dataset/dcw/` first, then `bench/dcw/results/`):
+Calibrator mode (auto-resolves the most-recent `fusion_head.safetensors` under `post_image_dataset/dcw/` first, then `bench/dcw/results/`):
 
 ```bash
-python inference.py --dcw_v4 auto --dcw_v4_disable_shrinkage   \
+python inference.py --dcw_calibrator auto   \
     ...
 ```
 
@@ -77,10 +77,10 @@ End artifact: `<run>/fusion_head.safetensors` — single file, ~285k params + pe
 | `--dcw_lambda` | scalar | `-0.015` | Negative on Anima — see findings. Tuned for `--dcw_band_mask LL`; use `-0.010` if you switch to `all`. |
 | `--dcw_schedule` | scalar | `one_minus_sigma` | One of `one_minus_sigma`, `sigma_i`, `const`, `none`. |
 | `--dcw_band_mask` | scalar | `LL` | Haar subband mask: `LL`, `HH`, `LH+HL+HH`, `all`. LL-only is strictly better than `all` on Anima — see §LL-only correction. |
-| `--dcw_v4` | v4 | unset | Path to `fusion_head.safetensors` (or directory containing one). When set, overrides scalar `--dcw_lambda` with per-step controller output. |
-| `--dcw_v4_warmup_k` | v4 | (from artifact) | Override the warmup-k baked into the artifact metadata. |
-| `--dcw_v4_disable_shrinkage` | v4 | off | Skip σ̂²-based shrinkage on `α̂`. **Recommended** while the prototype's σ̂² channel doesn't pass Gate B. |
-| `--dcw_v4_disable_backstop` | v4 | off | Skip the caption-length backstop. Currently a no-op (`tau_short` not yet shipped in the artifact). |
+| `--dcw_calibrator` | calibrator | unset | Path to `fusion_head.safetensors` (or directory containing one). When set, overrides scalar `--dcw_lambda` with per-step controller output. Legacy alias: `--dcw_v4`. |
+| `--dcw_calibrator_gain` | calibrator | `1.0` | Multiplier on the head's `α̂` (in λ-units). `2.0` doubles per-prompt magnitude, negative flips sign; per-step λ is clamped to `±0.05`. Legacy alias: `--dcw_v4_alpha_gain`. |
+
+The warmup-k (`k_warmup`) is read from the artifact metadata — there is no CLI override. The shipped controller is α̂-only (no σ̂²-shrinkage path, no caption-length backstop), so the prototype's `--dcw_v4_disable_*` toggles no longer exist.
 
 The final step (`σ_{i+1} == 0`) is always skipped in both modes — at that step `prev == x0_pred` exactly, so DCW would be a numerical no-op.
 
@@ -118,7 +118,7 @@ Trained on existing `bench/dcw/results/` data — 176 rows, 40 unique stems, 8-f
 | r(σ̂_p, std_s r) | ≥ 0.4 | −0.01 ✗ |
 | NLL improvement vs N(0, σ²_pop) | ≥ 15% | +5.7% ✗ |
 
-α̂ channels pass strongly; σ̂² channel doesn't (under-supervised at one-seed-per-prompt-mostly data). **Ships with `--dcw_v4_disable_shrinkage` by default** until `make dcw`'s 3-seed pool reruns the gate. If σ̂² still fails after, the controller stays shrinkage-off in production — α̂ alone with the clamp guard is gate-passing.
+α̂ channels pass strongly; σ̂² channel doesn't (under-supervised at one-seed-per-prompt-mostly data). The shipped controller is therefore **α̂-only** (no σ̂²-shrinkage path) until `make dcw`'s 3-seed pool reruns the gate. If σ̂² still fails after, the controller stays α̂-only in production — α̂ alone with the clamp guard is gate-passing.
 
 **Tail-formula correction.** The proposal pseudocode's `head_corr = α_eff · μ_g[i] / tail_norm` mixes gap-units (α_eff is the integrated tail gap residual, not λ) with λ-units. The controller actually uses the LSQ-projected form `Δλ_i = −α_eff · μ_g[i] / Σ_{tail}(μ_g · S_pop)`, which matches the proposal's intent of distributing correction proportional to μ_g while preserving units.
 

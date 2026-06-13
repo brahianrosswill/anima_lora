@@ -1,5 +1,7 @@
 # L2P latent→pixel transfer — shelved on the Anima budget
 
+<!-- check-docs: ignore-flags (historical record of shelved work; the flags below never shipped) -->
+
 This records why **L2P** (turn the frozen latent DiT into a pixel-space DiT by
 swapping the VAE for large-patch RGB tokenization) was not promoted past its
 Phase-0 probe on Anima. The short version: the paper's load-bearing premise —

@@ -1,5 +1,7 @@
 # Embedding Inversion
 
+<!-- check-docs: ignore-flags (archived design record; commands below drive scripts under the gitignored archive/inversion/ tree) -->
+
 > **Archived feature (2026-05-20).** Embedding inversion and reference (K-slot
 > prefix) inversion are no longer wired into the live pipeline — the `invert` /
 > `invert-ref` / `exp-test-ref` make targets, the `--prefix_weight` inference

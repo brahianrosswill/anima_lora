@@ -28,10 +28,18 @@ Design choices that keep it low-noise:
 
 CLI-flag caveat: the "known flags" set is every ``--x`` mentioned anywhere in
 the ``.py`` sources — permissive on purpose (a noisy linter gets disabled). It
-reliably catches a *fully removed* flag (e.g. the retired ``--smc_cfg_*``) but
-won't notice one that lingers only in a comment. Foreign tool flags in shell
-snippets (uv / gh / ruff …) are suppressed via ``FOREIGN_FLAGS``; that's why
-flags are WARN, not ERROR. Promote with ``--strict`` once the docs are clean.
+reliably catches a *fully removed* flag but won't notice one that lingers only
+in a comment. Several benign mentions are suppressed so they don't read as
+drift, since that's why flags are WARN, not ERROR:
+  * foreign tool flags in shell snippets (uv / gh / ruff …) → ``FOREIGN_FLAGS``;
+  * bare placeholders in example payloads (``--some_flag``) → ``PLACEHOLDER_FLAGS``;
+  * truncated glob/prefix families (``--region-*`` → ``--region-``, ``--ddp_*``
+    → ``--ddp_``) — any token ending in ``-`` or ``_`` is skipped;
+  * a flag named on a line that *documents its removal* ("``--fp8`` was removed",
+    "no ``--smc_cfg_k`` … retired") → ``_REMOVAL_RE``;
+  * a doc that is a historical record of archived/shelved work, opted out with a
+    ``<!-- check-docs: ignore-flags -->`` marker anywhere in the file.
+Promote with ``--strict`` once the docs are clean.
 
 Usage:
     python scripts/check_docs.py            # human report, exit 1 on any ERROR
@@ -83,6 +91,24 @@ FOREIGN_FLAGS = {
     "--token",
     "--name-only",
 }
+
+# Bare placeholders that appear in example payloads (JSON ``"extra"`` arrays,
+# schema snippets) and are never meant to resolve to a real flag.
+PLACEHOLDER_FLAGS = {
+    "--some_flag",
+}
+
+# A flag named on a line whose prose explicitly documents its *removal* is not
+# drift — the doc is correctly telling readers the flag is gone. Skip flag
+# WARNs on any line matching this.
+_REMOVAL_RE = re.compile(
+    r"\b(removed|retired|gone|deprecated|no longer)\b", re.IGNORECASE
+)
+
+# Docs that are historical records of archived/shelved work opt out of the flag
+# check by carrying this marker anywhere in the file — their commands reference
+# flags that only ever existed in now-removed / gitignored-archive code.
+_IGNORE_FLAGS_MARKER = "check-docs: ignore-flags"
 
 # A path token: either multi-segment (has a slash) or a bare file with a known
 # extension. The char class deliberately excludes ':' '#' '(' ')' so line/symbol
@@ -138,7 +164,9 @@ def known_flags() -> set[str]:
     flags: set[str] = set()
     for path in _tracked("*.py"):
         try:
-            flags.update(_FLAG_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
+            flags.update(
+                _FLAG_RE.findall(path.read_text(encoding="utf-8", errors="ignore"))
+            )
         except OSError:
             continue
     return flags
@@ -152,7 +180,9 @@ def known_make_targets() -> set[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
-        if not any(isinstance(t, ast.Name) and t.id == "COMMANDS" for t in node.targets):
+        if not any(
+            isinstance(t, ast.Name) and t.id == "COMMANDS" for t in node.targets
+        ):
             continue
         if isinstance(node.value, ast.Dict):
             for key in node.value.keys:
@@ -212,9 +242,11 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
         rel = str(doc.relative_to(REPO_ROOT))
         in_fence = False
         try:
-            lines = doc.read_text(encoding="utf-8", errors="ignore").splitlines()
+            text = doc.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        lines = text.splitlines()
+        skip_flags_doc = _IGNORE_FLAGS_MARKER in text
 
         for lineno, line in enumerate(lines, 1):
             if line.lstrip().startswith(("```", "~~~")):
@@ -230,7 +262,14 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
                     if bad and bad not in seen:
                         seen.add(bad)
                         issues.append(
-                            Issue("ERROR", rel, lineno, "path", bad, f"path does not exist: {bad}")
+                            Issue(
+                                "ERROR",
+                                rel,
+                                lineno,
+                                "path",
+                                bad,
+                                f"path does not exist: {bad}",
+                            )
                         )
 
             # make targets — code fragments only
@@ -242,18 +281,47 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
                     if tgt.endswith("-") or tgt in targets:
                         continue
                     issues.append(
-                        Issue("ERROR", rel, lineno, "make-target", tgt, f"unknown make target: make {tgt}")
+                        Issue(
+                            "ERROR",
+                            rel,
+                            lineno,
+                            "make-target",
+                            tgt,
+                            f"unknown make target: make {tgt}",
+                        )
                     )
 
             # cli flags — code fragments only, WARN level
+            if skip_flags_doc or _REMOVAL_RE.search(line):
+                continue
+            low = line.lower()
             flagged: set[str] = set()
             for frag in fragments:
                 for flag in _FLAG_RE.findall(frag):
-                    if flag in flags or flag in FOREIGN_FLAGS or flag in flagged:
+                    if (
+                        flag in flags
+                        or flag in FOREIGN_FLAGS
+                        or flag in PLACEHOLDER_FLAGS
+                    ):
+                        continue
+                    # truncated glob / prefix family (`--region-*`, `--ddp_*`)
+                    if flag.endswith(("-", "_")) or flag in flagged:
+                        continue
+                    # negated mention ("No `--vr_frozen_ref_dit` flag") — the doc
+                    # is telling readers it doesn't exist, not using it.
+                    fl = flag.lower()
+                    if f"no {fl}" in low or f"no `{fl}" in low:
                         continue
                     flagged.add(flag)
                     issues.append(
-                        Issue("WARN", rel, lineno, "cli-flag", flag, f"flag not declared in any .py: {flag}")
+                        Issue(
+                            "WARN",
+                            rel,
+                            lineno,
+                            "cli-flag",
+                            flag,
+                            f"flag not declared in any .py: {flag}",
+                        )
                     )
 
     return issues
@@ -263,10 +331,14 @@ def collect_issues(include_bench: bool = False) -> list[Issue]:
 # CLI
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Lint doc references against the live tree.")
+    ap = argparse.ArgumentParser(
+        description="Lint doc references against the live tree."
+    )
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--strict", action="store_true", help="WARN-level issues also fail")
-    ap.add_argument("--include-bench", action="store_true", help="also scan bench/ scratch docs")
+    ap.add_argument(
+        "--include-bench", action="store_true", help="also scan bench/ scratch docs"
+    )
     args = ap.parse_args(argv)
 
     issues = collect_issues(include_bench=args.include_bench)

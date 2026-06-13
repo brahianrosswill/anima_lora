@@ -1,5 +1,7 @@
 # Spectral Guidance — no low-rank guidable subspace on Anima (Phase 0 NO-GO)
 
+<!-- check-docs: ignore-flags (historical record of a NO-GO probe; the flags below never shipped) -->
+
 This records why **Spectral Guidance** (Moreira et al., *Spectral Guidance for
 Flexible and Efficient Control of Diffusion Models*, arXiv:2605.28900) was not
 promoted past its Phase-0 falsification gate on Anima. The short version: the

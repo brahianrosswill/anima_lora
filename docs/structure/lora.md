@@ -126,7 +126,7 @@ name = "lora_unet_blocks_{i}_{submodule}_{linear}"
              lora_unet_blocks_27_mlp_layer2
 ```
 
-Filters: `--network_target` regex, `--layer_start`/`--layer_end` (block-index range), `exclude_patterns` / `include_patterns`. These let you constrain plain LoRA to, say, cross-attention only (`*_cross_attn_*`) or just the mid-stack blocks.
+Filters (all set as `network_args`, e.g. `network_args = ["include_patterns=.*_cross_attn_.*", "layer_start=12"]`): `include_patterns` / `exclude_patterns` are regexes matched with `re.fullmatch` against the module name, and `layer_start`/`layer_end` bound the block-index range. These let you constrain plain LoRA to, say, cross-attention only (`.*_cross_attn_.*`) or just the mid-stack blocks.
 
 After `apply_to()`, LoRA parameters are the **only** trainable tensors. Everything else is frozen.
 

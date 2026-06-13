@@ -273,7 +273,7 @@ only the tagger node's vendor needs them.
 `archive/inversion/invert_embedding.py` already does per-image gradient
 descent on ψ_src to minimize FM loss through the frozen DiT — ground-truth
 quality at the cost of minutes per image. Not yet wired into the edit
-pipeline. Intended use: a `--psi_src_mode invert` flag in
+pipeline. Intended use: a (not-yet-built) `psi_src_mode=invert` option in
 `scripts/edit.py` for users willing to wait for max fidelity.
 
 Move-out-of-archive needed; otherwise no new code.
