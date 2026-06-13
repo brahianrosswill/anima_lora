@@ -58,6 +58,14 @@ def tiny_latents():
 
 
 def iter_method_names():
-    methods_dir = REPO_ROOT / "configs" / "methods"
-    for path in sorted(methods_dir.glob("*.toml")):
-        yield path.stem
+    configs_dir = REPO_ROOT / "configs"
+    names: set[str] = set()
+    # Flat folder: configs/methods/<method>.toml
+    for path in (configs_dir / "methods").glob("*.toml"):
+        names.add(path.stem)
+    # Self-contained per-method dir: configs/<method>/<method>.toml (the
+    # EasyControl pilot — auto-discovered by _resolve_method_path the same way).
+    for path in configs_dir.glob("*/*.toml"):
+        if path.parent.name == path.stem:
+            names.add(path.stem)
+    yield from sorted(names)

@@ -58,7 +58,7 @@ pe_encoder = "pe_spatial"
 
 # Training overrides for `make easycontrol EASYADAPTER=near_twin` (optional).
 # Each key is folded in as a `--key value` CLI override on top of
-# configs/methods/easycontrol.toml — CLI wins the merge chain, so anything here
+# configs/easycontrol/easycontrol.toml — CLI wins the merge chain, so anything here
 # beats the shipped method default; bools become bare flags, lists spread.
 # `--dataset_config` is injected automatically (points at this file's blueprint).
 # output_name defaults to anima_easycontrol_<name>; omit the table entirely to

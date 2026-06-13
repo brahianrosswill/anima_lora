@@ -126,7 +126,7 @@ caption_tag_dropout_rate = 0.1
 
 # Training overrides for `make easycontrol EASYADAPTER=near_twin` (optional).
 # Each key is folded in as a `--key value` CLI override on top of
-# configs/methods/easycontrol.toml; `--dataset_config` is injected automatically.
+# configs/easycontrol/easycontrol.toml; `--dataset_config` is injected automatically.
 # output_name defaults to anima_easycontrol_<name>; omit the table to train with
 # the plain easycontrol method defaults.
 [training]

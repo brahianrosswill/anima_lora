@@ -104,6 +104,10 @@ CONFLICT_GLOBS: tuple[str, ...] = (
     "configs/presets.toml",
     "configs/sam_mask.yaml",
     "configs/datasets/*",
+    # Self-contained per-method dirs (configs/<method>/<method>.toml) — the
+    # EasyControl pilot. Shipped method config, same prompt-on-conflict policy
+    # as configs/methods/*.toml.
+    "configs/easycontrol/*.toml",
 )
 
 

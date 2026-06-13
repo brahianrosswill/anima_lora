@@ -67,7 +67,7 @@ text_keep_copyright = true
 # page", so binding the tag lets a "comic" prompt steer toward panelled output.
 text_keep_comic = true
 
-# Training overrides folded onto configs/methods/easycontrol.toml (CLI wins the
+# Training overrides folded onto configs/easycontrol/easycontrol.toml (CLI wins the
 # merge chain). Only the colorize-specific deltas live here; infra knobs
 # (network_module, use_easycontrol, blocks_to_swap, gradient/offload checkpointing)
 # are inherited from the base easycontrol method.

@@ -1,9 +1,20 @@
 # configs/easycontrol/
 
-Auto-generated EasyControl dataset blueprints for **curated / mined** pair
-trees — the output side of the EasyControl builder workflow, kept apart from the
-shipped training config (`configs/methods/easycontrol.toml`) and the canonical
-dataset blueprint (`configs/datasets/easycontrol.toml`).
+This directory holds two kinds of file:
+
+- **`easycontrol.toml`** — the **shipped, self-contained method config**
+  (method settings + inline dataset blueprint, no `dataset_config` reference).
+  Auto-discovered by `--method easycontrol` / `make easycontrol` via
+  `_resolve_method_path` (the per-method-dir layout takes precedence over the
+  flat `configs/methods/` folder). This is the EasyControl pilot for the
+  consolidated per-method layout — see CLAUDE.md "Config flow".
+- **Auto-generated descriptor blueprints** (`near_twins.toml`, `colorize.toml`,
+  …) — the output side of the EasyControl builder workflow for **curated /
+  mined** pair trees, selected via `EASYADAPTER=<name>`.
+
+The `gui-methods` variant (`configs/gui-methods/easycontrol.toml`) still points
+at the standalone `configs/datasets/easycontrol.toml` blueprint; keep the inline
+subset in `easycontrol.toml` in sync with it until gui-methods is migrated.
 
 | File | Producer | Points at |
 |---|---|---|
@@ -27,7 +38,7 @@ make easycontrol            EASYADAPTER=near_twin   # train (easycontrol method
                                                     #   + [training] overrides)
 ```
 
-The training run uses the shipped `configs/methods/easycontrol.toml` method.
+The training run uses the shipped `configs/easycontrol/easycontrol.toml` method.
 train.py's dataset-config validator only accepts `[general]`/`[[datasets]]`, so
 the train step first extracts the blueprint into a generated sidecar
 (`post_image_dataset/easycontrol/near_twins/dataset_config.toml`, regenerated

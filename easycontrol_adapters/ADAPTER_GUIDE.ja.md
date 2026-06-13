@@ -140,7 +140,7 @@ colorize がターゲット latent とテキストに**共有の** `post_image_d
 
 ## 5. もの 3 — メソッド config (`configs/methods/<task>.toml`)
 
-`configs/methods/easycontrol.toml` のほぼコピーです。唯一の構造的な変更は自分のデータセットを指す `dataset_config` だけで、残りはハイパーパラメータです。
+`configs/easycontrol/easycontrol.toml` のほぼコピーです。唯一の構造的な変更は自分のデータセットを指す `dataset_config` だけで、残りはハイパーパラメータです。
 
 colorize (`configs/methods/colorize.toml`)、重要な行:
 

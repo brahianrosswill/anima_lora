@@ -140,7 +140,7 @@ colorize가 타깃 레이턴트와 텍스트에 **공유** `post_image_dataset/l
 
 ## 5. 항목 3 — 메서드 config (`configs/methods/<task>.toml`)
 
-`configs/methods/easycontrol.toml`의 거의 복사본입니다. 유일한 구조적 변경은 자신의 데이터셋을 가리키는 `dataset_config`이며, 나머지는 하이퍼파라미터입니다.
+`configs/easycontrol/easycontrol.toml`의 거의 복사본입니다. 유일한 구조적 변경은 자신의 데이터셋을 가리키는 `dataset_config`이며, 나머지는 하이퍼파라미터입니다.
 
 colorize(`configs/methods/colorize.toml`), 중요한 라인들:
 

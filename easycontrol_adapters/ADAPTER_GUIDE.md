@@ -240,7 +240,7 @@ text cache).
 
 ## 5. Thing 3 — the method config (`configs/methods/<task>.toml`)
 
-This is almost a copy of `configs/methods/easycontrol.toml`. The only structural
+This is almost a copy of `configs/easycontrol/easycontrol.toml`. The only structural
 change is `dataset_config`, pointing at your dataset; the rest is just
 hyperparameters.
 

@@ -140,7 +140,7 @@ validation_seed = 42
 
 ## 5. 第三件事——方法 config（`configs/methods/<task>.toml`）
 
-这几乎是 `configs/methods/easycontrol.toml` 的副本。唯一的结构性改动是 `dataset_config` 指向你的数据集；其余都是超参数。
+这几乎是 `configs/easycontrol/easycontrol.toml` 的副本。唯一的结构性改动是 `dataset_config` 指向你的数据集；其余都是超参数。
 
 colorize（`configs/methods/colorize.toml`），重要的几行：
 

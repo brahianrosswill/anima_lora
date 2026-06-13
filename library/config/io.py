@@ -145,18 +145,30 @@ def _substitute_templates(value: Any, ctx: dict) -> Any:
     return value
 
 
-def _read_dataset_sections(toml_path: str) -> dict:
-    """Return ``{general, datasets}`` sections from a TOML file, or ``{}``.
+def _resolve_method_path(
+    configs_dir: str, methods_subdir: str, method: Optional[str]
+) -> Optional[str]:
+    """Resolve the on-disk path of a method TOML, honoring the self-contained
+    per-method-directory layout.
 
-    Used to harvest dataset-blueprint overrides from method TOMLs without
-    going through the flat method+preset merge (which deliberately skips
-    these sections).
+    A method may live either in the flat folder (``configs/<methods_subdir>/
+    <method>.toml`` — the original layout) or in its own consolidated directory
+    (``configs/<method>/<method>.toml`` — method config + inline dataset
+    blueprint in one file, the EasyControl pilot). The per-method dir is
+    preferred when present, but only for the default ``methods`` subdir — the
+    ``gui-methods`` tree stays flat.
+
+    Returns the flat-folder path when no per-method file exists (callers that
+    require the file raise on the missing flat path), or ``None`` when
+    ``method`` is falsy.
     """
-    if not os.path.exists(toml_path):
-        return {}
-    with open(toml_path, "r", encoding="utf-8") as f:
-        raw = toml.load(f)
-    return {k: v for k, v in raw.items() if k in _DATASET_CONFIG_SECTIONS}
+    if not method:
+        return None
+    if methods_subdir == "methods":
+        per_method = os.path.join(configs_dir, method, f"{method}.toml")
+        if os.path.exists(per_method):
+            return per_method
+    return os.path.join(configs_dir, methods_subdir, f"{method}.toml")
 
 
 def _normalize_config_path(config_file: str) -> str:
@@ -269,14 +281,35 @@ def load_dataset_config_from_base(
                 sections = cfg_sections
                 source_raw = cfg_raw
 
+    if method is not None and not config_file:
+        method_path = _resolve_method_path(configs_dir, methods_subdir, method)
+        if method_path and os.path.exists(method_path):
+            with open(method_path, "r", encoding="utf-8") as f:
+                method_raw = toml.load(f)
+            method_sections = {
+                k: v for k, v in method_raw.items() if k in _DATASET_CONFIG_SECTIONS
+            }
+            # A method file may carry a *full* inline blueprint (the
+            # self-contained per-method-dir layout, e.g.
+            # configs/easycontrol/easycontrol.toml) or just scalar overrides of
+            # the base blueprint. A full blueprint == ``[[datasets]]`` with at
+            # least one subset → replace wholesale (mirrors the ``config_file``
+            # path, including using the method file as the template-substitution
+            # source). Scalar-only / subset-less sections keep the shallow
+            # override so a method bumping ``batch_size`` doesn't drop base's
+            # subsets (see tests/test_folder_repeats.py).
+            method_has_full_blueprint = any(
+                isinstance(d, dict) and d.get("subsets")
+                for d in (method_sections.get("datasets") or [])
+            )
+            if method_has_full_blueprint:
+                sections = method_sections
+                source_raw = method_raw
+            elif method_sections:
+                _apply_dataset_overrides(sections, method_sections)
+
     if not sections.get("datasets"):
         return None
-
-    if method is not None and not config_file:
-        method_path = os.path.join(configs_dir, methods_subdir, f"{method}.toml")
-        method_override = _read_dataset_sections(method_path)
-        if method_override:
-            _apply_dataset_overrides(sections, method_override)
 
     ctx = {
         k: v
@@ -457,9 +490,7 @@ def _iter_method_preset_layers(
     unknown presets silently.
     """
     base_path = os.path.join(configs_dir, "base.toml")
-    method_path = (
-        os.path.join(configs_dir, methods_subdir, f"{method}.toml") if method else None
-    )
+    method_path = _resolve_method_path(configs_dir, methods_subdir, method)
     if require_files:
         for p in (base_path, method_path):
             if p and not os.path.exists(p):
@@ -628,13 +659,13 @@ def _render_merged_toml(
             return 0
         if src.startswith("configs/presets.toml") or src.startswith("configs/custom/"):
             return 1
-        # Method file — lives under configs/methods/ by default, or under
-        # configs/gui-methods/ when --methods_subdir=gui-methods is used.
-        if src.startswith("configs/methods/") or src.startswith("configs/gui-methods/"):
-            return 2
         if src == "CLI":
             return 4
-        return 3
+        # Method file — lives under configs/methods/ by default, configs/
+        # gui-methods/ when --methods_subdir=gui-methods, or its own
+        # configs/<method>/<method>.toml dir (self-contained per-method layout).
+        # Anything that isn't base/preset/custom/CLI is the method layer.
+        return 2
 
     order = sorted(by_source, key=_rank)
 
