@@ -153,7 +153,12 @@ class SidecarSpec:
     loader: Callable[[ImageInfo], Optional[Any]]
     out_key: str
     policy: str = "all_or_nothing"
-    enabled: Callable[[], bool] = lambda: True
+    # Name of the dataset attribute gating this channel: truthy → active,
+    # ``None`` → always on. A plain attribute name (not a closure) keeps the
+    # spec picklable so the dataset can be shipped to DataLoader workers under
+    # Windows/`spawn` (a stored lambda raised "Can't get local object
+    # ...<locals>.<lambda>" at first iteration).
+    enabled_attr: Optional[str] = None
     mask_key: Optional[str] = None
     uniform_shape: bool = False
 
@@ -248,23 +253,26 @@ class BaseDataset(torch.utils.data.Dataset):
         # soft-tokens contrastive negatives stay bespoke — they are drawn by a
         # sampler from *other* stems, not loaded from a per-image file.
         self._sidecar_specs: List[SidecarSpec] = []
+        # Loaders are bound methods (not lambdas) and `enabled_attr` names a
+        # dataset attribute rather than capturing one in a closure, so every
+        # spec pickles cleanly for Windows/`spawn` DataLoader workers.
         self.register_sidecar(
             SidecarSpec(
                 name="inversion_runs",
-                loader=lambda info: self._try_load_inversion_runs(info.absolute_path),
+                loader=self._try_load_inversion_runs,
                 out_key="inversion_runs",
                 policy="masked",
                 mask_key="inversion_mask",
-                enabled=lambda: bool(self.inversion_dir),
+                enabled_attr="inversion_dir",
             )
         )
         self.register_sidecar(
             SidecarSpec(
                 name="byg",
-                loader=lambda info: self._try_load_byg_tuple(info.absolute_path),
+                loader=self._try_load_byg_tuple,
                 out_key="byg_",
                 policy="dict",
-                enabled=lambda: bool(self.byg_text_dir),
+                enabled_attr="byg_text_dir",
             )
         )
         self.register_sidecar(
@@ -278,7 +286,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 # norm; the shape guard skips the term on the rare
                 # aspect-rounding edge instead of crashing the epoch.
                 uniform_shape=True,
-                enabled=lambda: self.load_repa_pe,
+                enabled_attr="load_repa_pe",
             )
         )
 
@@ -1425,7 +1433,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 ok = len({tuple(v.shape) for v in values}) == 1
             example[spec.out_key] = torch.stack(values, dim=0) if ok else None
 
-    def _try_load_inversion_runs(self, image_abs_path: str) -> Optional[torch.Tensor]:
+    def _try_load_inversion_runs(self, info: ImageInfo) -> Optional[torch.Tensor]:
         """Load <stem>_inverted_run{0..N-1}.safetensors from self.inversion_dir.
 
         Returns a [N_runs, S, D] tensor, or None if any of the expected runs is missing
@@ -1433,7 +1441,7 @@ class BaseDataset(torch.utils.data.Dataset):
         """
         if not self.inversion_dir:
             return None
-        stem = os.path.splitext(os.path.basename(image_abs_path))[0]
+        stem = os.path.splitext(os.path.basename(info.absolute_path))[0]
         from safetensors.torch import load_file
 
         runs = []
@@ -1545,7 +1553,7 @@ class BaseDataset(torch.utils.data.Dataset):
         )
         return (len(kept), dropped)
 
-    def _try_load_byg_tuple(self, image_abs_path: str) -> Optional[dict]:
+    def _try_load_byg_tuple(self, info: ImageInfo) -> Optional[dict]:
         """Load <stem>_byg.safetensors from self.byg_text_dir.
 
         Returns ``{f"{role}_emb": Tensor[S,D], f"{role}_mask": Tensor[S]}`` for
@@ -1554,7 +1562,7 @@ class BaseDataset(torch.utils.data.Dataset):
         """
         if not self.byg_text_dir:
             return None
-        stem = os.path.splitext(os.path.basename(image_abs_path))[0]
+        stem = os.path.splitext(os.path.basename(info.absolute_path))[0]
         from safetensors.torch import load_file
 
         p = os.path.join(self.byg_text_dir, f"{stem}_byg.safetensors")
@@ -1828,8 +1836,11 @@ class BaseDataset(torch.utils.data.Dataset):
             captions.append(caption)
 
             for spec in self._sidecar_specs:
+                enabled = spec.enabled_attr is None or bool(
+                    getattr(self, spec.enabled_attr)
+                )
                 sidecar_values[spec.name].append(
-                    spec.loader(image_info) if spec.enabled() else None
+                    spec.loader(image_info) if enabled else None
                 )
 
             neg_crossattn, neg_jaccard = self._draw_contrastive_negatives(

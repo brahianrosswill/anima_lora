@@ -230,7 +230,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.18.4" },
     { name = "av", specifier = ">=17.0.1" },
     { name = "blake3", specifier = ">=1.0.8" },
-    { name = "comfy-aimdo", specifier = ">=0.3.0" },
+    { name = "comfy-aimdo", specifier = ">=0.4.9" },
     { name = "comfy-cli", specifier = ">=1.10.3" },
     { name = "comfy-kitchen", specifier = ">=0.2.10" },
     { name = "controlnet-aux", specifier = ">=0.0.10" },
@@ -484,14 +484,14 @@ wheels = [
 
 [[package]]
 name = "comfy-aimdo"
-version = "0.4.7"
+version = "0.4.9"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/ec/bb2779b223e3495f768c53f645aaf131b601f0d6bc927c3a5d380afccb0d/comfy_aimdo-0.4.7-cp39-abi3-manylinux2010_x86_64.manylinux2014_x86_64.manylinux_2_12_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7c1b5694209751b85a313c714d80b514cd7663fed112f192b2772a21eed204a9", size = 339783, upload-time = "2026-05-28T11:05:45.491Z" },
-    { url = "https://files.pythonhosted.org/packages/6e/34/1b92796a3d2495765686698ef4684e1b55564fb6131e62bce67bdec253db/comfy_aimdo-0.4.7-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:1b0c4c5e328582f07e5d563e7307452e3c13d75ff9d44facf18bfc68badf15d9", size = 564189, upload-time = "2026-05-28T11:05:47.211Z" },
-    { url = "https://files.pythonhosted.org/packages/49/d8/1aa69a321e515ea2a36e821e01b6d4a54242a7952f60556d3f8dfa2c1268/comfy_aimdo-0.4.7-cp39-abi3-win_amd64.whl", hash = "sha256:d2055975ebf11dbf231ad48ae5c76bb4f098a5f866ccc0e1c3ea304dbfe99179", size = 254952, upload-time = "2026-05-28T11:05:48.572Z" },
-    { url = "https://files.pythonhosted.org/packages/00/38/e193c38e02f2e42f6d79afc5f00029c29d949af8080d3a0930c0201bcfa8/comfy_aimdo-0.4.7-cp39-abi3-win_arm64.whl", hash = "sha256:67fbbc9e0af4843befc3cdd1f3d00d0a951857bff4faaa9ec887cf0f6ed9d4b4", size = 224892, upload-time = "2026-05-28T11:05:49.79Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/51/45cc0c8b5c4b40e00280f0631978ea26fb83061079ef84b4d5fa72f17360/comfy_aimdo-0.4.7-py3-none-any.whl", hash = "sha256:b265e8f40943c74cf52ba2f78c2d79297663c0d834b18e8df278e2e7cfc14ea1", size = 22196, upload-time = "2026-05-28T11:05:50.85Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/97/3e9fdb27eba447dde17852d80b4294a8a4b1442c8a886c33634db5ad4008/comfy_aimdo-0.4.9-cp39-abi3-manylinux2010_x86_64.manylinux2014_x86_64.manylinux_2_12_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b034c3f0bd0948237cac1cc6993a0cd0f24822976fd68efe398dfd4f95e1ea8c", size = 342554, upload-time = "2026-06-05T13:10:39.067Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/38/f4433d0ebcc10f529ccec891860028d8cbfd17481b48fd1356cacfc94e99/comfy_aimdo-0.4.9-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:10257ef8df324c225b39d520e577076ecf986b3f46bf0810dbf33958b8ede6ae", size = 567850, upload-time = "2026-06-05T13:10:40.718Z" },
+    { url = "https://files.pythonhosted.org/packages/88/15/8d6f07266659a3db6da1f941b3c58645344e895b8f10da500cc9bc964054/comfy_aimdo-0.4.9-cp39-abi3-win_amd64.whl", hash = "sha256:6e3dabbd0699c616d20a9cc76299c4c34792689b45f5c749134380cf7f5bc645", size = 255822, upload-time = "2026-06-05T13:10:42.108Z" },
+    { url = "https://files.pythonhosted.org/packages/37/14/5a7ba3a7a4b1afb0c84e79816e98267d5841e6618b34af55d3472b7624b8/comfy_aimdo-0.4.9-cp39-abi3-win_arm64.whl", hash = "sha256:d02fbc81a037b8caa70454dcdd81395ef79a9519744fde9ccf22c21831873823", size = 225745, upload-time = "2026-06-05T13:10:43.468Z" },
+    { url = "https://files.pythonhosted.org/packages/22/c5/74784992c566926b16fd4ec3f9285e104516882758363f46864c39f9d3c3/comfy_aimdo-0.4.9-py3-none-any.whl", hash = "sha256:a8217c0979d6e40254fdc8af2670b18d9c4e99f3c5469ef09aff146c3683ef2f", size = 22205, upload-time = "2026-06-05T13:10:44.736Z" },
 ]
 
 [[package]]

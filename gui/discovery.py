@@ -79,6 +79,7 @@ def _image_dirs() -> dict[str, Path]:
         ("ip-adapter-dataset", ROOT / "ip-adapter-dataset"),
         ("easycontrol-dataset", ROOT / "easycontrol-dataset"),
         ("output/tests", ROOT / "output" / "tests"),
+        ("output/ckpt/sample", ROOT / "output" / "ckpt" / "sample"),
     ]:
         if path.exists():
             dirs[name] = path

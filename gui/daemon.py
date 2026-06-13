@@ -249,6 +249,24 @@ def _read_job_record(job_id: str) -> Optional[dict]:
         return None
 
 
+def read_job_started_at(job_id: str) -> Optional[float]:
+    """Wall-clock epoch when the daemon began running ``job_id`` (falling back to
+    its submit time, then ``None`` for a missing/legacy record).
+
+    Used as a floor for the training-sample gallery: only previews written at or
+    after this time belong to the current run, so a fresh launch never surfaces
+    the previous run's stale sample PNGs — they accumulate under
+    ``<output_dir>/sample`` with timestamped names and are never deleted.
+    """
+    data = _read_job_record(job_id)
+    if not data:
+        return None
+    started = data.get("started_at")
+    if started is None:
+        started = data.get("submitted_at")
+    return started if isinstance(started, (int, float)) else None
+
+
 def read_job_chain_variant(job_id: str) -> Optional[str]:
     """The training variant a command job is the auto-chain preprocess for.
 

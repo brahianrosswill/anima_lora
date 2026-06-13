@@ -858,14 +858,27 @@ class ConfigTab(QWidget):
         sb.setValue(min(pos, sb.maximum()))
 
     @staticmethod
-    def _newest_images(d: Path, limit: int = 4) -> list:
+    def _newest_images(d: Path, limit: int = 4, *, since: float | None = None) -> list:
+        """Newest images in ``d`` by mtime. ``since`` (epoch seconds) drops any
+        written before it — the training-sample gallery passes the running job's
+        start time so a fresh run never shows the previous run's stale samples
+        (they pile up under sample/ with timestamped names and are never deleted).
+        """
         if not d.is_dir():
             return []
-        return sorted(
-            (p for p in d.iterdir() if p.suffix.lower() in IMAGE_EXTS),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:limit]
+        dated: list[tuple[float, Path]] = []
+        for p in d.iterdir():
+            if p.suffix.lower() not in IMAGE_EXTS:
+                continue
+            try:
+                mt = p.stat().st_mtime
+            except OSError:  # file vanished mid-scan (e.g. a clobbering re-run)
+                continue
+            if since is not None and mt < since:
+                continue
+            dated.append((mt, p))
+        dated.sort(key=lambda t: t[0], reverse=True)
+        return [p for _, p in dated[:limit]]
 
     def _show_test_output(self) -> None:
         self._explain_mode = "test"
@@ -895,7 +908,7 @@ class ConfigTab(QWidget):
         with an empty placeholder); ``announce=True`` always renders, including
         the empty message, and is used when a training job finishes."""
         sample_dir = getattr(self, "_sample_dir", None) or self._resolve_sample_dir()
-        imgs = self._newest_images(sample_dir)
+        imgs = self._newest_images(sample_dir, since=getattr(self, "_sample_floor", None))
         if not imgs and not announce:
             return
         self._explain_mode = "sample"
@@ -1581,6 +1594,14 @@ class ConfigTab(QWidget):
         # doesn't re-merge the config chain every tick (resolved from the
         # submitted variant; output_dir is per-variant). None for non-train jobs.
         self._sample_dir = self._resolve_sample_dir() if kind == "train" else None
+        # Floor the live sample gallery at this job's start time so a fresh run
+        # never surfaces the previous run's stale previews (they pile up under
+        # <output_dir>/sample with timestamped names and are never cleared). On
+        # re-attach the persisted start time keeps the current run's earlier
+        # samples visible; None (non-train / unreadable record) means no filter.
+        self._sample_floor = (
+            gui_daemon.read_job_started_at(job_id) if kind == "train" else None
+        )
         self._stdout_buf = ""
         self._jsonl_reader.watch(gui_daemon.progress_path(job_id))
         self._stdout_tailer.watch(gui_daemon.stdout_path(job_id))
