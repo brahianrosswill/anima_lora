@@ -96,6 +96,109 @@ _HEATMAP_GRID = 32
 _HEATMAP_TOPK_FRAC = 0.10
 
 
+# --------------------------------------------------------------------- helpers
+# The grid-match / pooling / Gram math, factored out of the adapter so
+# no-training probes (bench/turbo_repa/) measure the *identical* quantity the
+# training term optimizes instead of carrying a drifting copy.
+
+
+def resolve_pe_grid(spec, n_pe: int, h_lat: int, w_lat: int) -> tuple[int, int]:
+    """Resolve the encoder ``(gh, gw)`` patch grid for ``n_pe`` patch tokens.
+
+    Token count alone is ambiguous (the bucket table is aspect-symmetric:
+    46×23 and 23×46 both have 1058 patches), so disambiguate by the latent's
+    orientation. Returns the unique bucket whose patch product == ``n_pe``.
+    """
+    cands = [(h, w) for (h, w) in spec.buckets if h * w == n_pe]
+    if not cands:
+        raise RuntimeError(
+            f"REPA: no {spec.encoder} bucket has {n_pe} patches "
+            f"(buckets={spec.buckets}). Cache encoder/grid mismatch?"
+        )
+    if len(cands) > 1:
+        portrait = h_lat >= w_lat
+        cands = [(h, w) for (h, w) in cands if (h >= w) == portrait] or cands
+    return cands[0]
+
+
+def pool_dit_tokens_to_grid(
+    captured: torch.Tensor,
+    latent_hw: tuple[int, int],
+    patch: int,
+    gh: int,
+    gw: int,
+) -> torch.Tensor:
+    """Captured block output → ``(B, gh*gw, D)`` fp32 tokens on the encoder grid.
+
+    Layout-agnostic over the two block-output shapes (eager ``(B,1,H,W,D)`` /
+    native-flatten ``(B,1,seq,1,D)``): both flatten to the same row-major
+    ``(B, N_dit, D)``, which is verified against the latent patch grid and
+    adaptive-avg-pooled down to the encoder ``(gh, gw)`` grid.
+    """
+    b = captured.shape[0]
+    d_dit = captured.shape[-1]
+    tokens = captured.reshape(b, -1, d_dit)
+
+    h_lat, w_lat = latent_hw
+    h_dit, w_dit = h_lat // patch, w_lat // patch
+    if tokens.shape[1] != h_dit * w_dit:
+        raise RuntimeError(
+            f"REPA: captured {tokens.shape[1]} DiT tokens but latent grid is "
+            f"{h_dit}x{w_dit}={h_dit * w_dit} (patch={patch}). "
+            "Block/patch-grid mismatch."
+        )
+
+    # Pool DiT grid down to the encoder grid: (B,D,h,w) → (B,D,gh,gw).
+    dit_grid = tokens.reshape(b, h_dit, w_dit, d_dit).permute(0, 3, 1, 2)
+    dit_pooled = F.adaptive_avg_pool2d(dit_grid.float(), (gh, gw))
+    return dit_pooled.flatten(2).transpose(1, 2)  # (B, gh*gw, D) fp32
+
+
+def relational_gram_loss(
+    dit_tok: torch.Tensor, pe: torch.Tensor, *, spatial_norm: bool = False
+) -> torch.Tensor:
+    """Arm-B relational loss: ``MSE(Gram(dit_tok), Gram(pe))`` in fp32.
+
+    Per-token L2-norm within each space, then match the N×N affinity
+    structure — dimensions never need to align. ``spatial_norm`` applies the
+    iREPA target standardization (lever 2): standardize ``pe`` across the
+    token axis before per-token L2-norm, removing the shared global component
+    that compresses pairwise cosines.
+    """
+    if spatial_norm:
+        pe = (pe - pe.mean(dim=1, keepdim=True)) / (pe.std(dim=1, keepdim=True) + 1e-6)
+    dit_hat = F.normalize(dit_tok, dim=-1)
+    pe_hat = F.normalize(pe, dim=-1)
+    g_dit = torch.bmm(dit_hat, dit_hat.transpose(1, 2))  # (B, N, N)
+    g_pe = torch.bmm(pe_hat, pe_hat.transpose(1, 2))
+    return F.mse_loss(g_dit, g_pe)
+
+
+def relational_align_loss(
+    captured: torch.Tensor,
+    pe: torch.Tensor,
+    latent_hw: tuple[int, int],
+    patch: int,
+    spec,
+    *,
+    spatial_norm: bool = False,
+) -> torch.Tensor:
+    """One-shot relational alignment: CLS-drop → grid-match → pool → Gram MSE.
+
+    ``captured`` is a raw block output (either layout), ``pe`` the cached
+    encoder features ``(B, T, d_enc)`` with CLS still at index 0 when the spec
+    carries one. This is the probe entry point (``bench/turbo_repa/``); the
+    training adapter composes the same pieces itself because it also needs the
+    pooled tokens (absolute arm head, grad-heatmap probe).
+    """
+    n_pe = pe.shape[1] - (1 if spec.use_cls else 0)
+    gh, gw = resolve_pe_grid(spec, n_pe, latent_hw[0], latent_hw[1])
+    if spec.use_cls:
+        pe = pe[:, 1:, :]
+    dit_tok = pool_dit_tokens_to_grid(captured, latent_hw, patch, gh, gw)
+    return relational_gram_loss(dit_tok, pe, spatial_norm=spatial_norm)
+
+
 class REPAHead(nn.Module):
     """3-layer MLP projecting DiT hidden dim → vision-encoder feature dim.
 
@@ -289,22 +392,8 @@ class REPAMethodAdapter(MethodAdapter):
         return True
 
     def _pe_grid(self, n_pe: int, h_lat: int, w_lat: int) -> tuple[int, int]:
-        """Resolve the encoder ``(gh, gw)`` patch grid for ``n_pe`` patch tokens.
-
-        Token count alone is ambiguous (the bucket table is aspect-symmetric:
-        46×23 and 23×46 both have 1058 patches), so disambiguate by the latent's
-        orientation. Returns the unique bucket whose patch product == ``n_pe``.
-        """
-        cands = [(h, w) for (h, w) in self._spec.buckets if h * w == n_pe]
-        if not cands:
-            raise RuntimeError(
-                f"REPA: no {self._spec.encoder} bucket has {n_pe} patches "
-                f"(buckets={self._spec.buckets}). Cache encoder/grid mismatch?"
-            )
-        if len(cands) > 1:
-            portrait = h_lat >= w_lat
-            cands = [(h, w) for (h, w) in cands if (h >= w) == portrait] or cands
-        return cands[0]
+        """Thin delegate to :func:`resolve_pe_grid` over this run's spec."""
+        return resolve_pe_grid(self._spec, n_pe, h_lat, w_lat)
 
     def extra_forwards(self, ctx: StepCtx, primary: ForwardArtifacts) -> Optional[dict]:
         if not primary.is_train or self._pe_features is None or self._latent_hw is None:
@@ -322,31 +411,16 @@ class REPAMethodAdapter(MethodAdapter):
                 self._warned_no_capture = True
             return None
 
-        cap = self._captured
-        b = cap.shape[0]
-        d_dit = cap.shape[-1]
-        # Layout-agnostic flatten → (B, N_dit, D) row-major.
-        tokens = cap.reshape(b, -1, d_dit)
-
         h_lat, w_lat = self._latent_hw
-        h_dit, w_dit = h_lat // self._patch, w_lat // self._patch
-        if tokens.shape[1] != h_dit * w_dit:
-            raise RuntimeError(
-                f"REPA: captured {tokens.shape[1]} DiT tokens but latent grid is "
-                f"{h_dit}x{w_dit}={h_dit * w_dit} (patch={self._patch}). "
-                "Block/patch-grid mismatch."
-            )
-
         pe = self._pe_features  # (B, T_pe, d_enc) fp32
         n_pe = pe.shape[1] - (1 if self._spec.use_cls else 0)
-        gh, gw = self._pe_grid(n_pe, h_lat, w_lat)
+        gh, gw = resolve_pe_grid(self._spec, n_pe, h_lat, w_lat)
         if self._spec.use_cls:
             pe = pe[:, 1:, :]  # drop CLS → (B, gh*gw, d_enc)
 
-        # Pool DiT grid down to the encoder grid: (B,D,h,w) → (B,D,gh,gw).
-        dit_grid = tokens.reshape(b, h_dit, w_dit, d_dit).permute(0, 3, 1, 2)
-        dit_pooled = F.adaptive_avg_pool2d(dit_grid.float(), (gh, gw))
-        dit_tok = dit_pooled.flatten(2).transpose(1, 2)  # (B, gh*gw, D) fp32
+        dit_tok = pool_dit_tokens_to_grid(
+            self._captured, (h_lat, w_lat), self._patch, gh, gw
+        )  # (B, gh*gw, D) fp32
 
         if self._mode == "absolute":
             head = ctx.network.repa_head
@@ -355,22 +429,7 @@ class REPAMethodAdapter(MethodAdapter):
             cos = F.cosine_similarity(proj, pe, dim=-1)  # (B, N)
             loss = (1.0 - cos).mean()
         else:
-            # Relational (Gram): per-token L2-norm within each space, then match
-            # the N×N affinity structure. Dimensions never need to align.
-            if self._spatial_norm:
-                # Lever 2 (iREPA): standardize the target across the token axis
-                # before per-token L2-norm. Pretrained patch tokens share a
-                # large global component that the Gram cancels only imperfectly
-                # (it still sits inside every token's normalization); removing
-                # it sharpens the target affinity contrast.
-                pe = (pe - pe.mean(dim=1, keepdim=True)) / (
-                    pe.std(dim=1, keepdim=True) + 1e-6
-                )
-            dit_hat = F.normalize(dit_tok, dim=-1)
-            pe_hat = F.normalize(pe, dim=-1)
-            g_dit = torch.bmm(dit_hat, dit_hat.transpose(1, 2))  # (B, N, N)
-            g_pe = torch.bmm(pe_hat, pe_hat.transpose(1, 2))
-            loss = F.mse_loss(g_dit, g_pe)
+            loss = relational_gram_loss(dit_tok, pe, spatial_norm=self._spatial_norm)
 
             if self._grad_heatmap_every > 0:
                 if self._heat_runs % self._grad_heatmap_every == 0:

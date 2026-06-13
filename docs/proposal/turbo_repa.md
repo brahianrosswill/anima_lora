@@ -1,6 +1,41 @@
 # Turbo × REPA — relational alignment for the DP-DMD student
 
-Status: **proposal — not started**. Depends on REPA v2 Phase 0 (closed
+Status: **Phase 0 PASSED (DRIFT confirmed) — Phase 1 wired; first A/B arm
+INVALID (view bug, fixed 2026-06-13); retrain pending.** The `[repa]` section
+is live in `configs/methods/turbo.toml` (`weight = 0.0` default ⇒
+byte-identical; `--repa_weight 0.05` is the A/B arm); PE sidecars ride the
+distill `CachedDataset` (`load_repa_pe`), `train/repa_align_loss` +
+`train/repa_active` ride TB; the REPA forward is checkpointed
+(`selective_block_grad_ckpt` — un-checkpointed it OOM'd a 16 GB card) with a
+grad-requiring input guarding the unsloth closed-over-param grad drop. Wiring
+tests: `tests/test_turbo_repa.py`.
+
+**Post-mortem of the first arm** (`anima_turbo_N_repa`, 2026-06-12 overnight —
+do not evaluate it as a REPA result): the term originally ran AFTER the GAN gen
+forward and rode `loss_student.backward()`; `set_view` is global state read at
+forward time and checkpoint recompute defers to backward, so the GAN teacher
+checkpoint recomputed under the student view all run → silently corrupted GAN
+generator grads (samples awful, caption-probe 0c cosine 0.27, align profile
+scrambled +166%@σ0.75/−51%@σ1.0, while forward metrics and val/div stayed
+healthy). Fixed: the REPA term now backwards immediately (div_loss split-bwd
+pattern) BEFORE the GAN forward, restoring the invariant that the GAN gen
+forward is the last view-switch before the main backward. Same-class guards
+added at config time (repa+per_step_expert+--grad_ckpt = error;
+--grad_ckpt+GAN = pre-existing broken combo, warned).
+Probe: `bench/turbo_repa/probe_alignment_drift.py` (run
+`bench/turbo_repa/results/20260612-2244-alignment-drift/`, N=200, paired
+arms). Student align loss worse than base at every σ except exactly 1.0:
++21.8% @ σ=0.75 and +21.2% @ σ=0.50 (frac_worse 1.00 — all 200 images),
++12.7% @ σ=0.97, +8.9% @ σ=0.25; at σ=1.00 (pure-ε input, no image content)
+the student is −3.0% (slightly *better*). Reading: the visual-representation
+drift is real and peaks mid-σ on the student's operating band → primary
+real-data arm confirmed (renoise-distribution τ sampling already covers the
+peak); the σ=1.0 sign flip says the step-0 caption-ranking gap is a
+text-conditioning problem (soft-rank's site), not PE-visible — consistent
+with the three-axis split. The Gram/pooling math is factored into reusable
+helpers (`library/training/repa.py::relational_align_loss`) shared
+bit-identically with the training adapter.
+Depends on REPA v2 Phase 0 (closed
 2026-06-12, relational/Gram arm won — `docs/experimental/repa.md`) and the
 turbo feature-tap API (landed — `forward_mini_train_dit(...,
 return_block_features=, return_features_early=)`, bit-exact no-op when off).

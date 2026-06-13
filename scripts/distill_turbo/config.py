@@ -373,6 +373,46 @@ def build_argparser() -> argparse.ArgumentParser:
         "Default: TOML (gan.r1_weight, default 0).",
     )
 
+    # ---- Turbo × REPA relational alignment (off by default) ----
+    parser.add_argument(
+        "--repa_weight",
+        type=float,
+        default=-1.0,
+        help="λ on the relational (Gram) alignment of student block features to "
+        "PE-Spatial on renoised REAL latents. 0 disables the whole path "
+        "(byte-identical DP-DMD). LoRA-validated scale: 0.05. Default: TOML "
+        "(repa.weight, default 0).",
+    )
+    parser.add_argument(
+        "--repa_layer",
+        type=int,
+        default=-1,
+        help="DiT block whose output the REPA term taps (matches LoRA REPA). "
+        "Default: TOML (repa.layer, default 8).",
+    )
+    parser.add_argument(
+        "--repa_every_n",
+        type=int,
+        default=-1,
+        help="Run the REPA term every N student steps (amortizes the extra "
+        "partial forward). Default: TOML (repa.every_n, default 4).",
+    )
+    parser.add_argument(
+        "--repa_encoder",
+        type=str,
+        default=None,
+        help="Vision-encoder sidecar the term aligns to "
+        "({stem}_anima_{encoder}.safetensors next to the TE cache). Default: "
+        "TOML (repa.encoder, default 'pe_spatial').",
+    )
+    parser.add_argument(
+        "--repa_spatial_norm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="iREPA spatial standardization of the encoder target. Default: "
+        "TOML (repa.spatial_norm, default true).",
+    )
+
     # ---- f-distill reweighting (FastGen idea 2; needs the GAN disc) ----
     parser.add_argument(
         "--f_div",
@@ -469,6 +509,13 @@ class TurboConfig:
     f_ratio_ema_rate: float
     f_bin_num: int
     f_ratio_normalization: bool
+
+    # Turbo × REPA relational alignment on real data (turbo_repa.md Phase 1)
+    repa_weight: float
+    repa_layer: int
+    repa_encoder: str
+    repa_every_n: int
+    repa_spatial_norm: bool
 
     # Mean-variance reg (lever B / Eq. 7)
     mean_var_weight: float
@@ -604,6 +651,18 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
     f_bin_num = int(_flatten(cfg, "f_distill.bin_num", 10))
     f_ratio_normalization = bool(_flatten(cfg, "f_distill.ratio_normalization", True))
 
+    # Turbo × REPA relational alignment (turbo_repa.md Phase 1). weight=0 keeps
+    # the whole path off → byte-identical DP-DMD (no dataset PE loading, no
+    # extra RNG draws, no extra forward).
+    repa_weight = float(_pick(args.repa_weight, cfg, "repa.weight", 0.0))
+    repa_layer = int(_pick(args.repa_layer, cfg, "repa.layer", 8))
+    repa_encoder = _pick(args.repa_encoder, cfg, "repa.encoder", "pe_spatial")
+    repa_every_n = int(_pick(args.repa_every_n, cfg, "repa.every_n", 4))
+    if args.repa_spatial_norm is None:
+        repa_spatial_norm = bool(_flatten(cfg, "repa.spatial_norm", True))
+    else:
+        repa_spatial_norm = bool(args.repa_spatial_norm)
+
     # Per-step expert (dual-B-head student). step_expert_K is derived from
     # student_steps so head k ↔ denoise step k by construction (the plan's
     # K = student_steps invariant). K==1 (single step) would collapse to a
@@ -731,6 +790,48 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         )
     if gan_loss_weight_gen < 0.0:
         raise ValueError(f"gan.weight_gen={gan_loss_weight_gen}: must be >= 0")
+    if repa_weight < 0.0:
+        raise ValueError(f"repa.weight={repa_weight}: must be >= 0")
+    if repa_weight > 0.0:
+        if repa_every_n < 1:
+            raise ValueError(f"repa.every_n={repa_every_n}: must be >= 1")
+        if int(args.blocks_to_swap) > 0:
+            # The feature tap's early exit leaves the tail blocks' offloader
+            # moves un-submitted (forward_mini_train_dit raises the same way);
+            # fail at config time with the actionable message.
+            raise ValueError(
+                "repa.weight > 0 requires blocks_to_swap=0 — the block-feature "
+                "tap is unsupported under block swap (turbo keeps the DiT "
+                "resident by default)."
+            )
+        if per_step_expert and bool(args.grad_ckpt):
+            # Same global-state × deferred-ckpt-recompute class as the view bug:
+            # the REPA forward re-routes the student head (nearest-τ) AFTER the
+            # rollout's checkpointed forwards but BEFORE their backward, so the
+            # step-g recompute would run the wrong head — silent corruption.
+            raise ValueError(
+                "repa.weight > 0 with per_step_expert AND --grad_ckpt: the REPA "
+                "head switch corrupts the rollout's checkpoint recompute. "
+                "Disable one of the three."
+            )
+        logger.info(
+            f"REPA (turbo×REPA relational alignment) ON: weight={repa_weight}, "
+            f"layer={repa_layer}, encoder={repa_encoder!r}, "
+            f"every_n={repa_every_n}, spatial_norm={repa_spatial_norm}."
+        )
+    if bool(args.grad_ckpt) and gan_loss_weight_gen > 0.0:
+        # Pre-existing member of the same hazard class (predates REPA): under
+        # global --grad_ckpt the rollout's student forwards are checkpointed,
+        # but the GAN gen forward switches the network view to 'teacher' before
+        # loss_student.backward() — the rollout recompute then runs WITHOUT the
+        # student LoRA enabled and the DMD gradient is silently corrupted.
+        logger.warning(
+            "--grad_ckpt with gan.weight_gen > 0: the rollout's checkpointed "
+            "student forwards recompute after the GAN gen forward flipped the "
+            "view to 'teacher' — the recomputed blocks drop the student LoRA "
+            "and the DMD gradient is silently corrupted. Known-broken "
+            "combination; turn one of the two off."
+        )
     if gan_r1_weight < 0.0:
         raise ValueError(f"gan.r1_weight={gan_r1_weight}: must be >= 0")
     _F_DIVS = ("rkl", "kl", "js", "sf", "neyman", "sh", "jf")
@@ -905,6 +1006,11 @@ def resolve_config(args: argparse.Namespace, cfg: dict) -> TurboConfig:
         f_ratio_ema_rate=f_ratio_ema_rate,
         f_bin_num=f_bin_num,
         f_ratio_normalization=f_ratio_normalization,
+        repa_weight=repa_weight,
+        repa_layer=repa_layer,
+        repa_encoder=repa_encoder,
+        repa_every_n=repa_every_n,
+        repa_spatial_norm=repa_spatial_norm,
         mean_var_weight=mean_var_weight,
         mv_mu_t=mv_mu_t,
         mv_sigma2_t=mv_sigma2_t,
@@ -968,6 +1074,7 @@ def tb_config_text(c: TurboConfig) -> str:
     pairs = {
         "base_loss": c.base_loss,
         "gan_loss_weight_gen": c.gan_loss_weight_gen,
+        "repa_weight": c.repa_weight,
         "f_div": c.f_div,
         "k_anchor": c.k_anchor,
         "teacher_anchor_steps": c.teacher_anchor_steps,

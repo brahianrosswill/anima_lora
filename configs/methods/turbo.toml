@@ -11,7 +11,7 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_N"
+output_name = "anima_turbo_N_repa2"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
@@ -38,7 +38,7 @@ compile_dynamic_seq = true
 # when use_custom_down_autograd is off and torch_compile is on. Only applies when
 # torch_compile is on AND grad_ckpt is off (the two repartition the same joint
 # graph and conflict → CheckpointError). 1.0 = off (default; no behavior change).
-activation_memory_budget = 0.99
+activation_memory_budget = 0.75
 
 # Diversity mechanism. "dpdmd" (default) runs the first-step teacher anchor below;
 # "dmd" is plain DMD2 — no anchor, so student_steps may be 1 (a true single-step
@@ -154,6 +154,26 @@ ratio_upper = 20.0
 ratio_ema_rate = 0.0            # per-τ histogram EMA decay (0 = instantaneous per-bin)
 bin_num = 10
 ratio_normalization = true      # per-τ histogram normalization of r
+
+# Turbo × REPA — relational (Gram) alignment on REAL data (docs/proposal/
+# turbo_repa.md; Phase 0 drift probe PASSED 2026-06-12 — the student's block-8
+# representation sits measurably off the base manifold, worst at mid-σ:
+# bench/turbo_repa/results/20260612-2244-alignment-drift/).
+#
+# Every `every_n`-th student step, ONE extra grad-bearing partial student
+# forward (feature tap, exits after `layer` ≈ 9/28 of a forward) on renoised
+# real latents; the unweighted Gram MSE vs the cached PE-Spatial sidecar
+# ({stem}_anima_pe_spatial.safetensors, staged by `make preprocess-pe`) joins
+# the student loss with `weight`. Direct per-sample pressure on REAL data —
+# complements the GAN above (adversarial, distribution-level, GENERATED data)
+# and soft-rank (text axis). No new trainable params (the Gram form is
+# head-free). weight = 0 keeps the whole path OFF → byte-identical DP-DMD.
+[repa]
+weight = 0.05                   # λ on the Gram align loss. 0 = off; first live value 0.05 (LoRA-validated scale)
+layer = 8                       # DiT block tap (matches LoRA-family REPA)
+encoder = "pe_spatial"          # sidecar {stem}_anima_{encoder}.safetensors next to the TE cache
+every_n = 4                     # run the term every N student steps (amortization; ~0.08 partial fwd/step)
+spatial_norm = true             # iREPA target standardization (the validated LoRA operating point)
 
 # Logging / checkpoints.
 [io]

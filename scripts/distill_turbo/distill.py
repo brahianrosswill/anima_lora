@@ -39,6 +39,8 @@ from library.runtime.harness import (
     isolate_compile_cache,
     place_dit_for_training,
 )
+from library.training.repa import relational_align_loss
+from library.vision.buckets import get_bucket_spec
 from networks.methods.turbo_dmd import (
     TurboDMDNetwork,
     gan_loss_discriminator,
@@ -98,6 +100,17 @@ def _step_tag(step: int) -> str:
     Matches the hand-rolled ``_1k`` / ``_500`` naming the runs already use.
     """
     return f"{step // 1000}k" if step % 1000 == 0 else str(step)
+
+
+def nearest_student_step(student_sigmas: list[float], tau: float, n_steps: int) -> int:
+    """Per-step-expert head selection for the REPA term (turbo_repa.md §σ choice).
+
+    The student grid has ``n_steps + 1`` σ points; head ``k`` operates at
+    ``student_sigmas[k]`` (k < n_steps). The REPA forward runs at a sampled
+    renoise level τ that sits between grid points, so route it to the head
+    whose operating σ is nearest. No-op for the single-head student.
+    """
+    return min(range(n_steps), key=lambda i: abs(student_sigmas[i] - tau))
 
 
 def mean_var_kl(
@@ -518,6 +531,30 @@ def main():
     if fdistill_on and cfg.f_ratio_normalization:
         fdistill_bins = torch.ones(cfg.f_bin_num, device=device)
 
+    # ---------------- Turbo × REPA (turbo_repa.md Phase 1) ----------------
+    # Relational (Gram) alignment of student block-`repa_layer` features to the
+    # cached PE-Spatial sidecars of the REAL latents, every `repa_every_n`-th
+    # student step. Phase 0 (bench/turbo_repa/) confirmed the student's mid-block
+    # representation drifts off the base manifold (worst at mid-σ). weight=0
+    # keeps the whole path off → byte-identical DP-DMD.
+    repa_on = cfg.repa_weight > 0.0
+    repa_spec = None
+    repa_feature_set: set | None = None
+    if repa_on:
+        if not (0 <= cfg.repa_layer < len(model.blocks)):
+            raise ValueError(
+                f"repa.layer={cfg.repa_layer} out of range "
+                f"(DiT has {len(model.blocks)} blocks)"
+            )
+        repa_spec = get_bucket_spec(cfg.repa_encoder)
+        repa_feature_set = {cfg.repa_layer}
+        logger.info(
+            f"REPA: aligning student block {cfg.repa_layer}/{len(model.blocks)} "
+            f"to {cfg.repa_encoder} (grid≤{repa_spec.t_max_patches}tok) on real "
+            f"data, weight={cfg.repa_weight}, every_n={cfg.repa_every_n}, "
+            f"spatial_norm={cfg.repa_spatial_norm}"
+        )
+
     # ---------------- Dataset ----------------
     dataset = CachedDataset(
         cfg.data_dir,
@@ -525,6 +562,12 @@ def main():
         sample_ratio=cfg.sample_ratio,
         mask_dir=cfg.mask_dir if cfg.use_masked_loss else None,
     )
+    if repa_on:
+        # Post-construction PE gate (the bespoke-loop mirror of train.py's
+        # dataset.load_repa_pe): appends each sample's PE sidecar as the LAST
+        # tuple element; collate must be built with the matching flag below.
+        dataset.load_repa_pe = True
+        dataset.repa_pe_encoder = cfg.repa_encoder
     # Held-out conditioning for the DAVE diversity probe — captured from the
     # FULL sample list before any single-prompt slice mutates it, and chosen
     # distinct from the overfit sample so a collapsed run is visible. We only
@@ -574,7 +617,7 @@ def main():
         num_workers=2,
         pin_memory=True,
         drop_last=True,
-        collate_fn=make_collate(cfg.use_masked_loss),
+        collate_fn=make_collate(cfg.use_masked_loss, load_repa_pe=repa_on),
     )
 
     # ---------------- Logging ----------------
@@ -790,6 +833,7 @@ def main():
     )
     progress = tqdm(range(cfg.iterations), desc="turbo")
     metrics = TurboMetrics(device)
+    repa_warned_missing = False
 
     for step in progress:
         try:
@@ -797,6 +841,10 @@ def main():
         except StopIteration:
             data_iter = iter(dataloader)
             batch = next(data_iter)
+        batch = list(batch)
+        # PE features ride LAST when the REPA gate is on (None when any sample
+        # in the batch lacked its sidecar → the term is skipped this step).
+        repa_pe = batch.pop() if repa_on else None
         if cfg.use_masked_loss:
             _idx, latents, crossattn_emb, _pooled, mask = batch
             # float (not bf16): the student loss is assembled in fp32. [B,1,H,W]
@@ -995,6 +1043,82 @@ def main():
             )
             grad_dm = grad_dm / denom
         grad_signal = grad_dm.detach()
+
+        # --- REPA relational alignment on REAL data (turbo_repa.md Phase 1) ---
+        # One extra grad-bearing PARTIAL student forward (the feature tap exits
+        # after repa_layer ≈ 9/28 of the stack) on renoised real latents, every
+        # repa_every_n-th step, backwarded IMMEDIATELY (the div_loss split-bwd
+        # pattern; grads accumulate into the same optimizer step, grad_clip
+        # below still sees the full student gradient).
+        #
+        # PLACEMENT + IMMEDIATE BACKWARD ARE LOAD-BEARING. set_view flips
+        # global per-module enabled flags read at forward time, and checkpoint
+        # recompute is deferred to .backward() — so every checkpointed forward
+        # must be backwarded while its own view is still the live one. Running
+        # this block after the GAN gen forward and riding loss_student.backward()
+        # (the first wiring) left the view at "student" when the GAN's teacher
+        # checkpoint recomputed → student-contaminated teacher features →
+        # silently corrupted GAN generator grads for a whole run. Backward here
+        # (student view live ✓), then the GAN gen forward below is again the
+        # last view-switch before loss_student.backward() (teacher recompute ✓).
+        repa_loss = torch.zeros((), device=device)
+        repa_ran = False
+        if repa_on and step % cfg.repa_every_n == 0:
+            if repa_pe is None:
+                if not repa_warned_missing:
+                    logger.warning(
+                        "REPA: batch lacks a %s sidecar — term skipped for such "
+                        "batches (run `make preprocess-pe` for the spatial "
+                        "encoder to cover the pool).",
+                        cfg.repa_encoder,
+                    )
+                    repa_warned_missing = True
+            else:
+                # τ from the DMD path's renoise distribution (U[0,1)), but ONE
+                # level shared across the batch: per-step-expert head selection
+                # is a per-forward switch, not per-sample. CPU RNG → no GPU
+                # sync (mirrors the grad_step='random' g draw).
+                tau_val = float(torch.rand(()))
+                turbo.set_student_step(
+                    nearest_student_step(student_sigmas, tau_val, cfg.student_steps)
+                )
+                tau_repa = torch.full((B,), tau_val, device=device, dtype=dtype)
+                x_tau = renoise(latents, tau_repa, torch.randn_like(latents))
+                # The grad-requiring input is load-bearing twice over: the
+                # unsloth checkpoint silently drops grads that reach only
+                # closed-over params ([[project_unsloth_reentrant_drops_grad]]),
+                # and a grad-requiring tensor input resurrects them (the
+                # EasyControl-under-unsloth precedent) — the student-LoRA grads
+                # here have no other input path.
+                x_tau.requires_grad_()
+                # Checkpoint this forward like the GAN gen forward below: it is
+                # otherwise the only grad-bearing forward in the loop that
+                # retains its activations (the rollout is memory-flat under
+                # grad_step='random', the GAN tap is ckpt'd) — ~repa_layer/28 of
+                # a full-depth graph held until backward, which alone tipped a
+                # 16 GB card over. Recompute cost: repa_layer eager blocks every
+                # every_n-th step. Numerically exact (no dropout).
+                with selective_block_grad_ckpt(model):
+                    feats_repa = _forward(
+                        "student",
+                        x_tau,
+                        tau_repa,
+                        crossattn_emb,
+                        no_grad=False,
+                        return_block_features=repa_feature_set,
+                        return_features_early=True,
+                    )
+                repa_loss = relational_align_loss(
+                    feats_repa[cfg.repa_layer],
+                    repa_pe.to(device, dtype=torch.float32, non_blocking=True),
+                    (int(latents.shape[-2]), int(latents.shape[-1])),
+                    int(model.patch_spatial),
+                    repa_spec,
+                    spatial_norm=cfg.repa_spatial_norm,
+                )
+                (cfg.repa_weight * repa_loss).backward()
+                repa_loss = repa_loss.detach()  # metrics-only from here
+                repa_ran = True
 
         # --- GAN generator term + f-distill reweighting (ideas 1 & 2) ---
         # The discriminator scores the frozen TEACHER's block features of the
@@ -1201,6 +1325,8 @@ def main():
         metrics.add_div(div_loss_t)
         if turbo.disc is not None:
             metrics.add_gan(gan_gen_loss, gan_disc_mean_t)
+        if repa_on:
+            metrics.add_repa(repa_loss, active=repa_ran)
 
         if (step + 1) % cfg.log_interval == 0:
             m = metrics.flush(cfg.log_interval)

@@ -10,7 +10,7 @@ STRINGS: dict[str, str] = {
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
     "tab_experimental": "実験機能",
-    "tab_images": "データセット",
+    "tab_images": "データセットViewer",
     "tab_merge": "マージ",
     "tab_queue": "キュー状況",
     "tab_preprocess": "前処理",

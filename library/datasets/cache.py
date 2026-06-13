@@ -32,7 +32,7 @@ from library.io.cache import (
 logger = logging.getLogger(__name__)
 
 
-def _cached_collate_impl(batch, use_masked_loss: bool):
+def _cached_collate_impl(batch, use_masked_loss: bool, load_repa_pe: bool = False):
     out = [
         [b[0] for b in batch],
         torch.stack([b[1] for b in batch]),
@@ -41,21 +41,40 @@ def _cached_collate_impl(batch, use_masked_loss: bool):
     ]
     if use_masked_loss:
         out.append(torch.stack([b[4] for b in batch]))  # [B, 1, H, W] mask
+    if load_repa_pe:
+        # PE features ride LAST (after the optional mask). All-or-nothing per
+        # batch: a missing sidecar (None) — or a token-count mismatch across the
+        # batch (same latent bucket but different encoder aspect bucket, only
+        # possible at batch_size > 1) — collapses the element to None so the
+        # consumer skips the REPA term for that batch instead of crashing.
+        pe = [b[-1] for b in batch]
+        stackable = all(p is not None for p in pe) and (
+            len({tuple(p.shape) for p in pe}) == 1
+        )
+        out.append(torch.stack(pe) if stackable else None)
     return tuple(out)
 
 
-def make_cached_collate(use_masked_loss: bool = False):
+def make_cached_collate(use_masked_loss: bool = False, load_repa_pe: bool = False):
     """Stacking collate for :class:`CachedDataset` batches.
 
-    Returns ``(idx_list, latents, crossattn_emb, pooled_text[, mask])`` — the
-    per-resolution :class:`BucketBatchSampler` guarantees uniform spatial dims
-    so the ``torch.stack`` works at ``batch_size > 1``. Bypasses the default
+    Returns ``(idx_list, latents, crossattn_emb, pooled_text[, mask][, repa_pe])``
+    — the per-resolution :class:`BucketBatchSampler` guarantees uniform spatial
+    dims so the ``torch.stack`` works at ``batch_size > 1``. Bypasses the default
     ``collate_tensor_fn`` (its ``_new_shared_filename_cpu`` makes non-resizable
     storage on some PyTorch / Python 3.13 builds). Returns a
     ``functools.partial`` over a module-level impl (not a local closure) so
     DataLoader workers can pickle it under the Windows / spawn start method.
+
+    ``load_repa_pe`` must match the dataset's own ``load_repa_pe`` toggle; the
+    appended element is ``(B, T, d_enc)`` fp32 encoder features (CLS at index 0)
+    or ``None`` when any sample in the batch lacks its sidecar.
     """
-    return functools.partial(_cached_collate_impl, use_masked_loss=use_masked_loss)
+    return functools.partial(
+        _cached_collate_impl,
+        use_masked_loss=use_masked_loss,
+        load_repa_pe=load_repa_pe,
+    )
 
 
 class BucketBatchSampler(torch.utils.data.Sampler):
@@ -132,6 +151,14 @@ class CachedDataset(torch.utils.data.Dataset):
         # (in [0, 1]) as a 5th tuple element; consumers that don't pass
         # ``mask_dir`` keep the legacy 4-tuple. See ``_resolve_mask_path``.
         self.mask_dir = mask_dir
+        # REPA PE-feature loading (turbo_repa.md Phase 1) — post-construction
+        # toggles (the train.py-dataset ``load_repa_pe`` convention), so every
+        # existing consumer keeps the legacy tuple. When on, ``__getitem__``
+        # appends the ``{stem}_anima_{encoder}.safetensors`` patch tokens
+        # (fp32, CLS at index 0) as the LAST tuple element — ``None`` when the
+        # sidecar is missing (the collate then skips the batch's REPA term).
+        self.load_repa_pe: bool = False
+        self.repa_pe_encoder: str = "pe_spatial"
         cached = discover_cached_pairs(data_dir)
 
         # Optional stem allow-list: when a keep_list of stems is supplied, drop
@@ -302,10 +329,32 @@ class CachedDataset(torch.utils.data.Dataset):
         # a random variant per visit would let cache hits return a teacher pred
         # computed under a different caption than the student is conditioned on.
         crossattn_emb, pooled_text = load_cached_text_features(te_path, variant=0)
+        out = [idx, latents, crossattn_emb, pooled_text]
         if self.mask_dir is not None:
-            mask = self._load_mask(te_path, latents.shape[-2], latents.shape[-1])
-            return idx, latents, crossattn_emb, pooled_text, mask
-        return idx, latents, crossattn_emb, pooled_text
+            out.append(self._load_mask(te_path, latents.shape[-2], latents.shape[-1]))
+        if self.load_repa_pe:
+            out.append(self._load_repa_pe(te_path))
+        return tuple(out)
+
+    def _load_repa_pe(self, te_path: str) -> torch.Tensor | None:
+        """Cached ``{stem}_anima_{encoder}.safetensors`` patch tokens, or None.
+
+        The sidecar lives next to the TE cache (the common layout — candidate 1
+        of the train.py dataset's resolution chain; the distill loops read the
+        standard lora cache where TE and PE share a directory). Returns the
+        ``[T, d_enc]`` fp32 feature tensor with CLS still at index 0.
+        """
+        stem = os.path.basename(te_path).removesuffix(TE_CACHE_SUFFIX)
+        path = os.path.join(
+            os.path.dirname(te_path),
+            f"{stem}_anima_{self.repa_pe_encoder}.safetensors",
+        )
+        if not os.path.exists(path):
+            return None
+        from safetensors.torch import load_file
+
+        feats = load_file(path).get("image_features")
+        return feats.float() if feats is not None else None
 
     def _resolve_mask_path(self, te_path: str) -> str | None:
         """Map a TE cache path to its ``{stem}_mask.png``, or None if absent.

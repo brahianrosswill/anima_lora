@@ -55,6 +55,8 @@ class FlushedMetrics:
     div: float
     gan_gen: float
     gan_disc: float
+    repa: float
+    repa_active: float
 
 
 # Single source of truth for the accumulator key set — adding a logged scalar is
@@ -122,6 +124,17 @@ class TurboMetrics:
         self._acc.add("gan_gen", gan_gen_loss.detach().float())
         self._acc.add("gan_disc", gan_disc_mean_t.detach().float())
 
+    @torch.no_grad()
+    def add_repa(self, repa_loss: torch.Tensor, *, active: bool) -> None:
+        """Accumulate the REPA align loss (pre-weight) + its run indicator.
+
+        The term is amortized (``repa.every_n``), so the flushed ``repa`` mean
+        is diluted by skipped steps; consumers normalize by ``repa_active``
+        (the active fraction) to recover the per-run align loss.
+        """
+        self._acc.add("repa", repa_loss.detach().float())
+        self._acc.add("repa_active", 1.0 if active else 0.0)
+
     def flush(self, log_interval: int) -> FlushedMetrics:
         """One CUDA sync per log boundary: read every accumulator, mean it."""
         m = self._acc.flush()
@@ -145,6 +158,11 @@ def write_scalars(writer, m: FlushedMetrics, step: int) -> None:
     writer.add_scalar("train/div_loss", m.div, step)
     writer.add_scalar("train/gan_gen_loss", m.gan_gen, step)
     writer.add_scalar("train/gan_disc_loss", m.gan_disc, step)
+    writer.add_scalar("train/repa_active", m.repa_active, step)
+    if m.repa_active > 0:
+        # Normalize the interval mean to active steps so the curve reads as the
+        # per-run align loss regardless of the every_n amortization.
+        writer.add_scalar("train/repa_align_loss", m.repa / m.repa_active, step)
 
 
 def tqdm_postfix(m: FlushedMetrics) -> dict:
@@ -163,4 +181,6 @@ def tqdm_postfix(m: FlushedMetrics) -> dict:
     if m.gan_gen != 0 or m.gan_disc != 0:
         postfix["gen"] = f"{m.gan_gen:.3f}"
         postfix["dsc"] = f"{m.gan_disc:.3f}"
+    if m.repa_active > 0:
+        postfix["repa"] = f"{m.repa / m.repa_active:.4f}"
     return postfix

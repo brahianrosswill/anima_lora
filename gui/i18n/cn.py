@@ -14,7 +14,7 @@ STRINGS: dict[str, str] = {
     "tab_spd": "SPD",
     "tab_turbo": "Turbo",
     "tab_experimental": "实验功能",
-    "tab_images": "数据集",
+    "tab_images": "数据集Viewer",
     "tab_merge": "合并",
     "tab_queue": "队列状况",
     "tab_preprocess": "预处理",
