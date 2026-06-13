@@ -178,7 +178,7 @@ repa_layer     = 8            # block to hook (of 28)
 repa_encoder   = "pe_spatial"
 repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
 repa_spatial_norm = true
-repa_anneal_steps = 0.5
+# repa_anneal_steps = 0.5
 
 # Lever 1 — hard cutoff (HASTE): (0,1] = fraction of the run, >1 = absolute
 # optimizer steps, 0 = off. Candidate: 0.25 — the quarter-run align_loss curve
@@ -195,7 +195,7 @@ repa_anneal_steps = 0.5
 # 0.03 (≈ half the relational weight). When >0 the factory builds repa_global_head
 # and loads the calib (regen: `uv run python bench/pe_cls_probe/build_calib.py`).
 
-# repa_global_weight = 0.01
-# repa_global_norm   = "zscore"   # "zscore" (calib affine) | "none" (raw target)
-# repa_global_calib  = "networks/calibration/pe_patchmean_stats.safetensors"
+repa_global_weight = 0.001
+repa_global_norm   = "zscore"   # "zscore" (calib affine) | "none" (raw target)
+repa_global_calib  = "networks/calibration/pe_patchmean_stats.safetensors"
 

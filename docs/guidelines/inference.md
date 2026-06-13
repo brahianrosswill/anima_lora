@@ -59,7 +59,6 @@ Correction / conditioning test targets (each composes with `SPECTRUM`/`MOD`):
 | `make test-easycontrol REF_IMAGE=…` | EasyControl image conditioning |
 | `make exp-test-directedit PROMPT='…'` | DirectEdit on a random source image |
 | `make exp-test-directedit-dry` | DirectEdit reconstruction sanity check |
-| `make exp-test-postfix` (`-exp`, `-func`) | Postfix-tuning probes |
 
 ---
 
@@ -243,7 +242,7 @@ Plain Anima LoRA `.safetensors` use kohya-ss `lora_unet_` key naming and load
 directly into ComfyUI's stock `LoraLoader` — no conversion. For HydraLoRA /
 FeRA / postfix checkpoints (extra `router.*`, stacked
 `lora_ups.N.*` keys the stock loader drops), use the **Anima Adapter Loader** in
-`custom_nodes/comfyui-hydralora/`.
+`https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter`.
 
 Spectrum KSampler + mod-guidance + in-node DCW (scalar default `+0.01`, plus an
 `auto` mode running the v4 fusion head) live in

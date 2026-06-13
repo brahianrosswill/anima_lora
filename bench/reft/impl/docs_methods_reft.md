@@ -50,7 +50,7 @@ No special flag. `reft_*` keys are detected in the adapter file and the matching
 
 **Vanilla ComfyUI cannot load ReFT.** The built-in LoRA patcher rewrites `Linear.weight` in place, which is fundamentally the wrong operation here — ReFT is an *activation-space* intervention, not a weight patch. The standard loader silently ignores `reft_*` keys.
 
-Use the **Anima Adapter Loader** node (`custom_nodes/comfyui-hydralora/`), which installs per-block forward hooks for ReFT alongside LoRA / HydraLoRA / postfix. Separate `strength_lora` and `strength_reft` sliders allow independent ablation. See `custom_nodes/comfyui-hydralora/README.md` for the node's installation paths and changelog.
+Use the **Anima Adapter Loader** node (`https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter`), which installs per-block forward hooks for ReFT alongside LoRA / HydraLoRA / postfix. Separate `strength_lora` and `strength_reft` sliders allow independent ablation. See `https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter` for the node's installation paths and changelog.
 
 ## Configuration
 
@@ -74,7 +74,7 @@ reft_layers   = "last_8"
 | `networks/lora_anima/network.py` | `set_reft_timestep_mask()` — timestep masking on ReFT bottleneck |
 | `library/anima/training.py` | CLI arg plumbing (`add_reft`, `reft_dim`, `reft_alpha`, `reft_layers`) |
 | `train.py` | Calls `set_reft_timestep_mask()` each step after noise sampling |
-| `custom_nodes/comfyui-hydralora/adapter.py` | ComfyUI loader with per-block forward-hook install |
+| `https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapteradapter.py` | ComfyUI loader with per-block forward-hook install |
 
 ## Reference
 

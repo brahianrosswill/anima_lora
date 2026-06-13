@@ -88,7 +88,7 @@ Concrete details:
 
 ## Step-0 baseline equivalence
 
-The bench at `bench/easycontrol/step0_equivalence.py` settles which
+A step-0 equivalence bench (since removed) settled which
 init makes the extended self-attention match the no-cond baseline at step 0:
 
 | Strategy                             | rel_l2 max | mean α  | Verdict     |
@@ -194,8 +194,8 @@ inference-side change.
 **Equivalence.** At `cond_res_scale = 1.0` the downscale block is skipped and
 the cond RoPE is the native-position table — bit-exact to the pre-PAI path, so
 existing checkpoints are unaffected. The `b_cond` step-0 baseline equivalence is
-undisturbed (PAI only moves cond positions, not the gate). Verified by
-`bench/easycontrol/pai_equivalence.py`.
+undisturbed (PAI only moves cond positions, not the gate). Verified by a
+PAI-equivalence bench (since removed).
 
 ## Variants
 
@@ -312,7 +312,7 @@ Optional `EC_SCALE=0.8` to override the saved scale at test time.
 
 ## Memory envelope
 
-Measured peak GPU memory in the smoke bench (`bench/easycontrol/two_stream_smoke.py`,
+Measured peak GPU memory in the smoke bench (since removed;
 gradient checkpointing on, target latent 64×64, batch 1, bf16):
 
 | Configuration                            | Peak GPU memory |
@@ -433,7 +433,7 @@ cond_scale)` change; subsequent KSampler steps use the cache automatically.
    joint-softmax backward is implemented manually because FA2's stock
    backward drops the upstream gradient on `softmax_lse`. Verified against
    masked-SDPA reference within fp32 ulp on forward and all gradients
-   (`bench/easycontrol/step1p5_lse_equivalence.py`). Falls back to
+   (via an LSE-equivalence bench, since removed). Falls back to
    masked-SDPA when flash-attn is unavailable.
 
 ## History
@@ -463,7 +463,3 @@ training (vs Phase 1.5's >16 GiB OOM at the same bucket).
 | `configs/easycontrol/colorize.toml`             | Colorize **descriptor** — `name` + `[staging]`/`[preprocess]`/`[training]` tables + blueprint + `[variant]` GUI metadata (the single source of truth; folds onto the base easycontrol method) |
 | `configs/easycontrol/near_twins.toml`           | Near-twins descriptor (same shape; text-removal control task)          |
 | `easycontrol_adapters/colorization/`            | Colorize project — mangafy + `prep.py` + color-caption filter + README |
-| `bench/easycontrol/step0_equivalence.py` | `b_cond=-10` init recipe + two-stream verification     |
-| `bench/easycontrol/pai_equivalence.py`   | PAI: scale-1.0 bit-exactness + integer-ratio grid alignment |
-| `bench/easycontrol/step1p5_lse_equivalence.py` | LSE-decomposed Function vs masked-SDPA reference |
-| `bench/easycontrol/two_stream_smoke.py`  | End-to-end forward+backward smoke + peak memory        |

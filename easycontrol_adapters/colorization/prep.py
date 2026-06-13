@@ -470,6 +470,7 @@ def stage_text(
     keep_copyright: bool = True,
     keep_comic: bool = False,
     caption_index: str | None = None,
+    staging: Path | None = None,
 ):
     """Cache color-only TE embeddings for the color targets into ``text_cache_dir``.
 
@@ -478,6 +479,11 @@ def stage_text(
     with the color-only caption filter. ``caption_src`` (the caption master) is
     nested identically to ``post_image_dataset/resized``, so the resulting TE
     paths key-match the colorize loader's resized-rooted lookup.
+
+    When ``staging`` is given (the synthesized cond tree), encoding is scoped to
+    the stems present there — the matched colorize subset the mangafy stage already
+    materialized — so the TE cache mirrors the cond cache instead of re-encoding
+    the whole master. ``None`` / absent / empty staging = encode every caption.
 
     With ``shuffle_variants > 0`` each cache holds v0 (the full color set) plus
     shuffled variants with ``tag_dropout_rate`` of the color tags dropped. The
@@ -581,9 +587,22 @@ def stage_text(
     else:
         caption_transform = filter_to_colors
 
+    # Subset selection: the staged cond tree IS the matched colorize set (mangafy
+    # already applied the only/exclude tag filter when it synthesized it), so
+    # restrict TE encoding to those stems rather than re-encoding the whole
+    # caption master. ``staging`` None (or absent/empty) = no filter — encode all.
     # Note: --limit applies to the mangafy/encode stages only; the text stage
-    # encodes the whole caption_src tree (cache_text_embeddings walks it itself
-    # and skips already-cached files, so re-runs are cheap).
+    # walks caption_src itself and skips already-cached files, so re-runs are cheap.
+    keep_stems: set[str] | None = None
+    if staging is not None and staging.is_dir():
+        keep_stems = {p.stem for p in walk_images(staging, recursive=recursive)}
+        if not keep_stems:
+            print(
+                f"Warning: staging tree {staging} is empty; encoding the whole "
+                "caption master (run the mangafy staging step first to scope this)."
+            )
+            keep_stems = None
+
     stats = cache_text_embeddings(
         caption_src,
         tokenize_strategy,
@@ -593,6 +612,7 @@ def stage_text(
         device=device,
         cache_dir=text_cache_dir,
         recursive=recursive,
+        keep_stems=keep_stems,
         batch_size=batch_size,
         caption_transform=caption_transform,
         caption_protect_fn=caption_protect_fn,
@@ -878,6 +898,7 @@ def main() -> None:
             keep_copyright=args.text_keep_copyright,
             keep_comic=args.text_keep_comic,
             caption_index=args.caption_index,
+            staging=staging,
         )
         print(
             f"\nColor-only text caching complete: {tstats.written} cached, "

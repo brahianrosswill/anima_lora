@@ -433,7 +433,6 @@ How it works:
 | **Plain LoRA** | `make lora-gui GUI_PRESETS=lora` or `make lora` | Simplest baseline, for comparison experiments |
 | **Plain LoRA (8 GB)** | `make lora-gui GUI_PRESETS=lora-8gb` or `PRESET=low_vram make lora` | VRAM 8~12 GB |
 | **HydraLoRA** | `make lora-gui GUI_PRESETS=hydralora` (8 GB: `hydralora-8gb`) | MoE multi-head routing; fit multiple concepts in one adapter |
-| **Postfix Tuning** *(experimental)* | `make exp-postfix` or `make lora-gui GUI_PRESETS=postfix_ortho_cond` | Learnable N-vector appendix on cross-attention (caption-conditional + orthogonal) |
 | **ChimeraHydra** *(experimental)* | `make exp-chimera` or `make lora-gui GUI_PRESETS=chimera_hydra` | Content/frequency dual-pool MoE — for research |
 
 For detailed options per variant, see [`docs/guidelines/training.md`](training.md) and the individual docs under `docs/methods/`.
@@ -460,9 +459,6 @@ make test-merge                  # Inference with baked standalone DiT (*_merged
 make test-dcw                    # LoRA + DCW scalar correction (sampler-level SNR-t bias correction)
 make test-dcw-v4                 # LoRA + DCW v4 learnable calibrator
 # Experimental inference
-make exp-test-postfix            # Postfix tuning (vanilla)
-make exp-test-postfix-exp        # postfix_exp variant
-make exp-test-postfix-func       # postfix_func variant
 ```
 
 ### 10.2 Manual Inference
@@ -522,7 +518,7 @@ The baked `*_merged.safetensors` can be loaded as a standalone model with ComfyU
 
 These variants cannot be loaded with ComfyUI's default LoraLoader (they involve routing and token insertion, not simple weight deltas) and require dedicated nodes:
 
-- **Anima Adapter Loader** (`custom_nodes/comfyui-hydralora/`) — unified handling for LoRA / Hydra / postfix. See the `README.md` in that folder for usage details.
+- **Anima Adapter Loader** (`https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter`) — unified handling for LoRA / Hydra / postfix. See the `README.md` in that folder for usage details.
 - **Spectrum KSampler / Mod Guidance / DCW nodes** — separate repository at <https://github.com/sorryhyun/ComfyUI-Spectrum-KSampler>
 
 ---
@@ -550,6 +546,5 @@ make update -- --dry-run # Preview which files would change
 - [`docs/inference/dcw.md`](../inference/dcw.md) — DCW (scalar + v4 learnable calibrator)
 - [`docs/inference/mod-guidance.md`](../inference/mod-guidance.md) — Modulation guidance
 - [`docs/methods/hydra-lora.md`](../methods/hydra-lora.md) — HydraLoRA multi-head routing
-- [`docs/experimental/postfix.md`](../experimental/postfix.md) — Postfix (cond+ortho)
 
 Questions and bug reports are welcome on GitHub Issues. Happy training!

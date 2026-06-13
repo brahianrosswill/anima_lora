@@ -15,8 +15,8 @@ It lives under `easycontrol_adapters/` but is dataset-agnostic — point
 `--image-dirs` at any `<dir>/<artist>/<id>.<ext>` tree (defaults to the crawl
 pool `$CAPTION_CORPUS_DIR/{retrieved,selected}`, falling back to `~/gelcrawl/`).
 
-> **Note:** this README is the live doc. The original design lived at
-> `docs/proposal/near_twin_tag_gap_miner.md` (removed once implemented). The one
+> **Note:** this README is the live doc. The original design lived at a
+> `near_twin_tag_gap_miner` proposal (removed once implemented). The one
 > intentional divergence from that proposal: the **HTML contact sheet / TSV**
 > "eyeball" artifacts were *not* built — iteration happens by editing the
 > `[staging]` TOML and re-running (features are cached, so re-runs are seconds).

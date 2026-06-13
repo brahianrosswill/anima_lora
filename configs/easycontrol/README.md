@@ -64,7 +64,7 @@ rebuilt from scratch on every preprocess run.
 
 These start as **seed / eval** pair sets: each accepted pair is a `{id}_tags` /
 `{id}_no_tags` couple (the `_tags` side holds the discriminator attribute). See
-`docs/proposal/near_twin_tag_gap_miner.md`.
+`easycontrol_adapters/tools/near_twins/README.md`.
 
 Source images stay user-facing; VAE/TE/PE caches land under
 `post_image_dataset/` via the subset `cache_dir` (the IP-Adapter / EasyControl

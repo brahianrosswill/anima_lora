@@ -1,8 +1,8 @@
 # Removing a "numerically inert" custom autograd Function changed the compile partitioner and OOMed: numerically-inert ≠ memory-inert
 
-On 2026-06-10 we removed `networks/lora_modules/custom_autograd.py` (the LoRA
+On 2026-06-10 we removed `custom_autograd.py` (the LoRA
 down-projection `autograd.Function` + the fp32-bottleneck matmul policy it
-serviced) after `bench/lora_fp32_bottleneck` proved it numerically dead under
+serviced) after the `lora_fp32_bottleneck` bench proved it numerically dead under
 the trainer's autocast(bf16). The numerics verdict was correct — and the very
 next no-grad-ckpt training run OOMed at step 0 on the 16 GB card, in a way that
 resisted every config-level mitigation. This doc records why, how it was

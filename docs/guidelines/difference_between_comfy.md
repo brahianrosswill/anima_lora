@@ -4,7 +4,7 @@ Two independent Anima DiT implementations live side-by-side in this workspace:
 
 | label | path | role |
 |---|---|---|
-| **anima_lora** | `anima_lora/library/anima/models.py` (class `Anima`) | training + inference stack for LoRA / distillation / GRAFT / Spectrum |
+| **anima_lora** | `library/anima/models.py` (class `Anima`) | training + inference stack for LoRA / distillation / GRAFT / Spectrum |
 | **comfy** | `comfy/comfy/ldm/cosmos/predict2.py` (class `MiniTrainDIT`) + `comfy/comfy/ldm/anima/model.py` (wrapper) | ComfyUI's vanilla Anima runtime |
 
 They share the same model family lineage (`MiniTrainDIT`) and load the same base checkpoints for the transformer blocks, but the two forward paths have diverged in several behaviorally-visible ways. This doc catalogs those differences so you don't waste debugging cycles chasing phantom bugs when a workflow behaves differently between `inference.py` and ComfyUI.
@@ -119,7 +119,7 @@ out = self.llm_adapter(...)
 return torch.nn.functional.pad(out, (0, 0, 0, 512 - out.shape[1]))
 ```
 
-It does not compute per-sample seqlens, does not set up flex block masks, and does not apply LSE correction. Cross-attention just sees 512 KV positions every time, with the padding tail implicitly handled as attention sinks (matching the "do NOT mask padding" invariant from `anima_lora/CLAUDE.md`).
+It does not compute per-sample seqlens, does not set up flex block masks, and does not apply LSE correction. Cross-attention just sees 512 KV positions every time, with the padding tail implicitly handled as attention sinks (matching the "do NOT mask padding" invariant from `CLAUDE.md`).
 
 **Practical consequence.** Both paths produce the same image quality on normal prompts because the pretrained model was trained with max-padded text anyway (the padding positions act as attention sinks in cross-attention softmax — trimming or masking them produces black images, see `CLAUDE.md` § "Text encoder padding"). The anima_lora infrastructure for variable seqlens was originally there to feed the flash4 LSE-correction path; with flash4 disabled it now only drives the flex block mask, and is not a correctness requirement. **ComfyUI's simpler path is safe.**
 
@@ -200,7 +200,7 @@ anima_lora's entire performance stack is structured around "16GB VRAM must work 
 
 **comfy** applies LoRAs via `comfy/lora.py` + `comfy/model_patcher.py`. Weight merging is the default; patch-based is also supported. ComfyUI's stock `LoraLoader` recognizes anima's `lora_unet_` key naming directly (it's the kohya-ss convention) — it strips the prefix and swaps underscores back to dots to map onto `diffusion_model.*` targets. No conversion step is needed.
 
-**Practical consequence.** Plain LoRAs trained in anima_lora load fine in ComfyUI's stock LoRA loader. HydraLoRA / FeRA and prefix/postfix checkpoints carry extra keys (`router.*`, stacked `lora_ups.N.*`) that the stock loader silently drops — those need the `custom_nodes/comfyui-hydralora/` Anima Adapter Loader node.
+**Practical consequence.** Plain LoRAs trained in anima_lora load fine in ComfyUI's stock LoRA loader. HydraLoRA / FeRA and prefix/postfix checkpoints carry extra keys (`router.*`, stacked `lora_ups.N.*`) that the stock loader silently drops — those need the `https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter` Anima Adapter Loader node.
 
 ## 5. Text encoder / conditioning interface
 

@@ -160,7 +160,7 @@ Static merge and router-live are mutually exclusive: mixing an moe file with reg
 
 ### ComfyUI — live routing via the custom node
 
-The **Anima Adapter Loader** node installs per-Linear `forward_hook`s that reproduce `HydraLoRAModule.forward` exactly, including the rank-$r$ RMS pool and the softmax over experts. Separate `strength_lora` slider acts on `multiplier`. See `custom_nodes/comfyui-hydralora/README.md` for installation, hook mechanics, and changelog.
+The **Anima Adapter Loader** node installs per-Linear `forward_hook`s that reproduce `HydraLoRAModule.forward` exactly, including the rank-$r$ RMS pool and the softmax over experts. Separate `strength_lora` slider acts on `multiplier`. See `https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter` for installation, hook mechanics, and changelog.
 
 ---
 

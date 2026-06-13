@@ -56,8 +56,8 @@ To add an adapter named `<task>`, you create or edit exactly these four:
 | # | Thing | colorize version | what it's for |
 |---|---------|-------------------|--------------|
 | 1 | `easycontrol_adapters/<task>/` project | `colorization/` (`mangafy*.py`, `color_caption.py`, `prep.py`) | builds and caches the reference image (and maybe a shorter text cache) |
-| 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | a dataset that pairs each target with its reference via **cond_cache_dir** |
-| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/methods/colorize.toml` | the config — points at the dataset, sets LR / epochs / `network_args` |
+| 2 | `configs/datasets/<task>.toml` | `configs/easycontrol/colorize.toml` | a dataset that pairs each target with its reference via **cond_cache_dir** |
+| 3 | `configs/methods/<task>.toml` (+ `configs/gui-methods/<task>.toml`) | `configs/easycontrol/colorize.toml` | the config — points at the dataset, sets LR / epochs / `network_args` |
 | 4 | `scripts/tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + branches | makes `EASYADAPTER=<task>` work with the `make easycontrol*` commands |
 
 We go through them in order. None of this touches `networks/`.
@@ -198,7 +198,7 @@ This file is what makes the reference different from the target. It's an ordinar
 dataset (`[general]` + `[[datasets]]` + `[[datasets.subsets]]`) with **one extra
 knob**: `cond_cache_dir` (and optionally `text_cache_dir`).
 
-colorize's (`configs/datasets/colorize.toml`), with notes:
+colorize's (`configs/easycontrol/colorize.toml`), with notes:
 
 ```toml
 [general]
@@ -244,10 +244,10 @@ This is almost a copy of `configs/easycontrol/easycontrol.toml`. The only struct
 change is `dataset_config`, pointing at your dataset; the rest is just
 hyperparameters.
 
-colorize's (`configs/methods/colorize.toml`), the lines that matter:
+colorize's (`configs/easycontrol/colorize.toml`), the lines that matter:
 
 ```toml
-dataset_config = "configs/datasets/colorize.toml"   # ← your dataset from §4
+dataset_config = "configs/easycontrol/colorize.toml"   # ← your dataset from §4
 
 network_module = "networks.methods.easycontrol"     # SHARED — same network as plain EasyControl
 
@@ -297,7 +297,7 @@ Knobs to think about for your own task:
 You can also add `configs/gui-methods/<task>.toml` — a standalone version (no
 toggle blocks) with a `[variant]` block (`family = "easycontrol"`, `label`,
 `description`, `order`) so it shows up in the GUI's EasyControl dropdown. See
-`configs/gui-methods/colorize.toml`. Skip this if you only run from the command
+`configs/gui-methods/easycontrol.toml`. Skip this if you only run from the command
 line.
 
 ---

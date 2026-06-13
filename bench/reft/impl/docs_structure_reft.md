@@ -153,7 +153,7 @@ No special flag. `reft_*` keys are detected in the adapter file, the matching `R
 
 **Vanilla ComfyUI cannot load ReFT.** The built-in LoRA weight-patcher rewrites `Linear.weight` in place, which is the wrong operation by construction — ReFT is an activation-space intervention, not a weight patch. The stock loader silently drops any `reft_*` keys and ships you a LoRA-only inference.
 
-The **Anima Adapter Loader** node (`custom_nodes/comfyui-hydralora/`) installs per-block `forward_hook`s through `ModelPatcher.add_object_patch` to reproduce `ReFTModule.forward` exactly, in parallel with LoRA and HydraLoRA. Separate `strength_lora` and `strength_reft` sliders let you ablate the two branches independently at inference.
+The **Anima Adapter Loader** node (`https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter`) installs per-block `forward_hook`s through `ModelPatcher.add_object_patch` to reproduce `ReFTModule.forward` exactly, in parallel with LoRA and HydraLoRA. Separate `strength_lora` and `strength_reft` sliders let you ablate the two branches independently at inference.
 
 ---
 

@@ -1,5 +1,14 @@
 # Embedding Inversion
 
+> **Archived feature (2026-05-20).** Embedding inversion and reference (K-slot
+> prefix) inversion are no longer wired into the live pipeline — the `invert` /
+> `invert-ref` / `exp-test-ref` make targets, the `--prefix_weight` inference
+> path, and the postfix training network have all been
+> removed. The standalone scripts live under the gitignored `archive/inversion/`
+> tree; the only surviving in-tree piece is the inference-side probe
+> `library/inference/editing/postfix_inversion.py`. This page is kept as a design
+> record — the commands below are historical.
+
 Finds the optimal text embedding (`crossattn_emb`) for a target image by optimizing in the post-T5, pre-DiT embedding space. The frozen DiT acts as a fixed decoder — only the embedding is updated via gradient descent on the flow-matching loss.
 
 This reveals "how the DiT interprets the image" in embedding space, producing a `.safetensors` file that can be used as a conditioning input for inference or as an analysis tool for understanding model behavior.
@@ -10,8 +19,8 @@ This reveals "how the DiT interprets the image" in embedding space, producing a 
 # Preprocess images first (caches latents + text encoder outputs)
 make preprocess
 
-# Run inversion on 1 random image (INVERT_N=10 for 10)
-make invert
+# Run inversion on 1 random image (archived script; Makefile targets retired)
+python archive/inversion/invert_embedding.py --image_dir post_image_dataset --num_images 1 --shuffle
 ```
 
 Or with a single image:
@@ -68,7 +77,7 @@ python archive/inversion/invert_embedding.py --image_dir post_image_dataset \
 
 `torch.compile` provides significant memory savings through operator fusion, often outweighing block swap for small swap counts. Block swap is useful when the model doesn't fit on GPU at all.
 
-Override in the Makefile: `make invert INVERT_SWAP=12` or `make invert INVERT_SWAP=-1`.
+Pass `--blocks_to_swap 12` or `--blocks_to_swap -1` to the script.
 
 ## Embedding initialization
 
@@ -139,22 +148,17 @@ inversions/
 
 A "referencer" variant of embedding inversion: instead of optimizing all 512 token positions of the crossattn embedding, freeze a user-supplied text template and optimize **only K consecutive token vectors** against a single reference image. The resulting K vectors capture the image's subject/style in T5-compatible space; at inference they're spliced into a fresh user prompt, letting the subject travel into new scenes.
 
-This is the original Textual Inversion recipe (Gal et al. 2022) ported to Anima. Because Anima already has a `prefix` tuning network (`networks/methods/postfix.py`, prefix mode) with inference-side splicing via `inference.py --prefix_weight`, reference inversion reuses that entire runtime — **no inference changes required**. It's training-free in the meaningful sense: no dataset, just a single reference image, single-GPU optim, seconds-to-minutes per image.
+This is the original Textual Inversion recipe (Gal et al. 2022) ported to Anima. Because Anima already has a `prefix` tuning network (the now-removed `prefix` tuning network, whose inference-side probe survives as `library/inference/editing/postfix_inversion.py`) with splicing via `inference.py --prefix_weight`, reference inversion reused that entire runtime — **no inference changes required**. It's training-free in the meaningful sense: no dataset, just a single reference image, single-GPU optim, seconds-to-minutes per image.
 
 ## Quick start
 
 ```bash
-# Pick a random image from post_image_dataset/, invert with K=8 slots
-make invert-ref
-
-# Or use a specific reference
-make invert-ref REF_IMAGE=path/to/ref.png
-
-# Render a test image using the inverted prefix
-make exp-test-ref
+# Pick a reference image and invert K=8 slots (archived script; targets retired)
+python archive/inversion/invert_reference.py --image path/to/ref.png \
+    --dit models/diffusion_models/anima-base-v1.0.safetensors \
+    --vae models/vae/qwen_image_vae.safetensors --num_tokens 8 \
+    --save_path output/anima_ref_cat.safetensors
 ```
-
-Both commands also work via `python tasks.py invert-ref` / `exp-test-ref` on Windows.
 
 ## How it differs from full inversion
 
@@ -179,7 +183,7 @@ The assembly in step 4 byte-for-byte matches what `PostfixNetwork.prepend_prefix
 
 ## Commands
 
-### `make invert-ref`
+### Reference inversion env vars (retired `invert-ref` target)
 
 | Env var | Default | Description |
 |---|---|---|
@@ -193,9 +197,9 @@ The assembly in step 4 byte-for-byte matches what `PostfixNetwork.prepend_prefix
 | `REF_SAVE_PATH` | — | Overrides `REF_NAME` with an explicit path |
 | `REF_SWAP` | `0` | `blocks_to_swap` (same semantics as `invert`) |
 
-When `REF_IMAGE` is unset, a random image is picked from `REF_IMAGE_DIR` and **frozen for the whole target run** (one image, not a different pick per shell expansion). Re-running `make invert-ref` picks a new random image. Explicit `REF_IMAGE=...` always wins.
+When `REF_IMAGE` is unset, a random image is picked from `REF_IMAGE_DIR` and **frozen for the whole target run** (one image, not a different pick per shell expansion). Re-running it picks a new random image. Explicit `REF_IMAGE=...` always wins.
 
-### `make exp-test-ref`
+### Rendering with an inverted prefix (retired `exp-test-ref` target)
 
 Runs inference using the most recently modified `output/anima_ref*.safetensors` via `--prefix_weight`. Inherits the `TEST_COMMON` prompt and flags from the Makefile, so you test the prefix against your usual reference prompt.
 
@@ -245,7 +249,7 @@ Single `.safetensors` holding one tensor:
 
 | Key | Shape | Dtype | Notes |
 |---|---|---|---|
-| `prefix_embeds` | `[K, D]` | bf16 | Same key/schema as `networks/methods/postfix.py` prefix-mode checkpoints |
+| `prefix_embeds` | `[K, D]` | bf16 | Same key/schema as `library/inference/editing/postfix_inversion.py` prefix-mode checkpoints |
 
 Metadata includes `ss_network_module`, `ss_mode=prefix`, `ss_num_postfix_tokens=K`, `ss_embed_dim=D`, plus inversion-specific fields (`ss_reference_image`, `ss_template`, `ss_placeholder_char_offset`, `ss_best_loss`, `ss_steps`, `ss_lr`, `ss_seed`).
 

@@ -34,8 +34,8 @@ colorize 的做法——你可以复用的思路：**真实的黑白漫画没有
 | # | 内容 | colorize 版本 | 作用 |
 |---|---------|-------------------|--------------|
 | 1 | `easycontrol_adapters/<task>/` 项目 | `colorization/`（`mangafy*.py`、`color_caption.py`、`prep.py`） | 构建并缓存参考图像（以及可选的较短文本缓存） |
-| 2 | `configs/datasets/<task>.toml` | `configs/datasets/colorize.toml` | 通过 **cond_cache_dir** 将每个目标与参考配对的数据集 |
-| 3 | `configs/methods/<task>.toml`（+ `configs/gui-methods/<task>.toml`） | `configs/methods/colorize.toml` | config——指向数据集，设置 LR / epochs / `network_args` |
+| 2 | `configs/datasets/<task>.toml` | `configs/easycontrol/colorize.toml` | 通过 **cond_cache_dir** 将每个目标与参考配对的数据集 |
+| 3 | `configs/methods/<task>.toml`（+ `configs/gui-methods/<task>.toml`） | `configs/easycontrol/colorize.toml` | config——指向数据集，设置 LR / epochs / `network_args` |
 | 4 | `scripts/tasks/{training,inference}.py` | `_EASYADAPTERS = {"colorize"}` + 分支 | 让 `EASYADAPTER=<task>` 在 `make easycontrol*` 命令中正常工作 |
 
 我们按顺序逐一讲解。这里没有任何内容需要改动 `networks/`。
@@ -106,7 +106,7 @@ DiT 运行在 Anima 的**原生形状分桶**上（两个 token 数家族，4032
 
 这个文件使参考与目标不同。它是一个普通数据集（`[general]` + `[[datasets]]` + `[[datasets.subsets]]`），只多了**一个额外旋钮**：`cond_cache_dir`（以及可选的 `text_cache_dir`）。
 
-colorize（`configs/datasets/colorize.toml`），带注释：
+colorize（`configs/easycontrol/colorize.toml`），带注释：
 
 ```toml
 [general]
@@ -142,10 +142,10 @@ validation_seed = 42
 
 这几乎是 `configs/easycontrol/easycontrol.toml` 的副本。唯一的结构性改动是 `dataset_config` 指向你的数据集；其余都是超参数。
 
-colorize（`configs/methods/colorize.toml`），重要的几行：
+colorize（`configs/easycontrol/colorize.toml`），重要的几行：
 
 ```toml
-dataset_config = "configs/datasets/colorize.toml"   # ← your dataset from §4
+dataset_config = "configs/easycontrol/colorize.toml"   # ← your dataset from §4
 
 network_module = "networks.methods.easycontrol"     # SHARED — same network as plain EasyControl
 
@@ -180,7 +180,7 @@ unsloth_offload_checkpointing = true
 - **`easycontrol_drop_p`** — 用于图像 CFG 的参考 dropout 频率。colorize 使用 `0`（总是需要参考）；默认值是 `0.1`。
 - **`output_name`** — 必须唯一；推理步骤通过此名称找到最新的检查点（§6）。
 
-你也可以添加 `configs/gui-methods/<task>.toml`——一个独立版本（无切换块），带有 `[variant]` 块（`family = "easycontrol"`、`label`、`description`、`order`），使其出现在 GUI 的 EasyControl 下拉菜单中。参见 `configs/gui-methods/colorize.toml`。如果你只从命令行运行，可以跳过这一步。
+你也可以添加 `configs/gui-methods/<task>.toml`——一个独立版本（无切换块），带有 `[variant]` 块（`family = "easycontrol"`、`label`、`description`、`order`），使其出现在 GUI 的 EasyControl 下拉菜单中。参见 `configs/gui-methods/easycontrol.toml`。如果你只从命令行运行，可以跳过这一步。
 
 ---
 

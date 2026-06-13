@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 import torch
@@ -136,6 +136,7 @@ def cache_text_embeddings(
     cache_dir: Path | None = None,
     recursive: bool = False,
     path_pattern: str | None = None,
+    keep_stems: Collection[str] | None = None,
     batch_size: int = 16,
     caption_shuffle_variants: int = 0,
     caption_tag_dropout_rate: float = 0.0,
@@ -161,8 +162,22 @@ def cache_text_embeddings(
     ``caption_protect_fn`` (when given) is forwarded to
     :func:`generate_caption_variants` to exempt matching tags from tag-dropout
     (e.g. colorize copyright tags). No-op unless ``caption_shuffle_variants > 0``.
+
+    ``keep_stems`` (when given) restricts encoding to images whose filename stem
+    is in the set — the matched subset the VAE/cond stage already materialized,
+    so the TE cache mirrors that set rather than re-encoding the whole caption
+    master.
     """
     candidates = walk_images(data_dir, recursive=recursive, pattern=path_pattern)
+    if keep_stems is not None:
+        keep = frozenset(keep_stems)
+        pre = len(candidates)
+        candidates = [p for p in candidates if p.stem in keep]
+        if verbose and len(candidates) != pre:
+            print(
+                f"Stem filter: keeping {len(candidates)}/{pre} captions "
+                "(matched-subset only)."
+            )
 
     entries: list[tuple[Path, str]] = []
     skipped_small = 0

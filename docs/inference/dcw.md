@@ -25,7 +25,7 @@ prev      += λ_i · diff_LL                            # DCW correction
 
 What differs is how `λ_i` is produced. In scalar mode, `λ_i = λ · sched(σ_i)`. In v4, `λ_i = base + bucket_corr + α_eff · μ_g[i] / Σ_tail(μ_g·S_pop)` with the controller observing the first `k=7` step's LL gap before firing.
 
-See `docs/proposal/dcw-learnable-calibrator-v4.md` for the full v4 derivation, gates, and fallback ladder.
+See the v4 calibrator proposal (no longer in-tree) for the full v4 derivation, gates, and fallback ladder.
 
 ## Quick start
 
@@ -133,7 +133,7 @@ The bias direction is a **(CFG × aspect)** interaction, not a fixed property of
 | Setting | ∫ gap_LL | Direction | λ_scalar (LSQ) |
 |---|---:|---|---:|
 | CFG=1, no LoRA, no mod-guidance (`archive/dcw/results/20260503-1720`) | −406 | paper-opposite | −0.015 (shipped scalar) |
-| CFG=4, 1024² (`bench/dcw/results/20260504-1648`) | −188 | paper-opposite | +0.0046 |
+| CFG=4, 1024² | −188 | paper-opposite | +0.0046 |
 | CFG=4, 832×1248 HD portrait (`output/dcw/20260505-0130`) | +89 | paper-direction | +0.0059 |
 | CFG=4, 1248×832 inv-HD landscape (`output/dcw/20260505-0612`) | +205 | paper-direction | +0.0127 |
 
@@ -162,7 +162,7 @@ For v4 calibration, use `make dcw` instead — it produces the per-aspect bucket
 
 ## LL-only correction (2026-05-03 finding)
 
-`bench/dcw/results/20260503-2102-band-mask-eyeball/` ran a per-Haar-subband sweep on the same 4-image / 2-seed bench. Headline:
+A per-Haar-subband sweep (results since removed) ran on the same 4-image / 2-seed bench. Headline:
 
 | Config | late-half integrated \|gap\| | Δ vs baseline | per-band signed gap (LL / LH / HL / HH) |
 |---|---|---|---|
@@ -199,9 +199,8 @@ Closes 83% of the LL gap at the worst step (σ=0.04) and leaves headroom for per
 | File | Role |
 |---|---|
 | `networks/dcw.py` | `apply_dcw` (the apply site, shared by both modes) + `FusionHead` (shared by trainer + inference) + `haar_LL_norm` |
-| `library/inference/dcw_v4.py` | `OnlineFusionDCWController` — loads artifact, observes warmup, fires head at step `k`, emits per-step `λ_i` |
+| `library/inference/corrections/dcw_calibrator.py` | `OnlineFusionDCWController` — loads artifact, observes warmup, fires head at step `k`, emits per-step `λ_i` |
 | `library/inference/generation.py` | controller setup pre-loop + per-step apply at the DCW call site (non-tiled path) |
 | `scripts/dcw/measure_bias.py` | offline trajectory dump + S_pop sweep — produces `gaps_per_sample.npz` consumed by the trainer |
 | `scripts/dcw/train_fusion_head.py` | offline head training — produces `fusion_head.safetensors` |
 | `scripts/tasks/dcw.py` | `make dcw` / `make dcw-train` task wrappers |
-| `docs/proposal/dcw-learnable-calibrator-v4.md` | v4 derivation, gates, fallback ladder, evidence appendix |

@@ -207,7 +207,7 @@ visibly moves style fails regardless of its anatomy delta.**
 
 ## Graduation (Tier 1.5, outstanding)
 
-Gated on a settled operating point: `bench/repa_v2/` envelope (`bench/_common.py`;
+Gated on a settled operating point: a `repa_v2` bench envelope (to be added; `bench/_common.py`;
 grids + CMMD in `result.json`), a flag-off byte-identity invariant test
 (extend `tests/test_repa.py`), one full-length run at the final operating
 point vs baseline, and a `configs/gui-methods/` variant + default-on

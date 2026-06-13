@@ -11,7 +11,7 @@ step and a parameter-free conditioning patch.
   (Tewel, Atzmon, Chechik, Wolf; arXiv 2606.03911), Alg. 1.
 - Proposal / design rationale: `docs/proposal/byg_unpaired_editing.md`.
 - Code: `networks/methods/byg.py` (`BYGMethodAdapter` + `BYGConditioning`),
-  `library/training/ste.py`, `library/datasets/base.py` (sidecar loader),
+  `library/training/forward/ste.py`, `library/datasets/base.py` (sidecar loader),
   `scripts/byg/build_edit_tuples.py` (data), `configs/methods/byg.toml`.
 
 > **Status (v1, phased).** Training is functional end-to-end and verified
@@ -107,7 +107,7 @@ identity term backwarded separately.
 
 ### STE clean/one-step blend (Eq. 4)
 
-`library/training/ste.py::ste_clean_blend` — `ŷ_hyb = sg(ỹ_0) + (ŷ − sg(ŷ))`.
+`library/training/forward/ste.py::ste_clean_blend` — `ŷ_hyb = sg(ỹ_0) + (ŷ − sg(ŷ))`.
 The forward *value* equals the clean multi-step estimate `ỹ_0` (so the cycle pass
 conditions on inference-quality inputs), while the *gradient* flows through the
 cheap one-step prediction `ŷ` (differentiable w.r.t. the trainable forward

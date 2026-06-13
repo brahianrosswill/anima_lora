@@ -31,7 +31,7 @@ Read colorize's [README](easycontrol_adapters/colorization/README.md) before sta
 - **Trained adapters** — canny, depth, pose, lineart, scribble, segmentation, … each one a self-contained PR in colorize's shape (project dir + `configs/methods/<task>.toml` + model card + samples). Hosted under a HuggingFace collection (planned: `anima-easycontrol`). *[Tier 1.5 — bench numbers and side-by-side samples carry the PR; no new method code]*
 - **Per-task dataset spec** — one doc per control type covering pair format, recommended size (~2k pairs), where to source signal images. colorize's README is the only one written so far. *[Tier 1]*
 - **Toy datasets** — 200-pair CC-licensed bundles per control type so a contributor can validate the pipeline before committing to a full dataset. *[Tier 1]*
-- **Control-fidelity eval harness** — held-out ~100-pair sets per control type that re-extract the signal from generation (canny→canny, depth→depth, …) and report a fidelity metric vs the input. Lets adapter PRs be reviewed on numbers rather than vibes. The current `bench/easycontrol/` directory has equivalence + smoke scripts only; the harness slot is empty. *[Tier 1.5]*
+- **Control-fidelity eval harness** — held-out ~100-pair sets per control type that re-extract the signal from generation (canny→canny, depth→depth, …) and report a fidelity metric vs the input. Lets adapter PRs be reviewed on numbers rather than vibes. No EasyControl bench currently exists; the control-fidelity harness slot is empty. *[Tier 1.5]*
 
 ### 2. Turbo LoRA (Decoupled DMD distillation)
 
@@ -39,9 +39,9 @@ Distill 28-step Anima @ CFG=4 into a 4–8 step generator using **co-LoRA** (LoR
 
 Status: proposal only — no code, no checkpoints, no bench. The proposal is fully scoped (file-level plan, phased validation, risk register) and is waiting on an implementer.
 
-What's missing — this is one Tier 2 PR by definition (new method + paper + `bench/turbo/` + docs/methods entry + `make exp-turbo` / `make exp-test-turbo`), but it splits cleanly along phase boundaries:
+What's missing — this is one Tier 2 PR by definition (new method + paper + a turbo bench + docs/methods entry + `make exp-turbo` / `make exp-test-turbo`), but it splits cleanly along phase boundaries:
 
-- **Phase 0: single-prompt overfit (~1 day).** Implement `networks/methods/turbo_dmd.py` (two LoRA networks, attachment toggle), `scripts/distill_turbo/` (CA + DM gradient assembly, two optimizer states, the renoise primitive), `configs/methods/turbo.toml`, `make exp-turbo`. Prove the loop converges on one prompt at batch 1, 2k iterations. *[Tier 2 — drop a `bench/turbo/results/<ts>-phase0/` with teacher@28 vs student@4 side-by-side on a fixed seed]*
+- **Phase 0: single-prompt overfit (~1 day).** Implement `networks/methods/turbo_dmd.py` (two LoRA networks, attachment toggle), `scripts/distill_turbo/` (CA + DM gradient assembly, two optimizer states, the renoise primitive), `configs/methods/turbo.toml`, `make exp-turbo`. Prove the loop converges on one prompt at batch 1, 2k iterations. *[Tier 2 — drop a `bench/turbo_repa/results/<ts>-phase0/` with teacher@28 vs student@4 side-by-side on a fixed seed]*
 - **Phase 1: 100-prompt sweep (~3 days).** Image Reward + HPS v2.1 + per-aspect breakdown (1024², 832×1248, 1248×832). Pass = student IR ≥ 80% of teacher, no aspect below 60%. *[Tier 2 continuation]*
 - **Phase 2: full HPS bench (~1 week).** 1k COCO-prompt sample, all 4 schedule configs from the paper's Table 1 as an ablation, replicates the paper's Decoupled-Hybrid claim on Anima. *[Tier 1.5 once Phase 1 has landed]*
 - **Phase 3: composition test (~2 days).** (turbo only) vs (concept LoRA @ 28) vs (turbo + concept @ 4) on three existing concept checkpoints. Validates the deployment story. *[Tier 1.5]*
@@ -65,18 +65,15 @@ The `bench/<method>/` convention from Tier 2 below requires every method bench t
 
 | Subdir | Status | What it has | What's needed |
 |---|---|---|---|
-| `bench/dcw/` | **No README** | `measure_bias.py`, `train_fusion_head.py`, `covariance_ceiling.py`, `k_supervision_sweep.py`, `stability_predictor_check.py`, `sweep_buckets.py`, `transfer_hypothesis_check.py`, `plot_seed_band.py` — large `results/` corpus | One README that maps each script to a finding and links to a canonical results dir |
-| `bench/easycontrol/` | **No README** | `step0_equivalence.py`, `step1p5_lse_equivalence.py`, `two_stream_smoke.py` | README + the control-fidelity harness slot from (1) above |
-| `bench/fera/` | **No README** | `probe_fei.py`, `probe_fei_dataset.py`, `probe_fei_3band_dataset.py`, `probe_closed_loop.py`, `expressivity_analysis.py`, `refactor_lowdim_forward.py` | README explaining the probe ladder + linking to the 2-band decision in `project_fera_probe_2band_decision` |
-| `bench/hydralora/` | **No README** | `bench.py`, `analyze_drift.py`, `prompts.example.txt`, plus `hydralora_proposal.md` + `progress0421.md` | README that promotes the proposal/progress notes into a runnable-bench entry |
-| `bench/spectrum/` | Has README | analytical drift simulator + image bench | None — use this one as the shape template |
+| `bench/dcw/` | **No README** | `covariance_ceiling.py`, `k_supervision_sweep.py`, `stability_predictor_check.py`, `sweep_buckets.py`, `transfer_hypothesis_check.py`, `plot_seed_band.py` + a `results/` corpus | One README that maps each script to a finding and links to a canonical results dir |
+| `bench/spd/`, `bench/dave/`, `bench/mod_guidance/` | Has README | per-method probe ladder + `results/` | Use these as the shape template |
 
-Each missing README is a self-contained Tier 1 PR. Use `bench/spectrum/README.md` as the model: headline, what each script does, a copy-pasteable run command, the headline number(s) and what "good" looks like, links to representative `results/<timestamp>/` runs, and an "Observed on Anima" section.
+Each missing README is a self-contained Tier 1 PR. Use `bench/spd/README.md` as the model: headline, what each script does, a copy-pasteable run command, the headline number(s) and what "good" looks like, links to representative `results/<timestamp>/` runs, and an "Observed on Anima" section.
 
 A second-order bench-gap contribution worth calling out:
 
 - **Envelope conformance.** Older bench scripts predate `bench/_common.py` and don't drop a `result.json` via `make_run_dir` + `write_result`. Auditing each script and converting the holdouts (so cross-run indexing actually works) is a clean Tier 1 PR per script.
-- **`bench/turbo/` doesn't exist yet** — it lands as part of the Turbo LoRA contribution in (2) above.
+- **A dedicated turbo bench** lands as part of the Turbo LoRA contribution in (2) above (currently `bench/turbo_repa/`).
 
 ### 5. Translations & localization
 
@@ -90,7 +87,7 @@ Translatable content lives in four places, each with its own contribution shape 
 
 **(d) Docs and structure images — `docs/`.**
 - `docs/guidelines/가이드북.md` is the end-to-end onboarding doc and only exists in Korean. An English translation (or any other language) would significantly widen the audience. The `guidebook_tooltip` string in `gui/i18n/en.py` currently points users at the Korean file — once a translation lands, wire the Guidebook button (in `gui/app.py`) to pick the right file based on `current_language()`.
-- `docs/structure_images_korean/` holds Korean-labeled versions of the architecture diagrams under `docs/structure_images/` (e.g. `animakor.png` ↔ `anima.png`). English/other-language equivalents are welcome under the natural sibling tree (`docs/structure_images/` is the English baseline; `docs/structure_images_<lang>/` for translations). Mention which markdown files reference the diagram so the reviewer can update the embed paths.
+- `docs/structure_images_korean/` holds Korean-labeled versions of the architecture diagrams under `docs/structure_images/` (e.g. `animakor.png` ↔ `anima.png`). English/other-language equivalents are welcome under the natural sibling tree (`docs/structure_images/` is the English baseline; e.g. the existing `docs/structure_images_korean/`). Mention which markdown files reference the diagram so the reviewer can update the embed paths.
 - Method docs under `docs/methods/`, `docs/experimental/`, `docs/proposal/`, and `docs/optimizations/` are **English-only by convention** — translations are welcome as `<name>.<code>.md` siblings, but nothing reads them at runtime yet. If you contribute one, also propose how it should surface (e.g. a language switcher in the README's docs table, or wiring it into a GUI "Open method doc" button). Don't translate `CLAUDE.md` — that file is consumed by Claude Code and is single-source-of-truth for project conventions.
 
 **Parity check (covers all per-language surfaces):**
@@ -137,8 +134,8 @@ These sit between Tier 1 and Tier 2: no new paper or new docs page is required, 
 **Requirements:**
 
 1. **Bench script.** A runnable script that quantifies the change. Two acceptable shapes:
-   - **Add to an existing `bench/<method>/`** if the change is scoped to one method (e.g. a HydraLoRA router tweak goes under `bench/hydralora/`). Append a new script and a new section to that bench's README.
-   - **Add a small `bench/<topic>/`** for cross-cutting changes (e.g. an attention dispatch optimization belongs in something like `bench/attention/`).
+   - **Add to an existing `bench/<method>/`** if the change is scoped to one method (e.g. a router tweak goes under that method's bench dir such as `bench/dcw/`). Append a new script and a new section to that bench's README.
+   - **Add a small `bench/<topic>/`** for cross-cutting changes (e.g. a sampler-correction optimization belongs in a new dir alongside `bench/cns/`).
 
    The script must report the headline number(s) it claims to move — wall-clock, peak VRAM, loss-at-N-steps, drift, whatever the change targets — for **both before and after**. A single-number claim ("20% faster") with no reproducible script does not clear the bar. If the script loads the DiT, use `bench/_anima.py` (`add_common_args` + `build_anima`) — same rationale as Tier 2 §2 below: every DiT-loading bench needs to expose `--compile` and load the adapter in the right order, and the helper enforces both.
 
@@ -168,7 +165,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
 
    Hand-rolled methods without prior art are not categorically rejected, but the bar is higher: in the absence of a paper, the bench results have to carry the argument alone, and reviewers will be skeptical. If you are confident, propose the method in an issue first.
 
-2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/spectrum/`, `bench/dcw/`, `bench/easycontrol/`, `bench/hydralora/`):
+2. **Dedicated bench subdirectory.** Create `bench/<method_name>/` with the same shape as the existing ones (`bench/dcw/`, `bench/spd/`, `bench/dave/`):
 
    ```
    bench/<method_name>/
@@ -214,7 +211,7 @@ A new entry in `networks/lora_modules/` or `networks/methods/`, or a new variant
    - **Interpretation** — what the numbers mean, including what would falsify the method.
    - **Baseline run** — at least one results directory checked in (or linked from a release artifact if large), with the exact CLI used to produce it.
 
-   `bench/dcw/README.md` is a good template — it documents the measurement, has an "Observed on Anima" section with a dated baseline, and a "Next actions" section. Aim for that.
+   `bench/spd/README.md` is a good template — it documents the measurement, has an "Observed on Anima" section with a dated baseline, and a "Next actions" section. Aim for that.
 
 3. **Documentation.** A method doc at `docs/methods/<name>.md` covering the algorithm, config knobs, training/inference flow, and known failure modes. Cross-link from the README's "Experimental features" table.
 

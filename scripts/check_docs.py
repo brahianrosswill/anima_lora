@@ -102,8 +102,12 @@ Issue = namedtuple("Issue", "level path line kind token message")
 # git-derived sources of truth
 # --------------------------------------------------------------------------- #
 def _git(*args: str) -> str:
+    # ``core.quotepath=false`` keeps non-ASCII paths (e.g. the translated
+    # guidebooks ``가이드북.md`` / ``ガイドブック.md`` / ``指南书.md``) as raw
+    # UTF-8 instead of C-style ``\343\202…`` escapes — otherwise those files
+    # are unopenable here and silently skipped from the scan.
     return subprocess.run(
-        ["git", "-C", str(REPO_ROOT), *args],
+        ["git", "-C", str(REPO_ROOT), "-c", "core.quotepath=false", *args],
         capture_output=True,
         text=True,
         check=True,

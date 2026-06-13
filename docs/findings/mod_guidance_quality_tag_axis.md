@@ -129,7 +129,7 @@
 ## Schedule axis (σ + layer): both falsified — the shipped `8–26` full-dose is validated
 
 > **STATUS (2026-05-31): closed.** A separate proposal
-> (`docs/proposal/mod_guidance_layer_sigma_schedule.md`, now removed) asked whether
+> (`mod_guidance_layer_sigma_schedule`, now removed) asked whether
 > the mod-guidance steering *schedule* — which blocks carry it (`build_mod_schedule`'s
 > hand-set `8–26`) and whether to gate it by σ — could be set better than the shipped
 > default. Two phases on `channel_attribution.py` killed **both** axes. The shipped
@@ -426,7 +426,7 @@ outdoors`). Because the pool is per-dimension `max`, a dense base already maxes
 most channels, so an appended tag's marginal shrinks — the geometry can change.
 We re-ran the full vocab against three dense real captions (rating word +
 `@artist` stripped, all content kept), spanning solo-night / duo-day-beach /
-group-beach (`bench/mod_guidance/base_sensitivity.py`):
+group-beach (via a base-sensitivity probe, since removed):
 
 | | neutral | solo_night | duo_day_beach | group_beach |
 |---|---:|---:|---:|---:|

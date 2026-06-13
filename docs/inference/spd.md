@@ -77,7 +77,7 @@ From the Phase-2 schedule sweep (`bench/spd/README.md`, 832×1216, 2 seeds, with
 
 A **single, late** handoff matches a 2-stage ramp in quality while being simpler and faster (fewer HF injections). SPD-on-Anima also runs consistently **sharper / higher-contrast** than baseline — a behavioral signature, not a transparent speedup.
 
-**Caveat:** even tuned (×1.73 max), standalone SPD is slower than the Spectrum node we already ship (~×3.75). The real open question is **SPD ∘ Spectrum** (orthogonal: token-reduction vs block-skipping) and **SPD vs Turbo at matched quality** — both untested. The speed/quality bench (`bench/spd/bench_speed_quality.py`) is the remaining Phase-3 TODO.
+**Caveat:** even tuned (×1.73 max), standalone SPD is slower than the Spectrum node we already ship (~×3.75). The real open question is **SPD ∘ Spectrum** (orthogonal: token-reduction vs block-skipping) and **SPD vs Turbo at matched quality** — both untested. The speed/quality bench (not yet written) is the remaining Phase-3 TODO.
 
 ## Why it works on Anima — precondition history
 

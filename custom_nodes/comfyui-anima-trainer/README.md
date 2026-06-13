@@ -4,7 +4,7 @@ ComfyUI custom node that trains an Anima LoRA from **one image + caption** and
 returns a ready-to-use `MODEL`, so a single workflow run covers **curate → train
 → generate**.
 
-Complements `custom_nodes/comfyui-hydralora/` (which only loads already-trained
+Complements `https://github.com/sorryhyun/ComfyUI-Anima_lora-Adapter` (which only loads already-trained
 adapters). Training runs inside the local Anima **training daemon** — a separate
 detached process — so a CUDA OOM kills only the job, not ComfyUI.
 

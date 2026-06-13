@@ -22,7 +22,7 @@ inference-side code, you just run it at `--infer_steps <student_steps> --cfg 1.0
 > spent managing its standing CFG bias — and every CA-side lever came back inert or
 > harmful. DP-DMD removes the CA branch entirely and recovers diversity with an
 > explicit anchor instead. The CA-era decision log survives at
-> `docs/proposal/dmd2_decoupled_improvements.md`; the migration proposal at
+> `_archive/proposals/dmd2_decoupled_improvements.md`; the migration proposal at
 > `_archive/proposals/dpdmd.md`.
 
 ---
@@ -423,4 +423,4 @@ Consequences of the plain-LoRA bake (the load-bearing constraint):
 *(A schematic for `docs/structure_images/dpdmd.png` — the three-role frozen-DiT
 diagram plus the diversity-anchor / DMD step split — is still to be drawn; the ASCII
 diagram in §3 is the interim reference. The retired CA-era schematic lives at
-`docs/structure_images/dmd2_decoupled.png`.)*
+`docs/structure_images/dpdmd.png`.)*

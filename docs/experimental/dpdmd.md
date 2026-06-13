@@ -16,7 +16,7 @@ baked into the student during distillation).
 > entirely. The structural walkthrough (diversity-anchor / DMD gradient split,
 > flow-matching velocity↔x0 math, the per-step schedule) lives at
 > `docs/structure/dpdmd.md`; the CA-era decision log survives at
-> `docs/proposal/dmd2_decoupled_improvements.md`. The original migration proposal
+> `_archive/proposals/dmd2_decoupled_improvements.md`. The original migration proposal
 > is archived at `_archive/proposals/dpdmd.md`.
 
 - **Training:** `scripts/distill_turbo/distill.py` — bespoke single-GPU loop
@@ -222,7 +222,7 @@ simplicity *is* the headline. A per-step-expert student is **not**:
   `ss_turbo_per_step_expert` metadata stamp), ComfyUI via the dedicated
   `AnimaTurboPerStepExpertLoader` node (stock LoRA / `AnimaAdapterLoader` raise,
   since they can't drive step-indexed head selection).
-- **`make test-turbo` pins `--infer_steps` to the trained head count K** (read from
+- **`make exp-test-turbo` pins `--infer_steps` to the trained head count K** (read from
   metadata); head k binds to step k, so `infer_steps` must equal K. Overshoot repeats
   the last (quality) head; undershoot skips it. Keep `--cfg 1.0`.
 
@@ -250,7 +250,7 @@ the teacher anchor. The live TB scalars:
 
 DP-DMD is structurally **DMD2 with the GAN amputated**. Two off-by-default levers
 port the missing adversarial machinery from NVlabs FastGen
-(`docs/proposal/turbo_gan/plan.md`):
+(`docs/proposal/turbo_gan.md`):
 
 - **Teacher-feature GAN** (`[gan] weight_gen > 0`, FastGen idea 1). A tiny pooled-
   token discriminator (`networks/methods/turbo_dmd.py::PooledTokenDiscriminator`,
@@ -305,7 +305,7 @@ forwards). **Decision gate 1:** A/B `weight_gen` 0 vs 0.03 at fixed seed/data/st
   pose-vs-pooled-cosine metric caveat, the depth-m fallback).
 - `docs/structure/dpdmd.md` — structural walkthrough: the diversity-anchor / DMD
   gradient split, the flow-matching velocity↔x0 conversion, and the sign convention.
-- `docs/proposal/dmd2_decoupled_improvements.md` — CA-era decision log; the record
+- `_archive/proposals/dmd2_decoupled_improvements.md` — CA-era decision log; the record
   of why the CA branch was abandoned.
 - `docs/findings/asymflow_parameterization.md` — Anima's `u = ε − x0` velocity path
   (the conversion the renoise/grad-assembly relies on).

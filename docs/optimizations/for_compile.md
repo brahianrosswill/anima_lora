@@ -231,7 +231,7 @@ never actually executed, the "fp32 activation retained for backward" the
 Function was built to avoid was never retained, and the whole mechanism was
 dead weight plus cast traffic (`x.float()` materialized a fp32 copy of every
 adapted Linear's input that autocast immediately re-rounded — up to ~24%
-module overhead on wide-input Linears). Measured in `bench/lora_fp32_bottleneck`:
+module overhead on wide-input Linears). Measured in the `lora_fp32_bottleneck` bench (since removed):
 
 * live-autocast path vs explicit bf16 GEMMs: **bit-identical forward** (max abs diff 0.0);
 * cuBLAS bf16 GEMMs accumulate in fp32 internally, so the bf16 output sits at

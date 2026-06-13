@@ -36,7 +36,7 @@ The shipped default is `use_moe_style = false` (plain LoRA stack) with
 `use_ortho = true` + `use_timestep_mask = true`. Uncomment a routing block to
 get HydraLoRA (σ-routed shared-A experts), FeRA-on-Hydra (FEI-routed
 shared-A), or author-faithful FeRA (`independent_A` + global FEI router —
-already pre-baked in `configs/gui-methods/fera.toml`).
+available as a routing block in `configs/methods/lora.toml`).
 
 Pre-three-axis checkpoints carrying `ss_use_hydra` / `ss_use_fei_router`
 metadata no longer load — the legacy fallback was removed.
@@ -82,7 +82,6 @@ Each has its own method TOML and `make` entrypoint:
 | Family | Config | Train target |
 |--------|--------|--------------|
 | ChimeraHydra (dual-pool MoE) | `methods/chimera.toml` | `make exp-chimera` |
-| Postfix (free + cond+ortho) | `methods/postfix.toml` | `make exp-postfix` |
 | EasyControl | `methods/easycontrol.toml` | `make easycontrol` |
 | Soft Tokens (SoftREPA) | `methods/soft_tokens.toml` | `make exp-soft-tokens` |
 
