@@ -333,14 +333,37 @@ def create_network(
         network._repa_anneal_steps = float(kwargs.get("repa_anneal_steps", 0.0) or 0.0)
         network._repa_spatial_norm = _as_bool(kwargs.get("repa_spatial_norm"))
         network._repa_grad_heatmap = float(kwargs.get("repa_grad_heatmap", 0) or 0)
+        # Global-anchor arm (docs/proposal/repa_global_anchor.md): re-inject the
+        # global component the spatial-norm/relational path strips, via a
+        # patch-mean PE target + a train-only projection head. Mirrors
+        # networks.lora_anima.factory. The frozen DiT means this gradient, like
+        # the relational arm's, reaches the cond LoRA only through the extended
+        # self-attention in blocks <= repa_layer.
+        network._repa_global_weight = float(
+            kwargs.get("repa_global_weight", 0.0) or 0.0
+        )
+        network._repa_global_norm = str(
+            kwargs.get("repa_global_norm", "zscore")
+        ).lower()
+        network._repa_global_calib = str(kwargs.get("repa_global_calib", "") or "")
+        if network._repa_global_weight > 0.0:
+            from library.training.repa import REPAGlobalHead
+            from library.vision.encoders import get_encoder_info
+
+            enc_dim = get_encoder_info(network._repa_encoder).d_enc
+            # Train-only head; stripped from the checkpoint by
+            # EasyControlNetwork.state_dict_for_save.
+            network.repa_global_head = REPAGlobalHead(hidden_size, enc_dim)
         logger.info(
             f"EasyControl REPA[{repa_mode}]: weight={network._repa_weight}, "
             f"layer={network._repa_layer}, encoder={network._repa_encoder}, "
             f"anneal_steps={network._repa_anneal_steps:g}, "
-            f"spatial_norm={network._repa_spatial_norm}"
+            f"spatial_norm={network._repa_spatial_norm}, "
+            f"global_weight={network._repa_global_weight:g}"
         )
     else:
         network._repa_weight = 0.0
+        network._repa_global_weight = 0.0
 
     return network
 
@@ -556,6 +579,11 @@ class EasyControlNetwork(AdapterNetworkBase):
         #                        at cond's native token count)
         # cond_x_init for block 0 lives on block_modules[0]._easycontrol_cond_x_in.
         self._cond_state: Optional[dict] = None
+
+        # REPA global-anchor projection head — attached by create_network when
+        # repa_global_weight > 0, else stays None. Training-only: it IS in
+        # parameters() (so it's optimized) but state_dict_for_save strips it.
+        self.repa_global_head: Optional[nn.Module] = None
 
         # Inference KV cache: per-block (cond_k, cond_v) post-RoPE-and-norm,
         # i.e. the exact tensors `_extended_target_attention` consumes from the
@@ -1066,6 +1094,15 @@ class EasyControlNetwork(AdapterNetworkBase):
             "ss_apply_ffn_lora": str(int(self.apply_ffn_lora)),
             "ss_cond_res_scale": str(self.cond_res_scale),
             "ss_channel_scaling_alpha": str(self.channel_scaling_alpha),
+        }
+
+    def state_dict_for_save(self, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+        # repa_global_head (REPA global-anchor arm) is training-only — strip it
+        # from the checkpoint, mirroring the LoRA family's _training_only_prefixes.
+        return {
+            k: v.detach().cpu().to(dtype)
+            for k, v in self.state_dict().items()
+            if not k.startswith("repa_global_head.")
         }
 
     def load_weights(self, file):

@@ -9,15 +9,6 @@
 #   make easycontrol-preprocess EASYADAPTER=colorize   # [preprocess] → cond+text caches
 #   make easycontrol            EASYADAPTER=colorize   # [training]  → train
 # CLI flags (ARGS="…") override any table value.
-#
-# What makes colorize differ from plain EasyControl (same frozen-DiT network):
-#   • cond ≠ target — the condition is a synthetic mangafied B&W latent (cached in
-#     a parallel cond_cache_dir), the target is the original color image.
-#   • color-only captions — the TE cache (text_cache_dir) holds captions filtered
-#     to color tags only (hair/eye/clothing colors, + copyright). The manga cond
-#     already encodes structure; text carries only the ambiguous variable (hue),
-#     so a moderate caption_dropout still leaves a strong prompt→color binding. At
-#     inference an empty prompt auto-colorizes; "pink hair, blue eyes" steers.
 
 # Output slug — single source of truth for the derived trees. The staging /
 # cond / text caches live under post_image_dataset/easycontrol/<name>/ and the
@@ -75,7 +66,7 @@ text_keep_comic = true
 network_dim = 32
 network_alpha = 32
 target_res = [896, 1024]
-network_args = [
+network_args = [        # Do not use whitespace in each arg
     "b_cond_init=-4.0",
     "cond_scale=1.0",
     "apply_ffn_lora=1",
@@ -84,12 +75,9 @@ network_args = [
     "repa_weight=0.05",
     "repa_layer=8",
     "repa_spatial_norm=true",
-    "repa_global_weight = 0.001",
-    'repa_global_norm = "zscore"',
-    'repa_global_calib = "networks/calibration/pe_patchmean_stats.safetensors"'
 ]
 blocks_to_swap = 0
-output_name = "anima_colorize_comic"
+output_name = "anima_colorize_comic2"
 sigmoid_bias = 0
 masked_loss=false
 

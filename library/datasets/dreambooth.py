@@ -275,8 +275,44 @@ class DreamBoothDataset(BaseDataset):
                 f"found directory {subset.image_dir} contains {len(img_paths)} image files"
             )
 
+            # cond≠target task (cond_cache_dir set): keep only the targets that
+            # actually have a cached condition latent — BEFORE reading captions.
+            # Staging's tag filters ([staging].only_data_includes /
+            # exclude_data_includes) synthesize a cond + text cache for only a
+            # subset of the shared `resized` corpus, but image_dir still
+            # enumerates the whole corpus. Filtering here (rather than after the
+            # caption read, as this used to) keeps the TE-cache check below from
+            # spamming "neither caption file nor class tokens" for the thousands
+            # of unpaired targets we're about to drop anyway. A target with no
+            # cond latent would also crash at load time (_load_cond_latent raises).
+            if getattr(subset, "cond_cache_dir", None):
+                from library.io.cache import discover_latents_by_stem
+
+                cond_stems = set(discover_latents_by_stem(subset.cond_cache_dir))
+                if not cond_stems:
+                    raise FileNotFoundError(
+                        f"No condition latents under {subset.cond_cache_dir!r} — run "
+                        f"the cond prep step first (e.g. `make easycontrol-preprocess "
+                        f"EASYADAPTER=colorize`)."
+                    )
+                pre = len(img_paths)
+                kept = [
+                    (p, s)
+                    for p, s in zip(img_paths, sizes)
+                    if os.path.splitext(os.path.basename(p))[0] in cond_stems
+                ]
+                img_paths, sizes = (
+                    (list(t) for t in zip(*kept)) if kept else ([], [])
+                )
+                if len(img_paths) != pre:
+                    logger.info(
+                        f"colorize: kept {len(img_paths)}/{pre} targets with a cached "
+                        f"condition latent (dropped {pre - len(img_paths)} unpaired) "
+                        f"from {subset.image_dir}"
+                    )
+
             if use_cached_info_for_subset:
-                captions = [meta["caption"] for meta in metas.values()]
+                captions = [metas[p]["caption"] for p in img_paths]
                 missing_captions = [
                     img_path
                     for img_path, caption in zip(img_paths, captions)
@@ -399,39 +435,6 @@ class DreamBoothDataset(BaseDataset):
                     f"artist_filter='{_base._ARTIST_FILTER}' → kept {len(img_paths)}/{pre} "
                     f"images from {subset.image_dir}"
                 )
-
-            # cond≠target task (cond_cache_dir set): keep only the targets that
-            # actually have a cached condition latent. Staging's tag filters
-            # ([staging].only_data_includes / exclude_data_includes) leave some targets
-            # without a synthesized cond; rather than re-scanning the caption master
-            # here, we pair against what exists on disk — a target with no cond latent
-            # would otherwise crash at load time (_load_cond_latent raises).
-            if getattr(subset, "cond_cache_dir", None):
-                from library.io.cache import discover_latents_by_stem
-
-                cond_stems = set(discover_latents_by_stem(subset.cond_cache_dir))
-                if not cond_stems:
-                    raise FileNotFoundError(
-                        f"No condition latents under {subset.cond_cache_dir!r} — run "
-                        f"the cond prep step first (e.g. `make easycontrol-preprocess "
-                        f"EASYADAPTER=colorize`)."
-                    )
-                pre = len(img_paths)
-                kept = [
-                    (p, c, s)
-                    for p, c, s in zip(img_paths, captions, sizes)
-                    if os.path.splitext(os.path.basename(p))[0] in cond_stems
-                ]
-                if kept:
-                    img_paths, captions, sizes = (list(t) for t in zip(*kept))
-                else:
-                    img_paths, captions, sizes = [], [], []
-                if len(img_paths) != pre:
-                    logger.info(
-                        f"colorize: kept {len(img_paths)}/{pre} targets with a cached "
-                        f"condition latent (dropped {pre - len(img_paths)} unpaired) "
-                        f"from {subset.image_dir}"
-                    )
 
             return img_paths, captions, sizes
 
