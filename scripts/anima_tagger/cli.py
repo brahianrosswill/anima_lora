@@ -153,12 +153,12 @@ def parse_args() -> argparse.Namespace:
         "host-device sync) every N steps. Higher = fewer syncs / faster "
         "training; lower = more responsive progress bar (default: 10).",
     )
-    p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument(
         "--warmup_steps",
         type=int,
-        default=250,
+        default=50,
         help="Linear lr warmup over the first N optimizer steps before cosine "
         "decay takes over. 0 (default) disables warmup and runs pure cosine "
         "on a per-step schedule. Typical values: 200-1000 for fresh-head "
@@ -189,7 +189,8 @@ def parse_args() -> argparse.Namespace:
         help="Pool head over the PE-Core encoder's tokens. 'map' (default): "
         "K-query attention pool + CLS + mean concat → trunk. 'mean': "
         "single-vector mean-pool. Selects cache subdir "
-        "(.cache/tokens-<encoder>/ vs pooled-<encoder>/) and head arch.",
+        "(tokens-<encoder>/ vs pooled-<encoder>/ under --feature_cache_dir) "
+        "and head arch.",
     )
     p.add_argument(
         "--pool_kind_aux",
@@ -343,10 +344,22 @@ def parse_args() -> argparse.Namespace:
         "ready to paste into tag_rules.yaml.",
     )
 
-    # Output.
+    # Output. --out_dir holds the model checkpoint + vocab; the bulky
+    # dataset-derived feature caches are decoupled into --feature_cache_dir so
+    # they sit alongside the other dataset caches under post_image_dataset/.
     p.add_argument(
         "--out_dir",
         default="models/captioners/anima-tagger-v1",
+    )
+    p.add_argument(
+        "--feature_cache_dir",
+        default=None,
+        help="Root dir for build_features caches (per-stem token sidecars + "
+        "packed mmap shards). Decoupled from --out_dir so these bulky "
+        "dataset-derived caches live under post_image_dataset/. Default "
+        "(unset): post_image_dataset/anima_tagger/. "
+        "Read by build_features / train / calibrate — they must all agree, "
+        "so pass the same value (or none) to every mode.",
     )
 
     args = p.parse_args()

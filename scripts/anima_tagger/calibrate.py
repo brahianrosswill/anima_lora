@@ -87,9 +87,10 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
         AnimaTaggerHead,
     )
 
-    from .caches import cache_dir_for
+    from .caches import cache_dir_for, feature_cache_root
 
     out_dir = Path(args.out_dir)
+    feature_root = feature_cache_root(args)
 
     with open(out_dir / "config.json") as f:
         cfg_d = json.load(f)
@@ -110,7 +111,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     pool_kind = str(cfg_d.get("pool_kind", cfg.pool_kind))
     encoder = cfg_d.get("encoder") or args.encoder
 
-    cache_dir = cache_dir_for(out_dir, pool_kind, encoder)
+    cache_dir = cache_dir_for(feature_root, pool_kind, encoder)
     if not cache_dir.exists():
         raise SystemExit(
             f"missing {cache_dir} — calibrate needs the same cache the "
@@ -150,7 +151,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     spec_aux = (
         get_encoder_info(aux_encoder).bucket_spec if pool_kind_aux == "map" else None
     )
-    cache_dir_aux = cache_dir_for(out_dir, pool_kind_aux, aux_encoder)
+    cache_dir_aux = cache_dir_for(feature_root, pool_kind_aux, aux_encoder)
     if not cache_dir_aux.exists():
         raise SystemExit(
             f"missing aux cache {cache_dir_aux} — calibrate needs the same "
@@ -159,9 +160,9 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     # Read from the same per-bucket mmap shards the trainer built (keyed by a
     # hash of the kept-stem list, so this val split reuses the trainer's val
     # shard rather than re-opening ~thousands of tiny per-stem sidecars). Built
-    # on demand if .cache/packed was cleared. Calibrate only materializes val,
-    # so it never prunes the trainer's train shards.
-    pack_root = out_dir / ".cache" / "packed"
+    # on demand if <feature_root>/packed was cleared. Calibrate only
+    # materializes val, so it never prunes the trainer's train shards.
+    pack_root = feature_root / "packed"
     val_ds = CachedDualDataset(
         manifest,
         cache_dir,

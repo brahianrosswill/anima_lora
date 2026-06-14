@@ -54,7 +54,7 @@ def cmd_tagger(extra):
         "--batch_size",
         "64",
         "--lr",
-        "2e-5",
+        "2e-4",
         "--pool_kind",
         "map",
         "--pool_kind_aux",

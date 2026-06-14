@@ -6,8 +6,9 @@ within-batch T is constant per side and the :class:`AnimaTaggerHead` pools
 run inside the model forward. Each side's pool layout is selected
 independently: ``--pool_kind`` (PE-Core) and ``--pool_kind_aux``
 (PE-Spatial), each ``map`` (full token sequence ``[T, d_enc]`` under
-``out_dir/.cache/tokens-<encoder>/``) or ``mean`` (pre-pooled ``[d_enc]``
-under ``out_dir/.cache/pooled-<encoder>/``).
+``<feature_root>/tokens-<encoder>/``) or ``mean`` (pre-pooled ``[d_enc]``
+under ``<feature_root>/pooled-<encoder>/``) — see
+:func:`scripts.anima_tagger.caches.feature_cache_root`.
 
 Caches build via ``--mode build_features`` (which builds both the main and
 aux caches based on the same per-side pool kinds).
@@ -24,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from .caches import cache_dir_for
+from .caches import cache_dir_for, feature_cache_root
 from .train_common import (
     GroupRouter,
     build_warmup_cosine_scheduler,
@@ -319,7 +320,8 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
             "dual-encoder training requires --aux_encoder (e.g. "
             "--aux_encoder pe_spatial). The single-encoder path was removed."
         )
-    cache_dir = cache_dir_for(out_dir, args.pool_kind, args.encoder)
+    feature_root = feature_cache_root(args)
+    cache_dir = cache_dir_for(feature_root, args.pool_kind, args.encoder)
     if not manifest_path.exists():
         raise SystemExit(f"missing {manifest_path} — run --mode build_vocab first.")
     if not vocab_path.exists():
@@ -335,13 +337,13 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     spec = get_encoder_info(args.encoder).bucket_spec
 
     # Per-side pool layout. Aux cache_dir is keyed on its own pool_kind so
-    # mixed configs (mean main + map aux) read from .cache/tokens-pe_spatial/
-    # while the main side reads from .cache/pooled-pe/ or .cache/tokens-pe/.
+    # mixed configs (mean main + map aux) read from tokens-pe_spatial/ while the
+    # main side reads from pooled-pe/ or tokens-pe/ (under the feature root).
     pool_kind_aux = args.pool_kind_aux
     spec_aux = (
         get_encoder_info(aux_encoder).bucket_spec if pool_kind_aux == "map" else None
     )
-    cache_dir_aux = cache_dir_for(out_dir, pool_kind_aux, aux_encoder)
+    cache_dir_aux = cache_dir_for(feature_root, pool_kind_aux, aux_encoder)
     if not cache_dir_aux.exists():
         raise SystemExit(
             f"missing aux cache {cache_dir_aux} — run "
@@ -351,9 +353,9 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         )
     # Consolidate the per-stem sidecars into per-bucket mmap shards so the
     # loader stops opening ~30k tiny files per epoch (see CachedDualDataset
-    # docstring). Built once under out_dir/.cache/packed; reused across runs
+    # docstring). Built once under <feature_root>/packed; reused across runs
     # while the split is unchanged.
-    pack_root = out_dir / ".cache" / "packed"
+    pack_root = feature_root / "packed"
     train_ds = CachedDualDataset(
         manifest,
         cache_dir,
@@ -380,7 +382,7 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     # (new images / different val_frac / seed) builds fresh dirs and orphans
     # the old ~40 GB. train+val are the only live splits this run, so prune any
     # other packed-shard dir to keep disk bounded to one split's worth. Only
-    # touches out_dir/.cache/packed/ — never the per-stem sidecars.
+    # touches <feature_root>/packed/ — never the per-stem sidecars.
     live_dirs = {d for ds in (train_ds, val_ds) for d in ds._pack_dirs.values()}
     if pack_root.exists():
         for child in pack_root.iterdir():
