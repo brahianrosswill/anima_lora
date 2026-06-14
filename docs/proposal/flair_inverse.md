@@ -128,10 +128,14 @@ silent garbage, and three of them have a memory note already.
 ## Where it hooks (verified against the live tree)
 
 > **Productization split.** This doc is the **method + bench** (Algorithm 1, the
-> ladder, the λ_R calibration). Shipping the validated SR task as a user-facing app
-> — the `make exp-test-flair-sr` target + ComfyUI node + the bench→`library`
-> promotion — is its own proposal: [`flair_sr.md`](flair_sr.md). Read that for the
-> SR front-door wiring (tiling, the HDC-grad-in-a-node edge, the exp-target).
+> ladder, the λ_R calibration). Shipping a validated task as a user-facing app is its
+> own proposal. The first front door is **editing**, not SR: [`flair_edit.md`](flair_edit.md)
+> productizes the Phase-3 inpaint pilot into training-free *localized editing with a
+> delta-only prompt* (no ψ_src — the DirectEdit/tagger pain point), incl. a SAM3
+> text→mask front-end, the `make exp-test-flair-edit` target, and the
+> HDC-grad-in-a-node edge. (The earlier SR-deploy proposal `flair_sr.md` was retired
+> 2026-06-14 in favor of the editing track — SR stays validated in `bench/flair/` but
+> is not the shipped app.)
 
 A new training-free stack, composing at the **sampler boundary** like CNS/DCW.
 
@@ -205,6 +209,39 @@ near σ≈0.45 per `[[project_sigma_signal_resolves_by_045]]`). Output
 zeroed. **A/B against Phase 0:** calibrated λ_R must beat `λ_R=t` on the SR ×8
 LPIPS/CMMD, replicating the paper's CRW ablation direction. If calibration doesn't
 move the needle on Anima → ship `λ_R=t`, skip the npz, note it.
+
+**Results — N=100, 768px, 100-step σ grid (`results/20260614-1417-n100-768px/`).**
+Conditional FM error `‖v_θ − u_t‖²` over 100 calibration images from
+`post_image_dataset/resized`, flow_shift 3.0, RTX 5070 Ti, compiled. Canonical table
+written to `networks/calibration/flair_lambda_r.npz` (keys `sigmas`, `lambda_r`,
+`error`, `cutoff_sigma`; curve in `lambda_r_curve.png`).
+
+- **Curve shape — clean U.** Error is **minimal in the mid-σ band** (0.0683 @ σ=0.444,
+  **0.0679 @ σ=0.486**, 0.0687 @ σ=0.551 — a flat basin σ≈0.4–0.55) and rises at
+  *both* ends: a moderate climb to 0.299 at the noise end (σ=1.0, 4.4× the min) and a
+  **steeper blow-up in the deep tail** to 0.402 at σ=0.029 (5.9× the min). So the
+  calibrated `λ_R(σ)=1/error` is a **hump peaking at σ=0.486** that sits *above* the
+  Phase-0 `λ_R=σ` diagonal across the mid-band and *below* it past σ≈0.75 — i.e. CRW
+  concentrates the prior pull where the model is trustworthy and backs off in the
+  noisy high-σ regime the linear weight over-trusts.
+- **Resolve-σ vs hypothesis — CONFIRMED.** The error minimum (`resolve_sigma`) is
+  **σ=0.486**, against the pre-registered **σ≈0.45** (`[[project_sigma_signal_resolves_by_045]]`:
+  x₀_pred visually done by σ=0.45, base reconstructs to 20% norm-MSE by σ=0.55). The
+  measured peak-reliability σ lands inside that window, slightly toward the 0.55 edge —
+  Anima's flow prior is most reliable exactly where the σ-signal work said it resolves.
+- **Cutoff — σ=0.111, deeper than SD3's 0.2.** Auto knee detection (`knee_mult=2.0`)
+  zeros λ_R where error first exceeds 2× the basin minimum on the clean side:
+  err(σ=0.111)=0.157 ≈ 2×0.0679. So Anima stays usable **below** the paper's SD3
+  `t<0.2` cutoff — the deep-tail blow-up only takes over under σ≈0.11, not 0.2. (The
+  hypothesis expected the *break* near 0.45; the **error minimum** is at 0.45–0.49 as
+  predicted, while the **zeroing cutoff** sits well below it because the basin is wide
+  and only the σ<0.11 tail is unreliable. Both numbers are consistent with the σ-signal
+  picture: reliable through the mid-band, degrading only in the cleanest steps.)
+
+**Still owed to close Phase 1:** the calibrated-vs-`λ_R=σ` SR×8 **A/B** (PSNR/SSIM
+now, LPIPS/CMMD once wired). The table ships as the default (`--calib auto`,
+peak-normalized so `reg_scale` stays comparable); if it does *not* beat `λ_R=σ` on the
+A/B → fall back to the linear weight per the pre-registered rule.
 
 ### Phase 2 — ablation: confirm DTA is the lever on Anima too
 

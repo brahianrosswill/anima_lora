@@ -9,6 +9,20 @@ target self-attention attends to a key set extended with the cond stream's
 keys/values, and `b_cond` controls how much softmax mass the cond positions
 can claim.
 
+![EasyControl two-stream shared attention](assets/easycontrol_attention.png)
+
+Structurally this is the same shape as a unified multimodal transformer that
+shares one attention between a **clean** subsequence and a **noisy** one under a
+block-structured mask: the cond stream plays the clean/authoritative role
+(attends only to itself, never reads the noisy target — which is exactly why it
+is deterministic across timesteps and KV-cacheable at inference), and the target
+stream full-attends over `[K_t; K_c]`. Two differences from the canonical
+picture: the cond block is **full/bidirectional** (a clean image), not causal
+triangular; and the hard attend/mask boundary on the target→cond columns is
+replaced by a learnable scalar `b_cond` gate (init −10 → step-0 equivalence,
+then learned upward). Regenerate the figure with
+`uv run python docs/experimental/assets/easycontrol_attention.py`.
+
 ## Architecture
 
 **Training** runs a **two-stream block forward** — target and cond inside each

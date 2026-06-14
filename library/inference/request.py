@@ -78,6 +78,23 @@ class GenerationRequest:
     easycontrol_image: Optional[str] = None
     pooled_text_proj: Optional[str] = None
 
+    # --- FLAIR-edit (training-free localized editing; docs/proposal/flair_edit.md) -
+    # When ``flair_task == "edit"`` the engine replaces the sampling loop with the
+    # FLAIR inpaint solve: ``prompt`` carries the delta, the kept region is locked
+    # bit-exact by Hard Data Consistency, and exactly one of ``flair_mask`` /
+    # ``flair_mask_prompt`` localizes the edit. Defaults are the editing working
+    # point (near-deterministic α, calibrated λ_R) — distinct from SR's defaults.
+    flair_task: Optional[str] = None  # "edit"
+    flair_edit_image: Optional[str] = None  # source image path
+    flair_mask: Optional[str] = None  # explicit edit-region mask PNG (white = fill)
+    flair_mask_prompt: Optional[str] = None  # SAM3 concept phrase → mask
+    flair_reg_scale: float = 0.5
+    flair_alpha: float = 1.0  # scale on the α=1−t DTA schedule (1.0 = paper `inv_alpha: 1-t`)
+    flair_hdc_steps: int = 8
+    flair_hdc_lr: float = 0.1
+    flair_calib: str = "off"  # linear λ_R=reg_scale·σ; calibrated table diverges the inpaint hole
+    flair_dta_fixed: bool = False  # DTA: constant α instead of the α·(1−t) schedule (A/B knob)
+
     # --- model paths / runtime ---------------------------------------------
     dit: Optional[str] = None
     vae: Optional[str] = None
@@ -144,6 +161,24 @@ class GenerationRequest:
             argv += ["--easycontrol_image", self.easycontrol_image]
         if self.pooled_text_proj is not None:
             argv += ["--pooled_text_proj", self.pooled_text_proj]
+
+        # FLAIR-edit — emit the whole block only when the task is set, so ordinary
+        # requests stay clean and the scalar defaults aren't pinned in two places.
+        if self.flair_task is not None:
+            argv += ["--flair_task", self.flair_task]
+            if self.flair_edit_image is not None:
+                argv += ["--flair_edit_image", self.flair_edit_image]
+            if self.flair_mask is not None:
+                argv += ["--flair_mask", self.flair_mask]
+            if self.flair_mask_prompt is not None:
+                argv += ["--flair_mask_prompt", self.flair_mask_prompt]
+            argv += ["--flair_reg_scale", str(self.flair_reg_scale)]
+            argv += ["--flair_alpha", str(self.flair_alpha)]
+            if self.flair_dta_fixed:
+                argv += ["--flair_dta_fixed"]
+            argv += ["--flair_hdc_steps", str(self.flair_hdc_steps)]
+            argv += ["--flair_hdc_lr", str(self.flair_hdc_lr)]
+            argv += ["--flair_calib", self.flair_calib]
 
         # LoRA (nargs="*").
         if self.lora_weight is not None:

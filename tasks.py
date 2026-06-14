@@ -324,6 +324,14 @@ COMMANDS = {
         exp_inference.cmd_test_byg,
         "[experimental] Inference with latest BYG editing LoRA. Usage: exp-test-byg <ref_image> --prompt 'change background to a forest'",
     ),
+    "exp-test-flair": (
+        exp_inference.cmd_test_flair,
+        "[experimental] FLAIR-edit / reconstruction observer (training-free, no source "
+        "prompt). Default: random-mask reconstruction with the image's canonical caption "
+        "(eyeball the prior's fill). MASK=png / MASK_PROMPT='concept' (SAM3) localize an "
+        "edit; PROMPT='delta' is the edit prompt. REF_IMAGE overrides the random source. "
+        "Usage: exp-test-flair [ref_image] [extra...]",
+    ),
     "exp-test-directedit": (
         exp_inference.cmd_test_directedit,
         "[experimental] DirectEdit on a random source image. PROMPT='...' supplies the edit "

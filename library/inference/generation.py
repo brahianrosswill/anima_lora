@@ -941,6 +941,18 @@ def generate(
         logger.info("No precomputed data. Preparing image and text inputs.")
         context, context_null = prepare_text_inputs(args, device, anima, shared_models)
 
+    # FLAIR-edit: training-free localized editing replaces the sampling loop
+    # entirely (it optimizes the variational mean μ, it does not denoise a fixed
+    # trajectory), so dispatch here before any sampler-boundary setup. The kept
+    # region is locked bit-exact by Hard Data Consistency. See
+    # library/inference/corrections/flair.py / docs/proposal/flair_edit.md.
+    if getattr(args, "flair_task", None):
+        from library.inference.corrections.flair import run_flair_edit
+
+        return run_flair_edit(
+            args, anima, context, context_null, device, seed, shared_models
+        )
+
     # Phase 2 modulation guidance: compute guidance delta once
     if (
         getattr(args, "pooled_text_proj", None) is not None

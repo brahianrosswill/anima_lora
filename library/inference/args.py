@@ -99,6 +99,100 @@ def build_parser() -> argparse.ArgumentParser:
         help="Auto-pick --image_size from the closest CONSTANT_TOKEN_BUCKETS entry to the "
         "reference image's aspect ratio (overrides --image_size). Only effective with --easycontrol_image.",
     )
+    # --- FLAIR-edit (training-free localized editing; docs/proposal/flair_edit.md) -
+    parser.add_argument(
+        "--flair_task",
+        type=str,
+        default=None,
+        choices=["edit"],
+        help="Run the FLAIR inpaint solver instead of the standard sampling loop. "
+        "'edit' = localized editing: --prompt carries the delta, the kept region is "
+        "locked bit-exact by Hard Data Consistency, the masked region is filled by "
+        "the prior. Requires --flair_edit_image and one of --flair_mask / "
+        "--flair_mask_prompt. Does NOT compose with --spectrum/--dave/--mod (its own path).",
+    )
+    parser.add_argument(
+        "--flair_edit_image",
+        type=str,
+        default=None,
+        help="Source image for FLAIR-edit (the image whose unmasked region is preserved).",
+    )
+    parser.add_argument(
+        "--flair_mask",
+        type=str,
+        default=None,
+        help="Explicit edit-region mask PNG: white (>0.5) = region to fill/edit, "
+        "black = keep. Resized to --image_size. Mutually exclusive with --flair_mask_prompt.",
+    )
+    parser.add_argument(
+        "--flair_mask_invert",
+        action="store_true",
+        help="Treat --flair_mask as a KEEP mask (white = keep) instead of an edit mask.",
+    )
+    parser.add_argument(
+        "--flair_mask_prompt",
+        type=str,
+        default=None,
+        help="SAM3 open-vocabulary concept phrase (e.g. 'eyes', 'hair') localizing the "
+        "edit region from text. Mutually exclusive with --flair_mask.",
+    )
+    parser.add_argument(
+        "--flair_mask_dilate",
+        type=int,
+        default=0,
+        help="Dilate the SAM3-derived mask by N pixels so the fill has margin (--flair_mask_prompt only).",
+    )
+    parser.add_argument(
+        "--flair_reg_scale",
+        type=float,
+        default=0.5,
+        help="FLAIR regularizer-pull weight λ_R base (scales the calibrated curve / linear σ).",
+    )
+    parser.add_argument(
+        "--flair_alpha",
+        type=float,
+        default=0.9,
+        help="DTA scale on the α=1−t re-noise schedule (1.0 = paper `inv_alpha: 1-t`; <1 damps the stochastic exploration).",
+    )
+    parser.add_argument(
+        "--flair_hdc_steps",
+        type=int,
+        default=8,
+        help="SGD steps for Hard Data Consistency per σ-step (backprops through the VAE decoder).",
+    )
+    parser.add_argument(
+        "--flair_hdc_lr",
+        type=float,
+        default=0.1,
+        help="Adam lr for the HDC projection.",
+    )
+    parser.add_argument(
+        "--flair_t_stop",
+        type=float,
+        default=0.2,
+        help="Stop refining below this σ on the linear-λ_R arm (the calibrated table sets its own cutoff).",
+    )
+    parser.add_argument(
+        "--flair_calib",
+        type=str,
+        default="off",
+        help="λ_R weighting: 'off'/'linear'/'none' (default) = the stable Phase-0 "
+        "λ_R=reg_scale·σ baseline; 'auto' (shipped npz) / a path = the calibrated "
+        "table. NB the calibrated table peaks λ_R in the σ<0.45 band and DIVERGES "
+        "μ in an unconstrained inpaint hole (off-distribution latent → runaway); "
+        "it is only safe for fully-constrained tasks (SR/colorize), not edit/inpaint.",
+    )
+    parser.add_argument(
+        "--flair_dta_fixed",
+        action="store_true",
+        help="DTA: use a constant α (=--flair_alpha) instead of the faithful α·(1−t) "
+        "schedule. A/B knob — the schedule is the paper default.",
+    )
+    parser.add_argument(
+        "--flair_verbose",
+        action="store_true",
+        help="Log per-σ-step FLAIR solve diagnostics.",
+    )
     parser.add_argument(
         "--include_patterns",
         type=str,
@@ -625,6 +719,18 @@ def build_default_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.prompt is None and not args.from_file and not args.interactive:
             raise ValueError(
                 "Either --prompt, --from_file or --interactive must be specified"
+            )
+
+    if getattr(args, "flair_task", None):
+        if not args.flair_edit_image:
+            raise ValueError("--flair_task edit requires --flair_edit_image <source>.")
+        has_mask = bool(args.flair_mask)
+        has_prompt = bool(args.flair_mask_prompt)
+        if has_mask == has_prompt:
+            raise ValueError(
+                "--flair_task edit requires exactly one of --flair_mask / "
+                "--flair_mask_prompt (got "
+                f"mask={args.flair_mask!r}, mask_prompt={args.flair_mask_prompt!r})."
             )
 
     if args.attn_mode == "sdpa":
