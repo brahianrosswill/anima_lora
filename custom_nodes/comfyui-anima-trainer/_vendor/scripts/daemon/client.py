@@ -9,6 +9,7 @@ both the ComfyUI node and ``make daemon`` rely on.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import time
 import urllib.error
@@ -138,6 +139,19 @@ class DaemonClient:
     # ----- typed endpoints -----
 
     def health(self, *, timeout: float = 3.0) -> Optional[dict]:
+        # Fast-fail when nothing is listening. On Windows, a TCP connect to a
+        # closed port isn't refused immediately — the stack retransmits SYN
+        # for ~2s before erroring — so a bare urlopen turns every "is the
+        # daemon up?" probe into a 2s stall (the GUI makes several at launch
+        # and on poll timers, on the UI thread). A raw connect with a short
+        # timeout bounds the daemon-down answer at 0.25s; when the daemon is
+        # up, loopback connects in microseconds and we proceed to the real
+        # request with the caller's (generous) timeout.
+        try:
+            with socket.create_connection((config.HOST, self.port), timeout=0.25):
+                pass
+        except OSError:
+            return None
         try:
             return self._request("GET", "/health", timeout=timeout)
         except (urllib.error.URLError, OSError, ValueError):
@@ -153,6 +167,7 @@ class DaemonClient:
         config_file: Optional[str] = None,
         overrides: Optional[dict] = None,
         extra: Optional[list[str]] = None,
+        start: Optional[bool] = None,
     ) -> dict:
         return self._request(
             "POST",
@@ -165,6 +180,7 @@ class DaemonClient:
                 "config_file": config_file,
                 "overrides": overrides or {},
                 "extra": extra or [],
+                "start": start,
             },
         )
 
@@ -177,6 +193,7 @@ class DaemonClient:
         chain_train: Optional[dict] = None,
         config_snapshot: Optional[dict] = None,
         config_file: Optional[str] = None,
+        start: Optional[bool] = None,
     ) -> dict:
         return self._request(
             "POST",
@@ -189,8 +206,17 @@ class DaemonClient:
                 "chain_train": chain_train or None,
                 "config_snapshot": config_snapshot or None,
                 "config_file": config_file,
+                "start": start,
             },
         )
+
+    def start_queue(self) -> Optional[dict]:
+        """Resume a paused queue — the worker launches queued jobs in order."""
+        return self._request("POST", "/queue/start")
+
+    def pause_queue(self) -> Optional[dict]:
+        """Hold the queue — queued jobs wait until ``start_queue``."""
+        return self._request("POST", "/queue/pause")
 
     def list_jobs(self) -> list:
         return self._request("GET", "/jobs") or []

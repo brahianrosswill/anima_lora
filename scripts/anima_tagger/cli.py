@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--feature_cache_workers",
         type=int,
-        default=3,
+        default=5,
         help="DataLoader workers for build_features CPU-side decode + LANCZOS "
         "resize (default: 4). Set to 0 to run inline on the main process.",
     )
@@ -138,13 +138,35 @@ def parse_args() -> argparse.Namespace:
         "Optional — pass empty / unset to build a flat-vocab checkpoint. "
         "Default: $CAPTION_CORPUS_DIR/tag_groups.yaml.",
     )
-    p.add_argument("--min_freq", type=int, default=20)
+    p.add_argument("--min_freq", type=int, default=50)
     p.add_argument("--val_frac", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
 
     # Train-mode knobs.
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch_size", type=int, default=96)
+    p.add_argument(
+        "--ram_resident",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Load the whole packed feature set into RAM once at startup and "
+        "serve batches from memory (no per-epoch disk IO; runs the loader inline "
+        "with a free global shuffle). Needs ~feature-set-sized RAM (~40 GB here). "
+        "Use --no-ram_resident to fall back to the mmap-shard path with chunked "
+        "shuffle + prefetch workers (default: on).",
+    )
+    p.add_argument(
+        "--shuffle_chunk_size",
+        type=int,
+        default=2048,
+        help="IO-locality knob for the cached-feature loader. Each epoch "
+        "shuffles within contiguous chunks of this many samples (snapped to a "
+        "multiple of --batch_size) and shuffles chunk order, instead of a global "
+        "shuffle — keeps packed-shard reads inside a cache-resident window so the "
+        "~40 GB token set doesn't thrash on a RAM-bound box. Larger = closer to a "
+        "full global shuffle (more random IO); smaller = more sequential IO, "
+        "slightly more correlated batch composition (default: 2048).",
+    )
     p.add_argument(
         "--postfix_every",
         type=int,
@@ -166,6 +188,16 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--d_hidden", type=int, default=1024)
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument(
+        "--label_smooth",
+        type=float,
+        default=0.0,
+        help="Label-smoothing ε for the tag head (train only). Softens the "
+        "multi-label BCE targets to [ε/2, 1−ε/2] and feeds the same ε to the "
+        "softmax-group cross-entropy, regularizing against the overconfidence "
+        "that drives the train/val tag-loss gap. 0.0 (default) is inert; "
+        "0.05–0.1 is the usual range. Val loss is always reported unsmoothed.",
+    )
     p.add_argument(
         "--drop_sidecars_after_pack",
         action="store_true",
@@ -256,7 +288,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--pool_use_mean_aux",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Aux MAP pool: concat the patch-token mean (default on).",
     )
     p.add_argument(

@@ -89,10 +89,11 @@ def cmd_download_pe_spatial(_extra):
 
 
 def cmd_download_tagger(_extra):
-    # Just the Anima Tagger v2 ``vocab.json`` (~0.7 MB) — the only piece
+    # Just the Anima Tagger ``vocab.json`` (~0.7 MB) — the only piece
     # ``make caption-index`` / ``make preprocess`` need to classify tags. The
     # full tagger model is not fetched here (train it locally or pull it
     # separately); this deliberately won't clobber a local ``model.safetensors``.
+    # The checkpoint now lives at the repo root (it used to sit under ``v2/``).
     dst = ROOT / "models" / "captioners" / "anima-tagger-v2"
     if _skip("Anima Tagger vocab", [dst / "vocab.json"], _extra):
         return
@@ -102,20 +103,11 @@ def cmd_download_tagger(_extra):
             "hf",
             "download",
             "sorryhyun/anima-tagger",
-            "v2/vocab.json",
+            "vocab.json",
             "--local-dir",
             "models/captioners/anima-tagger-v2",
         ]
     )
-    # The file lands under the repo's ``v2/`` prefix; flatten it up one level.
-    sub = dst / "v2"
-    if sub.exists():
-        for f in sub.iterdir():
-            target = dst / f.name
-            if target.exists():
-                target.unlink()
-            shutil.move(str(f), str(target))
-        sub.rmdir()
 
 
 def cmd_download_mit(_extra):

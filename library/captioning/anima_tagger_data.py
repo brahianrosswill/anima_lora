@@ -493,7 +493,11 @@ class CachedDualDataset(Dataset):
         spec_aux: Optional[BucketSpec],
         stems_subset: Optional[Sequence[str]] = None,
         pack_root: Optional[Path] = None,
+        ram_resident: bool = False,
     ):
+        self._ram_resident_req = bool(ram_resident)
+        self._ram_resident = False
+        self._ram: Dict[tuple, torch.Tensor] = {}
         if pool_kind not in ("mean", "map"):
             raise ValueError(f"pool_kind must be 'mean' or 'map', got {pool_kind!r}")
         if pool_kind_aux not in ("mean", "map"):
@@ -698,6 +702,8 @@ class CachedDualDataset(Dataset):
         self._handles: Dict[tuple, object] = {}
         self._packed = True
         self._write_pack_index(pack_root)
+        if self._ram_resident_req:
+            self._load_ram_from_shards()
 
     @staticmethod
     def _subset_sig(stems: Sequence[str]) -> str:
@@ -842,6 +848,8 @@ class CachedDualDataset(Dataset):
             "(per-stem sidecars absent)",
             len(kept_stems),
         )
+        if self._ram_resident_req:
+            self._load_ram_from_shards()
 
     def _pack_side(self, side, paths, kind, buckets, pack_root):
         groups: Dict[str, List[int]] = defaultdict(list)
@@ -873,6 +881,38 @@ class CachedDualDataset(Dataset):
             del out
         return row_of
 
+    def _load_ram_from_shards(self) -> None:
+        """Pull every per-(side, bucket) shard fully into a process-resident CPU
+        tensor, so ``__getitem__`` indexes RAM instead of mmap'ing the shard.
+
+        The on-disk shards are kept only as the load source (one big sequential
+        read per bucket beats 30k sidecar opens); once here, the training loop
+        touches zero disk. ``get_tensor`` copies into anonymous RAM (unlike
+        ``get_slice``, which stays lazily mmap-backed), so a shuffled epoch never
+        page-faults. Run single-process (``num_workers=0``) — the resident set is
+        large and there's no IO left for workers to hide.
+        """
+        # bk is the shard key — "{h}x{w}" for map sides, "mean" for a mean side
+        # (one shard, no spatial bucket). Never None once a row map is built.
+        keys = {("main", bk) for bk, _ in self._pack_main}
+        keys |= {("aux", bk) for bk, _ in self._pack_aux}
+        total = 0
+        for side, bk in sorted(keys):
+            shard = self._pack_dirs[side] / f"{bk}.safetensors"
+            with safe_open(str(shard), framework="pt") as h:
+                t = h.get_tensor("data")  # copied into RAM, not mmap-backed
+            self._ram[(side, bk)] = t
+            total += t.numel() * t.element_size()
+        # Drop any lazily-opened mmap handles — RAM is now the source of truth.
+        self._handles = {}
+        self._ram_resident = True
+        logger.info(
+            "CachedDualDataset: %d shards resident in RAM (%.1f GB) — "
+            "loader is now disk-free",
+            len(keys),
+            total / 1024**3,
+        )
+
     def _handle(self, side: str, bucket_key: str):
         h = self._handles.get((side, bucket_key))
         if h is None:
@@ -882,7 +922,12 @@ class CachedDualDataset(Dataset):
         return h
 
     def __getitem__(self, idx: int):
-        if self._packed:
+        if self._ram_resident:
+            bk_m, row_m = self._pack_main[idx]
+            bk_a, row_a = self._pack_aux[idx]
+            feat = self._ram[("main", bk_m)][row_m]
+            feat_aux = self._ram[("aux", bk_a)][row_a]
+        elif self._packed:
             bk_m, row_m = self._pack_main[idx]
             bk_a, row_a = self._pack_aux[idx]
             feat = self._handle("main", bk_m).get_slice("data")[row_m]
@@ -925,13 +970,28 @@ def collate_dual_token_batch(batch):
 
 
 class BucketBatchSampler(Sampler[List[int]]):
-    """Yields batches of indices that share a single bucket.
+    """Yields batches of indices that share a single bucket — with IO-locality
+    via **chunked shuffle**.
 
-    Within each epoch: shuffle the per-bucket index pools, chunk into
-    batches of ``batch_size`` (drop_last=False — partial trailing batches
-    are kept since dataset sizes don't divide evenly), then shuffle the
-    batch order across buckets so the encoder doesn't see all of one
-    aspect ratio in a row.
+    A dataset index maps monotonically to a row in its packed shard (``_pack_*``
+    assigns rows in ascending-index order within each bucket), so a *globally*
+    shuffled epoch reads ~40 GB of token maps in random shard order — on a box
+    whose RAM ≈ the working-set size, that thrashes the page cache every epoch.
+
+    Chunked shuffle keeps reads local: within each bucket the (already ascending)
+    index pool is sliced into contiguous ``chunk_size``-sample **chunks** (each a
+    bounded, monotone row window on both shards — small enough to stay cache-
+    resident while it's the active chunk). We shuffle the *order of chunks*
+    (pooled across buckets, so aspect ratios still interleave and the order
+    varies per epoch) and shuffle *within* each chunk (full gradient mixing, but
+    the random access stays inside the resident window). Batches never straddle a
+    chunk, and we do **not** globally shuffle batches across chunks — that would
+    re-randomize the read order and defeat the locality.
+
+    ``chunk_size`` is snapped down to a multiple of ``batch_size`` so only the
+    final (partial) chunk of each bucket can yield a partial batch. A chunk large
+    enough to cover a whole bucket reduces to the old per-bucket full shuffle.
+    ``drop_last=False`` — partial trailing batches are kept.
     """
 
     def __init__(
@@ -940,13 +1000,21 @@ class BucketBatchSampler(Sampler[List[int]]):
         batch_size: int,
         seed: int = 42,
         shuffle: bool = True,
+        chunk_size: int = 2048,
     ):
         self.buckets = list(buckets)
         self.batch_size = batch_size
         self.seed = seed
         self.shuffle = shuffle
+        # chunk_size <= 0 → global shuffle (no IO locality constraint, e.g. the
+        # RAM-resident loader). Otherwise snap to a whole number of batches (≥1)
+        # so full chunks batch evenly and partials land only at a bucket's tail.
+        self.chunk_size = (
+            0 if chunk_size <= 0 else max(1, chunk_size // batch_size) * batch_size
+        )
         self._epoch = 0
-        # Group sample indices by bucket key.
+        # Group sample indices by bucket key. Insertion order is ascending index
+        # == ascending shard row, which the chunking below relies on for locality.
         self._by_bucket: Dict[tuple[int, int], List[int]] = defaultdict(list)
         for i, b in enumerate(self.buckets):
             self._by_bucket[b].append(i)
@@ -954,23 +1022,50 @@ class BucketBatchSampler(Sampler[List[int]]):
     def set_epoch(self, epoch: int) -> None:
         self._epoch = int(epoch)
 
+    def _chunks(self) -> List[List[int]]:
+        """Contiguous (monotone-row) ``chunk_size`` slices, pooled over buckets."""
+        chunks: List[List[int]] = []
+        for _, idxs in sorted(self._by_bucket.items()):
+            for s in range(0, len(idxs), self.chunk_size):
+                chunks.append(idxs[s : s + self.chunk_size])
+        return chunks
+
     def __iter__(self) -> Iterator[List[int]]:
         rng = torch.Generator().manual_seed(self.seed + self._epoch)
-        all_batches: List[List[int]] = []
-        for _, idxs in sorted(self._by_bucket.items()):
-            order = idxs[:]
+        if not self.chunk_size:
+            # Global shuffle: shuffle each bucket, batch, then shuffle batch order
+            # across buckets so aspect ratios interleave. Free when reads hit RAM.
+            all_batches: List[List[int]] = []
+            for _, idxs in sorted(self._by_bucket.items()):
+                order = idxs[:]
+                if self.shuffle:
+                    perm = torch.randperm(len(order), generator=rng).tolist()
+                    order = [order[k] for k in perm]
+                for s in range(0, len(order), self.batch_size):
+                    all_batches.append(order[s : s + self.batch_size])
+            if self.shuffle:
+                perm = torch.randperm(len(all_batches), generator=rng).tolist()
+                all_batches = [all_batches[k] for k in perm]
+            yield from all_batches
+            return
+        chunks = self._chunks()
+        if self.shuffle:
+            cperm = torch.randperm(len(chunks), generator=rng).tolist()
+            chunks = [chunks[k] for k in cperm]
+        for chunk in chunks:
+            order = chunk
             if self.shuffle:
                 perm = torch.randperm(len(order), generator=rng).tolist()
                 order = [order[k] for k in perm]
             for s in range(0, len(order), self.batch_size):
-                all_batches.append(order[s : s + self.batch_size])
-        if self.shuffle:
-            perm = torch.randperm(len(all_batches), generator=rng).tolist()
-            all_batches = [all_batches[k] for k in perm]
-        yield from all_batches
+                yield order[s : s + self.batch_size]
 
     def __len__(self) -> int:
         n = 0
-        for idxs in self._by_bucket.values():
-            n += (len(idxs) + self.batch_size - 1) // self.batch_size
+        if not self.chunk_size:
+            for idxs in self._by_bucket.values():
+                n += (len(idxs) + self.batch_size - 1) // self.batch_size
+            return n
+        for chunk in self._chunks():
+            n += (len(chunk) + self.batch_size - 1) // self.batch_size
         return n

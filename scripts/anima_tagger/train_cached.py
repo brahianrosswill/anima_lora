@@ -121,6 +121,7 @@ def _save_cfg_dict(args, cfg, d_in, best_f1):
         "batch_size": args.batch_size,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
+        "label_smooth": args.label_smooth,
         "lambda_rating": args.lambda_rating,
         "lambda_people": args.lambda_people,
         "seed": args.seed,
@@ -356,6 +357,7 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     # docstring). Built once under <feature_root>/packed; reused across runs
     # while the split is unchanged.
     pack_root = feature_root / "packed"
+    ram_resident = bool(getattr(args, "ram_resident", True))
     train_ds = CachedDualDataset(
         manifest,
         cache_dir,
@@ -366,6 +368,7 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         spec_aux,
         stems_subset=manifest.train_stems,
         pack_root=pack_root,
+        ram_resident=ram_resident,
     )
     val_ds = CachedDualDataset(
         manifest,
@@ -377,6 +380,7 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         spec_aux,
         stems_subset=manifest.val_stems,
         pack_root=pack_root,
+        ram_resident=ram_resident,
     )
     # Shard dirs are keyed by a hash of their stem list, so a changed split
     # (new images / different val_frac / seed) builds fresh dirs and orphans
@@ -484,24 +488,35 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     else:
         logger.info("no typed groups — pure BCE on every tag")
 
+    # RAM-resident reads hit no disk, so a full global shuffle is free
+    # (chunk_size=0); the on-disk mmap path instead wants chunked locality.
+    chunk_size = 0 if ram_resident else int(getattr(args, "shuffle_chunk_size", 2048))
     train_sampler = BucketBatchSampler(
-        train_ds.buckets, batch_size=args.batch_size, seed=args.seed, shuffle=True
+        train_ds.buckets,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        shuffle=True,
+        chunk_size=chunk_size,
     )
+    # Val isn't shuffled, so chunking is moot — leave it at the default.
     val_sampler = BucketBatchSampler(
         val_ds.buckets, batch_size=args.batch_size, seed=args.seed, shuffle=False
     )
     collate_fn = collate_dual_token_batch
-    # Feature reads are now zero-copy row slices off per-bucket mmap shards, so
-    # a handful of workers saturate the tiny MAP head — no need to brute-force
-    # with one-per-core. Keep them alive across epochs (avoids respawn) and
-    # prefetch a couple batches ahead. num_workers=0 stays inline.
-    n_train_workers = min(args.feature_cache_workers, 3)
+    # RAM-resident serving: every batch is an in-memory index + stack, so there's
+    # no disk IO for DataLoader workers to hide — running inline (num_workers=0)
+    # avoids forking the ~40 GB resident set and pickling each batch over a pipe.
+    # The on-disk mmap path keeps a few persistent prefetch workers.
+    if ram_resident:
+        n_train_workers = 0
+    else:
+        n_train_workers = min(args.feature_cache_workers, 6)
     loader_kwargs = dict(collate_fn=collate_fn, pin_memory=True)
     if n_train_workers > 0:
         loader_kwargs.update(
             num_workers=n_train_workers,
             persistent_workers=True,
-            prefetch_factor=4,
+            prefetch_factor=12,
         )
     else:
         loader_kwargs["num_workers"] = 0
@@ -552,7 +567,9 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
             people = people_cpu.to(device, non_blocking=True)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 tag_logits, rating_logits, people_logits = model(tokens, tokens_aux)
-                l_tag, _per_group = compute_grouped_loss(tag_logits, mh, router)
+                l_tag, _per_group = compute_grouped_loss(
+                    tag_logits, mh, router, label_smooth=args.label_smooth
+                )
                 l_rate = ce(rating_logits, rate)
                 loss = l_tag + args.lambda_rating * l_rate
                 if ce_people is not None and people_logits is not None:

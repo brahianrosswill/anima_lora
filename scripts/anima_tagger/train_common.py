@@ -235,6 +235,7 @@ def compute_grouped_loss(
     tag_logits: torch.Tensor,  # [B, n_tags]
     multi_hot: torch.Tensor,  # [B, n_tags]
     router: GroupRouter,
+    label_smooth: float = 0.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Return ``(total_tag_loss, per_group_metrics_for_logging)``.
 
@@ -245,6 +246,15 @@ def compute_grouped_loss(
     supervision. Samples without that gate (multi-subject, escape, no
     in-group label) keep BCE on the group's tags as a fallback.
 
+    ``label_smooth`` (ε ∈ [0, 1)) applies classic label smoothing as a
+    train-time regularizer against the overconfidence that blows up the
+    memorized-train / held-out gap on this head. The per-tag BCE targets
+    soften symmetrically to ``[ε/2, 1−ε/2]`` (the binary special case of
+    redistributing ε mass over the two classes), and the same ε feeds the
+    softmax-group ``cross_entropy`` so both tag objectives smooth
+    consistently. Pass ``0.0`` (default) on the val/metric path so reported
+    loss stays the true unsmoothed objective and is comparable across ε.
+
     Returned metrics: ``"bce"`` (mean of unmasked BCE entries) plus
     ``f"ce_{group_name}"`` for each softmax group; loss curves stay
     separable in TensorBoard.
@@ -252,10 +262,19 @@ def compute_grouped_loss(
     B, n_tags = tag_logits.shape
     metrics: Dict[str, float] = {}
 
+    # Label-smoothed BCE targets: 1 → 1−ε/2, 0 → ε/2. Caps how far the
+    # logits must run, so the head can't drive train BCE to ~0 by memorizing
+    # (ε=0 leaves multi_hot untouched — bit-identical to the un-smoothed path).
+    bce_target = (
+        multi_hot * (1.0 - label_smooth) + 0.5 * label_smooth
+        if label_smooth > 0.0
+        else multi_hot
+    )
+
     # Element-wise BCE-with-logits — we'll mask and reduce manually.
     bce_per_elem = F.binary_cross_entropy_with_logits(
         tag_logits,
-        multi_hot,
+        bce_target,
         pos_weight=router.bce_pos_weight,
         reduction="none",
     )
@@ -287,7 +306,7 @@ def compute_grouped_loss(
                 continue
             sel_logits = group_logits[ce_samples]  # [n_keep, K_g]
             sel_target = group_target[ce_samples].argmax(dim=1)  # [n_keep]
-            l_ce = F.cross_entropy(sel_logits, sel_target)
+            l_ce = F.cross_entropy(sel_logits, sel_target, label_smoothing=label_smooth)
             ce_total = ce_total + l_ce
             metrics[f"ce_{g.name}"] = float(l_ce.detach().item())
 
