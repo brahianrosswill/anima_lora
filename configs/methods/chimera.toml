@@ -61,7 +61,7 @@ balance_loss_weight = 1.0
 # denoise ~0.1) so it shapes usage rather than forcing flat uniformity — the
 # symmetry-break now comes mainly from content_router_init_std below. Raise
 # toward 1e-3 if experts still die; lower if usage pins uniform with margin flat.
-balance_w_content = 5e-4
+balance_w_content = 1e-3
 network_content_router_lr_scale = 10.0
 
 # Content routing is always the network-level ContentRouter fed the pooled

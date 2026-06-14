@@ -11,12 +11,12 @@
 # standard inference path with --infer_steps 2 --cfg 1.0 (CFG is baked into the
 # student during distillation).
 
-output_name = "anima_turbo_N_repa2"
+output_name = "anima_turbo_N2"
 dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 1250
+iterations = 4000
 batch_size = 1
 seed = 42
 use_masked_loss = true
@@ -170,11 +170,11 @@ weight = 0.0                    # λ on the Gram align loss. 0 = off; first live
 layer = 8                       # DiT block tap (matches LoRA-family REPA)
 encoder = "pe_spatial"          # sidecar {stem}_anima_{encoder}.safetensors next to the TE cache
 every_n = 4                     # run the term every N student steps (amortization; ~0.08 partial fwd/step)
-spatial_norm = true             # iREPA target standardization (the validated LoRA operating point)
+# spatial_norm = true           # iREPA target standardization (the validated LoRA operating point)
 
 # Logging / checkpoints.
 [io]
-save_every = 625
+save_every = 1000
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 625
+validate_every_n_steps = 1000

@@ -34,8 +34,8 @@ engine = "gpu"
 #   exclude_data_includes — then drop pages carrying one of these (e.g. monochrome
 #                           pure-B&W pages with nothing to colorize, or comic/4koma
 #                           panel pages whose tone the manga cond can't convey).
-only_data_includes = ["comic", "white border", "thick border", "2koma", "multiple views", "speech bubble"]
-exclude_data_includes = ["monochrome"]
+# only_data_includes = ["comic", "white border", "thick border", "2koma", "multiple views", "speech bubble"]
+# exclude_data_includes = ["monochrome"]
 # sd-engine-only knobs (uncomment when engine = "sd"):
 # steps = 40
 # cfg = 9.0
@@ -63,8 +63,8 @@ text_keep_comic = true
 # (network_module, use_easycontrol, blocks_to_swap, gradient/offload checkpointing)
 # are inherited from the base easycontrol method.
 [training]
-network_dim = 32
-network_alpha = 32
+network_dim = 48
+network_alpha = 48
 target_res = [896, 1024]
 network_args = [        # Do not use whitespace in each arg
     "b_cond_init=-4.0",
@@ -77,7 +77,7 @@ network_args = [        # Do not use whitespace in each arg
     "repa_target_dog=true"
 ]
 blocks_to_swap = 0
-output_name = "anima_colorize_comic2"
+output_name = "anima_colorize_comic3"
 sigmoid_bias = 0
 masked_loss=false
 
@@ -92,7 +92,7 @@ checkpointing_epochs = 4
 easycontrol_cond_noise_max = 0.0
 easycontrol_drop_p = 0.0
 
-caption_dropout_rate = 1.0
+caption_dropout_rate = 0.8
 use_shuffled_caption_variants = true
 use_shuffled_caption_variants_only = true
 

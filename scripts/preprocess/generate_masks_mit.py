@@ -143,7 +143,7 @@ def main() -> None:
         help="Text segmentation threshold (default: 0.7)",
     )
     parser.add_argument(
-        "--dilate", type=int, default=5, help="Mask dilation in pixels (default: 5)"
+        "--dilate", type=int, default=3, help="Mask dilation in pixels (default: 5)"
     )
     parser.add_argument(
         "--workers", type=int, default=4, help="I/O workers (default: 4)"
