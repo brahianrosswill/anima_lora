@@ -396,6 +396,23 @@ class LoRANetworkCfg:
     # (centering with λ0=0 is a no-op).
     chimera_lambda_init: float = 1e-2
 
+    # Per-expert capability levers (frozen-Cayley chimera only — the
+    # orthogonality-PRESERVING alternative to ``use_ortho_init``, which frees
+    # the bases and lets experts collapse into a shared subspace). Both distill
+    # into the standard per-expert up-stack, so inference / on-disk layout is
+    # unchanged; mutually exclusive with ``use_ortho_init``.
+    #   * ``chimera_expert_basis_mult`` (m≥1): each expert gets an over-complete
+    #     ``(out, m·r)`` frozen pool from a DISJOINT U-slice + an m·r Cayley
+    #     rotation; the forward selects an r-dim Stiefel subspace within it.
+    #     The expert's colspace becomes trainable yet stays disjoint across
+    #     experts (no collapse). Auto-downgrades per-layer when m·r overflows
+    #     a Linear's width. m=1 reproduces the canonical r-slice exactly.
+    #   * ``chimera_expert_diag``: per-expert ``(K, r)`` trainable diagonal σ
+    #     (init 1) — the learnable singular spectrum the orthogonal-only path
+    #     otherwise lacks. ΔW=0 at init still holds via the centered gate.
+    chimera_expert_basis_mult: int = 1
+    chimera_expert_diag: bool = False
+
     # Step-expert (turbo per-step head split). When > 1, each adapted Linear
     # is a ``StepExpertLoRAModule``: one shared ``lora_down`` + K up-heads
     # selected by the diffusion step index (no router). 0/1 = inactive. See
@@ -578,12 +595,28 @@ class LoRANetworkCfg:
             logger.info(
                 "chimera_lambda_init<=0 floored to 1e-2 (centering needs λ0>0)."
             )
+        chimera_expert_basis_mult = int(kwargs.get("chimera_expert_basis_mult", 1))
+        chimera_expert_diag = _as_bool(kwargs.get("chimera_expert_diag"))
         if use_chimera_hydra:
             if num_experts_content <= 0 or num_experts_freq <= 0:
                 raise ValueError(
                     "use_chimera_hydra=True requires num_experts_content > 0 "
                     f"and num_experts_freq > 0 (got K_c={num_experts_content}, "
                     f"K_f={num_experts_freq})."
+                )
+            if use_ortho_init and (
+                chimera_expert_basis_mult > 1 or chimera_expert_diag
+            ):
+                raise ValueError(
+                    "chimera_expert_basis_mult/chimera_expert_diag require the "
+                    "frozen-Cayley path (use_ortho_init=false) — they are the "
+                    "orthogonality-preserving alternative to ortho_init, which "
+                    "already frees the bases."
+                )
+            if chimera_expert_basis_mult < 1:
+                raise ValueError(
+                    "chimera_expert_basis_mult must be >= 1 "
+                    f"(got {chimera_expert_basis_mult})."
                 )
             if freq_router_mode == "fei" and num_experts_freq != fei_feature_dim:
                 raise ValueError(
@@ -745,6 +778,8 @@ class LoRANetworkCfg:
             content_router_layer_norm=content_router_layer_norm,
             content_router_init_std=content_router_init_std,
             chimera_lambda_init=chimera_lambda_init,
+            chimera_expert_basis_mult=chimera_expert_basis_mult,
+            chimera_expert_diag=chimera_expert_diag,
             step_expert_K=step_expert_K,
             channel_scales_dict=channel_scales_dict,
             verbose=verbose,

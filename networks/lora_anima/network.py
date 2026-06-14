@@ -430,6 +430,11 @@ class LoRANetwork(_NetworkMetricsMixin, torch.nn.Module):
                     # trainable SVD-seeded bases (distills to the same on-disk
                     # form, so the inference twin needs no flag).
                     extra_kwargs["use_ortho_init"] = cfg.use_ortho_init
+                    # Per-expert capability levers (frozen-Cayley path only).
+                    # Both distill into the standard up-stack, so the inference
+                    # twin needs no flag.
+                    extra_kwargs["expert_basis_mult"] = cfg.chimera_expert_basis_mult
+                    extra_kwargs["expert_diag"] = cfg.chimera_expert_diag
                 elif effective_module_class == ChimeraHydraInferenceModule:
                     # Inference (free-form) twin of the chimera training
                     # class. Same constructor surface — both pool sizes
