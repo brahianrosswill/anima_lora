@@ -12,7 +12,7 @@ Pipeline mirrors ``scripts/edit.py``:
   IMAGE -> PIL                        (ComfyUI [B,H,W,C] in [0,1] -> PIL.RGB)
   psi_src = source_tag                (caller-supplied string)
   psi_tar = target_tag or psi_src     (empty target_tag -> reconstruction)
-  bucket pick from source aspect ratio
+  resize to native res (snapped to 16px grid, capped by max_megapixels)
   CLIP.tokenize / encode_from_tokens(return_dict=True) for psi_src/tar/neg
   diffusion_model.preprocess_text_embeds -> 512-padded crossattn embeds
   VAE.encode + process_latent_in       -> standardized z_clean (DiT input space)
@@ -59,13 +59,12 @@ def _resolve_anima_modules():
         sys.path.insert(0, str(ANIMA_LORA))
 
     def _imports():
-        buckets_mod = importlib.import_module("library.datasets.buckets")
         directedit_mod = importlib.import_module("library.inference.editing.directedit")
         sampling_mod = importlib.import_module("library.inference.sampling")
         splice_mod = importlib.import_module(
             "library.inference.editing.directedit_splice"
         )
-        return (buckets_mod, directedit_mod, sampling_mod, splice_mod)
+        return (directedit_mod, sampling_mod, splice_mod)
 
     try:
         return _imports()
@@ -91,13 +90,17 @@ import comfy.model_management  # noqa: E402  ComfyUI module; only resolvable ins
 import comfy.utils  # noqa: E402  ComfyUI module; only resolvable inside ComfyUI
 
 (
-    _buckets_mod,
     directedit,
     inference_utils,
     _splice_mod,
 ) = _resolve_anima_modules()
-CONSTANT_TOKEN_BUCKETS = _buckets_mod.CONSTANT_TOKEN_BUCKETS
 splice_crossattn_emb = _splice_mod.splice_crossattn_emb
+
+# DiT pixel grid: VAE downscale (/8) × patch (/2) = 16px per latent-patch axis.
+# Every valid Anima resolution is a multiple of this on both axes.
+_DIT_GRID = 16
+# Rope per-axis cap is 256 patches = 256 * 16 = 4096px on either axis.
+_MAX_AXIS = 4096
 
 # T5 (T5xxl) PAD token id is 0 across the T5 family; vendor doesn't bundle the
 # T5 tokenizer config so we hardcode rather than `load_t5_tokenizer().pad_token_id`.
@@ -106,12 +109,28 @@ _T5_PAD_ID = 0
 logger = logging.getLogger(__name__)
 
 
-def _pick_bucket(pil_img: Image.Image) -> Tuple[int, int]:
-    """Closest CONSTANT_TOKEN_BUCKETS entry by aspect ratio. Returns (H, W)."""
-    rw, rh = pil_img.size
-    target = rw / rh
-    best = min(CONSTANT_TOKEN_BUCKETS, key=lambda wh: abs(wh[0] / wh[1] - target))
-    return best[1], best[0]  # bucket is (W, H); we return (H, W)
+def _snap_axis(n: int) -> int:
+    """Snap one axis down to the DiT 16px grid, clamped to [16, 4096px]."""
+    return max(_DIT_GRID, min(_MAX_AXIS, n - n % _DIT_GRID))
+
+
+def _edit_size(pil_img: Image.Image, max_megapixels: float) -> Tuple[int, int]:
+    """Target edit resolution from the source's native size. Returns (W, H).
+
+    Uses the image's own resolution and aspect ratio (no aspect-snapping to a
+    fixed bucket table). If ``max_megapixels > 0`` and the source exceeds that
+    pixel budget, it is scaled down (aspect preserved) to fit; smaller images
+    are never upscaled. Both axes are then snapped to the DiT's 16px grid and
+    capped at the rope per-axis limit (4096px).
+    """
+    w, h = pil_img.size
+    if max_megapixels and max_megapixels > 0:
+        budget = max_megapixels * 1_000_000
+        if w * h > budget:
+            scale = (budget / (w * h)) ** 0.5
+            w = max(1, round(w * scale))
+            h = max(1, round(h * scale))
+    return _snap_axis(w), _snap_axis(h)
 
 
 def _comfy_image_to_pil(image_tensor: torch.Tensor) -> Image.Image:
@@ -208,6 +227,25 @@ class AnimaDirectEdit:
                 ),
                 "vae": ("VAE", {"tooltip": "Qwen Image VAE."}),
                 "image": ("IMAGE",),
+                "max_megapixels": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 16.0,
+                        "step": 0.1,
+                        "tooltip": (
+                            "Megapixel budget for the edit resolution. The "
+                            "source is edited at its NATIVE resolution and "
+                            "aspect ratio (no bucket snapping); if it exceeds "
+                            "this many megapixels it is scaled down to fit "
+                            "(aspect preserved, never upscaled). Dims are "
+                            "snapped to the DiT 16px grid and capped at 4096px "
+                            "per axis. 0 = no cap (use native size as-is). "
+                            "Default 1.0 (~1024x1024)."
+                        ),
+                    },
+                ),
                 "source_tag": (
                     "STRING",
                     {
@@ -328,6 +366,7 @@ class AnimaDirectEdit:
         flow_shift: float,
         guidance_scale: float,
         invert_guidance: float,
+        max_megapixels: float = 1.0,
         t_inj: int = 0,
         use_slot_surgery: bool = False,
     ):
@@ -352,13 +391,18 @@ class AnimaDirectEdit:
         logger.info("DirectEdit: psi_src = %r", psi_src)
         logger.info("DirectEdit: psi_tar = %r", psi_tar)
 
-        h_pix, w_pix = _pick_bucket(pil_src)
-        pil_src_resized = pil_src.resize((w_pix, h_pix), Image.LANCZOS)
+        w_pix, h_pix = _edit_size(pil_src, max_megapixels)
+        if (w_pix, h_pix) == pil_src.size:
+            pil_src_resized = pil_src
+        else:
+            pil_src_resized = pil_src.resize((w_pix, h_pix), Image.LANCZOS)
         logger.info(
-            "DirectEdit: bucket %dx%d (HxW) for source aspect %.3f",
-            h_pix,
+            "DirectEdit: edit res %dx%d (WxH) from native %dx%d (max_megapixels=%.2f)",
             w_pix,
-            pil_src.size[0] / pil_src.size[1],
+            h_pix,
+            pil_src.size[0],
+            pil_src.size[1],
+            max_megapixels,
         )
 
         # Bring DiT onto device so preprocess_text_embeds (LLMAdapter) and the
@@ -520,6 +564,7 @@ class AnimaDirectEditAutoTag:
                 "clip": req["clip"],
                 "vae": req["vae"],
                 "image": req["image"],
+                "max_megapixels": req["max_megapixels"],
                 "tagger": (
                     "ANIMA_TAGGER",
                     {"tooltip": "AnimaTagger from the Anima Tagger Loader node."},
@@ -592,6 +637,7 @@ class AnimaDirectEditAutoTag:
         clip,
         vae,
         image: torch.Tensor,
+        max_megapixels: float,
         tagger,
         min_confidence: float,
         tags_to_add: str,
@@ -625,6 +671,7 @@ class AnimaDirectEditAutoTag:
             flow_shift=1.0,  # DirectEdit standard (Anima base-v1.0); invert/edit share it.
             guidance_scale=guidance_scale,
             invert_guidance=invert_guidance,
+            max_megapixels=max_megapixels,
             t_inj=t_inj,
         )
         return (latent, psi_src, psi_tar)
