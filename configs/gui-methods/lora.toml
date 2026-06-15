@@ -10,14 +10,6 @@ caption_dropout_rate = 0.1
 output_name = "anima"
 blocks_to_swap = 0
 use_cmmd = false
-sample_prompts = []
-sample_every_n_epochs = 0
-sample_at_first = false
-sample_decode_inline = "false"
-use_repa = true
-[[datasets]]
-validation_split_num = 0
-validation_split = 0.0
 
 [variant]
 family = "lora"
