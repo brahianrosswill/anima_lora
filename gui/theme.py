@@ -222,6 +222,28 @@ def set_theme(name: str) -> None:
         set_setting("theme", name)
 
 
+# App font size (point size handed to app.setFont). 10pt is the design default —
+# see the note in apply_theme(). The slider in SettingsDialog persists an override
+# here; clamped so a stray value can't shrink the UI to nothing or blow it up.
+DEFAULT_FONT_SIZE = 10
+FONT_SIZE_MIN = 8
+FONT_SIZE_MAX = 18
+
+
+def current_font_size() -> int:
+    """The persisted app font point size (clamped, falls back to the default)."""
+    try:
+        size = int(get_setting("font_size", DEFAULT_FONT_SIZE))
+    except (TypeError, ValueError):
+        return DEFAULT_FONT_SIZE
+    return max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, size))
+
+
+def set_font_size(size: int) -> None:
+    """Persist the chosen app font size (does not re-apply — caller does that)."""
+    set_setting("font_size", max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, int(size))))
+
+
 def _build_palette(t: Theme) -> QPalette:
     p = QPalette()
     for role, color in [
@@ -354,8 +376,9 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
     # 10pt, not the OS-native 9pt: Pretendard has a smaller x-height / apparent
     # size than Windows' Segoe UI at the same point size, so matching 9pt makes
     # every label read a notch smaller than native apps. 10pt brings Pretendard
-    # back in line with Segoe UI 9pt visually.
-    font.setPointSize(10)
+    # back in line with Segoe UI 9pt visually. The user can override this from
+    # Settings (persisted as "font_size"); current_font_size() clamps it.
+    font.setPointSize(current_font_size())
     font.setStyleHint(QFont.SansSerif)
     app.setFont(font)
 

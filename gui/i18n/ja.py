@@ -381,6 +381,11 @@ STRINGS: dict[str, str] = {
         "インターフェース全体のカラーテーマです。即時に反映され、設定画面を閉じると"
         "ウィンドウが再描画されて完全に適用されます。"
     ),
+    "settings_font_size": "フォントサイズ:",
+    "settings_font_size_tooltip": (
+        "インターフェースフォントのポイントサイズです。即時に反映され、設定画面を"
+        "閉じるとウィンドウが再描画され各パネルが再配置されます。既定値 10。"
+    ),
     "settings_theme_dark": "ダーク",
     "settings_theme_light": "ライト",
     "settings_theme_sepia": "セピア",

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QStackedWidget,
     QTabWidget,
     QTextBrowser,
@@ -246,6 +247,24 @@ class SettingsDialog(QDialog):
         theme_row.addStretch()
         prefs_lay.addLayout(theme_row)
 
+        # App font size — point size handed to QApplication.setFont. Applied live
+        # (apply_theme re-runs); closing the dialog rebuilds the window so widgets
+        # that sized themselves to the old metrics relayout cleanly.
+        font_row = QHBoxLayout()
+        font_label = QLabel(t("settings_font_size"))
+        font_label.setToolTip(t("settings_font_size_tooltip"))
+        font_row.addWidget(font_label)
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(gui_theme.FONT_SIZE_MIN, gui_theme.FONT_SIZE_MAX)
+        self.font_spin.setSuffix(" pt")
+        self.font_spin.setToolTip(t("settings_font_size_tooltip"))
+        self.font_spin.setValue(gui_theme.current_font_size())
+        self.font_spin.valueChanged.connect(self._change_font_size)
+        self.font_spin.setFixedWidth(80)
+        font_row.addWidget(self.font_spin)
+        font_row.addStretch()
+        prefs_lay.addLayout(font_row)
+
         lay.addWidget(prefs_group)
 
         mcp_group = QGroupBox(t("settings_mcp_header"))
@@ -322,6 +341,18 @@ class SettingsDialog(QDialog):
         app = QApplication.instance()
         if app is not None:
             gui_theme.apply_theme(app, name)
+        self.reload_requested = True
+
+    def _change_font_size(self, size: int) -> None:
+        """Persist + apply the chosen app font size live, then request a rebuild.
+
+        ``apply_theme`` re-reads the size into ``app.setFont``; the rebuild on
+        close lets widgets that cached the old font metrics relayout. Like the
+        theme, it's cheap and reversible, so there's no confirm prompt."""
+        gui_theme.set_font_size(size)
+        app = QApplication.instance()
+        if app is not None:
+            gui_theme.apply_theme(app)
         self.reload_requested = True
 
 

@@ -64,8 +64,8 @@ pe_encoder = "pe_spatial"
 # output_name defaults to anima_easycontrol_<name>; omit the table entirely to
 # train with the plain easycontrol method defaults.
 [training]
-network_dim = 48
-network_alpha = 48
+network_dim = 32
+network_alpha = 128
 masked_loss=false
 target_res = [896, 1024]
 

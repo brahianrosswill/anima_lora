@@ -420,6 +420,11 @@ STRINGS: dict[str, str] = {
         "인터페이스 전체 색상 테마입니다. 즉시 적용되며, 설정 창을 닫으면 "
         "창이 다시 그려져 완전히 반영됩니다."
     ),
+    "settings_font_size": "글꼴 크기:",
+    "settings_font_size_tooltip": (
+        "인터페이스 글꼴의 포인트 크기입니다. 즉시 적용되며, 설정 창을 닫으면 "
+        "창이 다시 그려져 모든 패널이 다시 배치됩니다. 기본값 10."
+    ),
     "settings_theme_dark": "다크",
     "settings_theme_light": "라이트",
     "settings_theme_sepia": "세피아",

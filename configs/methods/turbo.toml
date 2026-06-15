@@ -16,7 +16,7 @@ dit_path = "models/diffusion_models/anima-base-v1.0.safetensors"
 data_dir = "post_image_dataset/lora"
 output_dir = "output/ckpt"
 
-iterations = 4000
+iterations = 1000
 batch_size = 1
 seed = 42
 use_masked_loss = true
@@ -43,10 +43,10 @@ activation_memory_budget = 0.99
 base_loss = "dpdmd"
 
 [network]
-student_rank = 96
-student_alpha = 96
-fake_rank = 96
-fake_alpha = 96
+student_rank = 64
+student_alpha = 180
+fake_rank = 64
+fake_alpha = 180
 attn_mode = "flash"
 # Per-step expert: split the student into K = student_steps up-heads off a
 # shared down-proj, head k serving denoise step k. Removes the diversity↔quality
@@ -126,7 +126,7 @@ calib_batches = 0              # cap the calibration scan (0 = full pass)
 # (~3 GB) only to backprop into x_pred; `grad_ckpt` below recomputes them in
 # backward instead, so the GAN term costs ~one half-depth forward, not ~3 GB.
 [gan]
-weight_gen = 0.03               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
+weight_gen = 0.0               # λ on the generator GAN term (softplus hinge). 0 = off. FastGen: 0.03
 feature_block_idx = -1          # DiT block whose tokens the disc taps. -1 = middle (num_blocks//2)
 disc_lr = 1e-5                  # discriminator AdamW LR
 disc_hidden = 0                 # disc MLP hidden width; 0 → inner_dim // 2
@@ -174,7 +174,7 @@ every_n = 4                     # run the term every N student steps (amortizati
 
 # Logging / checkpoints.
 [io]
-save_every = 1000
+save_every = 500
 log_interval = 5
 log_dir = "output/logs/turbo"
-validate_every_n_steps = 1000
+validate_every_n_steps = 500

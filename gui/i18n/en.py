@@ -436,6 +436,11 @@ STRINGS: dict[str, str] = {
     "settings_theme_dark": "Dark",
     "settings_theme_light": "Light",
     "settings_theme_sepia": "Sepia",
+    "settings_font_size": "Font size:",
+    "settings_font_size_tooltip": (
+        "Point size of the interface font. Applies immediately; the window "
+        "rebuilds when you close Settings so every panel relayouts. Default 10."
+    ),
     "settings_mcp_header": "MCP server (agent access)",
     "settings_mcp_desc": "Expose the local training daemon to MCP clients (Claude Code, "
     "Claude Desktop, …). Run this in a terminal to register it with Claude Code:",

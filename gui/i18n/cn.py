@@ -366,6 +366,10 @@ STRINGS: dict[str, str] = {
     "settings_theme_tooltip": (
         "界面整体配色主题，立即生效；关闭设置窗口时会重建窗口以完全重绘。"
     ),
+    "settings_font_size": "字体大小:",
+    "settings_font_size_tooltip": (
+        "界面字体的磅值大小，立即生效；关闭设置窗口时会重建窗口以重新布局各面板。默认 10。"
+    ),
     "settings_theme_dark": "深色",
     "settings_theme_light": "浅色",
     "settings_theme_sepia": "护眼棕",

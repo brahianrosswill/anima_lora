@@ -16,13 +16,13 @@
 # the denoise loss + per-pool balance loss. T-LoRA's mask is applied to
 # the content branch only (the freq branch keeps full rank at every t).
 
-network_alpha = 32
+network_alpha = 128
 network_dim = 32
 
 learning_rate = 2e-5
-max_train_epochs = 2
-save_every_n_epochs = 2
-checkpointing_epochs = 2
+max_train_epochs = 16
+save_every_n_epochs = 4
+checkpointing_epochs = 4
 
 use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
@@ -31,7 +31,7 @@ caption_dropout_rate = 0.1
 # CMMD val (PE-Core MMD²) is the primary val signal.
 # use_cmmd = true
 
-output_name = "anima_chimera-0615"
+output_name = "anima_chimera-0616"
 # path_pattern = "ama_mitsuki/*|channel_(caststation)/*|sweetonedollar/*"
 
 use_ortho = true
@@ -73,8 +73,8 @@ num_experts_freq = 2
 balance_loss_warmup_ratio = 0.0
 balance_loss_weight = 1.0
 # EMA-usage load balance on the content pool (O(1) at uniform, → K_c at full collapse). 
-balance_w_content = 5e-3
-network_content_router_lr_scale = 10.0
+balance_w_content = 1e-3
+network_content_router_lr_scale = 5.0
 
 # Content routing is always the network-level ContentRouter fed the pooled
 # crossattn_emb (the per-Linear lx_c router was removed).
