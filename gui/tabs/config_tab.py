@@ -381,7 +381,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._explain.setOpenLinks(False)
         self._explain.anchorClicked.connect(self._on_explain_anchor)
         self._explain.setStyleSheet(
-            f"QTextBrowser {{ font-size: 13px; padding: 12px; background: {tok('panel')}; color: {tok('text')}; }}"
+            f"QTextBrowser {{ font-size: 14px; padding: 12px; background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
         # Identity of the gallery render currently showing (None = panel holds
@@ -869,7 +869,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{html.escape(field)}</h2>"
         ]
         if help_text:
-            parts.append(f"<p style='font-size:14px; line-height:1.6;'>{help_text}</p>")
+            parts.append(f"<p style='font-size:15px; line-height:1.6;'>{help_text}</p>")
         else:
             parts.append(
                 f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"

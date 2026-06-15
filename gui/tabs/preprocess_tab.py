@@ -666,7 +666,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self._explain = QTextBrowser()
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
-            f"QTextBrowser {{ font-size: 13px; padding: 12px; "
+            f"QTextBrowser {{ font-size: 14px; padding: 12px; "
             f"background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
@@ -902,7 +902,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         ]
         if help_text:
             parts.append(
-                f"<p style='font-size:14px; line-height:1.6;'>"
+                f"<p style='font-size:15px; line-height:1.6;'>"
                 f"{html.escape(help_text)}</p>"
             )
         else:

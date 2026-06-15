@@ -140,7 +140,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         self._explain = QTextBrowser()
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
-            "QTextBrowser { font-size: 13px; padding: 12px; "
+            "QTextBrowser { font-size: 14px; padding: 12px; "
             f"background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(300)
@@ -299,7 +299,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
             paras.append(" ".join(cur))
         if paras:
             body = "".join(
-                f"<p style='font-size:13px; line-height:1.6;'>{html.escape(p)}</p>"
+                f"<p style='font-size:14px; line-height:1.6;'>{html.escape(p)}</p>"
                 for p in paras
             )
         else:
@@ -317,7 +317,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         ]
         if help_text:
             parts.append(
-                f"<p style='font-size:14px; line-height:1.6;'>"
+                f"<p style='font-size:15px; line-height:1.6;'>"
                 f"{html.escape(help_text)}</p>"
             )
         else:

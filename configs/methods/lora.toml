@@ -33,7 +33,7 @@ use_shuffled_caption_variants = true
 cache_llm_adapter_outputs = true
 caption_dropout_rate = 0.1
 
-output_name = "anima_repa4_tenth"
+output_name = "anima_repa5_tenth"
 # sigmoid_bias = 0.5
 # path_pattern = "channel_(caststation)/*"
 
@@ -174,7 +174,7 @@ output_name = "anima_repa4_tenth"
 use_repa       = true
 repa_mode      = "relational"
 repa_weight    = 0.05          # vs v1's 0.5 — late-run gradient is where style drifts
-repa_layer     = 8            # block to hook (of 28)
+repa_layer     = 26            # block to hook (of 28)
 repa_encoder   = "pe_spatial"
 repa_lr_scale  = 1.0          # head LR multiplier (absolute mode only)
 repa_spatial_norm = false

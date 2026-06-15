@@ -26,11 +26,25 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication
 
 from gui._paths import DEFAULT_THEME, get_setting, set_setting
+
+# Bundled UI font (Pretendard, OFL) — the design system's primary sans. Three
+# static weights live next to this module; see gui/fonts/README.md.
+_FONT_DIR = Path(__file__).parent / "fonts"
+_PRETENDARD_FILES = (
+    "Pretendard-Regular.ttf",
+    "Pretendard-Medium.ttf",
+    "Pretendard-Bold.ttf",
+)
+# Resolved once: the loaded family name ("Pretendard") or None if the files are
+# missing / Qt refused them, in which case we fall back to OS fonts only.
+_bundled_family: str | None = None
+_fonts_loaded = False
 
 
 @dataclass(frozen=True)
@@ -256,7 +270,7 @@ def _build_stylesheet(t: Theme) -> str:
         QTabBar::tab {{
             background: {t.input_bg}; color: {t.text}; border: 1px solid {t.border_dim};
             padding: 6px 14px;
-            font-size: 12.5px; font-weight: 500;
+            font-size: 13.5px; font-weight: 500;
             border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
         }}
         QTabBar::tab:selected {{ background: {t.tab_selected}; color: {t.text_bright}; }}
@@ -273,6 +287,30 @@ def _build_stylesheet(t: Theme) -> str:
     """
 
 
+def _load_bundled_fonts() -> str | None:
+    """Register the bundled Pretendard weights with Qt (once per process).
+
+    Returns the family name to put at the head of the UI font stack, or ``None``
+    if no bundled file loaded (then we render in the OS font as before). All
+    three weights register under one Qt family, so a plain ``QFont(family)`` +
+    ``setWeight`` resolves the right instance."""
+    global _bundled_family, _fonts_loaded
+    if _fonts_loaded:
+        return _bundled_family
+    _fonts_loaded = True
+    for fname in _PRETENDARD_FILES:
+        path = _FONT_DIR / fname
+        if not path.exists():
+            continue
+        fid = QFontDatabase.addApplicationFont(str(path))
+        if fid == -1:
+            continue
+        fams = QFontDatabase.applicationFontFamilies(fid)
+        if fams:
+            _bundled_family = fams[0]  # "Pretendard"
+    return _bundled_family
+
+
 def apply_theme(app: QApplication, name: str | None = None) -> Theme:
     """Resolve + apply a theme to the whole app (palette + global stylesheet).
 
@@ -284,17 +322,23 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
     t = THEMES[resolved]
     _active = t
 
-    # App font with per-platform family + CJK/emoji fallbacks. "Malgun Gothic"
-    # only exists on Windows; on Linux/macOS naming it alone substitutes a
-    # default that doesn't cascade to an emoji font, so emoji (📖 ⚙ 🔍 …) render
-    # as tofu boxes. Listing explicit fallback families lets Qt fall through to
-    # the CJK font (Korean/Japanese/Chinese UI strings) and the color-emoji font.
+    # App font: the bundled Pretendard (design-system primary sans) leads the
+    # stack. Pretendard covers Latin + Korean Hangul + Japanese kana, but NOT
+    # Han ideographs (kanji/hanzi) or emoji — so the only fallbacks that remain
+    # load-bearing are the CJK font (kanji/hanzi for the JA/ZH UI strings) and
+    # the color-emoji font (📖 ⚙ 🔍 … wayfinding markers). Naming a CJK family
+    # alone doesn't cascade to an emoji font, so emoji would render as tofu;
+    # listing both explicitly fixes that. (A plain Latin fallback would be
+    # redundant with Pretendard, so it's omitted.)
     if sys.platform == "win32":
         families = ["Malgun Gothic", "Segoe UI Emoji"]
     elif sys.platform == "darwin":
         families = ["Apple SD Gothic Neo", "Apple Color Emoji"]
     else:  # Linux: Noto Sans CJK + Noto Color Emoji ship with most distros.
-        families = ["Noto Sans CJK KR", "Noto Sans", "Noto Color Emoji"]
+        families = ["Noto Sans CJK KR", "Noto Color Emoji"]
+    bundled = _load_bundled_fonts()
+    if bundled:
+        families.insert(0, bundled)
     font = QFont()
     font.setFamilies(families)
     font.setPointSize(9)
