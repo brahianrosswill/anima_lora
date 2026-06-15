@@ -39,8 +39,8 @@ import numpy as np
 MANIFEST_VERSION = 2
 # Stage-B near-twin gate — same semantics as the miner's defaults, but looser on
 # the inlier fraction so a partial overlap (one edited region) still groups.
-DEFAULT_CELL_MATCH_MIN = 0.9
-DEFAULT_MATCH_FRAC_MIN = 0.3
+DEFAULT_CELL_MATCH_MIN = 0.93
+DEFAULT_MATCH_FRAC_MIN = 0.25
 DEFAULT_SIM_MIN = (
     0.5  # Stage-A CLS-cosine prefilter (loose; the grid match is the gate)
 )
