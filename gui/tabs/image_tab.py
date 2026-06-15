@@ -1518,6 +1518,19 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         )
         if reply != QMessageBox.Yes:
             return
+        # Remember where the user was so the rebuilt tree doesn't snap back to
+        # the top: prefer the image they currently have open; if that one is
+        # itself being deleted, anchor on its position so we can land on the
+        # nearest surviving neighbour instead.
+        open_stem = (
+            self._current_caption_path.stem
+            if self._current_caption_path is not None
+            else None
+        )
+        old_images = list(self._images)
+        anchor_row = self._current_index()
+        targets_set = set(targets)
+
         from send2trash import send2trash  # lazy: keeps GUI startup light
 
         errors: list[str] = []
@@ -1539,7 +1552,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             self._all_images = _imgs(self._current_dir)
         self._apply_filter_and_sort()
         if self._images:
-            self._select_tree_index(0)
+            self._select_tree_index(
+                self._post_delete_row(open_stem, old_images, anchor_row, targets_set)
+            )
         else:
             self._set_image_none()
             self._refresh_buttons()
@@ -1548,6 +1563,31 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             QMessageBox.warning(
                 self, t("error"), t("dataset_delete_failed", err="\n".join(errors))
             )
+
+    def _post_delete_row(
+        self,
+        open_stem: str | None,
+        old_images: list[Path],
+        anchor_row: int,
+        deleted: set[Path],
+    ) -> int:
+        """Pick which row to reselect after a delete so the view stays put.
+
+        If the image the user had open survived, return its new row. Otherwise
+        walk outward from ``anchor_row`` (forward first, then backward) over the
+        pre-delete order to find the nearest surviving neighbour, and return its
+        new row. Falls back to the top only when nothing else matches.
+        """
+        new_row = {p.stem: i for i, p in enumerate(self._images)}
+        if open_stem is not None and open_stem in new_row:
+            return new_row[open_stem]
+        if old_images:
+            start = anchor_row if anchor_row >= 0 else 0
+            order = list(range(start, len(old_images))) + list(range(start - 1, -1, -1))
+            for j in order:
+                if old_images[j] not in deleted and old_images[j].stem in new_row:
+                    return new_row[old_images[j].stem]
+        return 0
 
     def _deletion_files(self, image: Path) -> list[Path]:
         """Image + its caption sidecar + caption history (all trashed together)."""

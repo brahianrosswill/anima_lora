@@ -119,8 +119,8 @@ So the dynamic lever is an **σ-tapered `repa_weight`** (peak at σ≲0.6, ~0 ab
    genuine high-freq content. **But** it feeds the velocity head, so its alignment
    may be **redundant with the flow-matching loss** — a base-model probe cannot
    distinguish "rich representation" from "reconstruction the diffusion loss
-   already trains." This motivates a **layer-24-vs-8 training A/B**; it is not a
-   probe conclusion.
+   already trains." This motivated a **layer-vs-8 training A/B** → now run and
+   **settled (layer 8 wins, layer 26 is worse than no REPA)** — see **Result 4**.
 3. **σ-tapered `repa_weight`** is the high-confidence, low-risk win and the real
    answer to "dynamic against timestep."
 
@@ -137,6 +137,102 @@ So the dynamic lever is an **σ-tapered `repa_weight`** (peak at σ≲0.6, ~0 ab
 - **σ-weight wiring** into `REPAMethodAdapter` (the adapter already sees σ per
   step; `repa_anneal_steps` is a per-*training-step* cutoff, this is a per-*σ*
   taper — a new lever).
-- **Layer-24-vs-8 A/B** to settle the deep-peak redundancy question.
-- The probe measures where alignment *exists*, not where *injecting* it helps —
-  both threads above are the training-side complement it can't provide.
+- ~~Layer-24-vs-8 A/B~~ **DONE — see Result 4.** Layer 8 wins; deep is net-negative.
+- ~~The probe measures where alignment *exists*, not where *injecting* it helps~~
+  — the two training-side tools in Result 4 (`probe_layer_grad_conflict.py`,
+  `compare_repa_ckpts.py`) now supply that complement.
+
+# Result 4 — the layer-8-vs-26 A/B, settled (training + two new tools)
+
+The probe (Results 1–3) measures *where alignment exists*, not *where injecting
+it helps*. The A/B settled the latter, and two new tools explain **why**.
+
+## The A/B
+
+`anima_repa4_tenth` (repa_layer **8**) vs `anima_repa5_tenth` (repa_layer **26**)
+— identical runs (dim 16/α 16, 3 epochs, relational + target_dog, `tenth`
+preset), differing only in the anchor block. Training loss already favored 8
+(0.085 vs 0.091 final); the deep peak the CKA probe pointed at (26) **lost**.
+
+## Two new tools
+
+- `probe_layer_grad_conflict.py` — base-model gradient interaction. For each
+  block output hₗ: FM-stress-weighted per-token cos(∂L_fm/∂hₗ, ∂L_repa/∂hₗ) and
+  the orthogonal-push ratio mag = ‖g_repa‖/‖g_fm‖. Needs gradient checkpointing
+  (forced on) to backprop the full stack on 16 GB.
+- `compare_repa_ckpts.py` — head-to-head on the **trained artifacts** over a
+  held-out probe set: (1) held-out flow-matching loss by σ, (2) **DoG-Gram align
+  loss** by layer = the exact trained objective, Δ vs base, (3) ΔW per-block
+  Frobenius norm + stable rank. Layer-vectorized (batched `bmm`) — GPU-resident,
+  ~3 min for base + 2 adapters × 64 images × 11 σ × 28 layers.
+
+```bash
+uv run python bench/repa/probe_layer_grad_conflict.py --num_samples 32 --target_dog --label full-sweep
+uv run python bench/repa/compare_repa_ckpts.py --num_samples 64   # defaults to the repa4/repa5 pair
+```
+
+Result dirs: grad sweep `results/20260615-1549-full-sweep/`; comparison
+`results/20260615-1631-compare-ckpts/`.
+
+## Finding A — held-out denoising: 8 > base > 26
+
+FM loss on 64 held-out images, band σ∈[0.45,0.9], **best at every single σ**:
+
+| | band FM | vs base |
+|---|---|---|
+| **layer 8** | **0.0768** | −0.0002 (best) |
+| base | 0.0770 | — |
+| **layer 26** | **0.0781** | **+0.0011 (worse than no REPA)** |
+
+Margins are small (3-epoch `tenth` run) but the *ranking* is perfectly consistent
+across all 11 σ. **Deep REPA is net-negative for the actual objective.**
+
+## Finding B — the DoG-Gram delta resolves the CKA paradox
+
+Raw matched CKA *dropped* at both trained layers (a ruler mismatch — REPA trains
+the DoG/high-freq target, raw CKA is dominated by the low band DoG strips). On the
+**trained objective** (DoG-Gram align loss, lower = aligned), both injected
+alignment — and layer 26 injected **~8× more**, yet denoises worse:
+
+| | align loss @ its layer | Δ vs base |
+|---|---|---|
+| layer 8 (base 0.152) | 0.061 | **−0.091** |
+| layer 26 (base 0.914) | 0.106 | **−0.808** |
+
+Two structural reasons deep is damaging:
+1. **Base alignment is depth-dependent** — block 8 is already near the DoG target
+   (base 0.15); block 26 is far (base 0.91). Closing that gap = a large rewrite.
+2. **Deep anchoring spills backward** — layer 26 drove align loss down across
+   blocks **9–27** (−0.26 @ L10, −0.24 @ L14, −0.11 @ L20), restructuring the
+   denoising-critical back half. Layer 8's effect stays shallow (blocks 2–11).
+   The ΔW table confirms it: layer 26's update is a big **near-rank-1** rewrite of
+   blocks 25–27 (‖ΔW‖ ~1.2, srank ~1.1) vs layer 8's gentle ~0.35.
+
+## Finding C — the grad probe predicted it (with a caveat)
+
+Base-model gradients: REPA is **~orthogonal to FM at every depth** (max|cos| =
+0.002 over 28 layers) — so the "deep = directionally redundant" reading is *not*
+the mechanism. The depth signal is magnitude: ‖g_fm‖ **collapses ~4 orders**
+toward the output (2.9e-2 @ L0 → 2.6e-6 @ L26), so FM barely constrains deep
+outputs and REPA's push lands unopposed there → mag = ‖g_repa‖/‖g_fm‖ rises 31×
+(0.010 @ L8 → 0.318 @ L26, peaking in the σ band). Caveat: mag is
+activation-scale-confounded; it's *suggestive*, and the held-out FM + DoG-Gram
+deltas above are the unconfounded confirmation.
+
+## Verdict 4
+
+- **Keep layer 8.** Confirmed safe and marginally positive; deep anchors
+  (≥~16, and 26 specifically) are **net-negative** — over-optimize the aux loss by
+  rewriting the output pathway. **Do not chase the CKA deep peak.**
+- **Alignment is not the goal** — *cheap* alignment is. The right layer is one
+  with real headroom (base align loss not ~0) that is shallow enough that reaching
+  it doesn't rewrite the denoising path. Layer 8 sits there; layers 1–5 are
+  already aligned (base loss ~0.06–0.10 → little to inject); ≥16 is the damage
+  zone.
+- **Within the repr regime (8–11) the optimum is untested.** Layers 9–11 have more
+  DoG headroom (base 0.25–0.43) but ‖g_fm‖ is already ~3× weaker by L11 (more
+  spillover risk). If a single cheap A/B is worth it, **layer 10** is the only
+  candidate worth trying against 8 — but expect second-order gains: REPA is ~4% of
+  total loss, so the anchor choice within 8–11 is a small lever. Higher-ROI levers
+  are the σ-tapered weight (Result 3) and possibly **multi-layer** alignment
+  (a few shallow-mid anchors at small weights) over any single deeper anchor.
