@@ -25,6 +25,7 @@ import sys
 from scripts.experimental_tasks import inference as exp_inference
 from scripts.experimental_tasks import training as exp_training
 from scripts.tasks import (
+    curate,
     daemon,
     dcw,
     downloads,
@@ -184,6 +185,13 @@ COMMANDS = {
         preprocess.cmd_caption_index,
         "Build the typed-tag caption index (character/copyright/artist groups) "
         "at post_image_dataset/captions/caption_index.json. Pure data, no GPU.",
+    ),
+    # ── Curation ──────────────────────────────────────────────────────
+    "curate-group": (
+        curate.cmd_curate_group,
+        "Group dataset images by PE-Spatial visual similarity (per-artist "
+        "connected-components) → post_image_dataset/groups/groups.json. The GUI "
+        'Dataset tab reads it to filter by group. ARGS="--threshold 0.95".',
     ),
     # ── Anima Tagger ──────────────────────────────────────────────────
     "preprocess-tagger": (

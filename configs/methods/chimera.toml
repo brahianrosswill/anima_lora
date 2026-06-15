@@ -73,9 +73,8 @@ num_experts_freq = 2
 balance_loss_warmup_ratio = 0.0
 balance_loss_weight = 1.0
 # EMA-usage load balance on the content pool (O(1) at uniform, → K_c at full collapse). 
-# balance_w_content = 5e-3 # only for ortho_init
-balance_w_content = 1e-4
-network_content_router_lr_scale = 5.0 # 10 for ortho_init
+balance_w_content = 5e-3
+network_content_router_lr_scale = 10.0
 
 # Content routing is always the network-level ContentRouter fed the pooled
 # crossattn_emb (the per-Linear lx_c router was removed).

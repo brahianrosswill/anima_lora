@@ -523,6 +523,12 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self._suspend_dirty = False  # while we set text programmatically
         self._search_text: str = ""
         self._sort_desc: bool = False
+        # Similarity-group curation (make curate-group). _groups is the manifest's
+        # group list; _group_filter is the selected group's member stems (None =
+        # show all). Filtering is stem-keyed so it works whether this tab views
+        # image_dataset/ or post_image_dataset/resized/ (stems are unique + shared).
+        self._groups: list[dict] = []
+        self._group_filter: set[str] | None = None
         # Source pixmap + resolved mask for the currently shown image.
         # _overlay_pm is lazily composed on first toggle and cached so flipping
         # the checkbox doesn't re-run the QPainter pipeline.
@@ -583,6 +589,21 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.sort_btn.clicked.connect(self._toggle_sort)
         search_row.addWidget(self.sort_btn)
         ll.addLayout(search_row)
+
+        # Similarity-group filter row: a combo populated from groups.json plus a
+        # rebuild button that submits `make curate-group` to the daemon. Read-only
+        # browse/filter — selecting a group narrows the list to its members.
+        group_row = QHBoxLayout()
+        group_row.setContentsMargins(0, 0, 0, 0)
+        self.group_combo = QComboBox()
+        self.group_combo.setToolTip(t("dataset_group_tooltip"))
+        self.group_combo.currentIndexChanged.connect(self._on_group_changed)
+        group_row.addWidget(self.group_combo, 1)
+        self.group_btn = QPushButton(t("dataset_group_rebuild"))
+        self.group_btn.setToolTip(t("dataset_group_rebuild_tooltip"))
+        self.group_btn.clicked.connect(self._rebuild_groups)
+        group_row.addWidget(self.group_btn)
+        ll.addLayout(group_row)
 
         self._view_mode = "list"
         self.fl = QListWidget()
@@ -662,7 +683,7 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         rl.addWidget(self.guide)
 
         sp.addWidget(right)
-        sp.setSizes([220, 750])
+        sp.setSizes([340, 700])
         lay.addWidget(sp)
 
         QShortcut(QKeySequence("Right"), self, lambda: self._nav(1))
@@ -682,6 +703,65 @@ class ImageViewerTab(LazyTabMixin, QWidget):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._current_dir)))
 
+    # ── similarity groups (curate-group) ──────────────────────
+
+    def _groups_manifest_path(self) -> Path:
+        return ROOT / "post_image_dataset" / "groups" / "groups.json"
+
+    def _load_groups(self) -> None:
+        """Read groups.json (if present) and repopulate the group combo.
+
+        Pure JSON — keeps the GUI torch-free. Resets the active filter to "all";
+        the combo lists one entry per group with its size, ordered as written
+        (largest first). A missing/unreadable manifest just leaves "all images".
+        """
+        self._groups = []
+        path = self._groups_manifest_path()
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                groups = data.get("groups", [])
+                if isinstance(groups, list):
+                    self._groups = groups
+            except (json.JSONDecodeError, OSError):
+                self._groups = []
+        self._group_filter = None
+        self.group_combo.blockSignals(True)
+        try:
+            self.group_combo.clear()
+            self.group_combo.addItem(t("dataset_group_all"))
+            for i, g in enumerate(self._groups):
+                self.group_combo.addItem(
+                    t("dataset_group_label", n=i + 1, size=g.get("size", 0))
+                )
+            self.group_combo.setCurrentIndex(0)
+            self.group_combo.setEnabled(bool(self._groups))
+        finally:
+            self.group_combo.blockSignals(False)
+
+    def _on_group_changed(self, idx: int) -> None:
+        if idx <= 0 or idx - 1 >= len(self._groups):
+            self._group_filter = None
+        else:
+            members = self._groups[idx - 1].get("members", [])
+            self._group_filter = {Path(m).stem for m in members}
+        self._apply_filter_and_sort()
+
+    def _rebuild_groups(self) -> None:
+        """Submit `make curate-group` to the daemon (runs PE-Spatial grouping)."""
+        from gui import daemon as gui_daemon
+
+        try:
+            resp = gui_daemon.submit_command(
+                label="curate-group", argv=["tasks.py", "curate-group"]
+            )
+        except Exception as e:  # noqa: BLE001 — surface daemon errors to the user
+            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
+            return
+        QMessageBox.information(
+            self, "", t("dataset_group_queued", job_id=resp.get("job_id"))
+        )
+
     def _load_dir(self, name: str, *, preserve_selection: bool = False):
         if not self._confirm_discard_if_dirty():
             # Roll the combo back without re-firing _load_dir.
@@ -693,6 +773,7 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         if preserve_selection and self._current_caption_path is not None:
             prev_stem = self._current_caption_path.stem
         self._current_dir = d
+        self._load_groups()  # repopulate the group combo + reset to "all"
         self._all_images = _imgs(d)
         had_match = self._apply_filter_and_sort(prev_stem=prev_stem)
         if not self._images:
@@ -739,6 +820,8 @@ class ImageViewerTab(LazyTabMixin, QWidget):
             ]
         else:
             visible = list(self._all_images)
+        if self._group_filter is not None:
+            visible = [p for p in visible if p.stem in self._group_filter]
         if self._sort_desc:
             visible.reverse()
         self._images = visible
@@ -774,7 +857,7 @@ class ImageViewerTab(LazyTabMixin, QWidget):
 
         total = len(self._all_images)
         shown = len(visible)
-        if q and shown != total:
+        if shown != total:  # narrowed by search and/or group filter
             self.cnt.setText(t("n_images_filtered", shown=shown, total=total))
         else:
             self.cnt.setText(t("n_images", n=total))
