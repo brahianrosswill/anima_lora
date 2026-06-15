@@ -47,7 +47,10 @@ from PySide6.QtWidgets import (
 )
 
 from gui import ROOT, LazyTabMixin, ScaledImageLabel, _image_dirs, _imgs
+from gui import daemon as gui_daemon
+from gui._job_mixin import DaemonJobMixin
 from gui.i18n import t
+from gui.progress import TqdmProgressTracker, make_progress_bar
 
 
 # Mask overlay tint — translucent red on top of the *masked-out* region (the
@@ -513,9 +516,12 @@ class CaptionVersionsDialog(QDialog):
         return self._restored
 
 
-class ImageViewerTab(LazyTabMixin, QWidget):
+class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def __init__(self):
         super().__init__()
+        # Daemon job observer (curate-group runs as a command job) so the
+        # grouping progress bar lives in this tab, not only the Queue tab.
+        self._init_job_observer()
         self._all_images: list[Path] = []  # unfiltered, alphabetical (from _imgs)
         self._images: list[Path] = []  # currently displayed (filter + sort applied)
         self._dirs = _image_dirs()
@@ -577,6 +583,12 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.cnt = QLabel()
         top.addWidget(self.cnt)
         lay.addLayout(top)
+
+        # Grouping progress bar (curate-group). Hidden until a run starts; the
+        # tracker drives it from the job's tqdm stdout, then hides it on finish.
+        self.group_progress = make_progress_bar()
+        self._progress_tracker = TqdmProgressTracker(self.group_progress)
+        lay.addWidget(self.group_progress)
 
         sp = QSplitter(Qt.Horizontal)
 
@@ -754,19 +766,59 @@ class ImageViewerTab(LazyTabMixin, QWidget):
                 self._groups = []
 
     def _rebuild_groups(self) -> None:
-        """Submit `make curate-group` to the daemon (runs PE-Spatial grouping)."""
-        from gui import daemon as gui_daemon
-
-        try:
-            resp = gui_daemon.submit_command(
-                label="curate-group", argv=["tasks.py", "curate-group"]
+        """Submit `make curate-group` and observe it in-tab (progress bar here)."""
+        if self._job_id:  # a grouping run is already attached
+            QMessageBox.information(
+                self, "", t("dataset_group_queued", job_id=self._job_id)
             )
-        except Exception as e:  # noqa: BLE001 — surface daemon errors to the user
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
             return
-        QMessageBox.information(
-            self, "", t("dataset_group_queued", job_id=resp.get("job_id"))
+        # Busy UI + indeterminate bar before the submit so a cold-start daemon
+        # spin-up still feels responsive.
+        self.group_btn.setEnabled(False)
+        self._progress_tracker.reset()
+        self._progress_tracker.mark_starting(t("dataset_group_rebuild"))
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(
+                label="curate-group", argv=["tasks.py", "curate-group"], start=True
+            ),
+            on_fail=self._restore_group_idle_ui,
         )
+        if not job_id:
+            return
+        self._watch_job(job_id, replay_log=False)
+
+    def _emit_log_line(self, line: str) -> None:
+        """No log widget on this tab — non-progress stdout lines are dropped.
+
+        The progress bar (tqdm) and the finish banner carry the user-facing
+        signal; a full log belongs to the Queue tab.
+        """
+
+    def _on_job_finished(self, state: str | None) -> None:
+        self._job_timer.stop()
+        self._drain_job_stdout()
+        self._stdout_buf = ""
+        job_id = self._job_id
+        self._job_id = None
+        self._stdout_tailer.reset()
+        self._progress_tracker.reset()
+        self._restore_group_idle_ui()
+        if gui_daemon.is_success(state):
+            # Reload the manifest + re-render both views so new groups show now.
+            prev = (
+                self._current_caption_path.stem
+                if self._current_caption_path is not None
+                else None
+            )
+            self._load_groups()
+            self._apply_filter_and_sort(prev_stem=prev)
+        else:
+            QMessageBox.warning(
+                self, t("error"), gui_daemon.format_finish_banner(job_id, state)
+            )
+
+    def _restore_group_idle_ui(self) -> None:
+        self.group_btn.setEnabled(True)
 
     def _load_dir(self, name: str, *, preserve_selection: bool = False):
         if not self._confirm_discard_if_dirty():
@@ -926,7 +978,32 @@ class ImageViewerTab(LazyTabMixin, QWidget):
             node.setText(
                 0, t("dataset_group_label", n=key[1] + 1, size=group_counts[key])
             )
+        self._float_groups_to_top(folder_items, group_nodes)
         self.tree.expandAll()
+
+    def _float_groups_to_top(
+        self,
+        folder_items: dict[Path, QTreeWidgetItem],
+        group_nodes: dict[tuple[Path, int], QTreeWidgetItem],
+    ) -> None:
+        """Reorder each folder's children so green group nodes sit above the
+        ungrouped files at the *same* level (groups never cross into another
+        folder — they stay children of their own folder, so they can't rise
+        above a higher tree level). Within the group block and within the rest,
+        the original filename order is preserved.
+        """
+        group_set = set(group_nodes.values())
+        # Every parent that can hold a mix: each folder node + the invisible root
+        # (top-level images that live directly under the viewed directory).
+        parents = [*folder_items.values(), self.tree.invisibleRootItem()]
+        for parent in parents:
+            children = parent.takeChildren()
+            grouped = [c for c in children if c in group_set]
+            rest = [c for c in children if c not in group_set]
+            if grouped:  # only touch folders that actually hold a group node
+                parent.addChildren(grouped + rest)
+            else:
+                parent.addChildren(children)
 
     def _ensure_group_node(
         self,

@@ -20,7 +20,6 @@ from pathlib import Path
 
 import numpy as np
 import torch  # noqa: F401  (kept for API parity / discriminate_signal device handling)
-import torch.nn.functional as F
 from PIL import Image
 
 # Run from the repo root; `library` is installed editable (`uv sync`).
@@ -46,6 +45,16 @@ from library.vision.pe_features import (  # noqa: F401
     keep_size_cohabiting,
     normalize_tag,
     read_tags,
+)
+
+# Stage-B dense grid match promoted to the library so the dataset-grouping
+# curation tool shares the exact same near-twin gate. Re-exported here so
+# ``near_twin.outputs`` / ``__main__`` keep importing them from ``.engine``.
+from library.vision.pe_matching import (  # noqa: F401
+    MatchResult,
+    _geom_filter,
+    match_grids,
+    pool_cells,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -80,91 +89,8 @@ def prune_for_pairing(
 
 
 # ---------------------------------------------------------------------------- Stage B match
-
-
-@dataclass
-class MatchResult:
-    n_inliers: int
-    match_frac: float
-    diff_cells: set[int]  # union of unmatched a/b cells (grid index r*G + c)
-    diff_a: set[int]
-    diff_b: set[int]
-    offset: tuple[float, float]  # estimated (drow, dcol) crop offset (geom-check)
-    G: int
-
-
-def _pool_cells(grid16: np.ndarray, G: int) -> np.ndarray:
-    """[16, 16, 768] → [G*G, 768], L2-normed per cell."""
-    t = torch.from_numpy(grid16.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)
-    p = F.adaptive_avg_pool2d(t, G)[0].permute(1, 2, 0).reshape(G * G, -1).numpy()
-    return p / (np.linalg.norm(p, axis=1, keepdims=True) + 1e-8)
-
-
-def match_grids(
-    fa: Feature, fb: Feature, G: int, cell_min: float, ratio: float, geom_check: bool
-) -> MatchResult:
-    """Mutual-NN + ratio-test dense cell match between two pooled grids.
-
-    Raw "has a >0.9 neighbor" inflates badly on anime art's flat color fields,
-    so we require **mutual** nearest neighbours that also pass a distinctiveness
-    (ratio) test. Unmatched cells localize the difference region.
-    """
-    ca, cb = _pool_cells(fa.grid16, G), _pool_cells(fb.grid16, G)
-    N = G * G
-    sim = ca @ cb.T  # [N, N] cosine (cells are unit-norm)
-    col_best = sim.argmax(axis=0)
-    matched: list[tuple[int, int]] = []
-    for i in range(N):
-        row = sim[i]
-        order = np.argsort(-row)
-        nn1 = int(order[0])
-        s1 = float(row[nn1])
-        s2 = float(row[order[1]]) if N > 1 else -1.0
-        if s1 < cell_min:
-            continue
-        if col_best[nn1] != i:  # mutual NN
-            continue
-        if (1.0 - s1) > ratio * (1.0 - s2):  # ratio test on cosine-distance
-            continue
-        matched.append((i, nn1))
-
-    offset = (0.0, 0.0)
-    if geom_check and matched:
-        matched, offset = _geom_filter(matched, G)
-
-    matched_a = {i for i, _ in matched}
-    matched_b = {j for _, j in matched}
-    diff_a = set(range(N)) - matched_a
-    diff_b = set(range(N)) - matched_b
-    return MatchResult(
-        n_inliers=len(matched),
-        match_frac=len(matched) / N,
-        diff_cells=diff_a | diff_b,
-        diff_a=diff_a,
-        diff_b=diff_b,
-        offset=offset,
-        G=G,
-    )
-
-
-def _geom_filter(
-    matched: list[tuple[int, int]], G: int
-) -> tuple[list[tuple[int, int]], tuple[float, float]]:
-    """RANSAC-lite translation consistency: keep matches near the median offset.
-
-    Rejects "same character, different pose" (whose cell offsets scatter) and
-    estimates the crop offset from the surviving translation. A full
-    LoFTR/SIFT homography is the escape hatch if the coarse grid is too blunt.
-    """
-    a = np.array([[i // G, i % G] for i, _ in matched], dtype=np.float32)
-    b = np.array([[j // G, j % G] for _, j in matched], dtype=np.float32)
-    deltas = b - a
-    med = np.median(deltas, axis=0)
-    keep = (
-        np.abs(deltas - med).max(axis=1) <= 1.0
-    )  # within 1 cell of the consensus shift
-    kept = [m for m, k in zip(matched, keep) if k]
-    return kept, (float(med[0]), float(med[1]))
+# ``match_grids`` / ``MatchResult`` / ``_geom_filter`` now live in
+# ``library.vision.pe_matching`` (re-exported at the top of this module).
 
 
 def _largest_blob(cells: set[int], G: int) -> tuple[int, set[int]]:

@@ -3,16 +3,25 @@
 
 A curation tool (not a preprocess/training step): clusters near-identical /
 same-concept images per artist so the GUI Dataset tab can filter by group and
-near-duplicates are easy to spot. Argparse shell over
+near-duplicates are easy to spot. Uses the **same near-twin grid gate as the
+miner** — two images group when ``match_frac >= --match-frac-min`` at per-cell
+floor ``--cell-match-min``. Argparse shell over
 ``library.datasets.grouping.build_groups``; driven by ``make curate-group``
 (paths resolved from the config chain). Reuses the shared PE-Spatial feature
-cache, so a re-run — or a re-run at a different ``--threshold`` — is cheap.
+cache, so a re-run — or a re-run at different thresholds — is cheap.
 """
 
 import argparse
 from pathlib import Path
 
-from library.datasets.grouping import DEFAULT_THRESHOLD, build_groups
+from library.datasets.grouping import (
+    DEFAULT_CELL_MATCH_MIN,
+    DEFAULT_GRID,
+    DEFAULT_MATCH_FRAC_MIN,
+    DEFAULT_RATIO,
+    DEFAULT_SIM_MIN,
+    build_groups,
+)
 
 
 def main() -> None:
@@ -26,10 +35,31 @@ def main() -> None:
         help="Manifest path the GUI Dataset tab reads",
     )
     p.add_argument(
-        "--threshold",
+        "--cell-match-min",
         type=float,
-        default=DEFAULT_THRESHOLD,
-        help="cosine >= this connects two images (higher = tighter near-dups)",
+        default=DEFAULT_CELL_MATCH_MIN,
+        help="per-cell cosine for an inlier grid-cell match",
+    )
+    p.add_argument(
+        "--match-frac-min",
+        type=float,
+        default=DEFAULT_MATCH_FRAC_MIN,
+        help="inlier fraction to connect two images (higher = tighter)",
+    )
+    p.add_argument(
+        "--sim-min",
+        type=float,
+        default=DEFAULT_SIM_MIN,
+        help="Stage-A CLS-cosine prefilter (loose; the grid match is the gate)",
+    )
+    p.add_argument(
+        "--grid", type=int, default=DEFAULT_GRID, help="pooled grid edge (G×G cells)"
+    )
+    p.add_argument(
+        "--ratio",
+        type=float,
+        default=DEFAULT_RATIO,
+        help="ratio-test distinctiveness (lower = stricter)",
     )
     p.add_argument(
         "--min-size",
@@ -48,7 +78,11 @@ def main() -> None:
     m = build_groups(
         Path(args.source_dir),
         Path(args.out),
-        threshold=args.threshold,
+        cell_match_min=args.cell_match_min,
+        match_frac_min=args.match_frac_min,
+        sim_min=args.sim_min,
+        grid=args.grid,
+        ratio=args.ratio,
         min_size=args.min_size,
         encoder=args.encoder,
         device=args.device,
@@ -58,7 +92,8 @@ def main() -> None:
     print(
         f"{m['n_groups']} group(s) over {m['n_images']} image(s) "
         f"({m['n_grouped']} grouped, {m['n_singletons']} ungrouped) "
-        f"@ threshold {args.threshold} → {args.out}"
+        f"@ cell_match_min {args.cell_match_min} / match_frac_min "
+        f"{args.match_frac_min} → {args.out}"
     )
 
 

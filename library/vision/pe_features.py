@@ -258,13 +258,16 @@ def embed_members(
         collate_fn=_collate,
         persistent_workers=False,
     )
-    done = 0
+    # tqdm to stderr so the daemon captures it and the GUI progress-bar tracker
+    # (gui/progress.py TQDM_RE) can drive a determinate bar over the embed pass.
+    from tqdm import tqdm
+
+    pbar = tqdm(total=len(todo), desc="embedding", unit="img", file=sys.stderr)
     with ThreadPoolExecutor(max_workers=2) as saver:
         for idxs, tens, oks in loader:
             batch = tens.to(bundle.device, bundle.dtype, non_blocking=pin)
             cls_b, grid_b = _forward_pe(bundle, batch)
             for k, i in enumerate(idxs):
-                done += 1
                 if not oks[k]:
                     print(
                         f"  [warn] skipped unreadable {todo[i].image_path}",
@@ -274,6 +277,6 @@ def embed_members(
                 f = Feature(cls=cls_b[k], grid16=grid_b[k])
                 feats[todo[i].stem] = f
                 saver.submit(_save_feature, _cache_path(todo[i]), f)
-            print(f"  embedded {done}/{len(todo)}", end="\r", file=sys.stderr)
-    print(file=sys.stderr)
+            pbar.update(len(idxs))
+    pbar.close()
     return feats

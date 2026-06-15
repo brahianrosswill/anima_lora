@@ -14,11 +14,12 @@ def cmd_curate_group(extra):
     """Group dataset images by PE-Spatial visual similarity.
 
     Writes ``post_image_dataset/groups/groups.json`` (per-artist
-    connected-components on PE-Spatial CLS cosine). The GUI Dataset tab reads the
-    manifest to filter the image list by group. Tune via
-    ``ARGS="--threshold 0.95"`` (higher = tighter near-duplicates) /
-    ``ARGS="--min-size 2"``. Reuses the shared PE feature cache, so re-runs and
-    threshold sweeps are cheap.
+    connected-components over the same near-twin grid gate the miner uses — two
+    images group when ``match_frac >= --match-frac-min`` at per-cell floor
+    ``--cell-match-min``). The GUI Dataset tab reads the manifest to filter the
+    image list by group. Tune via ``ARGS="--match-frac-min 0.4 --cell-match-min
+    0.9"`` (higher = tighter) / ``ARGS="--min-size 2"``. Reuses the shared PE
+    feature cache, so re-runs and threshold sweeps are cheap.
     """
     run(
         [

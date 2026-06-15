@@ -21,7 +21,7 @@ from typing import Optional
 
 from scripts.daemon import client as _client
 from scripts.daemon import config as _cfg
-from scripts.daemon.jobs import STATE_ERROR, STATE_STOPPED, TERMINAL_STATES
+from scripts.daemon.jobs import STATE_DONE, STATE_ERROR, STATE_STOPPED, TERMINAL_STATES
 
 
 class DaemonUnavailable(RuntimeError):
@@ -315,6 +315,11 @@ def read_job_error(job_id: str) -> Optional[str]:
 
 def is_terminal(state: Optional[str]) -> bool:
     return state in TERMINAL_STATES
+
+
+def is_success(state: Optional[str]) -> bool:
+    """True only on a clean ``done`` (not stopped / errored)."""
+    return state == STATE_DONE
 
 
 # Exception markers scanned (tail-first) when a job ends in error. The real
