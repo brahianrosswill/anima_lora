@@ -658,18 +658,43 @@ def _ensure_source_image_dir() -> None:
 
 
 def _prefer_cleartype_font_engine() -> None:
-    """Use Qt's GDI font engine on Windows so UI text gets ClearType.
+    """Use Qt's GDI font engine on Windows — but only at integer DPI scaling.
 
     Qt 6 defaults to the DirectWrite font engine on Windows, which rasterizes
     small UI text with *grayscale* antialiasing — it reads soft/blurry next to
     native apps, and the effect is worse on lightly-hinted modern faces like the
     bundled Pretendard. The GDI engine uses ClearType subpixel rendering (what
-    native Windows controls use), which snaps small text crisp. Selected via the
-    ``windows:fontengine=gdi`` platform option, which must be set *before*
-    ``QApplication`` is constructed. Skipped if the user already pinned
-    ``QT_QPA_PLATFORM`` (e.g. a HiDPI user who prefers DirectWrite, or offscreen
-    in tests) so we never clobber an explicit choice."""
-    if sys.platform == "win32" and "QT_QPA_PLATFORM" not in os.environ:
+    native Windows controls use), which snaps small text crisp.
+
+    But GDI ClearType is tied to the *physical* pixel grid: at the fractional
+    display scaling most laptops ship (125% / 150%) it renders fringed and can
+    come out undersized, because the GDI engine honors Qt's device-pixel-ratio
+    less cleanly than DirectWrite. So we only force GDI when the display is at an
+    integer scale (100% / 200%, where ClearType lines up) and let DirectWrite
+    handle fractional-scaled screens.
+
+    Reading the real scaling requires the process to be DPI-aware first — an
+    unaware process always reports 96 DPI (100%). We set per-monitor-v2 awareness
+    up front (the same context Qt 6 sets itself, so this only moves the call
+    earlier) and query ``GetDpiForSystem``. The platform option must be set
+    *before* ``QApplication`` is constructed. Skipped if the user already pinned
+    ``QT_QPA_PLATFORM`` (explicit choice, or offscreen in tests), and falls back
+    to DirectWrite on older Windows where the DPI APIs are missing."""
+    if sys.platform != "win32" or "QT_QPA_PLATFORM" in os.environ:
+        return
+    try:
+        import ctypes
+
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4. Harmless if it fails
+        # (awareness already set) — we still get a usable DPI below.
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+        dpi = ctypes.windll.user32.GetDpiForSystem()  # 96 == 100%
+    except (OSError, AttributeError):
+        return  # pre-1607 Windows / no DPI API — leave Qt on DirectWrite
+    if not dpi:
+        return
+    scale = dpi / 96.0
+    if abs(scale - round(scale)) < 0.01:  # integer scaling only
         os.environ["QT_QPA_PLATFORM"] = "windows:fontengine=gdi"
 
 
@@ -677,6 +702,13 @@ def main():
     load_language()
     _ensure_source_image_dir()
     _prefer_cleartype_font_engine()
+    # Don't round fractional display scaling (125% / 150%) to the nearest
+    # integer — pass it through so the UI scales to the screen's real DPI
+    # instead of snapping to 100%/200% (which is what made text look small on
+    # HiDPI Windows laptops). Must be set before QApplication is constructed.
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))

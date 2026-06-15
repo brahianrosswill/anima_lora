@@ -351,7 +351,11 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
         families.insert(0, bundled)
     font = QFont()
     font.setFamilies(families)
-    font.setPointSize(9)
+    # 10pt, not the OS-native 9pt: Pretendard has a smaller x-height / apparent
+    # size than Windows' Segoe UI at the same point size, so matching 9pt makes
+    # every label read a notch smaller than native apps. 10pt brings Pretendard
+    # back in line with Segoe UI 9pt visually.
+    font.setPointSize(10)
     font.setStyleHint(QFont.SansSerif)
     app.setFont(font)
 
