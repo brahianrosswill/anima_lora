@@ -10,8 +10,10 @@ from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QColorDialog,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -26,6 +28,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui import (
+    DEFAULT_AUTOTAG_CONFIDENCE,
+    DEFAULT_THEME_COLOR,
+    get_setting,
+    set_setting,
+)
 from gui import daemon as gui_daemon
 from gui.i18n import (
     available_languages,
@@ -78,6 +86,14 @@ def _dark(app: QApplication):
     font.setStyleHint(QFont.SansSerif)
     app.setFont(font)
 
+    # User-chosen accent (Settings → Theme color); drives the highlight /
+    # selection color across palette + stylesheet. Falls back to the historical
+    # blue if unset or unparseable.
+    accent = QColor(get_setting("theme_color", DEFAULT_THEME_COLOR))
+    if not accent.isValid():
+        accent = QColor(DEFAULT_THEME_COLOR)
+    accent_hex = accent.name()
+
     p = QPalette()
     for role, color in [
         (QPalette.Window, QColor(30, 30, 30)),
@@ -89,7 +105,7 @@ def _dark(app: QApplication):
         (QPalette.Text, QColor(220, 220, 220)),
         (QPalette.Button, QColor(45, 45, 45)),
         (QPalette.ButtonText, QColor(220, 220, 220)),
-        (QPalette.Highlight, QColor(60, 120, 200)),
+        (QPalette.Highlight, accent),
         (QPalette.HighlightedText, QColor(255, 255, 255)),
         # Default Qt link blue (#0000ff-ish) is unreadable on dark bg.
         (QPalette.Link, QColor(0xFF, 0xB8, 0x6B)),
@@ -97,40 +113,40 @@ def _dark(app: QApplication):
     ]:
         p.setColor(role, color)
     app.setPalette(p)
-    app.setStyleSheet("""
-        QGroupBox {
+    app.setStyleSheet(f"""
+        QGroupBox {{
             font-weight: bold; border: 1px solid #444;
             border-radius: 4px; margin-top: 8px; padding-top: 16px;
-        }
-        QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-        QPushButton { padding: 4px 12px; border: 1px solid #555; border-radius: 3px; }
-        QPushButton:hover { background: #555; }
-        QScrollArea { border: none; }
-        QSplitter::handle { background: #444; }
-        QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit, QListWidget {
+        }}
+        QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
+        QPushButton {{ padding: 4px 12px; border: 1px solid #555; border-radius: 3px; }}
+        QPushButton:hover {{ background: #555; }}
+        QScrollArea {{ border: none; }}
+        QSplitter::handle {{ background: #444; }}
+        QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit, QListWidget {{
             background: #2a2a2a; color: #dcdcdc; border: 1px solid #555; border-radius: 3px;
             padding: 2px 4px;
-        }
-        QComboBox QAbstractItemView {
-            background: #2a2a2a; color: #dcdcdc; selection-background-color: #3c78c8;
-        }
-        QTabWidget::pane { border: 1px solid #444; }
-        QTabBar::tab {
+        }}
+        QComboBox QAbstractItemView {{
+            background: #2a2a2a; color: #dcdcdc; selection-background-color: {accent_hex};
+        }}
+        QTabWidget::pane {{ border: 1px solid #444; }}
+        QTabBar::tab {{
             background: #2a2a2a; color: #dcdcdc; border: 1px solid #444;
             padding: 6px 14px;
             font-size: 12.5px; font-weight: 500;
             border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
-        }
-        QTabBar::tab:selected { background: #1e1e1e; color: #ffffff; }
-        QTabBar::tab:hover { background: #3a3a3a; }
-        QToolTip { max-width: 400px; }
-        QMenu {
+        }}
+        QTabBar::tab:selected {{ background: #1e1e1e; color: #ffffff; }}
+        QTabBar::tab:hover {{ background: #3a3a3a; }}
+        QToolTip {{ max-width: 400px; }}
+        QMenu {{
             background: #2a2a2a; color: #dcdcdc; border: 1px solid #555;
-        }
-        QMenu::item { padding: 4px 20px; background: transparent; color: #dcdcdc; }
-        QMenu::item:selected { background: #3c78c8; color: #ffffff; }
-        QMenu::item:disabled { color: #777; }
-        QMenu::separator { height: 1px; background: #444; margin: 4px 8px; }
+        }}
+        QMenu::item {{ padding: 4px 20px; background: transparent; color: #dcdcdc; }}
+        QMenu::item:selected {{ background: {accent_hex}; color: #ffffff; }}
+        QMenu::item:disabled {{ color: #777; }}
+        QMenu::separator {{ height: 1px; background: #444; margin: 4px 8px; }}
     """)
 
 
@@ -246,6 +262,52 @@ class SettingsDialog(QDialog):
         lang_row.addStretch()
         lay.addLayout(lang_row)
 
+        prefs_group = QGroupBox(t("settings_prefs_header"))
+        prefs_lay = QVBoxLayout(prefs_group)
+
+        # Autotagger confidence floor (applied on top of the model's per-tag F1
+        # thresholds; see AnimaTagger.predict_caption min_confidence).
+        conf_row = QHBoxLayout()
+        conf_label = QLabel(t("settings_autotag_confidence"))
+        conf_label.setToolTip(t("settings_autotag_confidence_tooltip"))
+        conf_row.addWidget(conf_label)
+        self.conf_spin = QDoubleSpinBox()
+        self.conf_spin.setRange(0.0, 1.0)
+        self.conf_spin.setSingleStep(0.05)
+        self.conf_spin.setDecimals(2)
+        self.conf_spin.setToolTip(t("settings_autotag_confidence_tooltip"))
+        self.conf_spin.setValue(
+            float(get_setting("autotag_confidence", DEFAULT_AUTOTAG_CONFIDENCE))
+        )
+        self.conf_spin.valueChanged.connect(
+            lambda v: set_setting("autotag_confidence", round(float(v), 2))
+        )
+        self.conf_spin.setFixedWidth(80)
+        conf_row.addWidget(self.conf_spin)
+        conf_row.addStretch()
+        prefs_lay.addLayout(conf_row)
+
+        # Theme accent color — a swatch button opening a color picker; applied
+        # live across the app palette + stylesheet on accept.
+        theme_row = QHBoxLayout()
+        theme_label = QLabel(t("settings_theme_color"))
+        theme_label.setToolTip(t("settings_theme_color_tooltip"))
+        theme_row.addWidget(theme_label)
+        self._theme_color = str(get_setting("theme_color", DEFAULT_THEME_COLOR))
+        self.theme_btn = QPushButton()
+        self.theme_btn.setFixedSize(48, 24)
+        self.theme_btn.setToolTip(t("settings_theme_color_tooltip"))
+        self._paint_theme_swatch()
+        self.theme_btn.clicked.connect(self._pick_theme_color)
+        theme_row.addWidget(self.theme_btn)
+        self.theme_reset_btn = QPushButton(t("settings_theme_reset"))
+        self.theme_reset_btn.clicked.connect(self._reset_theme_color)
+        theme_row.addWidget(self.theme_reset_btn)
+        theme_row.addStretch()
+        prefs_lay.addLayout(theme_row)
+
+        lay.addWidget(prefs_group)
+
         mcp_group = QGroupBox(t("settings_mcp_header"))
         mcp_lay = QVBoxLayout(mcp_group)
         self._add_command_block(
@@ -307,6 +369,32 @@ class SettingsDialog(QDialog):
         if choice == QMessageBox.Yes:
             self.reload_requested = True
             self.accept()
+
+    def _paint_theme_swatch(self) -> None:
+        """Fill the swatch button with the current accent color."""
+        self.theme_btn.setStyleSheet(
+            f"background:{self._theme_color}; border:1px solid #777; border-radius:3px;"
+        )
+
+    def _apply_theme_color(self, hex_color: str) -> None:
+        """Persist the accent and re-apply the dark theme live (palette +
+        stylesheet propagate to all open widgets immediately, no restart)."""
+        self._theme_color = hex_color
+        set_setting("theme_color", hex_color)
+        self._paint_theme_swatch()
+        app = QApplication.instance()
+        if app is not None:
+            _dark(app)
+
+    def _pick_theme_color(self) -> None:
+        chosen = QColorDialog.getColor(
+            QColor(self._theme_color), self, t("settings_theme_color")
+        )
+        if chosen.isValid():
+            self._apply_theme_color(chosen.name())
+
+    def _reset_theme_color(self) -> None:
+        self._apply_theme_color(DEFAULT_THEME_COLOR)
 
 
 class MainWindow(QMainWindow):

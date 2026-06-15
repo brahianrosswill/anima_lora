@@ -210,6 +210,12 @@ COMMANDS = {
         "Predict tags for a single image (--image <path>) or sample a random "
         "val-split stem. Pass --show_scores for rating + top-K kept tags.",
     ),
+    "autotag": (
+        tagger.cmd_autotag,
+        "Autotag one image (--image <path>) with the Anima Tagger "
+        "(auto-downloaded on first use); prints the predicted caption. CLI "
+        "one-shot — the GUI Dataset tab uses a resident worker instead.",
+    ),
     # ── Downloads ─────────────────────────────────────────────────────
     "download-models": (downloads.cmd_download_models, "Download all models"),
     "download-anima": (downloads.cmd_download_anima, "Download Anima model"),

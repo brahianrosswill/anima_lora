@@ -7,11 +7,50 @@ imports) so it can be imported first without risking a cycle.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIGS_DIR = ROOT / "configs"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+# Persistent UI state (language, update-check cache, preprocess knobs, and the
+# generic preferences below). Separate from configs/ so it survives a config
+# reset. The same file the i18n / system-dialog / preprocess modules read.
+GUI_SETTINGS_FILE = Path(__file__).resolve().parent / "gui_settings.json"
+
+# Default autotagger probability floor applied on top of the model's per-tag
+# F1 thresholds (see AnimaTagger.predict_caption min_confidence).
+DEFAULT_AUTOTAG_CONFIDENCE = 0.5
+# Default GUI accent color (the dark theme's highlight / selection blue).
+DEFAULT_THEME_COLOR = "#3c78c8"
+
+
+def _read_gui_settings() -> dict:
+    """Whole gui_settings.json as a dict (``{}`` if absent/unparseable)."""
+    if not GUI_SETTINGS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(GUI_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get_setting(key: str, default=None):
+    """Read one preference from gui_settings.json, or ``default`` if missing."""
+    return _read_gui_settings().get(key, default)
+
+
+def set_setting(key: str, value) -> None:
+    """Persist one preference into gui_settings.json (merge, don't clobber)."""
+    settings = _read_gui_settings()
+    settings[key] = value
+    try:
+        GUI_SETTINGS_FILE.write_text(json.dumps(settings), encoding="utf-8")
+    except OSError:
+        pass
+
 
 METHODS_DIR = CONFIGS_DIR / "methods"
 GUI_METHODS_DIR = CONFIGS_DIR / "gui-methods"

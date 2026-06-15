@@ -327,6 +327,21 @@ STRINGS: dict[str, str] = {
     "no_caption": "(キャプションなし)",
     "caption_save": "保存",
     "caption_revert": "元に戻す",
+    "caption_autotag": "自動タグ付け",
+    "caption_autotag_tooltip": (
+        "Anima Tagger をこの画像に実行し、予測されたタグをキャプションに追加します。"
+        "モデルは初回使用時に自動でダウンロードされます。結果を確認してから保存すると "
+        ".txt に書き込まれます。"
+    ),
+    "caption_autotag_running": "自動タグ付け中…",
+    "caption_autotag_loading": "タガーを読み込み中…",
+    "caption_autotag_ready": "タガー読み込み済み · 待機中",
+    "caption_autotag_busy": (
+        "GPU が別のジョブ（学習 / 前処理 / グルーピング）で使用中です。"
+        "完了後にもう一度自動タグ付けしてください。"
+    ),
+    "caption_autotag_error": "自動タグ付けに失敗しました: {err}",
+    "caption_autotag_empty": "タガーはこの画像のタグを返しませんでした。",
     "caption_versions": "履歴…",
     "caption_dirty_marker": " *",
     "caption_diff_stats": "(+{add} / −{rem})",
@@ -355,8 +370,19 @@ STRINGS: dict[str, str] = {
     "language": "言語:",
     # Settings dialog
     "settings_btn": "⚙ 設定",
-    "settings_btn_tooltip": "アプリ設定 — 言語、MCP サーバー登録",
+    "settings_btn_tooltip": "アプリ設定 — 言語、環境設定、MCP サーバー登録",
     "settings_title": "設定",
+    "settings_prefs_header": "環境設定",
+    "settings_autotag_confidence": "自動タグの信頼度:",
+    "settings_autotag_confidence_tooltip": (
+        "タガーのタグ別しきい値に追加で適用する確率の下限（0–1）です。"
+        "高いほど確信度の高いタグだけが少数残ります。既定値 0.50。"
+    ),
+    "settings_theme_color": "テーマカラー:",
+    "settings_theme_color_tooltip": (
+        "インターフェース全体で使われるアクセント／ハイライト色です。即時に反映されます。"
+    ),
+    "settings_theme_reset": "リセット",
     "settings_mcp_header": "MCP サーバー（エージェント連携）",
     "settings_mcp_desc": "ローカル学習デーモンを MCP クライアント（Claude Code、Claude Desktop "
     "など）に公開します。以下のコマンドをターミナルで実行すると Claude Code に登録されます:",

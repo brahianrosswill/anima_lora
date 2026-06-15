@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -60,6 +61,65 @@ from library.vision.encoder import (
 )
 
 logger = logging.getLogger(__name__)
+
+# HF repo the dual-encoder tagger checkpoint is auto-fetched from when its
+# directory is missing required files. Mirrors the ComfyUI loader's one-time
+# auto-download (custom_nodes/comfyui-anima-tagger/nodes.py) so the GUI
+# "Autotag" button and CLI entries work out of the box. The dual-encoder
+# checkpoint lives at the repo root (no version subfolder).
+TAGGER_HF_REPO = "sorryhyun/anima-tagger"
+TAGGER_REQUIRED_FILES = ("config.json", "model.safetensors", "vocab.json", "rules.yaml")
+TAGGER_OPTIONAL_FILES = ("thresholds.safetensors", "groups.yaml")
+DEFAULT_TAGGER_DIR = "models/captioners/anima-tagger-v2"
+
+
+def ensure_tagger_checkpoint(
+    ckpt_dir: str | Path,
+    repo: str = TAGGER_HF_REPO,
+    subfolder: str = "",
+) -> Path:
+    """Fetch the tagger checkpoint into ``ckpt_dir`` if any required file is missing.
+
+    One-time download from ``repo`` (default ``sorryhyun/anima-tagger``); files
+    are flattened into ``ckpt_dir`` regardless of the source layout so the
+    loader's directory contract (``ckpt_dir/config.json`` …) stays uniform.
+    Optional files (thresholds / groups) are best-effort — a 404 just means the
+    published checkpoint doesn't ship that file. Returns the resolved ``Path``.
+    """
+    ckpt_dir = Path(ckpt_dir)
+    if all((ckpt_dir / f).exists() for f in TAGGER_REQUIRED_FILES):
+        return ckpt_dir
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
+
+    logger.info(
+        "AnimaTagger: %s missing required files — fetching %s%s (one-time).",
+        ckpt_dir,
+        repo,
+        f"/{subfolder}" if subfolder else "",
+    )
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    def _fetch_flat(fname: str) -> Path:
+        repo_path = f"{subfolder}/{fname}" if subfolder else fname
+        downloaded = Path(
+            hf_hub_download(repo_id=repo, filename=repo_path, local_dir=str(ckpt_dir))
+        )
+        dest = ckpt_dir / fname
+        if downloaded.resolve() != dest.resolve():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(downloaded), str(dest))
+        return dest
+
+    for fname in TAGGER_REQUIRED_FILES:
+        _fetch_flat(fname)
+    for fname in TAGGER_OPTIONAL_FILES:
+        try:
+            _fetch_flat(fname)
+        except EntryNotFoundError:
+            logger.debug("optional tagger file %s not present on %s", fname, repo)
+    return ckpt_dir
+
 
 # Matches "1girl", "2girls", …, "6+girls" (digit-prefixed girls counts).
 # "multiple girls" is intentionally not matched — it carries no exact count

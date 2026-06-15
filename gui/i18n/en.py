@@ -378,6 +378,21 @@ STRINGS: dict[str, str] = {
     "no_caption": "(no caption)",
     "caption_save": "Save",
     "caption_revert": "Revert",
+    "caption_autotag": "Autotag",
+    "caption_autotag_tooltip": (
+        "Run the Anima Tagger on this image and append its predicted tags to "
+        "the caption. The model is downloaded automatically on first use; "
+        "review the result, then Save to write the .txt."
+    ),
+    "caption_autotag_running": "Autotagging…",
+    "caption_autotag_loading": "Loading tagger…",
+    "caption_autotag_ready": "Tagger loaded · ready",
+    "caption_autotag_busy": (
+        "The GPU is busy with another job (training / preprocessing / "
+        "grouping). Try autotagging again once it finishes."
+    ),
+    "caption_autotag_error": "Autotag failed: {err}",
+    "caption_autotag_empty": "The tagger returned no tags for this image.",
     "caption_versions": "Versions…",
     "caption_dirty_marker": " *",
     "caption_diff_stats": "(+{add} / −{rem})",
@@ -407,8 +422,19 @@ STRINGS: dict[str, str] = {
     "language": "Language:",
     # Settings dialog
     "settings_btn": "⚙ Settings",
-    "settings_btn_tooltip": "Application settings — language, MCP server registration",
+    "settings_btn_tooltip": "Application settings — language, preferences, MCP server registration",
     "settings_title": "Settings",
+    "settings_prefs_header": "Preferences",
+    "settings_autotag_confidence": "Autotag confidence:",
+    "settings_autotag_confidence_tooltip": (
+        "Extra probability floor (0–1) applied on top of the tagger's per-tag "
+        "thresholds. Higher = fewer, more confident tags. Default 0.50."
+    ),
+    "settings_theme_color": "Theme color:",
+    "settings_theme_color_tooltip": (
+        "Accent / highlight color used across the interface. Applies immediately."
+    ),
+    "settings_theme_reset": "Reset",
     "settings_mcp_header": "MCP server (agent access)",
     "settings_mcp_desc": "Expose the local training daemon to MCP clients (Claude Code, "
     "Claude Desktop, …). Run this in a terminal to register it with Claude Code:",

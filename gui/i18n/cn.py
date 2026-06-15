@@ -315,6 +315,20 @@ STRINGS: dict[str, str] = {
     "no_caption": "(无标注)",
     "caption_save": "保存",
     "caption_revert": "还原",
+    "caption_autotag": "自动标注",
+    "caption_autotag_tooltip": (
+        "对该图像运行 Anima Tagger，并将预测的标签追加到标注中。"
+        "模型在首次使用时自动下载；确认结果后保存即可写入 .txt 文件。"
+    ),
+    "caption_autotag_running": "自动标注中……",
+    "caption_autotag_loading": "正在加载标注器……",
+    "caption_autotag_ready": "标注器已加载 · 待命",
+    "caption_autotag_busy": (
+        "GPU 正被其他任务（训练 / 预处理 / 分组）占用。"
+        "完成后再重试自动标注。"
+    ),
+    "caption_autotag_error": "自动标注失败：{err}",
+    "caption_autotag_empty": "标注器未为该图像返回任何标签。",
     "caption_versions": "历史……",
     "caption_dirty_marker": " *",
     "caption_diff_stats": "(+{add} / −{rem})",
@@ -343,8 +357,19 @@ STRINGS: dict[str, str] = {
     "language": "语言:",
     # Settings dialog
     "settings_btn": "⚙ 设置",
-    "settings_btn_tooltip": "应用设置 —— 语言、MCP 服务器注册",
+    "settings_btn_tooltip": "应用设置 —— 语言、偏好设置、MCP 服务器注册",
     "settings_title": "设置",
+    "settings_prefs_header": "偏好设置",
+    "settings_autotag_confidence": "自动打标置信度:",
+    "settings_autotag_confidence_tooltip": (
+        "在打标器各标签阈值之上额外应用的概率下限（0–1）。"
+        "数值越高，保留的标签越少但越可靠。默认 0.50。"
+    ),
+    "settings_theme_color": "主题颜色:",
+    "settings_theme_color_tooltip": (
+        "界面通用的强调／高亮颜色，立即生效。"
+    ),
+    "settings_theme_reset": "重置",
     "settings_mcp_header": "MCP 服务器（智能体接入）",
     "settings_mcp_desc": "将本地训练守护进程暴露给 MCP 客户端（Claude Code、Claude Desktop 等）。"
     "在终端中运行以下命令即可注册到 Claude Code:",
