@@ -24,14 +24,13 @@ from __future__ import annotations
 
 import html
 import json
-import re
 import sys
 import copy
 from pathlib import Path
 
 import toml
 import yaml
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -68,10 +67,12 @@ from gui import (
     variant_path,
 )
 from gui import daemon as gui_daemon
+from gui._job_mixin import DaemonJobMixin
 from gui.explanations import preprocess_field_help, preprocess_guide
 from gui.i18n import t
 from gui.progress import TQDM_RE, TqdmProgressTracker, make_progress_bar
-from gui.tabs.config_tab import ClickableLabel, ConfigTab, SplitButtonStyle
+from gui.tabs.config_tab import ConfigTab, SplitButtonStyle
+from gui.widgets import ClickableLabel, DirtyTrackingMixin, make_field_label
 from library.datasets.path_filter import filter_paths_by_glob
 
 SAM_YAML = ROOT / "configs" / "sam_mask.yaml"
@@ -290,11 +291,12 @@ class _RuleCard(QGroupBox):
 
     def _label(self, key: str, text: str) -> ClickableLabel:
         """Clickable field label that routes this field's help to the panel."""
-        lbl = ClickableLabel(text)
-        lbl.setStyleSheet("color:#f0f0f0; text-decoration: underline dotted;")
         help_text = preprocess_field_help(key)
-        lbl.clicked.connect(lambda _t=text, _h=help_text: self._help_cb(_t, _h))
-        return lbl
+        return make_field_label(
+            text,
+            style="color:#f0f0f0; text-decoration: underline dotted;",
+            on_click=lambda _t=text, _h=help_text: self._help_cb(_t, _h),
+        )
 
     def to_dict(self) -> dict:
         """Serialize to a rule dict. Raises ValueError on an unparseable threshold."""
@@ -326,7 +328,7 @@ class _RuleCard(QGroupBox):
         return rule
 
 
-class PreprocessingTab(LazyTabMixin, QWidget):
+class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget):
     def __init__(self):
         super().__init__()
         # Daemon-backed preprocessing (mirrors ConfigTab's Train button): each
@@ -336,12 +338,9 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         # time). The tab observes the job by polling the per-job files the
         # daemon writes (job.json for state, stdout.log for the log/bar) off a
         # single timer; no SSE thread (daemon is localhost-only).
-        self._job_id: str | None = None
-        self._stdout_tailer = gui_daemon.FileTailer()
-        self._stdout_buf = ""
-        self._job_timer = QTimer(self)
-        self._job_timer.setInterval(400)
-        self._job_timer.timeout.connect(self._poll_job)
+        # _poll_job / _drain_job_stdout come from DaemonJobMixin (its default
+        # _emit_log_line → self.log.appendPlainText already matches this tab).
+        self._init_job_observer()
         self._run_buttons: list[QToolButton] = []
         # Custom QStyle instances for the split Run buttons — kept alive here
         # because setStyle() does not take ownership.
@@ -846,19 +845,9 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             self._add_rule_card(rule)
         self._update_remove_buttons()
 
-    # ── Dirty tracking ─────────────────────────────────────────────
-
-    def _connect_dirty_signal(self, widget: QWidget) -> None:
-        if isinstance(widget, _TargetResWidget):
-            widget.changed.connect(self._mark_dirty)
-        elif isinstance(widget, QCheckBox):
-            widget.toggled.connect(self._mark_dirty)
-        elif isinstance(widget, QSpinBox):
-            widget.valueChanged.connect(self._mark_dirty)
-        elif isinstance(widget, QLineEdit):
-            widget.textChanged.connect(self._mark_dirty)
-        elif isinstance(widget, QPlainTextEdit):
-            widget.textChanged.connect(self._mark_dirty)
+    # ── Dirty tracking — _connect_dirty_signal / _mark_dirty / _clear_dirty
+    #    are inherited from DirtyTrackingMixin. _update_save_button is overridden
+    #    below (the Save button has a different name + localized label). ──
 
     def _connect_dirty_signals(self) -> None:
         for widget in (
@@ -877,16 +866,6 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         ):
             self._connect_dirty_signal(widget)
 
-    def _mark_dirty(self, *_):
-        if self._loading_variant or self._dirty:
-            return
-        self._dirty = True
-        self._update_save_button()
-
-    def _clear_dirty(self):
-        self._dirty = False
-        self._update_save_button()
-
     def _update_save_button(self):
         if not hasattr(self, "save_btn"):
             return
@@ -903,13 +882,14 @@ class PreprocessingTab(LazyTabMixin, QWidget):
 
     def _field_label(self, key: str, text_str: str) -> ClickableLabel:
         """Build a ClickableLabel that shows this field's help when clicked."""
-        lbl = ClickableLabel(text_str)
-        lbl.setStyleSheet("color:#f0f0f0; text-decoration: underline dotted;")
         help_text = preprocess_field_help(key)
-        lbl.clicked.connect(
-            lambda _k=key, _h=help_text, _t=text_str: self._show_field_help(_t, _h)
+        return make_field_label(
+            text_str,
+            style="color:#f0f0f0; text-decoration: underline dotted;",
+            on_click=lambda _k=key, _h=help_text, _t=text_str: self._show_field_help(
+                _t, _h
+            ),
         )
-        return lbl
 
     def _show_default_explain(self) -> None:
         self._explain.setHtml(preprocess_guide())
@@ -1248,9 +1228,8 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         if rules is None:
             return False
 
-        mask_path_pattern = (
-            self.mask_path_pattern_edit.text().strip() or DEFAULT_MASK_PATH_PATTERN
-        )
+        # The mask path pattern is read + persisted inside
+        # _save_variant_preprocess_meta (include_mask=True); nothing to pass here.
         if not self._save_variant_preprocess_meta(
             validate_dropout=False,
             include_mask=True,
@@ -1416,8 +1395,8 @@ class PreprocessingTab(LazyTabMixin, QWidget):
             self.log.appendPlainText(t("daemon_submitting"))
             QApplication.processEvents()
 
-        try:
-            resp = gui_daemon.submit_command(
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(
                 label=label,
                 argv=argv,
                 extra_env=extra_env,
@@ -1425,19 +1404,10 @@ class PreprocessingTab(LazyTabMixin, QWidget):
                 # Main Run starts now; the "add to queue" dropdown holds it
                 # paused until the Queue tab's "Start Queue".
                 start=attach,
-            )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            if attach:
-                self._restore_idle_ui()
-            return
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+            ),
+            on_fail=(self._restore_idle_ui if attach else None),
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
-            if attach:
-                self._restore_idle_ui()
             return
         if attach:
             self.log.appendPlainText(t("daemon_queued", job_id=job_id).rstrip("\n"))
@@ -1475,39 +1445,11 @@ class PreprocessingTab(LazyTabMixin, QWidget):
         ``replay_log`` reads ``stdout.log`` from the top (re-attach after a GUI
         restart); otherwise pre-existing output is skipped so a fresh launch
         shows only new lines."""
-        self._job_id = job_id
-        self._stdout_buf = ""
-        self._stdout_tailer.watch(gui_daemon.stdout_path(job_id))
-        if not replay_log:
-            self._stdout_tailer.read_new()  # discard backlog
         for btn in self._run_buttons:
             btn.setEnabled(False)
         self.save_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self._job_timer.start()
-
-    def _poll_job(self) -> None:
-        if not self._job_id:
-            return
-        self._drain_job_stdout()
-        state = gui_daemon.read_job_state(self._job_id)
-        if gui_daemon.is_terminal(state):
-            self._on_job_finished(state)
-
-    def _drain_job_stdout(self) -> None:
-        """Append new stdout.log lines to the log (carriage-return aware); tqdm
-        lines drive the bar instead of spamming the log (no progress.jsonl for
-        preprocess/mask, so tqdm is the only progress signal)."""
-        chunk = self._stdout_tailer.read_new()
-        if not chunk:
-            return
-        parts = re.split(r"[\r\n]", self._stdout_buf + chunk)
-        self._stdout_buf = parts[-1]  # incomplete trailing fragment
-        for line in parts[:-1]:
-            if self._progress_tracker.feed(line):
-                continue
-            if line:
-                self.log.appendPlainText(line)
+        self._watch_job(job_id, replay_log=replay_log)
 
     def _on_job_finished(self, state: str | None) -> None:
         self._job_timer.stop()
@@ -1534,12 +1476,7 @@ class PreprocessingTab(LazyTabMixin, QWidget):
     def _stop(self) -> None:
         # Abort the daemon job; the poll loop then observes the 'stopped' state
         # and restores the UI. The daemon stays up and advances its queue.
-        if not self._job_id:
-            return
-        try:
-            gui_daemon.stop_job(self._job_id)
-        except Exception as e:  # noqa: BLE001
-            self.log.appendPlainText(f"stop failed: {e}")
+        self._stop_job()
 
     def cleanup_subprocess(self) -> None:
         """App-shutdown hook. Stops observing but deliberately leaves the daemon

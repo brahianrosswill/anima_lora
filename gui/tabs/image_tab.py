@@ -58,6 +58,10 @@ from gui.i18n import t
 _MASK_OVERLAY_COLOR_OPAQUE = QColor(255, 60, 60, 255)
 _MASK_OVERLAY_OPACITY = 0.55
 
+# Foreground tint for images marked for deletion (toggled with the Delete key,
+# removed by the 삭제 button). Bright red so marks stand out in both views.
+_DELETE_MARK_COLOR = QColor("#e74c3c")
+
 
 def _resolve_mask_path(image_path: Path, current_dir: Path | None) -> Path | None:
     """Locate the merged mask PNG for ``image_path``.
@@ -524,11 +528,15 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self._search_text: str = ""
         self._sort_desc: bool = False
         # Similarity-group curation (make curate-group). _groups is the manifest's
-        # group list; _group_filter is the selected group's member stems (None =
-        # show all). Filtering is stem-keyed so it works whether this tab views
-        # image_dataset/ or post_image_dataset/resized/ (stems are unique + shared).
+        # group list; the tree view folds images under green per-group nodes (the
+        # old dropdown filter was replaced by this always-on tree grouping).
+        # Grouping is stem-keyed so it works whether this tab views image_dataset/
+        # or post_image_dataset/resized/ (stems are unique + shared).
         self._groups: list[dict] = []
-        self._group_filter: set[str] | None = None
+        # Images marked for deletion (Delete key toggles the current one red; the
+        # 삭제 button moves the whole set to the OS trash). Keyed by full path so a
+        # mark survives filter/sort/view rebuilds; cleared when the dir changes.
+        self._marked: set[Path] = set()
         # Source pixmap + resolved mask for the currently shown image.
         # _overlay_pm is lazily composed on first toggle and cached so flipping
         # the checkbox doesn't re-run the QPainter pipeline.
@@ -552,6 +560,16 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.open_dir_btn.setToolTip(t("dataset_open_dir_tooltip"))
         self.open_dir_btn.clicked.connect(self._open_current_dir)
         top.addWidget(self.open_dir_btn)
+        # Group button, accented blue like the preprocess "run" buttons. Submits
+        # `make curate-group`; results surface as green folds in the tree view.
+        self.group_btn = QPushButton(t("dataset_group_rebuild"))
+        self.group_btn.setToolTip(t("dataset_group_rebuild_tooltip"))
+        self.group_btn.setStyleSheet(
+            "QPushButton{background:#2980b9;color:white;font-weight:bold;"
+            "padding:4px 16px;}"
+        )
+        self.group_btn.clicked.connect(self._rebuild_groups)
+        top.addWidget(self.group_btn)
         self.add_dir_btn = QPushButton(t("dataset_add_dir"))
         self.add_dir_btn.setToolTip(t("dataset_add_dir_tooltip"))
         self.add_dir_btn.clicked.connect(self._add_dir)
@@ -590,21 +608,6 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         search_row.addWidget(self.sort_btn)
         ll.addLayout(search_row)
 
-        # Similarity-group filter row: a combo populated from groups.json plus a
-        # rebuild button that submits `make curate-group` to the daemon. Read-only
-        # browse/filter — selecting a group narrows the list to its members.
-        group_row = QHBoxLayout()
-        group_row.setContentsMargins(0, 0, 0, 0)
-        self.group_combo = QComboBox()
-        self.group_combo.setToolTip(t("dataset_group_tooltip"))
-        self.group_combo.currentIndexChanged.connect(self._on_group_changed)
-        group_row.addWidget(self.group_combo, 1)
-        self.group_btn = QPushButton(t("dataset_group_rebuild"))
-        self.group_btn.setToolTip(t("dataset_group_rebuild_tooltip"))
-        self.group_btn.clicked.connect(self._rebuild_groups)
-        group_row.addWidget(self.group_btn)
-        ll.addLayout(group_row)
-
         self._view_mode = "list"
         self.fl = QListWidget()
         self.fl.currentRowChanged.connect(self._on_row_changed)
@@ -637,6 +640,21 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         self.overlay_cb.setEnabled(False)
         self.overlay_cb.toggled.connect(self._on_overlay_toggled)
         img_head.addWidget(self.overlay_cb)
+        # Delete button: removes the images marked red via the Delete key. Red
+        # accent to match the marks; disabled until at least one is marked.
+        self.delete_btn = QPushButton(t("dataset_delete"))
+        self.delete_btn.setToolTip(t("dataset_delete_tooltip"))
+        self.delete_btn.setStyleSheet(
+            "QPushButton{background:#c0392b;color:white;font-weight:bold;"
+            "padding:4px 16px;}QPushButton:disabled{background:#5a3a37;color:#aaa;}"
+        )
+        self.delete_btn.clicked.connect(self._delete_marked)
+        img_head.addWidget(self.delete_btn)
+        # Cancel button: clears all deletion marks (same as pressing Esc).
+        self.cancel_mark_btn = QPushButton(t("dataset_delete_clear"))
+        self.cancel_mark_btn.setToolTip(t("dataset_delete_clear_tooltip"))
+        self.cancel_mark_btn.clicked.connect(self._clear_marks)
+        img_head.addWidget(self.cancel_mark_btn)
         img_head.addStretch()
         rl.addLayout(img_head)
 
@@ -689,6 +707,15 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         QShortcut(QKeySequence("Right"), self, lambda: self._nav(1))
         QShortcut(QKeySequence("Left"), self, lambda: self._nav(-1))
         QShortcut(QKeySequence.Save, self, self._save)
+        # Delete toggles the deletion mark on the current image; Esc un-marks it.
+        # Both act per-current-image and are scoped to the list/tree
+        # (WidgetShortcut) so they don't hijack the caption editor on focus.
+        for _w in (self.fl, self.tree):
+            _del = QShortcut(QKeySequence.Delete, _w, self._toggle_mark_current)
+            _del.setContext(Qt.WidgetShortcut)
+            _esc = QShortcut(QKeySequence(Qt.Key_Escape), _w, self._unmark_current)
+            _esc.setContext(Qt.WidgetShortcut)
+        self._refresh_delete_button()
 
     def _lazy_init(self) -> None:
         # Walking the image dir + building the tree is deferred to first show.
@@ -709,11 +736,11 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         return ROOT / "post_image_dataset" / "groups" / "groups.json"
 
     def _load_groups(self) -> None:
-        """Read groups.json (if present) and repopulate the group combo.
+        """Read groups.json (if present) into ``self._groups``.
 
-        Pure JSON — keeps the GUI torch-free. Resets the active filter to "all";
-        the combo lists one entry per group with its size, ordered as written
-        (largest first). A missing/unreadable manifest just leaves "all images".
+        Pure JSON — keeps the GUI torch-free. The tree view folds images under
+        green per-group nodes built from this list (ordered as written, largest
+        first). A missing/unreadable manifest just leaves the plain folder tree.
         """
         self._groups = []
         path = self._groups_manifest_path()
@@ -725,27 +752,6 @@ class ImageViewerTab(LazyTabMixin, QWidget):
                     self._groups = groups
             except (json.JSONDecodeError, OSError):
                 self._groups = []
-        self._group_filter = None
-        self.group_combo.blockSignals(True)
-        try:
-            self.group_combo.clear()
-            self.group_combo.addItem(t("dataset_group_all"))
-            for i, g in enumerate(self._groups):
-                self.group_combo.addItem(
-                    t("dataset_group_label", n=i + 1, size=g.get("size", 0))
-                )
-            self.group_combo.setCurrentIndex(0)
-            self.group_combo.setEnabled(bool(self._groups))
-        finally:
-            self.group_combo.blockSignals(False)
-
-    def _on_group_changed(self, idx: int) -> None:
-        if idx <= 0 or idx - 1 >= len(self._groups):
-            self._group_filter = None
-        else:
-            members = self._groups[idx - 1].get("members", [])
-            self._group_filter = {Path(m).stem for m in members}
-        self._apply_filter_and_sort()
 
     def _rebuild_groups(self) -> None:
         """Submit `make curate-group` to the daemon (runs PE-Spatial grouping)."""
@@ -772,8 +778,12 @@ class ImageViewerTab(LazyTabMixin, QWidget):
         prev_stem: str | None = None
         if preserve_selection and self._current_caption_path is not None:
             prev_stem = self._current_caption_path.stem
+        if d != self._current_dir:
+            # Deletion marks are path-scoped to one dir; drop them on a switch.
+            self._marked.clear()
+            self._refresh_delete_button()
         self._current_dir = d
-        self._load_groups()  # repopulate the group combo + reset to "all"
+        self._load_groups()  # reload the group manifest for the tree folds
         self._all_images = _imgs(d)
         had_match = self._apply_filter_and_sort(prev_stem=prev_stem)
         if not self._images:
@@ -820,8 +830,6 @@ class ImageViewerTab(LazyTabMixin, QWidget):
             ]
         else:
             visible = list(self._all_images)
-        if self._group_filter is not None:
-            visible = [p for p in visible if p.stem in self._group_filter]
         if self._sort_desc:
             visible.reverse()
         self._images = visible
@@ -855,26 +863,45 @@ class ImageViewerTab(LazyTabMixin, QWidget):
             self.fl.blockSignals(False)
             self.tree.blockSignals(False)
 
+        # Re-apply deletion marks to the freshly rebuilt items.
+        self._refresh_mark_styles()
+
         total = len(self._all_images)
         shown = len(visible)
-        if shown != total:  # narrowed by search and/or group filter
+        if shown != total:  # narrowed by search
             self.cnt.setText(t("n_images_filtered", shown=shown, total=total))
         else:
             self.cnt.setText(t("n_images", n=total))
         return target_row >= 0
 
     def _rebuild_tree(self, visible: list[Path]) -> None:
-        """Rebuild the tree widget from ``visible``, mirroring the relative
-        folder structure under ``self._current_dir``. Leaves are image stems;
-        folders auto-expand the first time the user enters tree view so the
-        hierarchy is visible without an extra click."""
+        """Rebuild the tree widget from ``visible``.
+
+        The folder structure under ``self._current_dir`` is primary. Within a
+        folder, images that belong to a similarity group (from
+        ``make curate-group``) nest one level deeper under a green per-group
+        node; ungrouped images sit directly in the folder. Group nodes are
+        per-folder, so a group spanning folders shows up once under each. Leaves
+        are image stems; everything auto-expands so the hierarchy is visible
+        without an extra click."""
         self.tree.clear()
         self._tree_item_to_index.clear()
         if not visible:
             return
+        # Map each member stem → group index so grouped images get routed under
+        # a green sub-node within their folder; the rest stay flat in the folder.
+        stem_to_group: dict[str, int] = {}
+        for gi, g in enumerate(self._groups):
+            for m in g.get("members", []):
+                stem_to_group[Path(m).stem] = gi
+
         # Cache folder QTreeWidgetItems by their relative parent path so
-        # sibling images in the same folder share one parent node.
+        # sibling images in the same folder share one parent node. Group
+        # sub-nodes are keyed by (folder, group index) so each folder gets its
+        # own green node per group.
         folder_items: dict[Path, QTreeWidgetItem] = {}
+        group_nodes: dict[tuple[Path, int], QTreeWidgetItem] = {}
+        group_counts: dict[tuple[Path, int], int] = {}
         for idx, p in enumerate(visible):
             rel: Path
             if self._current_dir is None:
@@ -884,10 +911,44 @@ class ImageViewerTab(LazyTabMixin, QWidget):
                     rel = p.relative_to(self._current_dir)
                 except ValueError:
                     rel = Path(p.name)
-            parent = self._ensure_tree_folder(rel.parent, folder_items)
+            folder = self._ensure_tree_folder(rel.parent, folder_items)
+            gi = stem_to_group.get(p.stem)
+            if gi is not None:
+                key = (rel.parent, gi)
+                parent = self._ensure_group_node(folder, key, group_nodes)
+                group_counts[key] = group_counts.get(key, 0) + 1
+            else:
+                parent = folder
             leaf = QTreeWidgetItem(parent, [p.stem])
             self._tree_item_to_index[leaf] = idx
+        # Label group nodes once their per-folder visible member count is known.
+        for key, node in group_nodes.items():
+            node.setText(
+                0, t("dataset_group_label", n=key[1] + 1, size=group_counts[key])
+            )
         self.tree.expandAll()
+
+    def _ensure_group_node(
+        self,
+        folder: QTreeWidget | QTreeWidgetItem,
+        key: tuple[Path, int],
+        group_nodes: dict[tuple[Path, int], QTreeWidgetItem],
+    ) -> QTreeWidgetItem:
+        """Lazily create the green similarity-group node under ``folder``.
+
+        ``key`` is (folder rel-path, group index). Text is set later (in
+        ``_rebuild_tree``) once the per-folder visible member count is known;
+        only created for groups with a visible member in that folder."""
+        cached = group_nodes.get(key)
+        if cached is not None:
+            return cached
+        node = QTreeWidgetItem(folder, [""])
+        node.setForeground(0, QColor("#27ae60"))
+        font = node.font(0)
+        font.setBold(True)
+        node.setFont(0, font)
+        group_nodes[key] = node
+        return node
 
     def _ensure_tree_folder(
         self, rel_parent: Path, folder_items: dict[Path, QTreeWidgetItem]
@@ -1093,6 +1154,139 @@ class ImageViewerTab(LazyTabMixin, QWidget):
 
     def _on_overlay_toggled(self, _checked: bool) -> None:
         self._apply_image_view()
+
+    # ── deletion marking ──────────────────────────────────────
+
+    def _current_index(self) -> int:
+        """Index into ``self._images`` of the currently selected image.
+
+        Reads the active view (tree leaf or list row); -1 if nothing is on an
+        image (e.g. a folder/group node is selected in the tree)."""
+        if self._view_mode == "tree":
+            item = self.tree.currentItem()
+            if item is not None:
+                idx = self._tree_item_to_index.get(item)
+                if idx is not None:
+                    return idx
+            return -1
+        return self.fl.currentRow()
+
+    def _toggle_mark_current(self) -> None:
+        """Toggle the deletion mark on the currently selected image."""
+        idx = self._current_index()
+        if not 0 <= idx < len(self._images):
+            return
+        p = self._images[idx]
+        if p in self._marked:
+            self._marked.discard(p)
+        else:
+            self._marked.add(p)
+        self._refresh_mark_styles()
+        self._refresh_delete_button()
+
+    def _refresh_mark_styles(self) -> None:
+        """Repaint list rows + tree leaves red iff marked for deletion.
+
+        Unmarked items clear the ForegroundRole entirely (rather than setting a
+        default QBrush, which paints black — invisible on the dark theme) so
+        they fall back to the palette text color."""
+        for row in range(self.fl.count()):
+            item = self.fl.item(row)
+            marked = row < len(self._images) and self._images[row] in self._marked
+            if marked:
+                item.setForeground(_DELETE_MARK_COLOR)
+            else:
+                item.setData(Qt.ForegroundRole, None)
+        for leaf, idx in self._tree_item_to_index.items():
+            marked = idx < len(self._images) and self._images[idx] in self._marked
+            if marked:
+                leaf.setForeground(0, _DELETE_MARK_COLOR)
+            else:
+                leaf.setData(0, Qt.ForegroundRole, None)
+
+    def _unmark_current(self) -> None:
+        """Remove the deletion mark from the currently selected image (Esc)."""
+        idx = self._current_index()
+        if not 0 <= idx < len(self._images):
+            return
+        p = self._images[idx]
+        if p not in self._marked:
+            return
+        self._marked.discard(p)
+        self._refresh_mark_styles()
+        self._refresh_delete_button()
+
+    def _clear_marks(self) -> None:
+        """Deselect every deletion target (취소 button)."""
+        if not self._marked:
+            return
+        self._marked.clear()
+        self._refresh_mark_styles()
+        self._refresh_delete_button()
+
+    def _refresh_delete_button(self) -> None:
+        n = len(self._marked)
+        self.delete_btn.setEnabled(n > 0)
+        self.delete_btn.setText(t("dataset_delete") + (f" ({n})" if n else ""))
+        self.cancel_mark_btn.setEnabled(n > 0)
+
+    def _delete_marked(self) -> None:
+        """Move every marked image (+ its caption sidecars) to the OS trash."""
+        targets = sorted(self._marked)
+        if not targets:
+            return
+        reply = QMessageBox.question(
+            self,
+            t("dataset_delete_confirm_title"),
+            t("dataset_delete_confirm_body", n=len(targets)),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        from send2trash import send2trash  # lazy: keeps GUI startup light
+
+        errors: list[str] = []
+        for p in targets:
+            try:
+                for f in self._deletion_files(p):
+                    if f.exists():
+                        send2trash(str(f))
+            except OSError as e:
+                errors.append(f"{p.name}: {e}")
+        self._marked.clear()
+        self._refresh_delete_button()
+        # Drop the editor context so the post-delete reload doesn't prompt about
+        # a caption whose image we just removed, then re-scan from disk.
+        self._current_caption_path = None
+        self._disk_text = ""
+        self._set_caption_text("")
+        if self._current_dir is not None:
+            self._all_images = _imgs(self._current_dir)
+        self._apply_filter_and_sort()
+        if self._images:
+            self.fl.setCurrentRow(0)
+        else:
+            self._set_image_none()
+            self._refresh_buttons()
+            self._refresh_inline_diff()
+        if errors:
+            QMessageBox.warning(
+                self, t("error"), t("dataset_delete_failed", err="\n".join(errors))
+            )
+
+    def _deletion_files(self, image: Path) -> list[Path]:
+        """Image + its caption sidecar + caption history (all trashed together)."""
+        cap = image.with_suffix(".txt")
+        return [image, cap, _history_path(cap)]
+
+    def _set_image_none(self) -> None:
+        """Clear the preview pane (used after deleting the last image)."""
+        self._source_pm = None
+        self._mask_path = None
+        self._overlay_pm = None
+        self.overlay_cb.setEnabled(False)
+        self.img.clear()
 
     # ── caption editing ───────────────────────────────────────
 

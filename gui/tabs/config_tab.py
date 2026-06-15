@@ -11,7 +11,7 @@ from typing import Any
 import html
 
 import toml
-from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QPen, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -64,10 +64,16 @@ from gui import (
     variant_path,
 )
 from gui import daemon as gui_daemon
+from gui._job_mixin import DaemonJobMixin
 from gui.explanations import field_help, method_guide
 from gui.i18n import t
 from gui.process import kill_process_tree, setup_kill_safe
-from gui.widgets import ImageViewerDialog
+from gui.widgets import (
+    ClickableLabel,  # noqa: F401 — re-exported; sibling tabs import it from here
+    DirtyTrackingMixin,
+    ImageViewerDialog,
+    make_field_label,
+)
 from gui.progress import (
     TQDM_RE,
     JsonlProgressReader,
@@ -137,22 +143,7 @@ class SplitButtonStyle(QProxyStyle):
             painter.restore()
 
 
-class ClickableLabel(QLabel):
-    """QLabel that emits `clicked` on left-click."""
-
-    clicked = Signal()
-
-    def __init__(self, text: str = ""):
-        super().__init__(text)
-        self.setCursor(Qt.PointingHandCursor)
-
-    def mousePressEvent(self, ev):
-        if ev.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(ev)
-
-
-class ConfigTab(QWidget):
+class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
     def __init__(
         self, methods: list[str] | None = None, tb_panel=None, preprocess_tab=None
     ):
@@ -553,17 +544,17 @@ class ConfigTab(QWidget):
             for k in sorted(flds, key=lambda key: (_FIELD_ORDER.get(key, 100), key)):
                 w = _widget(flds[k], key=k)
                 self._w[k] = w
-                lbl = ClickableLabel(k)
-
                 help_text = field_help(k)
                 style, note = origin_style.get(
                     self._origin.get(k, "base"), origin_style["base"]
                 )
-                lbl.setStyleSheet(style)
                 notes = (note,)
-
-                lbl.clicked.connect(
-                    lambda _k=k, _h=help_text, _n=notes: self._show_explain(_k, _h, _n)
+                lbl = make_field_label(
+                    k,
+                    style=style,
+                    on_click=lambda _k=k, _h=help_text, _n=notes: self._show_explain(
+                        _k, _h, _n
+                    ),
                 )
                 form.addRow(lbl, w)
             box.setLayout(form)
@@ -715,57 +706,8 @@ class ConfigTab(QWidget):
         use_valid_w.toggled.connect(_on_use_valid)
         vsn_w.valueChanged.connect(_on_split_changed)
 
-    # ── Dirty tracking ──
-
-    def _connect_dirty_signal(self, w: QWidget) -> None:
-        """Wire each form widget's change signal to _mark_dirty so the Save
-        button reflects whether the form has drifted from the variant file."""
-        from PySide6.QtWidgets import (
-            QCheckBox,
-            QComboBox,
-            QLineEdit,
-            QPlainTextEdit,
-            QSpinBox,
-        )
-
-        from gui import _SamplePromptsWidget, _TargetResWidget
-
-        if isinstance(w, _TargetResWidget):
-            w.changed.connect(self._mark_dirty)
-        elif isinstance(w, _SamplePromptsWidget):
-            w.changed.connect(self._mark_dirty)
-        elif isinstance(w, QComboBox):
-            w.currentTextChanged.connect(self._mark_dirty)
-        elif isinstance(w, QCheckBox):
-            w.toggled.connect(self._mark_dirty)
-        elif isinstance(w, QSpinBox):
-            w.valueChanged.connect(self._mark_dirty)
-        elif isinstance(w, QLineEdit):
-            w.textChanged.connect(self._mark_dirty)
-        elif isinstance(w, QPlainTextEdit):
-            w.textChanged.connect(self._mark_dirty)
-
-    def _mark_dirty(self, *_):
-        if self._dirty:
-            return
-        self._dirty = True
-        self._update_save_button()
-
-    def _clear_dirty(self):
-        self._dirty = False
-        self._update_save_button()
-
-    def _update_save_button(self):
-        if not hasattr(self, "_save_btn"):
-            return
-        if self._dirty:
-            self._save_btn.setText(t("save") + " *")
-            self._save_btn.setStyleSheet(self._save_btn_dirty_style)
-            self._save_btn.setToolTip(t("save_dirty_tooltip"))
-        else:
-            self._save_btn.setText(t("save"))
-            self._save_btn.setStyleSheet(self._save_btn_idle_style)
-            self._save_btn.setToolTip("")
+    # ── Dirty tracking — _connect_dirty_signal / _mark_dirty / _clear_dirty /
+    #    _update_save_button are inherited from DirtyTrackingMixin. ──
 
     # ── Explanation panel ──
 
@@ -1298,29 +1240,23 @@ class ConfigTab(QWidget):
         # The spec also tags this command job as *this tab's* preprocess, so
         # ConfigTab re-claims it on reopen and the PreprocessingTab leaves it be.
         chain_train = self._chain_train_spec(variant) if chain_after else None
-        try:
-            snapshot = self._queue_config_snapshot(variant)
-            resp = gui_daemon.submit_command(
+
+        def _on_fail():
+            self._chain_train_after_preprocess = False
+            self._restore_idle_ui()
+
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(
                 label="preprocess",
                 argv=["tasks.py", "preprocess"],
                 extra_env=self._preprocess_env(variant),
                 chain_train=chain_train,
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant),
                 start=True,  # main Train auto-chain: run now
-            )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._chain_train_after_preprocess = False
-            self._restore_idle_ui()
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+            ),
+            on_fail=_on_fail,
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
-            self._chain_train_after_preprocess = False
-            self._restore_idle_ui()
             return
 
         self._log(t("daemon_queued", job_id=job_id))
@@ -1401,24 +1337,16 @@ class ConfigTab(QWidget):
         self._log(t("queue_submitting", variant=variant) + "\n")
         QApplication.processEvents()
 
-        try:
-            snapshot = self._queue_config_snapshot(variant, merged)
-            resp = gui_daemon.submit_training(
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_training(
                 method=variant,
                 preset=self._IMPLICIT_PRESET,
                 methods_subdir="gui-methods",
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=False,  # queue dropdown: add to queue, don't start now
             )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
             return
 
         self._log(t("queue_added_train", variant=variant, job_id=job_id))
@@ -1453,30 +1381,20 @@ class ConfigTab(QWidget):
         self._log(t(submit_key, variant=variant) + "\n")
         QApplication.processEvents()
 
-        try:
-            snapshot = self._queue_config_snapshot(variant, merged)
-            resp = gui_daemon.submit_command(
+        queued_key = (
+            "queue_added_preprocess" if train_after else "queue_added_preprocess_only"
+        )
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_command(
                 label="preprocess",
                 argv=["tasks.py", "preprocess"],
                 extra_env=self._preprocess_env(variant),
                 chain_train=self._chain_train_spec(variant) if train_after else None,
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=False,  # queue dropdown: add to queue, don't start now
             )
-            queued_key = (
-                "queue_added_preprocess"
-                if train_after
-                else "queue_added_preprocess_only"
-            )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
             return
 
         self._log(t(queued_key, variant=variant, job_id=job_id))
@@ -1517,26 +1435,17 @@ class ConfigTab(QWidget):
         self._log(t("daemon_submitting") + "\n")
         QApplication.processEvents()
 
-        try:
-            snapshot = self._queue_config_snapshot(variant, merged)
-            resp = gui_daemon.submit_training(
+        job_id = self._submit_job(
+            lambda: gui_daemon.submit_training(
                 method=variant,
                 preset=self._IMPLICIT_PRESET,
                 methods_subdir="gui-methods",
-                config_snapshot=snapshot,
+                config_snapshot=self._queue_config_snapshot(variant, merged),
                 start=True,  # main Train button: run now
-            )
-        except Exception as e:  # noqa: BLE001 — daemon failed to start / submit
-            QMessageBox.warning(self, t("error"), t("daemon_submit_failed", err=str(e)))
-            self._restore_idle_ui()
-            return
-
-        job_id = resp.get("job_id") if isinstance(resp, dict) else None
+            ),
+            on_fail=self._restore_idle_ui,
+        )
         if not job_id:
-            QMessageBox.warning(
-                self, t("error"), t("daemon_submit_failed", err=str(resp))
-            )
-            self._restore_idle_ui()
             return
 
         self._log(t("daemon_queued", job_id=job_id))

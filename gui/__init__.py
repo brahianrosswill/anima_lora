@@ -72,6 +72,8 @@ from gui.validation import (
     apply_validation_choice,
 )
 from gui.widgets import (
+    ClickableLabel,
+    DirtyTrackingMixin,
     LazyTabMixin,
     ScaledImageLabel,
     _SamplePromptsWidget,
@@ -79,6 +81,7 @@ from gui.widgets import (
     _read,
     _TargetResWidget,
     _widget,
+    make_field_label,
 )
 
 __all__ = [
@@ -90,6 +93,8 @@ __all__ = [
     "PRESETS_FILE",
     "CUSTOM_DIR",
     "CUSTOM_VARIANTS_DIR",
+    "ClickableLabel",
+    "DirtyTrackingMixin",
     "LazyTabMixin",
     "ScaledImageLabel",
     "_SamplePromptsWidget",
@@ -97,6 +102,7 @@ __all__ = [
     "_no_wheel",
     "_read",
     "_widget",
+    "make_field_label",
     "_load",
     "_load_base",
     "_save",
