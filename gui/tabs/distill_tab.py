@@ -47,6 +47,7 @@ from gui.explanations import method_overview
 from gui.i18n import t
 from gui._job_mixin import DaemonJobMixin
 from gui.progress import TqdmProgressTracker, make_progress_bar
+from gui.theme import tok
 from gui.widgets import DirtyTrackingMixin, make_field_label
 
 
@@ -84,7 +85,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         title.setStyleSheet("font-weight:bold;font-size:14px;")
         top.addWidget(title)
         path_lbl = QLabel(self.CONFIG_PATH)
-        path_lbl.setStyleSheet("color:#888;")
+        path_lbl.setStyleSheet(f"color:{tok('text_dim')};")
         top.addWidget(path_lbl)
         top.addStretch()
 
@@ -140,7 +141,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
             "QTextBrowser { font-size: 13px; padding: 12px; "
-            "background: #2b2b2b; color: #e0e0e0; }"
+            f"background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(300)
         hsplit.addWidget(self._explain)

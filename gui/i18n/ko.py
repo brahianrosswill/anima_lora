@@ -354,8 +354,6 @@ STRINGS: dict[str, str] = {
     "dataset_delete_confirm_title": "이미지 삭제",
     "dataset_delete_confirm_body": "이미지 {n}개와 캡션 파일을 휴지통으로 보낼까요?",
     "dataset_delete_failed": "일부 이미지를 삭제하지 못했습니다:\n{err}",
-    "dataset_view_list_tooltip": "리스트 뷰 (클릭하면 트리 뷰로 전환)",
-    "dataset_view_tree_tooltip": "폴더 트리 뷰 (클릭하면 리스트 뷰로 전환)",
     "dataset_group_label": "그룹 {n} — {size}장",
     "dataset_group_rebuild": "그룹화",
     "dataset_group_rebuild_tooltip": "PE-Spatial 시각적 유사도로 이미지 그룹화 (작가별). 작업 큐에서 실행됩니다.",
@@ -417,11 +415,14 @@ STRINGS: dict[str, str] = {
         "태거의 태그별 임계값 위에 추가로 적용되는 확률 하한(0–1)입니다. "
         "높을수록 더 확실한 태그만 적게 남습니다. 기본값 0.50."
     ),
-    "settings_theme_color": "테마 색상:",
-    "settings_theme_color_tooltip": (
-        "인터페이스 전반에 사용되는 강조/하이라이트 색상입니다. 즉시 적용됩니다."
+    "settings_theme": "테마:",
+    "settings_theme_tooltip": (
+        "인터페이스 전체 색상 테마입니다. 즉시 적용되며, 설정 창을 닫으면 "
+        "창이 다시 그려져 완전히 반영됩니다."
     ),
-    "settings_theme_reset": "초기화",
+    "settings_theme_dark": "다크",
+    "settings_theme_light": "라이트",
+    "settings_theme_sepia": "세피아",
     "settings_mcp_header": "MCP 서버 (에이전트 연동)",
     "settings_mcp_desc": "로컬 학습 데몬을 MCP 클라이언트(Claude Code, Claude Desktop 등)에 "
     "노출합니다. 아래 명령을 터미널에서 실행하면 Claude Code에 등록됩니다:",
@@ -455,6 +456,8 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "새 릴리스 {v} 가 있습니다 — 클릭하여 릴리스 노트 보기",
     "report_issue": "이슈 신고",
     "report_issue_tooltip": "브라우저에서 GitHub 이슈 트래커 열기",
+    "visit_github": "GitHub 페이지 방문",
+    "open_in_system_viewer": "시스템 뷰어로 열기",
     # Models dialog
     "models_title": "모델 다운로드",
     "models_intro": "아래에서 모델 그룹을 선택하거나 '전체 다운로드'로 표준 세트 "

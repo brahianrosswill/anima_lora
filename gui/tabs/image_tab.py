@@ -44,11 +44,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QSplitter,
-    QStackedWidget,
     QTextBrowser,
     QTextEdit,
     QTreeWidget,
@@ -70,6 +70,7 @@ from gui import daemon as gui_daemon
 from gui._job_mixin import DaemonJobMixin
 from gui.i18n import t
 from gui.progress import TqdmProgressTracker, make_progress_bar
+from gui.theme import tok
 
 # Stdio protocol sentinels of the resident autotag worker (kept in sync with
 # ``scripts/anima_tagger/autotag_server.py``). Hardcoded rather than imported
@@ -452,13 +453,13 @@ def _unified_diff_html(old: str, new: str) -> str:
         if line.startswith("---") or line.startswith("+++"):
             continue  # filenames are noise here
         if line.startswith("@@"):
-            rows.append(f'<span style="color:#7aa6da;">{escape(line)}</span>')
+            rows.append(f'<span style="color:{tok("link")};">{escape(line)}</span>')
         elif line.startswith("+"):
             rows.append(f'<span style="color:#9ad17a;">{escape(line)}</span>')
         elif line.startswith("-"):
             rows.append(f'<span style="color:#e07a7a;">{escape(line)}</span>')
         else:
-            rows.append(f'<span style="color:#aaa;">{escape(line)}</span>')
+            rows.append(f'<span style="color:{tok("text_dim")};">{escape(line)}</span>')
     if not rows:
         return ""
     return (
@@ -501,8 +502,8 @@ class CaptionVersionsDialog(QDialog):
         rl.setContentsMargins(0, 0, 0, 0)
         self.diff = QTextBrowser()
         self.diff.setStyleSheet(
-            "QTextBrowser { background:#1e1e1e; color:#dcdcdc; "
-            "border:1px solid #444; padding:6px; }"
+            f"QTextBrowser {{ background:{tok('base')}; color:{tok('text')}; "
+            f"border:1px solid {tok('border_dim')}; padding:6px; }}"
         )
         rl.addWidget(self.diff, 1)
         sp.addWidget(right)
@@ -532,7 +533,9 @@ class CaptionVersionsDialog(QDialog):
         prev = self._history[row]["text"]
         html = _unified_diff_html(prev, self._current)
         if not html:
-            self.diff.setHtml(f'<i style="color:#aaa;">{t("caption_diff_clean")}</i>')
+            self.diff.setHtml(
+                f'<i style="color:{tok("text_dim")};">{t("caption_diff_clean")}</i>'
+            )
         else:
             self.diff.setHtml(html)
         self.restore_btn.setEnabled(True)
@@ -642,11 +645,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
         sp = QSplitter(Qt.Horizontal)
 
-        # Left panel: search + sort + view-toggle row, then a stack holding
-        # the list and tree widgets. The two views are kept in sync via the
-        # _images array (selecting either one routes through _select_path).
-        # ``_view_mode`` is "list" by default — flipping the toggle button
-        # swaps the stacked widget without reloading images.
+        # Left panel: search + sort row, then the tree of images. The tree folds
+        # images under their folder + green per-similarity-group nodes; selecting
+        # a leaf routes through _show(index) via the _images array.
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
@@ -658,11 +659,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._on_search_changed)
         search_row.addWidget(self.search, 1)
-        self.view_btn = QPushButton("⊞")
-        self.view_btn.setFixedWidth(28)
-        self.view_btn.setToolTip(t("dataset_view_list_tooltip"))
-        self.view_btn.clicked.connect(self._toggle_view_mode)
-        search_row.addWidget(self.view_btn)
         self.sort_btn = QPushButton("↑")
         self.sort_btn.setFixedWidth(28)
         self.sort_btn.setToolTip(t("dataset_sort_asc_tooltip"))
@@ -670,22 +666,13 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         search_row.addWidget(self.sort_btn)
         ll.addLayout(search_row)
 
-        self._view_mode = "list"
-        self.fl = QListWidget()
-        self.fl.currentRowChanged.connect(self._on_row_changed)
-
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setUniformRowHeights(True)
         self.tree.currentItemChanged.connect(self._on_tree_item_changed)
-        # Map item → image index so selections in the tree route through the
-        # same _show(index) flow as list-row clicks.
+        # Map item → image index so tree selections route through _show(index).
         self._tree_item_to_index: dict[QTreeWidgetItem, int] = {}
-
-        self.view_stack = QStackedWidget()
-        self.view_stack.addWidget(self.fl)
-        self.view_stack.addWidget(self.tree)
-        ll.addWidget(self.view_stack, 1)
+        ll.addWidget(self.tree, 1)
         sp.addWidget(left)
 
         right = QWidget()
@@ -732,7 +719,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         # Resident-tagger status ("loading…" / "loaded, waiting"). Hidden until
         # the worker is spawned; updated from the worker's stdout sentinels.
         self.autotag_status = QLabel()
-        self.autotag_status.setStyleSheet("QLabel{color:#5dade2;font-size:11px;}")
+        self.autotag_status.setStyleSheet(
+            f"QLabel{{color:{tok('link')};font-size:11px;}}"
+        )
         self.autotag_status.setVisible(False)
         cap_head.addWidget(self.autotag_status)
         cap_head.addStretch()
@@ -775,7 +764,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.guide.setWordWrap(True)
         self.guide.setTextFormat(Qt.RichText)
         self.guide.setStyleSheet(
-            "QLabel { color:#888; font-size:11px; padding:2px 4px; }"
+            f"QLabel {{ color:{tok('text_dim')}; font-size:11px; padding:2px 4px; }}"
         )
         rl.addWidget(self.guide)
 
@@ -787,13 +776,12 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         QShortcut(QKeySequence("Left"), self, lambda: self._nav(-1))
         QShortcut(QKeySequence.Save, self, self._save)
         # Delete toggles the deletion mark on the current image; Esc un-marks it.
-        # Both act per-current-image and are scoped to the list/tree
-        # (WidgetShortcut) so they don't hijack the caption editor on focus.
-        for _w in (self.fl, self.tree):
-            _del = QShortcut(QKeySequence.Delete, _w, self._toggle_mark_current)
-            _del.setContext(Qt.WidgetShortcut)
-            _esc = QShortcut(QKeySequence(Qt.Key_Escape), _w, self._unmark_current)
-            _esc.setContext(Qt.WidgetShortcut)
+        # Both act per-current-image and are scoped to the tree (WidgetShortcut)
+        # so they don't hijack the caption editor on focus.
+        _del = QShortcut(QKeySequence.Delete, self.tree, self._toggle_mark_current)
+        _del.setContext(Qt.WidgetShortcut)
+        _esc = QShortcut(QKeySequence(Qt.Key_Escape), self.tree, self._unmark_current)
+        _esc.setContext(Qt.WidgetShortcut)
         self._refresh_delete_button()
 
     def _lazy_init(self) -> None:
@@ -1098,8 +1086,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             self._refresh_buttons()
             self._refresh_inline_diff()
         elif not had_match:
-            # Fresh dir, no prior selection to restore — pick the first row.
-            self.fl.setCurrentRow(0)
+            # Fresh dir, no prior selection to restore — pick the first image.
+            self._select_tree_index(0)
 
     def _display_label(self, p: Path) -> str:
         """``stem`` for top-level images, ``parent/stem`` for nested ones.
@@ -1120,12 +1108,12 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return f"{rel.parent.as_posix()}/{p.stem}"
 
     def _apply_filter_and_sort(self, *, prev_stem: str | None = None) -> bool:
-        """Rebuild the visible list from ``_all_images`` using the current
+        """Rebuild the visible tree from ``_all_images`` using the current
         search text and sort direction.
 
         Returns True if a row matching ``prev_stem`` was selected, False
         otherwise. Block-signals while rebuilding so search keystrokes don't
-        trigger ``_on_row_changed`` (which would prompt to save unsaved
+        trigger ``_on_tree_item_changed`` (which would prompt to save unsaved
         caption edits on every keystroke).
         """
         q = self._search_text.strip().lower()
@@ -1151,21 +1139,14 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 target_row = i
                 break
 
-        self.fl.blockSignals(True)
         self.tree.blockSignals(True)
         try:
-            self.fl.clear()
-            for p in visible:
-                self.fl.addItem(self._display_label(p))
             self._rebuild_tree(visible)
             if target_row >= 0:
-                self.fl.setCurrentRow(target_row)
                 self._select_tree_index(target_row)
             else:
-                self.fl.setCurrentRow(-1)
                 self.tree.setCurrentItem(None)
         finally:
-            self.fl.blockSignals(False)
             self.tree.blockSignals(False)
 
         # Re-apply deletion marks to the freshly rebuilt items.
@@ -1311,40 +1292,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._search_text = text
         self._apply_filter_and_sort()
 
-    def _toggle_view_mode(self) -> None:
-        """Flip between list and tree view of the same image set.
-
-        We rebuild on every flip (rather than only on _apply_filter_and_sort)
-        so the tree picks up structural changes (newly added subfolders) from
-        operations performed while it wasn't visible.
-        """
-        if self._view_mode == "list":
-            self._view_mode = "tree"
-            self.view_btn.setText("☰")
-            self.view_btn.setToolTip(t("dataset_view_tree_tooltip"))
-            self.view_stack.setCurrentWidget(self.tree)
-            row = self.fl.currentRow()
-            if 0 <= row < len(self._images):
-                self.tree.blockSignals(True)
-                try:
-                    self._select_tree_index(row)
-                finally:
-                    self.tree.blockSignals(False)
-        else:
-            self._view_mode = "list"
-            self.view_btn.setText("⊞")
-            self.view_btn.setToolTip(t("dataset_view_list_tooltip"))
-            self.view_stack.setCurrentWidget(self.fl)
-            item = self.tree.currentItem()
-            if item is not None:
-                idx = self._tree_item_to_index.get(item)
-                if idx is not None:
-                    self.fl.blockSignals(True)
-                    try:
-                        self.fl.setCurrentRow(idx)
-                    finally:
-                        self.fl.blockSignals(False)
-
     def _toggle_sort(self) -> None:
         self._sort_desc = not self._sort_desc
         self.sort_btn.setText("↓" if self._sort_desc else "↑")
@@ -1392,30 +1339,12 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.dc.addItem(label)
         self.dc.setCurrentText(label)
 
-    def _on_row_changed(self, row: int):
-        if not self._confirm_discard_if_dirty():
-            # Snap back to the previous selection without recursing.
-            prev = self._row_for_path(self._current_caption_path)
-            if prev is not None and prev != row:
-                self.fl.blockSignals(True)
-                self.fl.setCurrentRow(prev)
-                self.fl.blockSignals(False)
-            return
-        self._show(row)
-        # Keep the tree's highlight in sync so a later view-mode flip lands
-        # on the same image rather than resetting selection.
-        self.tree.blockSignals(True)
-        try:
-            self._select_tree_index(row)
-        finally:
-            self.tree.blockSignals(False)
-
     def _on_tree_item_changed(self, current, _previous) -> None:
-        """Tree-side equivalent of ``_on_row_changed``.
+        """Show the image for the newly selected tree leaf.
 
         Folder rows (no index) are non-selectable in the data sense; only
         leaves correspond to an image. We confirm-discard before switching so
-        the unsaved-edit prompt works identically across views.
+        the unsaved-edit prompt fires on navigation.
         """
         if current is None:
             return
@@ -1432,12 +1361,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                     self.tree.blockSignals(False)
             return
         self._show(idx)
-        # Keep the list selection aligned for next view-mode flip / arrow nav.
-        self.fl.blockSignals(True)
-        try:
-            self.fl.setCurrentRow(idx)
-        finally:
-            self.fl.blockSignals(False)
 
     def _show(self, row: int):
         if not 0 <= row < len(self._images):
@@ -1490,16 +1413,44 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def _current_index(self) -> int:
         """Index into ``self._images`` of the currently selected image.
 
-        Reads the active view (tree leaf or list row); -1 if nothing is on an
-        image (e.g. a folder/group node is selected in the tree)."""
-        if self._view_mode == "tree":
-            item = self.tree.currentItem()
-            if item is not None:
-                idx = self._tree_item_to_index.get(item)
-                if idx is not None:
-                    return idx
-            return -1
-        return self.fl.currentRow()
+        Reads the selected tree leaf; -1 if nothing is on an image (e.g. a
+        folder/group node is selected)."""
+        item = self.tree.currentItem()
+        if item is not None:
+            idx = self._tree_item_to_index.get(item)
+            if idx is not None:
+                return idx
+        return -1
+
+    def app_context_menu(self, target, global_pos):
+        """Right-click hook (called by MainWindow's global filter). Over an
+        image — the preview or a tree leaf — offer "open in system viewer"
+        instead of the app default; return None elsewhere so the default shows."""
+        path = self._image_under_cursor(target, global_pos)
+        if path is None:
+            return None
+        menu = QMenu(self)
+        act = menu.addAction(t("open_in_system_viewer"))
+        act.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        )
+        return menu
+
+    def _image_under_cursor(self, target, global_pos) -> Path | None:
+        """The image path the right-click landed on: the tree leaf under the
+        cursor, or the currently shown preview. None if neither applies."""
+        if target is self.tree or self.tree.isAncestorOf(target):
+            pos = self.tree.viewport().mapFromGlobal(global_pos)
+            item = self.tree.itemAt(pos)
+            idx = self._tree_item_to_index.get(item) if item is not None else None
+            if idx is not None and 0 <= idx < len(self._images):
+                return self._images[idx]
+            return None
+        if target is self.img or self.img.isAncestorOf(target):
+            idx = self._current_index()
+            if 0 <= idx < len(self._images):
+                return self._images[idx]
+        return None
 
     def _toggle_mark_current(self) -> None:
         """Toggle the deletion mark on the currently selected image."""
@@ -1515,18 +1466,11 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._refresh_delete_button()
 
     def _refresh_mark_styles(self) -> None:
-        """Repaint list rows + tree leaves red iff marked for deletion.
+        """Repaint tree leaves red iff marked for deletion.
 
         Unmarked items clear the ForegroundRole entirely (rather than setting a
         default QBrush, which paints black — invisible on the dark theme) so
         they fall back to the palette text color."""
-        for row in range(self.fl.count()):
-            item = self.fl.item(row)
-            marked = row < len(self._images) and self._images[row] in self._marked
-            if marked:
-                item.setForeground(_DELETE_MARK_COLOR)
-            else:
-                item.setData(Qt.ForegroundRole, None)
         for leaf, idx in self._tree_item_to_index.items():
             marked = idx < len(self._images) and self._images[idx] in self._marked
             if marked:
@@ -1595,7 +1539,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             self._all_images = _imgs(self._current_dir)
         self._apply_filter_and_sort()
         if self._images:
-            self.fl.setCurrentRow(0)
+            self._select_tree_index(0)
         else:
             self._set_image_none()
             self._refresh_buttons()
@@ -1747,6 +1691,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         return True
 
     def _nav(self, d: int):
-        r = self.fl.currentRow() + d
-        if 0 <= r < self.fl.count():
-            self.fl.setCurrentRow(r)
+        r = self._current_index() + d
+        if 0 <= r < len(self._images):
+            self._select_tree_index(r)

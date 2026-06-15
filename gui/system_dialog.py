@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from gui import ROOT
 from gui.i18n import t
 from gui.process import kill_process_tree, setup_kill_safe
+from gui.theme import tok
 
 # (task-key, display-label-i18n-key, [paths-relative-to-ROOT-that-must-all-exist])
 # Status is "installed" iff every path resolves; otherwise "missing".
@@ -213,13 +214,13 @@ class ModelsDialog(_StreamingDialog):
         hint = QLabel(t("models_hf_token_hint"))
         hint.setWordWrap(True)
         hint.setOpenExternalLinks(True)
-        hint.setStyleSheet("color:#888;font-size:11px;margin-bottom:6px;")
+        hint.setStyleSheet(f"color:{tok('text_dim')};font-size:11px;margin-bottom:6px;")
         layout.addWidget(hint)
         self._refresh_auth_status()
 
         intro = QLabel(t("models_intro"))
         intro.setWordWrap(True)
-        intro.setStyleSheet("color:#aaa;")
+        intro.setStyleSheet(f"color:{tok('text_dim')};")
         layout.addWidget(intro)
 
         # Download-all button (Anima + SAM3 + MIT + PE).
@@ -243,7 +244,9 @@ class ModelsDialog(_StreamingDialog):
 
             installed = _all_exist(paths)
             status = QLabel(t("models_installed") if installed else t("models_missing"))
-            status.setStyleSheet("color:#4ade80;" if installed else "color:#f87171;")
+            status.setStyleSheet(
+                f"color:{tok('ok')};" if installed else f"color:{tok('err')};"
+            )
             status.setMinimumWidth(110)
             row.addWidget(status)
 
@@ -283,22 +286,22 @@ class ModelsDialog(_StreamingDialog):
             token = None
         if token:
             self.auth_status.setText(t("models_hf_token_present"))
-            self.auth_status.setStyleSheet("color:#4ade80;")
+            self.auth_status.setStyleSheet(f"color:{tok('ok')};")
         else:
             self.auth_status.setText(t("models_hf_not_authenticated"))
-            self.auth_status.setStyleSheet("color:#9ca3af;")
+            self.auth_status.setStyleSheet(f"color:{tok('text_dim')};")
 
     def _authenticate(self) -> None:
         token = self.token_edit.text().strip()
         if not token:
             self.auth_status.setText(t("models_hf_token_empty"))
-            self.auth_status.setStyleSheet("color:#f87171;")
+            self.auth_status.setStyleSheet(f"color:{tok('err')};")
             return
         if self._login_thread is not None and self._login_thread.isRunning():
             return
         self.auth_btn.setEnabled(False)
         self.auth_status.setText(t("models_hf_authenticating"))
-        self.auth_status.setStyleSheet("color:#9ca3af;")
+        self.auth_status.setStyleSheet(f"color:{tok('text_dim')};")
         self._login_thread = _HFLoginThread(token, self)
         self._login_thread.done.connect(self._on_login_result)
         self._login_thread.start()
@@ -310,12 +313,12 @@ class ModelsDialog(_StreamingDialog):
             self.auth_status.setText(
                 t("models_hf_logged_in", name=result.get("name", ""))
             )
-            self.auth_status.setStyleSheet("color:#4ade80;font-weight:bold;")
+            self.auth_status.setStyleSheet(f"color:{tok('ok')};font-weight:bold;")
         else:
             self.auth_status.setText(
                 t("models_hf_login_failed", err=result.get("error", ""))
             )
-            self.auth_status.setStyleSheet("color:#f87171;")
+            self.auth_status.setStyleSheet(f"color:{tok('err')};")
 
     def _set_busy(self, busy: bool) -> None:
         super()._set_busy(busy)
@@ -332,7 +335,7 @@ class ModelsDialog(_StreamingDialog):
                 t("models_installed") if installed else t("models_missing")
             )
             status_lbl.setStyleSheet(
-                "color:#4ade80;" if installed else "color:#f87171;"
+                f"color:{tok('ok')};" if installed else f"color:{tok('err')};"
             )
             btn.setText(t("models_redownload") if installed else t("models_download"))
 
@@ -493,7 +496,7 @@ class UpdateDialog(_StreamingDialog):
         version_row.addWidget(self.latest_lbl)
 
         self.status_lbl = QLabel(t("update_status_checking"))
-        self.status_lbl.setStyleSheet("color:#9ca3af;font-weight:bold;")
+        self.status_lbl.setStyleSheet(f"color:{tok('text_dim')};font-weight:bold;")
         version_row.addWidget(self.status_lbl)
 
         version_row.addStretch()
@@ -510,20 +513,20 @@ class UpdateDialog(_StreamingDialog):
 
         # ── Release notes panel ──
         notes_label = QLabel(t("update_release_notes"))
-        notes_label.setStyleSheet("color:#aaa;margin-top:4px;")
+        notes_label.setStyleSheet(f"color:{tok('text_dim')};margin-top:4px;")
         layout.addWidget(notes_label)
 
         self.notes_view = QTextBrowser()
         self.notes_view.setOpenExternalLinks(True)
         self.notes_view.setMaximumHeight(180)
         self.notes_view.document().setDefaultStyleSheet(
-            "a { color: #ffb86b; text-decoration: underline; }"
-            "code { background:#2a2a2a; padding:1px 4px; border-radius:3px; }"
-            "pre { background:#2a2a2a; padding:6px; border-radius:4px; }"
+            f"a {{ color: {tok('link')}; text-decoration: underline; }}"
+            f"code {{ background:{tok('panel')}; padding:1px 4px; border-radius:3px; }}"
+            f"pre {{ background:{tok('panel')}; padding:6px; border-radius:4px; }}"
         )
         self.notes_view.setStyleSheet(
-            "QTextBrowser { background:#1e1e1e; color:#dcdcdc; "
-            "border:1px solid #444; padding:8px; }"
+            f"QTextBrowser {{ background:{tok('base')}; color:{tok('text')}; "
+            f"border:1px solid {tok('border_dim')}; padding:8px; }}"
         )
         self.notes_view.setPlaceholderText(t("update_status_checking"))
         layout.addWidget(self.notes_view)
@@ -532,7 +535,7 @@ class UpdateDialog(_StreamingDialog):
         warn = QLabel(t("update_warning"))
         warn.setWordWrap(True)
         warn.setStyleSheet(
-            "padding:8px; border-radius:3px; background:#3d2e0a; color:#fbbf24;"
+            f"padding:8px; border-radius:3px; background:#3d2e0a; color:{tok('warn')};"
         )
         layout.addWidget(warn)
 
@@ -572,7 +575,7 @@ class UpdateDialog(_StreamingDialog):
         self.view_release_btn.setEnabled(False)
         self.latest_lbl.setText(t("update_latest_version", v="…"))
         self.status_lbl.setText(t("update_status_checking"))
-        self.status_lbl.setStyleSheet("color:#9ca3af;font-weight:bold;")
+        self.status_lbl.setStyleSheet(f"color:{tok('text_dim')};font-weight:bold;")
         self.notes_view.setMarkdown("")
         self.notes_view.setPlaceholderText(t("update_status_checking"))
 
@@ -585,7 +588,7 @@ class UpdateDialog(_StreamingDialog):
         if not result.get("ok"):
             self.latest_lbl.setText(t("update_latest_version", v="?"))
             self.status_lbl.setText(t("update_status_failed"))
-            self.status_lbl.setStyleSheet("color:#f87171;font-weight:bold;")
+            self.status_lbl.setStyleSheet(f"color:{tok('err')};font-weight:bold;")
             self.notes_view.setPlainText(
                 t("update_check_error", err=result.get("error", "")),
             )
@@ -599,14 +602,14 @@ class UpdateDialog(_StreamingDialog):
         local = _load_local_version()
         if local and latest and local == latest:
             self.status_lbl.setText(t("update_status_uptodate"))
-            self.status_lbl.setStyleSheet("color:#4ade80;font-weight:bold;")
+            self.status_lbl.setStyleSheet(f"color:{tok('ok')};font-weight:bold;")
         elif local is None:
             # No manifest — can't tell if user is on this release or older.
             self.status_lbl.setText(t("update_status_unknown"))
-            self.status_lbl.setStyleSheet("color:#fbbf24;font-weight:bold;")
+            self.status_lbl.setStyleSheet(f"color:{tok('warn')};font-weight:bold;")
         else:
             self.status_lbl.setText(t("update_status_available"))
-            self.status_lbl.setStyleSheet("color:#fbbf24;font-weight:bold;")
+            self.status_lbl.setStyleSheet(f"color:{tok('warn')};font-weight:bold;")
 
         body = result.get("body", "").strip()
         if body:
@@ -664,7 +667,7 @@ class UpdateDialog(_StreamingDialog):
             new_version = _load_local_version() or "?"
             self.current_lbl.setText(t("update_current_version", v=new_version))
             self.status_lbl.setText(t("update_success_badge", v=new_version))
-            self.status_lbl.setStyleSheet("color:#4ade80;font-weight:bold;")
+            self.status_lbl.setStyleSheet(f"color:{tok('ok')};font-weight:bold;")
             QMessageBox.information(
                 self,
                 t("update_success_title"),

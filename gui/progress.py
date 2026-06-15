@@ -23,6 +23,8 @@ import time
 
 from PySide6.QtWidgets import QProgressBar
 
+from gui.theme import tok
+
 # Matches tqdm lines like:
 #   "Denoising steps:  40%|####      | 12/30 [00:12<00:34,  2.50it/s]"
 # The trailing "[...]" block carries the rate as either "X.XXit/s" or
@@ -46,7 +48,7 @@ def make_progress_bar() -> QProgressBar:
     bar.setFormat("")
     bar.setVisible(False)
     bar.setStyleSheet(
-        "QProgressBar { border: 1px solid #444; border-radius: 3px;"
+        f"QProgressBar {{ border: 1px solid {tok('border_dim')}; border-radius: 3px;"
         " text-align: center; padding: 1px; font-size: 11px; }"
         "QProgressBar::chunk { background: #27ae60; }"
     )
@@ -113,12 +115,7 @@ class TqdmProgressTracker:
         now = time.monotonic()
         anchor = self._anchor
         # New bar (label/total changed, or progress rewound) → drop anchor.
-        if (
-            anchor is None
-            or anchor[2] != label
-            or anchor[3] != tot
-            or cur < anchor[1]
-        ):
+        if anchor is None or anchor[2] != label or anchor[3] != tot or cur < anchor[1]:
             if cur >= 1:
                 self._anchor = (now, cur, label, tot)
             else:

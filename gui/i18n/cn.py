@@ -304,8 +304,6 @@ STRINGS: dict[str, str] = {
     "dataset_delete_confirm_title": "删除图像",
     "dataset_delete_confirm_body": "将 {n} 张图像及其字幕文件移到回收站吗？",
     "dataset_delete_failed": "部分图像无法删除:\n{err}",
-    "dataset_view_list_tooltip": "平铺列表视图 (点击切换为树状视图)",
-    "dataset_view_tree_tooltip": "文件夹树视图 (点击切换为列表视图)",
     "dataset_group_label": "分组 {n} — {size} 张",
     "dataset_group_rebuild": "分组",
     "dataset_group_rebuild_tooltip": "按 PE-Spatial 视觉相似度对图像分组 (按作者). 在任务队列中运行.",
@@ -324,8 +322,7 @@ STRINGS: dict[str, str] = {
     "caption_autotag_loading": "正在加载标注器……",
     "caption_autotag_ready": "标注器已加载 · 待命",
     "caption_autotag_busy": (
-        "GPU 正被其他任务（训练 / 预处理 / 分组）占用。"
-        "完成后再重试自动标注。"
+        "GPU 正被其他任务（训练 / 预处理 / 分组）占用。完成后再重试自动标注。"
     ),
     "caption_autotag_error": "自动标注失败：{err}",
     "caption_autotag_empty": "标注器未为该图像返回任何标签。",
@@ -365,11 +362,13 @@ STRINGS: dict[str, str] = {
         "在打标器各标签阈值之上额外应用的概率下限（0–1）。"
         "数值越高，保留的标签越少但越可靠。默认 0.50。"
     ),
-    "settings_theme_color": "主题颜色:",
-    "settings_theme_color_tooltip": (
-        "界面通用的强调／高亮颜色，立即生效。"
+    "settings_theme": "主题:",
+    "settings_theme_tooltip": (
+        "界面整体配色主题，立即生效；关闭设置窗口时会重建窗口以完全重绘。"
     ),
-    "settings_theme_reset": "重置",
+    "settings_theme_dark": "深色",
+    "settings_theme_light": "浅色",
+    "settings_theme_sepia": "护眼棕",
     "settings_mcp_header": "MCP 服务器（智能体接入）",
     "settings_mcp_desc": "将本地训练守护进程暴露给 MCP 客户端（Claude Code、Claude Desktop 等）。"
     "在终端中运行以下命令即可注册到 Claude Code:",
@@ -403,6 +402,8 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "有新版本 {v} 可用 — 点击查看发布说明",
     "report_issue": "提交问题",
     "report_issue_tooltip": "在浏览器中打开 GitHub 问题追踪",
+    "visit_github": "访问 GitHub 页面",
+    "open_in_system_viewer": "在系统查看器中打开",
     # Models dialog
     "models_title": "下载模型",
     "models_intro": "在下方选择模型组,或使用「全部下载」获取标准套件 "

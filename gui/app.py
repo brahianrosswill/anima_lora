@@ -6,11 +6,10 @@ import sys
 from pathlib import Path
 
 import toml
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette, QPixmap
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QColorDialog,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -30,11 +30,11 @@ from PySide6.QtWidgets import (
 
 from gui import (
     DEFAULT_AUTOTAG_CONFIDENCE,
-    DEFAULT_THEME_COLOR,
     get_setting,
     set_setting,
 )
 from gui import daemon as gui_daemon
+from gui import theme as gui_theme
 from gui.i18n import (
     available_languages,
     current_language,
@@ -52,6 +52,7 @@ from gui.tabs.queue_tab import QueueTab
 from gui.tensorboard import TensorBoardTab
 from gui.system_dialog import (
     GITHUB_ISSUES_URL,
+    GITHUB_REPO_URL,
     check_for_update_async,
     open_models_dialog,
     open_update_dialog,
@@ -81,73 +82,11 @@ _WINDOW: MainWindow | None = None
 
 
 def _dark(app: QApplication):
-    # Use a font that supports Korean glyphs on Windows
-    font = QFont("Malgun Gothic", 9)
-    font.setStyleHint(QFont.SansSerif)
-    app.setFont(font)
+    """Apply the user's chosen named theme (Dark / Light / Sepia).
 
-    # User-chosen accent (Settings → Theme color); drives the highlight /
-    # selection color across palette + stylesheet. Falls back to the historical
-    # blue if unset or unparseable.
-    accent = QColor(get_setting("theme_color", DEFAULT_THEME_COLOR))
-    if not accent.isValid():
-        accent = QColor(DEFAULT_THEME_COLOR)
-    accent_hex = accent.name()
-
-    p = QPalette()
-    for role, color in [
-        (QPalette.Window, QColor(30, 30, 30)),
-        (QPalette.WindowText, QColor(220, 220, 220)),
-        (QPalette.Base, QColor(25, 25, 25)),
-        (QPalette.AlternateBase, QColor(35, 35, 35)),
-        (QPalette.ToolTipBase, QColor(50, 50, 50)),
-        (QPalette.ToolTipText, QColor(220, 220, 220)),
-        (QPalette.Text, QColor(220, 220, 220)),
-        (QPalette.Button, QColor(45, 45, 45)),
-        (QPalette.ButtonText, QColor(220, 220, 220)),
-        (QPalette.Highlight, accent),
-        (QPalette.HighlightedText, QColor(255, 255, 255)),
-        # Default Qt link blue (#0000ff-ish) is unreadable on dark bg.
-        (QPalette.Link, QColor(0xFF, 0xB8, 0x6B)),
-        (QPalette.LinkVisited, QColor(0xE6, 0x94, 0x4E)),
-    ]:
-        p.setColor(role, color)
-    app.setPalette(p)
-    app.setStyleSheet(f"""
-        QGroupBox {{
-            font-weight: bold; border: 1px solid #444;
-            border-radius: 4px; margin-top: 8px; padding-top: 16px;
-        }}
-        QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
-        QPushButton {{ padding: 4px 12px; border: 1px solid #555; border-radius: 3px; }}
-        QPushButton:hover {{ background: #555; }}
-        QScrollArea {{ border: none; }}
-        QSplitter::handle {{ background: #444; }}
-        QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit, QListWidget {{
-            background: #2a2a2a; color: #dcdcdc; border: 1px solid #555; border-radius: 3px;
-            padding: 2px 4px;
-        }}
-        QComboBox QAbstractItemView {{
-            background: #2a2a2a; color: #dcdcdc; selection-background-color: {accent_hex};
-        }}
-        QTabWidget::pane {{ border: 1px solid #444; }}
-        QTabBar::tab {{
-            background: #2a2a2a; color: #dcdcdc; border: 1px solid #444;
-            padding: 6px 14px;
-            font-size: 12.5px; font-weight: 500;
-            border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
-        }}
-        QTabBar::tab:selected {{ background: #1e1e1e; color: #ffffff; }}
-        QTabBar::tab:hover {{ background: #3a3a3a; }}
-        QToolTip {{ max-width: 400px; }}
-        QMenu {{
-            background: #2a2a2a; color: #dcdcdc; border: 1px solid #555;
-        }}
-        QMenu::item {{ padding: 4px 20px; background: transparent; color: #dcdcdc; }}
-        QMenu::item:selected {{ background: {accent_hex}; color: #ffffff; }}
-        QMenu::item:disabled {{ color: #777; }}
-        QMenu::separator {{ height: 1px; background: #444; margin: 4px 8px; }}
-    """)
+    Thin wrapper kept for call-site stability; the palette + stylesheet now live
+    in ``gui.theme`` so individual widgets can share the same tokens."""
+    gui_theme.apply_theme(app)
 
 
 class GuidebookDialog(QDialog):
@@ -287,22 +226,22 @@ class SettingsDialog(QDialog):
         conf_row.addStretch()
         prefs_lay.addLayout(conf_row)
 
-        # Theme accent color — a swatch button opening a color picker; applied
-        # live across the app palette + stylesheet on accept.
+        # Theme selector — Dark / Light / Sepia. Applied live across the app
+        # palette + stylesheet; closing the dialog rebuilds the window so each
+        # tab's per-widget tokens (gui.theme.tok) repaint in the new theme.
         theme_row = QHBoxLayout()
-        theme_label = QLabel(t("settings_theme_color"))
-        theme_label.setToolTip(t("settings_theme_color_tooltip"))
+        theme_label = QLabel(t("settings_theme"))
+        theme_label.setToolTip(t("settings_theme_tooltip"))
         theme_row.addWidget(theme_label)
-        self._theme_color = str(get_setting("theme_color", DEFAULT_THEME_COLOR))
-        self.theme_btn = QPushButton()
-        self.theme_btn.setFixedSize(48, 24)
-        self.theme_btn.setToolTip(t("settings_theme_color_tooltip"))
-        self._paint_theme_swatch()
-        self.theme_btn.clicked.connect(self._pick_theme_color)
-        theme_row.addWidget(self.theme_btn)
-        self.theme_reset_btn = QPushButton(t("settings_theme_reset"))
-        self.theme_reset_btn.clicked.connect(self._reset_theme_color)
-        theme_row.addWidget(self.theme_reset_btn)
+        self.theme_combo = QComboBox()
+        for code in gui_theme.THEME_ORDER:
+            self.theme_combo.addItem(t(gui_theme.THEME_LABEL_KEYS[code]), code)
+        cur = gui_theme.current_theme_name()
+        self.theme_combo.setCurrentIndex(gui_theme.THEME_ORDER.index(cur))
+        self.theme_combo.setToolTip(t("settings_theme_tooltip"))
+        self.theme_combo.currentIndexChanged.connect(self._change_theme)
+        self.theme_combo.setFixedWidth(140)
+        theme_row.addWidget(self.theme_combo)
         theme_row.addStretch()
         prefs_lay.addLayout(theme_row)
 
@@ -370,31 +309,19 @@ class SettingsDialog(QDialog):
             self.reload_requested = True
             self.accept()
 
-    def _paint_theme_swatch(self) -> None:
-        """Fill the swatch button with the current accent color."""
-        self.theme_btn.setStyleSheet(
-            f"background:{self._theme_color}; border:1px solid #777; border-radius:3px;"
-        )
+    def _change_theme(self, idx: int) -> None:
+        """Persist + apply the chosen theme live, then request a window rebuild.
 
-    def _apply_theme_color(self, hex_color: str) -> None:
-        """Persist the accent and re-apply the dark theme live (palette +
-        stylesheet propagate to all open widgets immediately, no restart)."""
-        self._theme_color = hex_color
-        set_setting("theme_color", hex_color)
-        self._paint_theme_swatch()
+        ``apply_theme`` restyles app-level chrome immediately; the rebuild on
+        close makes per-widget ``tok()`` lookups (log boxes, previews, …) repaint
+        too. Unlike a language change there's no confirm prompt — it's cheap and
+        reversible."""
+        name = self.theme_combo.itemData(idx)
+        gui_theme.set_theme(name)
         app = QApplication.instance()
         if app is not None:
-            _dark(app)
-
-    def _pick_theme_color(self) -> None:
-        chosen = QColorDialog.getColor(
-            QColor(self._theme_color), self, t("settings_theme_color")
-        )
-        if chosen.isValid():
-            self._apply_theme_color(chosen.name())
-
-    def _reset_theme_color(self) -> None:
-        self._apply_theme_color(DEFAULT_THEME_COLOR)
+            gui_theme.apply_theme(app, name)
+        self.reload_requested = True
 
 
 class MainWindow(QMainWindow):
@@ -404,6 +331,16 @@ class MainWindow(QMainWindow):
         self.resize(1100, 750)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
+
+        # Right-click anywhere — including over text widgets that would otherwise
+        # show Qt's default copy/select-all menu (explanation panels, log
+        # consoles) — opens our app menu. An app-wide event filter catches the
+        # ContextMenu event before it reaches the target widget so the menu is
+        # uniform everywhere. Removed in closeEvent so a _reload_ui rebuild
+        # doesn't stack filters.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         central = QWidget()
         main_lay = QVBoxLayout(central)
@@ -557,6 +494,12 @@ class MainWindow(QMainWindow):
         self._update_queue_btn_style(False)
 
     def closeEvent(self, event):
+        # Drop the app-wide context-menu filter so a _reload_ui rebuild (which
+        # closes this window and constructs a fresh one) doesn't leave a dead
+        # window filtering events.
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         # Without this, closing the window leaves training subprocesses
         # (accelerate → train.py) orphaned and still holding VRAM.
         for i in range(self.tabs.count()):
@@ -616,6 +559,42 @@ class MainWindow(QMainWindow):
             self._queue_active_style if on else self._queue_idle_style
         )
 
+    def eventFilter(self, obj, event):  # noqa: N802 — Qt event handler name
+        """Intercept every right-click in the app and show our menu instead of
+        the target widget's default one (text widgets ship a copy/select-all
+        menu we want to override). Returning True consumes the event."""
+        if event.type() == QEvent.ContextMenu:
+            self._show_context_menu(event.globalPos())
+            return True
+        return super().eventFilter(obj, event)
+
+    def _show_context_menu(self, global_pos):
+        """Walk up from the widget under the cursor; the first ancestor exposing
+        a callable ``app_context_menu(target, global_pos)`` gets to supply the
+        menu (e.g. the dataset image view → open-in-system-viewer). If none does
+        — or it declines by returning None — fall back to the app default."""
+        target = QApplication.widgetAt(global_pos)
+        w = target
+        while w is not None:
+            provider = getattr(w, "app_context_menu", None)
+            if callable(provider):
+                menu = provider(target, global_pos)
+                if menu is not None:
+                    menu.exec(global_pos)
+                    return
+                break
+            w = w.parentWidget()
+        self._show_app_menu(global_pos)
+
+    def _show_app_menu(self, global_pos):
+        """The default right-click menu — currently just a link to the repo."""
+        menu = QMenu(self)
+        visit = menu.addAction(t("visit_github"))
+        visit.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPO_URL))
+        )
+        menu.exec(global_pos)
+
     def _open_guidebook(self):
         path = _guidebook_path()
         if not path.exists():
@@ -633,9 +612,10 @@ class MainWindow(QMainWindow):
             self._reload_ui()
 
     def _reload_ui(self):
-        """Rebuild the main window in place to apply a language change — every
-        string is resolved at construction, so a fresh window is the cleanest
-        way to retranslate. The daemon owns running jobs, so only local UI
+        """Rebuild the main window in place to apply a language or theme change —
+        every string and per-widget theme token is resolved at construction, so a
+        fresh window is the cleanest way to re-render. The daemon owns running
+        jobs, so only local UI
         state (unsaved edits, overlay subprocesses) resets; closeEvent reaps
         the old window's TensorBoard/Queue children as usual. New window is
         shown before the old closes so quitOnLastWindowClosed never fires."""

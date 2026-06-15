@@ -211,6 +211,7 @@ absurdres, safe, 1girl, chitanda eru, hyouka, @channel (caststation), full body,
 
 - Based on personal experimentation, quality tags such as absurdres, highres, and masterpiece are best omitted or kept to a minimum. Alternatively, once the officially released mod guidance is available, you can skip quality tags entirely.
 - Place original images in `image_dataset/` (filenames are free — keep them in this location).
+- **Don't want to caption by hand?** Use the built-in **Anima Tagger** to auto-generate captions in the correct Anima tag order. In the GUI's **Dataset** tab, select an image and click **Autotag** to fill its caption (see [§7.4](#74-dataset-tab-autotag--grouping)); from the CLI, `make autotag --image <path>` prints the predicted caption for one image (the tagger model is downloaded automatically on first use). Treat the result as a starting point — review and touch up the tags before training.
 
 ### 5.2 What is `num_repeats` and when should I touch it? (Summary: **leave it alone**)
 
@@ -287,7 +288,7 @@ Main GUI tabs:
 
 - **Training Config**: Select a LoRA family variant from the dropdown (recommended: `tlora` — Ortho + T-LoRA / others include `lora`, `tlora-8gb`, `hydralora`, etc.), edit the `presets.toml` preset (default / low_vram / etc.) and all training keys, then start training.
 - **Preprocess**: Run resize + VAE + text embedding caching in one shot.
-- **Dataset**: Preview images/captions and edit captions directly.
+- **Dataset**: Preview images/captions and edit captions directly. Also **auto-generates captions** with the Anima Tagger (the *Autotag* button) and **groups visually similar images** so duplicates and same-scene shots are easy to spot — see [§7.4](#74-dataset-tab-autotag--grouping).
 - **Merge**: Bake a trained LoRA into the base DiT to produce a standalone ComfyUI checkpoint (supports base LoRA / OrthoLoRA / T-LoRA only).
 
 GUI training internally calls `train.py`, so the same parameters can be reproduced identically on the CLI. The GUI reads `configs/gui-methods/<variant>.toml` (one clean file per variant, no toggle blocks), so the variant list in the GUI matches `make lora-gui GUI_PRESETS=<variant>` on the CLI. Check the current variant list with `ls configs/gui-methods/`.
@@ -324,6 +325,25 @@ Training does not run *inside* the GUI window — when you click `Train`, the jo
 > To fully shut training down — kill the active job *and* stop the daemon to free the GPU — use `make daemon-terminate` on the CLI. `Stop` alone leaves the daemon up.
 >
 > `Test` and `Preprocess` are the exception: they run as in-window subprocesses, so closing the GUI cancels them.
+
+### 7.4 Dataset Tab: Autotag & Grouping
+
+The **Dataset** tab is for getting your `image_dataset/` into shape before preprocessing — previewing images, writing captions, and tidying up the collection. Two helpers make this much faster.
+
+**Autotag — auto-generate captions.** Select an image and click **Autotag** to run the **Anima Tagger**, which predicts tags in the correct Anima order (`[meta] [character] [series] [artist] [general]`) and fills them into the caption box. The first click downloads the tagger model automatically and may take a moment; after that the model stays loaded in the background so subsequent images tag almost instantly. A small status line shows whether the tagger is loading or ready.
+
+- The tagger frees its GPU memory automatically before you start any other GPU work (grouping, preprocessing, or training), so you never have to unload it by hand.
+- Autotag is a **starting point, not a final answer** — review the tags and fix mistakes (especially character/series/artist names) before training. See the caption tips in [§5.1](#51-caption-writing-tips).
+- CLI equivalent for a single image: `make autotag --image <path>`.
+
+**Grouping — cluster similar images.** Click **Group** to scan the dataset and cluster images that look near-identical or show the same scene/character. When it finishes, the image list folds these into collapsible **green group headers**, so duplicates, alternate versions, and near-twins sit together — making it easy to thin out redundancy or balance how much of each concept you keep.
+
+- Grouping runs as a background job with its own progress bar; you can keep working while it runs.
+- It compares images by *visual content* (not filenames or captions), and groups are computed **per top-level folder** (artist/character bucket) so different folders never merge together.
+- Re-running is cheap — it reuses cached image features — so feel free to click **Group** again after adding images.
+- CLI equivalent: `make curate-group` (writes `post_image_dataset/groups/groups.json`, which the GUI reads). Tighten or loosen the clustering with `ARGS="--match-frac-min 0.4 --cell-match-min 0.9"` (higher = stricter, fewer images per group).
+
+> Both features operate on your **original** `image_dataset/` images and don't touch the preprocessing caches — run them before `make preprocess` to clean up captions and trim duplicates first.
 
 ---
 

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.i18n import t
+from gui.theme import tok
 
 # flash4 is not supported yet (flash-attention-sm120 disabled)
 _ATTN_MODES = ["flex", "flash"]
@@ -126,7 +127,7 @@ class _SamplePromptRow(QFrame):
         super().__init__()
         self.setFrameShape(QFrame.StyledPanel)
         self.setStyleSheet(
-            "QFrame { border:1px solid #444; border-radius:4px; } "
+            f"QFrame {{ border:1px solid {tok('border_dim')}; border-radius:4px; }} "
             "QLabel, QLineEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, "
             "QCheckBox { border:0; }"
         )
@@ -355,7 +356,7 @@ class _SamplePromptsWidget(QWidget):
 
         hint = QLabel(t("sample_prompt_hint"))
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#aaa;")
+        hint.setStyleSheet(f"color:{tok('text_dim')};")
         lay.addWidget(hint)
 
         self.scroll = QScrollArea()
@@ -367,31 +368,31 @@ class _SamplePromptsWidget(QWidget):
             QSizePolicy.Expanding if fill else QSizePolicy.Fixed,
         )
         self.scroll.setStyleSheet(
-            """
-            QScrollBar:vertical {
-                background: #242424;
+            f"""
+            QScrollBar:vertical {{
+                background: {tok("scroll_bg")};
                 width: 14px;
                 margin: 0;
-            }
-            QScrollBar:horizontal {
-                background: #242424;
+            }}
+            QScrollBar:horizontal {{
+                background: {tok("scroll_bg")};
                 height: 14px;
                 margin: 0;
-            }
-            QScrollBar::handle {
-                background: #7a7a7a;
+            }}
+            QScrollBar::handle {{
+                background: {tok("scroll_handle")};
                 border-radius: 5px;
                 min-height: 24px;
                 min-width: 24px;
-            }
-            QScrollBar::handle:hover {
-                background: #a0a0a0;
-            }
+            }}
+            QScrollBar::handle:hover {{
+                background: {tok("scroll_handle_hover")};
+            }}
             QScrollBar::add-line,
-            QScrollBar::sub-line {
+            QScrollBar::sub-line {{
                 width: 0;
                 height: 0;
-            }
+            }}
             """
         )
         self._rows_widget = QWidget()
@@ -582,7 +583,7 @@ class _SamplePromptsLauncher(QWidget):
         lay.addWidget(self._edit_btn)
         self._summary = QLabel()
         self._summary.setWordWrap(True)
-        self._summary.setStyleSheet("color:#aaa;")
+        self._summary.setStyleSheet(f"color:{tok('text_dim')};")
         lay.addWidget(self._summary, 1)
         self._refresh_summary()
 
@@ -790,7 +791,9 @@ class DirtyTrackingMixin:
         superset of what any single tab needs — widget types a given tab never
         builds simply never match.
         """
-        if isinstance(w, (_TargetResWidget, _SamplePromptsWidget, _SamplePromptsLauncher)):
+        if isinstance(
+            w, (_TargetResWidget, _SamplePromptsWidget, _SamplePromptsLauncher)
+        ):
             w.changed.connect(self._mark_dirty)
         elif isinstance(w, QComboBox):
             w.currentTextChanged.connect(self._mark_dirty)

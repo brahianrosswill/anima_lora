@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.i18n import t
+from gui.theme import tok
 
 
 class TensorBoardManager:
@@ -116,7 +117,7 @@ class _RunRow(QWidget):
 
     def _set_current_style(self, is_current: bool) -> None:
         if is_current:
-            self.label.setStyleSheet("font-weight:bold;color:#27ae60;")
+            self.label.setStyleSheet(f"font-weight:bold;color:{tok('ok')};")
             suffix = t("tb_current_run_label")
             if not self.label.text().endswith(suffix):
                 self.label.setText(self._label_text + suffix)
@@ -169,7 +170,9 @@ class TensorBoardPanel(QGroupBox):
         outer.addWidget(self._scroll)
 
         self._empty_label = QLabel(t("tb_no_runs"))
-        self._empty_label.setStyleSheet("color:#888;font-size:11px;padding:4px;")
+        self._empty_label.setStyleSheet(
+            f"color:{tok('text_dim')};font-size:11px;padding:4px;"
+        )
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._inner_lay.insertWidget(0, self._empty_label)
 
@@ -197,7 +200,7 @@ class TensorBoardPanel(QGroupBox):
         btn_bar.addStretch()
 
         self._status_label = QLabel("")
-        self._status_label.setStyleSheet("color:#aaa;font-size:11px;")
+        self._status_label.setStyleSheet(f"color:{tok('text_dim')};font-size:11px;")
         btn_bar.addWidget(self._status_label)
 
         outer.addLayout(btn_bar)
@@ -206,7 +209,7 @@ class TensorBoardPanel(QGroupBox):
         # current-run button is activated) — reminds the user to hit the reload
         # button if the run hasn't surfaced in TensorBoard yet. Hidden when idle.
         self._hint_label = QLabel(t("tb_appear_hint"))
-        self._hint_label.setStyleSheet("color:#27ae60;font-size:11px;padding:2px;")
+        self._hint_label.setStyleSheet(f"color:{tok('ok')};font-size:11px;padding:2px;")
         self._hint_label.setWordWrap(True)
         self._hint_label.setVisible(False)
         outer.addWidget(self._hint_label)
@@ -274,7 +277,9 @@ class TensorBoardPanel(QGroupBox):
             )
             self._current_btn.setToolTip(t("tb_open_current_tip"))
         else:
-            self._current_btn.setStyleSheet("color:#888;padding:4px 14px;")
+            self._current_btn.setStyleSheet(
+                f"color:{tok('text_dim')};padding:4px 14px;"
+            )
             self._current_btn.setToolTip(t("tb_open_current_idle_tip"))
 
     def _find_run_dirs(self, base: Path, max_depth: int = 3) -> list[Path]:

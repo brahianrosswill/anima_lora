@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from gui import ROOT, LazyTabMixin, _adapter_dirs, _safetensors_in
 from gui.i18n import t
+from gui.theme import tok
 from gui.process import kill_process_tree, setup_kill_safe
 
 _DEFAULT_DIT = "models/diffusion_models/anima-base-v1.0.safetensors"
@@ -50,10 +51,10 @@ class PickerLineEdit(QLineEdit):
         self.setReadOnly(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(
-            "QLineEdit { background: #262626; color: #dcdcdc; "
-            "border: 1px solid #555; border-radius: 3px; padding: 2px 6px; }"
-            "QLineEdit:hover { border-color: #3c78c8; background: #2c2c2c; }"
-            "QLineEdit:disabled { color: #666; background: #222; }"
+            f"QLineEdit {{ background: {tok('input_bg')}; color: {tok('text')}; "
+            f"border: 1px solid {tok('border')}; border-radius: 3px; padding: 2px 6px; }}"
+            f"QLineEdit:hover {{ border-color: #3c78c8; background: {tok('input_hover')}; }}"
+            f"QLineEdit:disabled {{ color: {tok('text_dim')}; background: {tok('base')}; }}"
         )
 
     def mousePressEvent(self, ev):
@@ -220,13 +221,13 @@ class MergeTab(LazyTabMixin, QWidget):
         rlay.addWidget(self.path_label)
 
         self.stats_label = QLabel()
-        self.stats_label.setStyleSheet("color:#aaa;")
+        self.stats_label.setStyleSheet(f"color:{tok('text_dim')};")
         rlay.addWidget(self.stats_label)
 
         self.verdict_label = QLabel()
         self.verdict_label.setWordWrap(True)
         self.verdict_label.setStyleSheet(
-            "padding:6px; border-radius:3px; background:#2a2a2a;"
+            f"padding:6px; border-radius:3px; background:{tok('panel')};"
         )
         rlay.addWidget(self.verdict_label)
 
@@ -373,10 +374,10 @@ class MergeTab(LazyTabMixin, QWidget):
         scan = _scan_adapter(p)
         self._current_scan = scan
         colors = {
-            "ok": ("#0a3d2a", "#4ade80"),  # bg, text
-            "partial": ("#3d2e0a", "#fbbf24"),
-            "block": ("#3d0a0a", "#f87171"),
-            "unknown": ("#2a2a2a", "#aaa"),
+            "ok": ("#0a3d2a", tok("ok")),  # bg (darkened tint, kept), text
+            "partial": ("#3d2e0a", tok("warn")),
+            "block": ("#3d0a0a", tok("err")),
+            "unknown": (tok("panel"), tok("text_dim")),
         }
         bg, fg = colors.get(scan["severity"], colors["unknown"])
         bits = scan["verdict"]
@@ -400,7 +401,7 @@ class MergeTab(LazyTabMixin, QWidget):
         self.stats_label.setText("")
         self.verdict_label.setText(t("merge_no_selection"))
         self.verdict_label.setStyleSheet(
-            "padding:8px; border-radius:3px; background:#2a2a2a; color:#888;"
+            f"padding:8px; border-radius:3px; background:{tok('panel')}; color:{tok('text_dim')};"
         )
         self._current_scan = None
         self.merge_btn.setEnabled(False)

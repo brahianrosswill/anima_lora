@@ -65,6 +65,7 @@ from gui import (
 )
 from gui import daemon as gui_daemon
 from gui._job_mixin import DaemonJobMixin
+from gui.theme import tok
 from gui.explanations import field_help, method_guide
 from gui.i18n import t
 from gui.process import kill_process_tree, setup_kill_safe
@@ -380,7 +381,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._explain.setOpenLinks(False)
         self._explain.anchorClicked.connect(self._on_explain_anchor)
         self._explain.setStyleSheet(
-            "QTextBrowser { font-size: 13px; padding: 12px; background: #2b2b2b; color: #e0e0e0; }"
+            f"QTextBrowser {{ font-size: 13px; padding: 12px; background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
         # Identity of the gallery render currently showing (None = panel holds
@@ -407,9 +408,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._log_copy_btn.setToolTip(t("copy_log_tooltip"))
         self._log_copy_btn.setCursor(Qt.PointingHandCursor)
         self._log_copy_btn.setStyleSheet(
-            "QToolButton { background:#3a3a3a; color:#e0e0e0; border:1px solid #555;"
+            f"QToolButton {{ background:{tok('surface')}; color:{tok('text')}; border:1px solid {tok('border')};"
             " border-radius:4px; padding:2px 8px; font-size:11px; }"
-            "QToolButton:hover { background:#4a4a4a; }"
+            f"QToolButton:hover {{ background:{tok('surface_hover')}; }}"
         )
         self._log_copy_btn.clicked.connect(self._copy_log)
         self.log.installEventFilter(self)
@@ -525,15 +526,15 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         variant_label = f"gui-methods/{variant}.toml"
         origin_style = {
             "base": (
-                "color:#888; text-decoration: underline dotted;",
+                f"color:{tok('text_dim')}; text-decoration: underline dotted;",
                 "from base.toml",
             ),
             "preset": (
-                "color:#6aa4d8; text-decoration: underline dotted;",
+                f"color:{tok('link')}; text-decoration: underline dotted;",
                 f"from presets.toml[{self._IMPLICIT_PRESET}] (saves to {variant_label})",
             ),
             "method": (
-                "color:#f0f0f0; text-decoration: underline dotted;",
+                f"color:{tok('text')}; text-decoration: underline dotted;",
                 f"from {variant_label}",
             ),
         }
@@ -730,7 +731,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             self._set_explain_html(guide)
             return
         self._set_explain_html(
-            f"<p style='color:#888; font-style:italic;'>{html.escape(t('click_field_for_help'))}</p>"
+            f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t('click_field_for_help'))}</p>"
         )
 
     def _set_explain_html(
@@ -779,7 +780,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         if not imgs:
             self._set_explain_html(
                 f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"
-                f"<p style='color:#888; font-style:italic;'>{html.escape(t(empty_key))}</p>",
+                f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t(empty_key))}</p>",
                 gallery_sig=sig,
             )
             return
@@ -790,7 +791,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             parts.append(
                 f"<p style='margin:0 0 10px 0;'>"
                 f"<a href='{magnify}'><img src='{url}' style='max-width:100%;'/></a><br/>"
-                f"<span style='color:#aaa; font-size:11px;'>{html.escape(p.name)}</span> "
+                f"<span style='color:{tok('text_dim')}; font-size:11px;'>{html.escape(p.name)}</span> "
                 f"<a href='{magnify}' style='text-decoration:none; font-size:12px;'>🔍</a>"
                 f"</p>"
             )
@@ -850,7 +851,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         with an empty placeholder); ``announce=True`` always renders, including
         the empty message, and is used when a training job finishes."""
         sample_dir = getattr(self, "_sample_dir", None) or self._resolve_sample_dir()
-        imgs = self._newest_images(sample_dir, since=getattr(self, "_sample_floor", None))
+        imgs = self._newest_images(
+            sample_dir, since=getattr(self, "_sample_floor", None)
+        )
         if not imgs and not announce:
             return
         self._explain_mode = "sample"
@@ -869,11 +872,11 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             parts.append(f"<p style='font-size:14px; line-height:1.6;'>{help_text}</p>")
         else:
             parts.append(
-                f"<p style='color:#888; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"
+                f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"
             )
         for note in notes:
             parts.append(
-                f"<p style='color:#aaa; font-style:italic; margin-top:12px;'>• {html.escape(note)}</p>"
+                f"<p style='color:{tok('text_dim')}; font-style:italic; margin-top:12px;'>• {html.escape(note)}</p>"
             )
         self._set_explain_html("".join(parts))
 

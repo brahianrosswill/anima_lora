@@ -316,8 +316,6 @@ STRINGS: dict[str, str] = {
     "dataset_delete_confirm_title": "画像を削除",
     "dataset_delete_confirm_body": "{n} 枚の画像とキャプションファイルをゴミ箱へ移動しますか？",
     "dataset_delete_failed": "一部の画像を削除できませんでした:\n{err}",
-    "dataset_view_list_tooltip": "フラットリスト表示 (クリックでツリー表示に切り替え)",
-    "dataset_view_tree_tooltip": "フォルダーツリー表示 (クリックでリスト表示に切り替え)",
     "dataset_group_label": "グループ {n} — {size} 枚",
     "dataset_group_rebuild": "グループ化",
     "dataset_group_rebuild_tooltip": "PE-Spatial の視覚的類似度で画像をグループ化 (作者ごと). ジョブキューで実行されます.",
@@ -378,11 +376,14 @@ STRINGS: dict[str, str] = {
         "タガーのタグ別しきい値に追加で適用する確率の下限（0–1）です。"
         "高いほど確信度の高いタグだけが少数残ります。既定値 0.50。"
     ),
-    "settings_theme_color": "テーマカラー:",
-    "settings_theme_color_tooltip": (
-        "インターフェース全体で使われるアクセント／ハイライト色です。即時に反映されます。"
+    "settings_theme": "テーマ:",
+    "settings_theme_tooltip": (
+        "インターフェース全体のカラーテーマです。即時に反映され、設定画面を閉じると"
+        "ウィンドウが再描画されて完全に適用されます。"
     ),
-    "settings_theme_reset": "リセット",
+    "settings_theme_dark": "ダーク",
+    "settings_theme_light": "ライト",
+    "settings_theme_sepia": "セピア",
     "settings_mcp_header": "MCP サーバー（エージェント連携）",
     "settings_mcp_desc": "ローカル学習デーモンを MCP クライアント（Claude Code、Claude Desktop "
     "など）に公開します。以下のコマンドをターミナルで実行すると Claude Code に登録されます:",
@@ -416,6 +417,8 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "新しいリリース {v} があります — クリックしてリリースノートを確認",
     "report_issue": "問題を報告",
     "report_issue_tooltip": "ブラウザで GitHub Issue トラッカーを開きます",
+    "visit_github": "GitHub ページを開く",
+    "open_in_system_viewer": "システムビューアで開く",
     # Models dialog
     "models_title": "モデルのダウンロード",
     "models_intro": "以下からモデルグループを選択するか、「すべてダウンロード」で標準セット "

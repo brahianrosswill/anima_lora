@@ -367,8 +367,6 @@ STRINGS: dict[str, str] = {
     "dataset_delete_confirm_title": "Delete images",
     "dataset_delete_confirm_body": "Move {n} image(s) and their caption files to the trash?",
     "dataset_delete_failed": "Some images could not be deleted:\n{err}",
-    "dataset_view_list_tooltip": "Flat list view (click to switch to tree view)",
-    "dataset_view_tree_tooltip": "Folder tree view (click to switch to list view)",
     "dataset_group_label": "Group {n} — {size} imgs",
     "dataset_group_rebuild": "Group",
     "dataset_group_rebuild_tooltip": "Group images by PE-Spatial visual similarity (per-artist). Runs in the job queue.",
@@ -430,11 +428,14 @@ STRINGS: dict[str, str] = {
         "Extra probability floor (0–1) applied on top of the tagger's per-tag "
         "thresholds. Higher = fewer, more confident tags. Default 0.50."
     ),
-    "settings_theme_color": "Theme color:",
-    "settings_theme_color_tooltip": (
-        "Accent / highlight color used across the interface. Applies immediately."
+    "settings_theme": "Theme:",
+    "settings_theme_tooltip": (
+        "Overall color theme for the interface. Applies immediately; the window "
+        "rebuilds when you close Settings to fully repaint."
     ),
-    "settings_theme_reset": "Reset",
+    "settings_theme_dark": "Dark",
+    "settings_theme_light": "Light",
+    "settings_theme_sepia": "Sepia",
     "settings_mcp_header": "MCP server (agent access)",
     "settings_mcp_desc": "Expose the local training daemon to MCP clients (Claude Code, "
     "Claude Desktop, …). Run this in a terminal to register it with Claude Code:",
@@ -468,6 +469,8 @@ STRINGS: dict[str, str] = {
     "update_btn_available_tooltip": "New release {v} available — click to view release notes",
     "report_issue": "Report Issue",
     "report_issue_tooltip": "Open the GitHub issue tracker in your browser",
+    "visit_github": "Visit GitHub page",
+    "open_in_system_viewer": "Open in system viewer",
     # Models dialog
     "models_title": "Download Models",
     "models_intro": "Pick a model group below or use 'Download all' for the standard set "

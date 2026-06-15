@@ -71,6 +71,7 @@ from gui._job_mixin import DaemonJobMixin
 from gui.explanations import preprocess_field_help, preprocess_guide
 from gui.i18n import t
 from gui.progress import TQDM_RE, TqdmProgressTracker, make_progress_bar
+from gui.theme import tok
 from gui.tabs.config_tab import ConfigTab, SplitButtonStyle
 from gui.widgets import ClickableLabel, DirtyTrackingMixin, make_field_label
 from library.datasets.path_filter import filter_paths_by_glob
@@ -294,7 +295,7 @@ class _RuleCard(QGroupBox):
         help_text = preprocess_field_help(key)
         return make_field_label(
             text,
-            style="color:#f0f0f0; text-decoration: underline dotted;",
+            style=f"color:{tok('text')}; text-decoration: underline dotted;",
             on_click=lambda _t=text, _h=help_text: self._help_cb(_t, _h),
         )
 
@@ -446,7 +447,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         # the OS file manager.
         status_row = QHBoxLayout()
         self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("color:#dcdcdc; padding: 2px 0;")
+        self.status_lbl.setStyleSheet(f"color:{tok('text')}; padding: 2px 0;")
         status_row.addWidget(self.status_lbl)
         status_row.addStretch()
         self.open_dataset_btn = QToolButton()
@@ -665,8 +666,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self._explain = QTextBrowser()
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
-            "QTextBrowser { font-size: 13px; padding: 12px; "
-            "background: #2b2b2b; color: #e0e0e0; }"
+            f"QTextBrowser {{ font-size: 13px; padding: 12px; "
+            f"background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
         self._show_default_explain()
@@ -885,7 +886,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         help_text = preprocess_field_help(key)
         return make_field_label(
             text_str,
-            style="color:#f0f0f0; text-decoration: underline dotted;",
+            style=f"color:{tok('text')}; text-decoration: underline dotted;",
             on_click=lambda _k=key, _h=help_text, _t=text_str: self._show_field_help(
                 _t, _h
             ),
@@ -906,7 +907,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             )
         else:
             parts.append(
-                f"<p style='color:#888; font-style:italic;'>"
+                f"<p style='color:{tok('text_dim')}; font-style:italic;'>"
                 f"{html.escape(t('no_help_available'))}</p>"
             )
         self._explain.setHtml("".join(parts))

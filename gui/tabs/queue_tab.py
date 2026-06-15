@@ -27,6 +27,7 @@ from gui import LazyTabMixin
 from gui import daemon as gui_daemon
 from gui.i18n import t
 from gui.progress import TQDM_RE, make_progress_bar
+from gui.theme import tok
 
 _LIVE_STATES = {"queued", "running"}
 _MAX_LOG_BYTES = 2 * 1024 * 1024
@@ -160,7 +161,7 @@ class QueueTab(LazyTabMixin, QWidget):
 
         top.addStretch()
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color:#aaa;")
+        self.status_label.setStyleSheet(f"color:{tok('text_dim')};")
         top.addWidget(self.status_label)
         outer.addLayout(top)
 

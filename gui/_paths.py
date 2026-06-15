@@ -23,7 +23,11 @@ GUI_SETTINGS_FILE = Path(__file__).resolve().parent / "gui_settings.json"
 # F1 thresholds (see AnimaTagger.predict_caption min_confidence).
 DEFAULT_AUTOTAG_CONFIDENCE = 0.5
 # Default GUI accent color (the dark theme's highlight / selection blue).
+# Kept for backward compat; the live accent now comes from the active theme
+# (see gui/theme.py). Legacy ``theme_color`` settings are ignored.
 DEFAULT_THEME_COLOR = "#3c78c8"
+# Default named theme (see gui/theme.py THEMES). One of "dark" / "light" / "sepia".
+DEFAULT_THEME = "dark"
 
 
 def _read_gui_settings() -> dict:
