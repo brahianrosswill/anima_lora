@@ -267,7 +267,7 @@ class AnimaTagger:
         # `original` copyright tag.
         self._character_floor = float(character_floor)
 
-        with open(self.ckpt_dir / "config.json") as f:
+        with open(self.ckpt_dir / "config.json", encoding="utf-8") as f:
             cfg_d = json.load(f)
         self.encoder_name: str = cfg_d.get("encoder", "pe")
         # Auxiliary (PE-Spatial) encoder — mandatory; the head is always
@@ -291,7 +291,7 @@ class AnimaTagger:
         for p in self.model.parameters():
             p.requires_grad_(False)
 
-        with open(self.ckpt_dir / "vocab.json") as f:
+        with open(self.ckpt_dir / "vocab.json", encoding="utf-8") as f:
             vocab = json.load(f)
         self.tag_entries: List[_TagEntry] = [
             _TagEntry(

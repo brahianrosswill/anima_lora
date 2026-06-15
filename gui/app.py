@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -656,9 +657,26 @@ def _ensure_source_image_dir() -> None:
         print(f"warn: could not create {src_path}: {e}", file=sys.stderr)
 
 
+def _prefer_cleartype_font_engine() -> None:
+    """Use Qt's GDI font engine on Windows so UI text gets ClearType.
+
+    Qt 6 defaults to the DirectWrite font engine on Windows, which rasterizes
+    small UI text with *grayscale* antialiasing — it reads soft/blurry next to
+    native apps, and the effect is worse on lightly-hinted modern faces like the
+    bundled Pretendard. The GDI engine uses ClearType subpixel rendering (what
+    native Windows controls use), which snaps small text crisp. Selected via the
+    ``windows:fontengine=gdi`` platform option, which must be set *before*
+    ``QApplication`` is constructed. Skipped if the user already pinned
+    ``QT_QPA_PLATFORM`` (e.g. a HiDPI user who prefers DirectWrite, or offscreen
+    in tests) so we never clobber an explicit choice."""
+    if sys.platform == "win32" and "QT_QPA_PLATFORM" not in os.environ:
+        os.environ["QT_QPA_PLATFORM"] = "windows:fontengine=gdi"
+
+
 def main():
     load_language()
     _ensure_source_image_dir()
+    _prefer_cleartype_font_engine()
     app = QApplication(sys.argv)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))

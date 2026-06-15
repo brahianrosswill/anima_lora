@@ -78,7 +78,7 @@ _RESERVED_KEYS = frozenset({
 
 def load_rules(path: str | Path) -> TagRules:
     """Load a ``tag_rules.yaml`` (gelcrawl format) into a :class:`TagRules`."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
     repl_map = raw.pop("replacements", {}) or {}

@@ -122,7 +122,7 @@ def load_groups(path: str | Path) -> TagGroups:
     ``tags:`` lists are allowed (group exists but has no current members)
     so the YAML can be checked in before the corpus catches up.
     """
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
     version = int(raw.pop("version", 1))

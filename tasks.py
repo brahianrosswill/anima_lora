@@ -360,7 +360,26 @@ COMMANDS = {
 }
 
 
+def _force_utf8_stdio():
+    """Make stdout/stderr UTF-8 so non-UTF-8 consoles don't crash on glyphs.
+
+    Several commands print Unicode status glyphs (``✓``/``✗``). On a Windows
+    console whose code page isn't UTF-8 (e.g. cp949 on a Korean install)
+    ``print`` raises ``UnicodeEncodeError`` and aborts the whole task. Re-encode
+    stdio as UTF-8 with ``errors="replace"`` so output is never fatal — UTF-8
+    when the terminal can show it, a replacement char at worst when it can't.
+    Best-effort: some wrapped streams (pytest capture, certain pipes) lack
+    ``reconfigure``; skip them silently.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    _force_utf8_stdio()
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("Usage: python tasks.py <command> [extra args...]\n")
         print("Commands:")

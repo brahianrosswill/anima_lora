@@ -248,8 +248,18 @@ def _build_palette(t: Theme) -> QPalette:
     return p
 
 
-def _build_stylesheet(t: Theme) -> str:
+def _build_stylesheet(t: Theme, font_family: str = "") -> str:
+    # Enforce the UI font family through the stylesheet, not just app.setFont().
+    # On Windows the native style paints many controls with the system font and
+    # ignores the application QFont (QFontInfo still *reports* the app font, so
+    # this is invisible to code — only the pixels are wrong). A stylesheet rule
+    # has higher precedence than the native style, so listing the family on the
+    # base QWidget forces every widget to actually render in the bundled font.
+    # Family only — size/weight stay on the QFont so per-widget overrides (the
+    # monospace log views set their own font-family directly and still win).
+    font_rule = f"* {{ font-family: {font_family}; }}\n" if font_family else ""
     return f"""
+        {font_rule}
         QGroupBox {{
             font-weight: bold; border: 1px solid {t.border_dim};
             border-radius: 4px; margin-top: 8px; padding-top: 16px;
@@ -345,6 +355,11 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
     font.setStyleHint(QFont.SansSerif)
     app.setFont(font)
 
+    # Same family stack handed to the stylesheet so the family is enforced even
+    # for native-styled controls that ignore app.setFont() on Windows. Quote
+    # each name (Qt CSS needs quotes for multi-word families like "Malgun Gothic").
+    family_css = ", ".join(f'"{f}"' for f in families)
+
     app.setPalette(_build_palette(t))
-    app.setStyleSheet(_build_stylesheet(t))
+    app.setStyleSheet(_build_stylesheet(t, family_css))
     return t
