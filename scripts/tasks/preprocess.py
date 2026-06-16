@@ -122,6 +122,49 @@ def _repa_pe_encoder() -> str | None:
     return encoder or "pe_spatial"
 
 
+# REPA encoder name → the `make` target that fetches its vision checkpoint, for
+# the fail-fast hint below.
+_REPA_ENCODER_DOWNLOAD_TARGET = {
+    "pe": "download-pe",
+    "pe_spatial": "download-pe-spatial",
+}
+
+
+def _require_repa_encoder_model(encoder: str) -> None:
+    """Fail fast (clear error, nonzero exit) if the REPA vision checkpoint is
+    absent — never silently auto-download it from inside the daemon.
+
+    The PE caching step the auto-chain calls would otherwise fall into
+    ``hf_hub_download`` with no timeout (``library/vision/encoders.py``). In the
+    daemon's detached, console-less child that fetch surfaces no progress, and a
+    stalled/gated download hangs indefinitely; because the daemon queue is
+    *serial*, that one hung preprocess wedges every job queued behind it
+    (training included). So when a ``use_repa=true`` Train auto-chain reaches
+    this step we require the checkpoint up front and bail with an actionable
+    message instead. Users who want the one-time download just run the named
+    target manually first (it shows real progress in a foreground terminal)."""
+    import sys
+    from pathlib import Path
+
+    try:
+        from library.vision.encoders import get_encoder_info
+
+        model_path = Path(get_encoder_info(encoder).default_model_id())
+    except (KeyError, ImportError):
+        return  # unknown encoder / import issue — let the downstream step report it
+    if model_path.is_file():
+        return
+    target = _REPA_ENCODER_DOWNLOAD_TARGET.get(encoder, "download-models")
+    sys.exit(
+        f"  [preprocess] use_repa=true needs the REPA vision checkpoint, but "
+        f"it's missing:\n      {model_path}\n"
+        f"  Fetch it once with `make {target}` (or `make download-models`), "
+        f"then start training again.\n"
+        f"  (Not auto-downloading here on purpose: in the background daemon the "
+        f"fetch shows no progress and a stalled download would hang the queue.)"
+    )
+
+
 def _pop_target_res(extra) -> list[str]:
     """Strip ``--target_res E1 E2 …`` (a resize-only flag) from ``extra``.
 
@@ -403,6 +446,14 @@ def cmd_preprocess(extra):
     # tower. The one exception is a `use_repa=true` variant in scope: REPA aligns
     # against PE features every step, so they're chained in at the end (see the
     # `_repa_pe_encoder()` block below).
+    #
+    # Fail fast BEFORE any GPU work: if this is a use_repa=true auto-chain whose
+    # REPA vision checkpoint isn't on disk, the PE step at the end would stall on
+    # a silent download inside the daemon and wedge the serial queue. Surface an
+    # actionable error in seconds instead of after the full resize/VAE/TE pass.
+    encoder = _repa_pe_encoder()
+    if encoder is not None:
+        _require_repa_encoder_model(encoder)
     cmd_preprocess_resize(extra)
     # The VAE/TE steps read on-disk shapes — strip the low-res convenience flags
     # AND the resize-only --target_res so their argparse never sees an arg it
@@ -446,7 +497,7 @@ def cmd_preprocess(extra):
     # "Train" auto-preprocess (and `make preprocess METHOD=<repa-variant>`)
     # builds them without a second manual step. Idempotent — cache_pe_encoder.py
     # skips images already cached. PE-less variants never pay for the tower.
-    encoder = _repa_pe_encoder()
+    # `encoder` was resolved (and its checkpoint required) at the top.
     if encoder is not None:
         print(f"  [preprocess] use_repa=true → caching REPA PE features ({encoder})")
         if encoder == "pe_spatial":
