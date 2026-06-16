@@ -49,7 +49,14 @@ _MODEL_GROUPS: list[tuple[str, str, list[str]]] = [
     ),
     ("sam3", "model_sam3", ["models/sam3/sam3.pt"]),
     ("mit", "model_mit", ["models/mit/model.pth"]),
-    ("pe", "model_pe", ["models/pe/PE-Core-L14-336.pt"]),
+    (
+        "pe",
+        "model_pe",
+        [
+            "models/pe/PE-Core-L14-336.pt",
+            "models/pe/PE-Spatial-B16-512.pt",
+        ],
+    ),
 ]
 
 
