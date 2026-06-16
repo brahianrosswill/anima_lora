@@ -241,7 +241,9 @@ def parse_args() -> argparse.Namespace:
         "the ortho_tail probe (apples-to-apples — only the parameterization differs).",
     )
 
-    p.add_argument("--steps", type=int, default=100, help="Optimization steps per image")
+    p.add_argument(
+        "--steps", type=int, default=100, help="Optimization steps per image"
+    )
     p.add_argument("--lr", type=float, default=0.01, help="Learning rate (AdamW)")
     p.add_argument(
         "--lr_schedule",
@@ -533,7 +535,9 @@ def main() -> None:
         net.apply_to(text_encoders=None, unet=_anima, apply_unet=True)
         st_holder["net"] = net
 
-    anima = _load_anima(args, device, apply_before_compile=_apply_st if soft_tokens else None)
+    anima = _load_anima(
+        args, device, apply_before_compile=_apply_st if soft_tokens else None
+    )
     soft_tokens_net = st_holder.get("net")
 
     cfg = TailInversionConfig(

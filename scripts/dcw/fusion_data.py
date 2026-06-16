@@ -75,9 +75,7 @@ def load_bench_runs(
     set, ``results_roots`` is ignored entirely.
     """
     if fei_source not in ("z", "v_surrogate"):
-        raise ValueError(
-            f"fei_source must be 'z' or 'v_surrogate', got {fei_source!r}"
-        )
+        raise ValueError(f"fei_source must be 'z' or 'v_surrogate', got {fei_source!r}")
     if isinstance(results_roots, (str, Path)):
         results_roots = [Path(results_roots)]
     rows: list[Row] = []

@@ -40,7 +40,9 @@ class DiversityMetrics:
     ac_sim: float  # cross-seed cosine of the AC residual (block feats); LOWER = more diverse
     dc_sim: float  # cross-seed cosine of the DC (block feats); reference, ~conditioning lock
     gap: float  # dc_sim − ac_sim; the DAVE separation (high = AC carries the diversity)
-    xpred_ac_sim: float  # same decomposition on the final x_pred latent; LOWER = more diverse
+    xpred_ac_sim: (
+        float  # same decomposition on the final x_pred latent; LOWER = more diverse
+    )
     fm_mse: float  # flow-matching reconstruction MSE on the held-out sample; the
     # fidelity half of the fidelity↔diversity tradeoff view. CAVEAT: FM val loss
     # has NOT tracked sample quality on Anima (CMMD replaced it as the quality
@@ -179,7 +181,9 @@ def run_diversity_validation(
                 s_i, s_next = student_sigmas[i], student_sigmas[i + 1]
                 t_b = torch.full((latent_shape[0],), s_i, device=device, dtype=dtype)
                 set_student_step(i)
-                v = forward_fn("student", x, t_b, crossattn_emb, no_grad=True).squeeze(2)
+                v = forward_fn("student", x, t_b, crossattn_emb, no_grad=True).squeeze(
+                    2
+                )
                 x = x - (s_i - s_next) * v
             probe.stop()
             x_preds.append(x.detach())

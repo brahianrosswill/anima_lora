@@ -79,7 +79,7 @@ def classify_people(tags: Iterable[str]) -> int:
                 saw_other = True
             continue
         m = _LEADING_INT_RE.match(t)
-        if m is None:                    # e.g. malformed; defensive
+        if m is None:  # e.g. malformed; defensive
             continue
         n = int(m.group(1))
         if "girl" in t:
@@ -96,19 +96,19 @@ def classify_people(tags: Iterable[str]) -> int:
     if saw_multi_b and boys == 0:
         boys = 2
     if saw_other or girls >= 3 or boys >= 3 or (boys >= 2 and girls >= 2):
-        return 7                          # multi: 3+girls / 3+boys / 2g+2b+ / lonely multiple_* / Nothers
+        return 7  # multi: 3+girls / 3+boys / 2g+2b+ / lonely multiple_* / Nothers
     if girls == 0 and boys == 0:
-        return 0                          # no_people (only when no count tag fired)
+        return 0  # no_people (only when no count tag fired)
     if girls == 1 and boys == 0:
-        return 1                          # 1girl
+        return 1  # 1girl
     if girls == 1 and boys == 1:
-        return 2                          # 1girl_1boy
+        return 2  # 1girl_1boy
     if girls == 2 and boys == 0:
-        return 3                          # 2girls
+        return 3  # 2girls
     if girls == 2 and boys == 1:
-        return 4                          # 2girls_1boy
+        return 4  # 2girls_1boy
     if girls == 1 and boys == 2:
-        return 5                          # 2boys_1girl
+        return 5  # 2boys_1girl
     if girls == 0 and boys == 1:
-        return 6                          # 1boy
-    return 7                              # fallback (e.g. 0g/2b without "others")
+        return 6  # 1boy
+    return 7  # fallback (e.g. 0g/2b without "others")

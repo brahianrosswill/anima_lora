@@ -180,9 +180,7 @@ def run_reverse_batched(
     fei_sigma_low_div: float = 4.0,
 ) -> (
     list[tuple[np.ndarray, dict[str, np.ndarray], np.ndarray]]
-    | tuple[
-        list[tuple[np.ndarray, dict[str, np.ndarray], np.ndarray]], torch.Tensor
-    ]
+    | tuple[list[tuple[np.ndarray, dict[str, np.ndarray], np.ndarray]], torch.Tensor]
 ):
     """Run N reverse trajectories in parallel along batch, where each row
     is the (seed, λ) pair ``(noise_seeds[r], dcw_lams[r])``.

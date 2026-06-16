@@ -453,8 +453,6 @@ def main():
 
     print("[3/6] computing population μ_g ...")
     mu_g_pop = build_population_mu_g(rows, n_steps)  # (n_steps,)
-    mu_g = np.broadcast_to(mu_g_pop, (N_DCW_ASPECTS, n_steps)).copy()
-    s_pop = np.zeros_like(mu_g)
     lam_scalar = np.zeros(N_DCW_ASPECTS, dtype=np.float32)
     print(
         f"  integrated μ_g = {mu_g_pop.sum():+.2f} "

@@ -194,9 +194,7 @@ def generate_synthetic_latents(
     synth_dir.mkdir(parents=True, exist_ok=True)
 
     if buckets is not None or n_per_bucket is not None:
-        bucket_str = (
-            ", ".join(f"{h}x{w}" for h, w in buckets) if buckets else "(all)"
-        )
+        bucket_str = ", ".join(f"{h}x{w}" for h, w in buckets) if buckets else "(all)"
         logger.info(
             f"Phase 2 bucket filter: buckets=[{bucket_str}], "
             f"n_per_bucket={n_per_bucket}, shuffle_seed={shuffle_seed}"

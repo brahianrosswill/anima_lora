@@ -412,8 +412,7 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
     rules_src = Path(args.rules)
     rules = tr.load_rules(rules_src)
     logger.info(
-        "rules: %d replacements, %d remove, %d dedup base tags, "
-        "%d category overrides",
+        "rules: %d replacements, %d remove, %d dedup base tags, %d category overrides",
         len(rules.replacements),
         len(rules.remove),
         len(rules.dedup),
@@ -453,8 +452,7 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
         coverage["n_total_tag_occurrences"], 1
     )
     logger.info(
-        "cache coverage: %d/%d unique tags categorized "
-        "(%.2f%% of occurrences missing)",
+        "cache coverage: %d/%d unique tags categorized (%.2f%% of occurrences missing)",
         coverage["n_unique_tags"] - coverage["n_unique_missing"],
         coverage["n_unique_tags"],
         100 * miss_rate,
@@ -493,14 +491,19 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
             n_drop = len(g.tag_names) < sum(1 for _ in groups.by_name(g.name).tags)
             logger.info(
                 "  %-14s mode=%-18s n_tags=%3d n_escape=%2d%s",
-                g.name, g.mode, len(g.tag_indices), len(g.escape_indices),
+                g.name,
+                g.mode,
+                len(g.tag_indices),
+                len(g.escape_indices),
                 "  (some tags dropped)" if n_drop else "",
             )
         if dropped:
             sample = list(dropped)[:10]
             logger.info(
                 "first %d dropped: %s%s",
-                len(sample), sample, " …" if len(dropped) > len(sample) else "",
+                len(sample),
+                sample,
+                " …" if len(dropped) > len(sample) else "",
             )
     else:
         vocab["groups"] = []
@@ -572,7 +575,9 @@ def cmd_build_vocab(args: argparse.Namespace) -> None:
     print(f"  rating coverage:        {vocab['rating_coverage']}")
     print(f"  rating distribution:    {vocab['rating_distribution']}")
     print(f"  people distribution:    {vocab['people_count_distribution']}")
-    print(f"  split:                  {len(split['train'])} train / {len(split['val'])} val")
+    print(
+        f"  split:                  {len(split['train'])} train / {len(split['val'])} val"
+    )
     print(f"  cache miss rate:        {miss_rate:.2%}")
     print(f"  trainable samples:      {len(manifest['stems'])}")
     print(

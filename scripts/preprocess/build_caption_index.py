@@ -58,7 +58,17 @@ VOCAB_AXES = ("character", "copyright", "count")
 # in the same caption) and not a generic disambiguator (``X (cosplay)``).
 _PAREN_RE = re.compile(r"^(.+?)\s*\(([^)]+)\)$")
 _GENERIC_PAREN_QUALIFIERS = frozenset(
-    {"cosplay", "costume", "alternate costume", "meme", "food", "fruit", "maid", "animal", "object"}
+    {
+        "cosplay",
+        "costume",
+        "alternate costume",
+        "meme",
+        "food",
+        "fruit",
+        "maid",
+        "animal",
+        "object",
+    }
 )
 
 # Positional recovery of bare-name characters (no `(series)` disambiguator).
@@ -70,8 +80,23 @@ _GENERIC_PAREN_QUALIFIERS = frozenset(
 # ``_COPYRIGHT_STOPWORDS`` are franchise-title words too weak to anchor that test.
 _COPYRIGHT_STOPWORDS = frozenset(
     {
-        "club", "high", "school", "idol", "story", "world", "project", "series",
-        "love", "live", "girl", "girls", "boy", "boys", "the", "and", "no",
+        "club",
+        "high",
+        "school",
+        "idol",
+        "story",
+        "world",
+        "project",
+        "series",
+        "love",
+        "live",
+        "girl",
+        "girls",
+        "boy",
+        "boys",
+        "the",
+        "and",
+        "no",
     }
 )
 
@@ -175,9 +200,7 @@ def _classify(
 
     # Positional recovery of bare-name characters (see _COPYRIGHT_STOPWORDS note).
     if recover_positional:
-        artist_at = next(
-            (i for i, t in enumerate(tags) if is_artist_tag(t)), None
-        )
+        artist_at = next((i for i, t in enumerate(tags) if is_artist_tag(t)), None)
         if artist_at is not None:
             copy_words: set[str] = set()
             for cp in out["copyright"]:

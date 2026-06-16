@@ -92,7 +92,9 @@ def build_tag_swap_tuple(caption: str, rng: random.Random):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--dir", type=str, default="image_dataset", help="Caption source dir")
+    p.add_argument(
+        "--dir", type=str, default="image_dataset", help="Caption source dir"
+    )
     p.add_argument(
         "--cache_dir",
         type=str,
@@ -106,7 +108,9 @@ def main() -> None:
     p.add_argument("--t5_tokenizer_path", type=str, default=None)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--recursive", action="store_true", default=True)
-    p.add_argument("--limit", type=int, default=0, help="Cap images (0 = all). Smoke aid.")
+    p.add_argument(
+        "--limit", type=int, default=0, help="Cap images (0 = all). Smoke aid."
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument(

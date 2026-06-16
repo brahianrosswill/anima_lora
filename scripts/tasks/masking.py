@@ -94,7 +94,9 @@ def _sam_config_path(cfg: dict, tmp_root: str, *, from_env: bool) -> str:
     return str(path)
 
 
-def _run_sam(image_dir: Path, out_dir: Path, extra: list[str], config_path: str) -> None:
+def _run_sam(
+    image_dir: Path, out_dir: Path, extra: list[str], config_path: str
+) -> None:
     run(
         [
             PY,
