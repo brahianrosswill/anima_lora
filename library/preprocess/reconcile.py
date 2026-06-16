@@ -79,8 +79,7 @@ def _native_size_index(image_dir: Path) -> dict[tuple[str, str], tuple[int, int]
     """
     idx: dict[tuple[str, str], tuple[int, int]] = {}
     with warnings.catch_warnings():
-        # Large source art legitimately trips PIL's decompression-bomb guard;
-        # we only read the header (.size), never decode pixels.
+        # Large source art trips PIL's decompression-bomb guard; we only read the header (.size).
         warnings.simplefilter("ignore", Image.DecompressionBombWarning)
         for dirpath, _, files in safe_walk(image_dir, followlinks=True):
             rel = os.path.relpath(dirpath, image_dir)
@@ -161,7 +160,6 @@ def find_orphan_caches(
             for fn in files:
                 yield rel, dirpath, fn
 
-    # Latent / text / PE caches all live under the lora cache dir.
     for rel, dirpath, fn in _walk(lora_cache_dir):
         for rx, bucket in (
             (NPZ_RE, orphans.npz),
@@ -224,8 +222,8 @@ def find_stale_caches(
         correct = _correct_bucket(w, h, target_res)
         reldir = Path(rel) if rel else Path()
 
-        # Latent npzs: a stem may carry several (multi-resolution); any whose
-        # filename bucket != correct is an orphan from an old bucket assignment.
+        # A stem may carry several latent npzs (multi-resolution); any whose
+        # filename bucket != correct is stale from an old bucket assignment.
         wrong_npz = [
             p
             for p in (lora_cache_dir / reldir).glob(f"{stem}_*_anima.npz")
@@ -243,7 +241,7 @@ def find_stale_caches(
                 png_wrong = True
 
         if not wrong_npz and not png_wrong:
-            continue  # consistent with the configured target_res
+            continue
 
         cur: tuple[int, int] | str = "png"
         if wrong_npz and (m := NPZ_RE.match(wrong_npz[0].name)):

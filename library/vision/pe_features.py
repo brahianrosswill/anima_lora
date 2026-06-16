@@ -39,8 +39,6 @@ PE_NATIVE = 512  # PE-Spatial-B16-512 square bucket → 32x32 patch grid
 GRID_NATIVE = 32
 GRID_CACHE = 16  # cached pooled grid edge; any pooled grid <= 16 pools down from here
 
-# ---------------------------------------------------------------------------- captions / tags
-
 
 def normalize_tag(tag: str) -> str:
     """Space-insensitive canonical form: lowercase, underscores→spaces, collapsed.
@@ -65,9 +63,6 @@ def caption_text(txt_path: Path) -> str:
         if txt_path.is_file()
         else ""
     )
-
-
-# ---------------------------------------------------------------------------- member discovery
 
 
 @dataclass
@@ -148,9 +143,6 @@ def keep_size_cohabiting(members: list[Member]) -> list[Member]:
     """
     sizes = Counter(m.wh for m in members)
     return [m for m in members if m.wh != (0, 0) and sizes[m.wh] >= 2]
-
-
-# ---------------------------------------------------------------------------- embedding + cache
 
 
 def _dir_hash(path: Path) -> str:

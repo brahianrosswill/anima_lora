@@ -74,7 +74,7 @@ def apply_masked_loss(loss, batch) -> torch.FloatTensor:
     if "conditioning_images" in batch:
         mask_image = (
             batch["conditioning_images"].to(dtype=loss.dtype)[:, 0].unsqueeze(1)
-        )  # use R channel
+        )  # R channel
         mask_image = mask_image / 2 + 0.5
     elif "alpha_masks" in batch and batch["alpha_masks"] is not None:
         mask_image = (
@@ -249,11 +249,6 @@ def conditional_loss(
 _conditional_loss = conditional_loss
 
 
-# ---------------------------------------------------------------------------
-# Context + types
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class LossContext:
     args: argparse.Namespace
@@ -270,11 +265,6 @@ class LossContext:
 
 
 LossFn = Callable[[LossContext], torch.Tensor]
-
-
-# ---------------------------------------------------------------------------
-# Per-sample losses ([B])
-# ---------------------------------------------------------------------------
 
 
 def _flow_match_loss(ctx: LossContext) -> torch.Tensor:
@@ -358,11 +348,6 @@ def _flow_matching_vr_loss(ctx: LossContext) -> torch.Tensor:
     loss = loss.mean(dim=list(range(1, loss.ndim)))
     loss = loss * ctx.loss_weights
     return weight * loss
-
-
-# ---------------------------------------------------------------------------
-# Scalar-broadcast regularizers (added to the per-sample [B] tensor)
-# ---------------------------------------------------------------------------
 
 
 def _ortho_reg_loss(ctx: LossContext) -> torch.Tensor:
@@ -538,11 +523,6 @@ def _fera_fecl_loss(ctx: LossContext) -> torch.Tensor:
     return weight * loss.mean()
 
 
-# ---------------------------------------------------------------------------
-# Scalar post-reduction losses (operate on the scalar mean of the per-sample)
-# ---------------------------------------------------------------------------
-
-
 def _multiscale_loss(ctx: LossContext) -> torch.Tensor:
     """Additional MSE term at 2x-downsampled resolution. Scalar output meant to
     be blended into the scalar mean via `(scalar + ms*ms_w) / (1 + ms_w)`.
@@ -560,11 +540,6 @@ def _multiscale_loss(ctx: LossContext) -> torch.Tensor:
     return torch.nn.functional.mse_loss(pred_ds, target_ds)
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-
 LOSS_REGISTRY: dict[str, LossFn] = {
     "flow_match": _flow_match_loss,
     "flow_matching_vr": _flow_matching_vr_loss,
@@ -578,10 +553,7 @@ LOSS_REGISTRY: dict[str, LossFn] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Liveness ledger (issues.md P1.1)
-# ---------------------------------------------------------------------------
-#
+# Liveness ledger (issues.md P1.1):
 # Every handler that consumes a trainer/adapter-supplied aux key skips
 # silently when the key is missing — by design (partial sidecar coverage,
 # validation steps). The cost of that design is that "configured ON and 100%
@@ -702,9 +674,6 @@ _STAGE_SCALAR_BROADCAST = (
     "repa",
 )
 _STAGE_SCALAR_POST = ("multiscale",)
-# _STAGE_SCALAR_POST is consulted by LossComposer.compose via the hard-coded
-# multiscale branch; kept as a named constant for documentation / future
-# extensibility.
 __all__ = [
     "LivenessLedger",
     "LossContext",
@@ -718,11 +687,6 @@ __all__ = [
     "_STAGE_SCALAR_BROADCAST",
     "_STAGE_SCALAR_POST",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Composer
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -748,7 +712,6 @@ class LossComposer:
 
         per_sample = ctx.model_pred.new_zeros(ctx.model_pred.shape[0])
 
-        # Stage 1: per-sample losses.
         first = True
         for name in _STAGE_PER_SAMPLE:
             if name not in self.active_losses:
@@ -764,7 +727,6 @@ class LossComposer:
                 "one of {'flow_match', 'flow_matching_vr'} must be in active_losses"
             )
 
-        # Stage 2: scalar-broadcast regularizers (added to the per-sample [B]).
         for name in _STAGE_SCALAR_BROADCAST:
             if name not in self.active_losses:
                 continue
@@ -775,7 +737,6 @@ class LossComposer:
 
         scalar = per_sample.mean()
 
-        # Stage 3: scalar-level blend (multiscale).
         if "multiscale" in self.active_losses:
             ms_weight = float(getattr(ctx.args, "multiscale_loss_weight", 0.0) or 0.0)
             if ms_weight > 0.0:

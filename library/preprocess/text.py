@@ -50,9 +50,8 @@ def generate_caption_variants(
     tags = [t.strip() for t in caption.split(",")]
     split_idx = anima_train_utils.find_anima_prefix_end(tags)
 
-    # v0 stays byte-identical to the source caption unless the sentinel is
-    # actually present — re-joining would normalize whitespace around commas
-    # for every existing dataset otherwise.
+    # v0 stays byte-identical to the source caption unless the sentinel is present
+    # — re-joining would otherwise normalize whitespace around commas.
     if sentinel in tags:
         variants = [", ".join(anima_train_utils.strip_no_artist_sentinel(tags))]
     else:
@@ -265,12 +264,9 @@ def cache_text_embeddings(
     entries: list[tuple[Path, str]] = []
     for p in candidates:
         caption_path = p.with_suffix(".txt")
-        # A missing or empty caption file is a valid explicit empty caption
-        # (unconditional / style-LoRA training) — encode "" rather than
-        # dropping the image, so the cached TE set matches the training dataset.
-        # Training-time dreambooth loads uncaptioned images with an empty
-        # caption and the trainer's cache-completeness probe expects a TE cache
-        # for every such image; skipping them here leaves the cache incomplete.
+        # Missing/empty caption → encode "" (not drop): dreambooth loads uncaptioned
+        # images with an empty caption and the cache-completeness probe expects a TE
+        # cache for each, so dropping here would leave the cache incomplete.
         if caption_path.exists():
             caption = caption_path.read_text(encoding="utf-8").strip().split("\n")[0]
         else:
@@ -292,7 +288,6 @@ def cache_text_embeddings(
     for batch_start in range(0, len(entries), batch_size):
         batch = entries[batch_start : batch_start + batch_size]
 
-        # Skip already-cached entries.
         to_encode: list[tuple[Path, str, Path]] = []
         for img_path, caption in batch:
             cache_path = _te_cache_path(img_path, cache_dir, data_dir)
@@ -356,9 +351,8 @@ def cache_text_embeddings(
             for i, (img_path, _, cache_path) in enumerate(to_encode):
                 save_dict = {
                     "num_variants": torch.tensor(n_variants, dtype=torch.int64),
-                    # Marker: v0 is the pristine original caption (no shuffle,
-                    # no tag dropout). Loaders use this to switch on weighted
-                    # 20%/80% sampling between v0 and v1..v{N-1}.
+                    # Marker: v0 is pristine; loaders switch on weighted 20%/80%
+                    # sampling between v0 and v1..v{N-1}.
                     "v0_intact": torch.tensor(1, dtype=torch.int8),
                     "caption_dropout_rate": caption_dropout_rate,
                 }

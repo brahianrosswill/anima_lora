@@ -42,15 +42,12 @@ from library.preprocess.text import (
 )
 
 __all__ = [
-    # dataset walk / group / skip
     "PreprocessStats",
     "group_by_shape",
     "partition_cached",
     "walk_images",
-    # progress
     "ProgressFn",
     "tqdm_progress",
-    # cache functions
     "cache_latents",
     "count_pending_latents",
     "get_latents_npz_path",
@@ -65,7 +62,6 @@ __all__ = [
     "pe_cache_path_for",
     "resize_to_buckets",
     "process_image",
-    # cache reconciliation
     "find_stale_caches",
     "delete_stale",
     "reconcile_caches",

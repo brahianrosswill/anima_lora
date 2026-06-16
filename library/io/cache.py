@@ -275,10 +275,6 @@ def stem_from_cache_path(path: str | os.PathLike) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Bucketed-latent filename parsing + stem-grouped discovery.
-# ---------------------------------------------------------------------------
-
 # `{stem}_{Wpix}x{Hpix}_anima.npz`. The `{3,5}` digit bound matches real image
 # dimensions and avoids swallowing a numeric stem suffix into the resolution.
 _LATENT_PIXEL_RE = re.compile(
@@ -336,11 +332,7 @@ def discover_latents_by_stem(
     return out
 
 
-# ---------------------------------------------------------------------------
 # Bucketed sample discovery (promoted from bench/_anima.py).
-# ---------------------------------------------------------------------------
-
-
 def discover_bucketed_samples(
     data_dir: Path,
     bucket: str | None,

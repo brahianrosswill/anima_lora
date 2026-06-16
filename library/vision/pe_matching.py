@@ -89,14 +89,9 @@ def match_grids(
     )
 
 
-# ---------------------------------------------------------------------------- batched (GPU)
-# The scalar ``match_grids`` above (per-pair, numpy + Python per-cell loop) is
-# kept for the miner, which needs the full ``MatchResult`` (diff cells, offset).
-# Consumers that only need the inlier *fraction* over many pairs — dataset
-# grouping — use the vectorized path below: pool every image's grid once, then
-# evaluate the same mutual-NN + ratio gate for a whole batch of pairs as tensor
-# ops on the embedding device. Bit-comparable to the scalar gate (see
-# tests/test_grouping_grid_match.py).
+# Scalar ``match_grids`` is kept for the miner (needs the full MatchResult). The
+# vectorized path below is for consumers needing only the inlier fraction over many
+# pairs (dataset grouping); bit-comparable to the scalar gate (tests/test_grouping_grid_match.py).
 
 
 @torch.no_grad()

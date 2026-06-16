@@ -80,8 +80,7 @@ def process_image(
     change (e.g. adding a ``--target_res`` tier) still re-resizes only the
     images whose target bucket actually moved.
     """
-    # 6th element (target_res) is optional so pre-multiscale 5-tuple callers
-    # still work.
+    # 6th element (target_res) is optional so pre-multiscale 5-tuple callers still work.
     max_reso, min_size, max_size, reso_steps, use_constant, *rest = bucket_args
     target_res = rest[0] if rest else None
     bucket_mgr = BucketManager(
@@ -92,17 +91,12 @@ def process_image(
     )
 
     src_img = Image.open(image_path)
-    w, h = src_img.size  # header-only read; no pixel decode yet
+    w, h = src_img.size
 
     if use_constant:
-        # Pick the tier that resizes this image the least (nearest bucket by
-        # cover-scale), then the nearest-aspect bucket within it. target_res is
-        # absent when no preprocess.toml / config value supplies it (or it's a
-        # bare [1024], which tasks.py strips); default to the canonical 1024
-        # tier rather than the full multi-tier catalog. NOT defaulting here lets
-        # make_buckets fall back to all_constant_token_buckets() (every tier),
-        # whose aspect-only select_bucket happily UPSCALES a 0.7MP portrait into
-        # a 1536-tier 1024x2160 bucket — the multi-tier resize regression.
+        # Default to the canonical 1024 tier (not the full multi-tier catalog):
+        # all_constant_token_buckets()'s aspect-only select_bucket would UPSCALE
+        # a 0.7MP portrait into a 1536-tier bucket — the multi-tier resize regression.
         tier = target_res or list(DEFAULT_TARGET_RES)
         edge = choose_edge(w, h, tier)
         bucket_mgr.set_predefined_resos(buckets_for_edges([edge]))
@@ -115,19 +109,17 @@ def process_image(
     target_dir = out_dir / rel_dir if rel_dir else out_dir
     out_path = target_dir / f"{image_path.stem}.png"
 
-    # Idempotent skip: an existing PNG already at the target bucket is up to date.
     if not overwrite and out_path.exists():
         try:
             with Image.open(out_path) as ex:
                 if ex.size == (bw, bh):
                     return image_path.name, bucket_reso, True
         except Exception:
-            pass  # unreadable existing output → fall through and re-resize
+            pass
 
     save_kwargs = _collect_metadata(src_img)
     img = src_img.convert("RGB")
 
-    # Resize preserving aspect ratio so the image covers the bucket.
     ar_img = w / h
     ar_bucket = bw / bh
     if ar_img > ar_bucket:
@@ -139,7 +131,6 @@ def process_image(
 
     img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    # Center crop to bucket resolution.
     left = (new_w - bw) // 2
     top = (new_h - bh) // 2
     img = img.crop((left, top, left + bw, top + bh))
@@ -197,8 +188,7 @@ def resize_to_buckets(
         target_res,
     )
 
-    # walk_images enforces per-subfolder stem uniqueness (same-folder stem
-    # collisions would collide the resized output).
+    # walk_images enforces per-subfolder stem uniqueness (collisions would collide the resized output).
     image_files = walk_images(src, recursive=recursive, pattern=path_pattern)
     stats = PreprocessStats(seen=len(image_files))
 

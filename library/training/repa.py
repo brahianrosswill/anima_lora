@@ -97,10 +97,9 @@ _HEATMAP_GRID = 32
 _HEATMAP_TOPK_FRAC = 0.10
 
 
-# --------------------------------------------------------------------- helpers
-# The grid-match / pooling / Gram math, factored out of the adapter so
-# no-training probes (bench/turbo_repa/) measure the *identical* quantity the
-# training term optimizes instead of carrying a drifting copy.
+# Grid-match / pooling / Gram math factored out of the adapter so no-training
+# probes (bench/turbo_repa/) measure the identical quantity the training term
+# optimizes instead of carrying a drifting copy.
 
 
 def resolve_pe_grid(spec, n_pe: int, h_lat: int, w_lat: int) -> tuple[int, int]:
@@ -149,7 +148,6 @@ def pool_dit_tokens_to_grid(
             "Block/patch-grid mismatch."
         )
 
-    # Pool DiT grid down to the encoder grid: (B,D,h,w) → (B,D,gh,gw).
     dit_grid = tokens.reshape(b, h_dit, w_dit, d_dit).permute(0, 3, 1, 2)
     dit_pooled = F.adaptive_avg_pool2d(dit_grid.float(), (gh, gw))
     return dit_pooled.flatten(2).transpose(1, 2)  # (B, gh*gw, D) fp32
@@ -338,35 +336,23 @@ class REPAMethodAdapter(MethodAdapter):
         self._spec = None
         self._anneal_steps = 0.0
         self._spatial_norm = False
-        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md): a broader
-        # low-band strip than spatial_norm's DC removal. Off (dog False) ⇒ inert
-        # — when on it replaces the spatial_norm block in the relational loss.
+        # REPA-DoG target band-pass: when on, replaces the spatial_norm block in
+        # the relational loss (off ⇒ inert).
         self._dog = False
         self._dog_sigma1_div = 16.0
         self._dog_sigma2_div = 0.0
         self._dog_norm_std = 0.0
         # Timestep reweighting of the alignment term (0 = uniform = legacy path).
         self._timestep_weighting = 0.0
-        # Optimizer-step clock: train micro-batches seen, converted with
+        # Optimizer-step clock: train micro-batches, converted with
         # gradient_accumulation_steps at the anneal gate.
         self._train_micro_steps = 0
-        # Grad-heatmap diagnostic (lever-3 gate): probe cadence in train
-        # micro-steps (0 = off), flat (32*32,) top-10% membership counts,
-        # samples accumulated, and the probe-tick counter.
         self._grad_heatmap_every = 0
         self._heat_counts: Optional[torch.Tensor] = None
         self._heat_samples = 0
         self._heat_runs = 0
-        # Last-step diagnostics surfaced to TensorBoard/W&B via metrics().
-        # ``repa/align_loss`` is the *unweighted* alignment scalar — watch this
-        # curve to choose ``repa_anneal_steps`` (anneal off → the term runs
-        # every step → the curve is fresh; pick the cutoff where it plateaus /
-        # stops helping sample quality). ``repa/active`` is 1.0 while the term
-        # contributes, 0.0 once past the anneal cutoff or when PE features were
-        # missing this step.
         self._metrics: dict[str, float] = {}
 
-    # ------------------------------------------------------------------ setup
     def on_network_built(self, ctx: SetupCtx) -> None:
         net = ctx.network
         self._mode = str(getattr(net, "_repa_mode", "relational")).lower()
@@ -387,9 +373,8 @@ class REPAMethodAdapter(MethodAdapter):
         self._spec = get_bucket_spec(encoder)
         self._patch = int(ctx.unet.patch_spatial)
 
-        # REPA-DoG target band-pass (docs/proposal/repa_dog_target.md). Replaces
-        # the spatial_norm DC-removal block in the relational loss when on
-        # (relational mode only — it preprocesses the target, no head needed).
+        # REPA-DoG target band-pass: replaces the spatial_norm DC-removal block
+        # in the relational loss when on (relational mode only).
         self._dog = bool(getattr(net, "_repa_target_dog", False))
         self._dog_sigma1_div = float(getattr(net, "_repa_dog_sigma1_div", 16.0) or 16.0)
         self._dog_sigma2_div = float(getattr(net, "_repa_dog_sigma2_div", 0.0) or 0.0)
@@ -402,9 +387,8 @@ class REPAMethodAdapter(MethodAdapter):
             )
             self._dog = False
 
-        # Timestep reweighting (docs/experimental/repa.md): tilt the alignment
-        # term across the diffusion noise level σ. 0 = uniform (legacy). See
-        # _timestep_weights for the parameterization.
+        # Timestep reweighting: tilt the alignment term across σ (0 = uniform).
+        # See _timestep_weights for the parameterization.
         self._timestep_weighting = float(
             getattr(net, "_repa_timestep_weighting", 0.0) or 0.0
         )
@@ -423,10 +407,9 @@ class REPAMethodAdapter(MethodAdapter):
             )
 
         def _hook(_module, _inputs, output: torch.Tensor) -> None:
-            # Block output: eager (B,1,H,W,D) or native_flatten (B,1,seq,1,D).
-            # Keep grad — we want it to flow back into LoRA modules in blocks
-            # <= repa_layer. The hook runs in block.__call__, outside the
-            # compiled block._forward, so it fires under compile_blocks().
+            # Keep grad (flows back into LoRA modules in blocks <= repa_layer).
+            # Runs in block.__call__, outside the compiled block._forward, so it
+            # fires under compile_blocks().
             self._captured = output
 
         self._hook_handle = blocks[self._layer].register_forward_hook(_hook)
@@ -483,7 +466,6 @@ class REPAMethodAdapter(MethodAdapter):
         p = -g
         return (p + 1.0) * (1.0 - s).pow(p)
 
-    # ------------------------------------------------------------------- step
     def prime_for_forward(
         self, ctx: StepCtx, batch, latents: torch.Tensor, *, is_train: bool
     ) -> None:
@@ -617,7 +599,6 @@ class REPAMethodAdapter(MethodAdapter):
         self._metrics["repa/align_loss"] = float(loss.detach())
         return {"repa": loss}
 
-    # ------------------------------------------------- grad-heatmap diagnostic
     def _accumulate_grad_heatmap(
         self, loss: torch.Tensor, dit_tok: torch.Tensor, gh: int, gw: int
     ) -> None:
@@ -694,7 +675,6 @@ class REPAMethodAdapter(MethodAdapter):
             conc,
         )
 
-    # ---------------------------------------------------------------- metrics
     def metrics(self, ctx) -> dict[str, float]:
         """Surface the last train-step alignment scalar to the loggers.
 

@@ -116,7 +116,9 @@ def _decode_batch(
     kept: list[tuple[Path, tuple[int, int]]] = []
     tensors: list[torch.Tensor] = []
     for p in batch_paths:
-        npz_path = get_latents_npz_path(p, (w, h), cache_dir=cache_dir, image_dir=data_dir)
+        npz_path = get_latents_npz_path(
+            p, (w, h), cache_dir=cache_dir, image_dir=data_dir
+        )
         if _latent_cached(npz_path, w, h):
             skipped.append(p)
             continue
@@ -177,7 +179,6 @@ def cache_latents(
     if progress is not None:
         progress(0, total=len(image_files))
 
-    # Flatten to (w, h, batch_paths) jobs so decode/encode/save pipeline uniformly.
     batches: list[tuple[int, int, list[Path]]] = []
     for (w, h), paths in reso_groups.items():
         for s in range(0, len(paths), batch_size):

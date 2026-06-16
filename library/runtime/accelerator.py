@@ -144,10 +144,8 @@ def prepare_accelerator(args: argparse.Namespace):
             if args.wandb_api_key is not None:
                 wandb.login(key=args.wandb_api_key)
 
-    # Always "NO": torch.compile is applied per-block by DiT.compile_blocks (the
-    # block loop is the shape-stable hot path; pre/post-block regions vary per
-    # bucket). Letting Accelerate full-compile the model on top of that would
-    # double-compile and trigger graph-break / recompile storms.
+    # Always "NO": torch.compile is applied per-block by DiT.compile_blocks;
+    # letting Accelerate full-compile on top would double-compile and storm recompiles.
     dynamo_backend = "NO"
 
     accelerator = Accelerator(
