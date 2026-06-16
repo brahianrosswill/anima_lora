@@ -21,7 +21,7 @@ Endpoints
     POST /queue/pause       → {ok, paused:true}   (hold queued jobs)
     GET  /jobs/{id}/logs    → SSE: tail of the job's stdout.log
     GET  /events            → SSE: daemon-level lifecycle events
-    GET  /health            → {ok, pid, port, root, active_job, paused}
+    GET  /health            → {ok, pid, port, root, active_job, paused, worker_alive, worker_idle_for}
     POST /shutdown          {kill_jobs} → {ok}
 """
 
@@ -257,7 +257,7 @@ TOOLS = [
     },
     {
         "name": "health",
-        "description": "Daemon liveness: {ok, pid, port, root, active_job, paused}. 'root' is the checkout it belongs to.",
+        "description": "Daemon liveness: {ok, pid, port, root, active_job, paused, worker_alive, worker_idle_for}. 'root' is the checkout it belongs to; worker_idle_for is seconds since the job worker last advanced.",
         "method": "GET",
         "path": "/health",
         "input_schema": {"type": "object", "properties": {}},
@@ -396,6 +396,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "root": str(config.ROOT),
                 "active_job": active.id if active else None,
                 "paused": self.manager.is_paused(),
+                "worker_alive": self.manager.worker_alive(),
+                "worker_idle_for": self.manager.worker_idle_for(),
             }
         )
 

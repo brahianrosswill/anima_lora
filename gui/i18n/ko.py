@@ -459,6 +459,18 @@ STRINGS: dict[str, str] = {
     "settings_theme_dark": "다크",
     "settings_theme_light": "라이트",
     "settings_theme_sepia": "세피아",
+    "settings_debug_mode": "디버그 모드",
+    "settings_debug_mode_tooltip": (
+        "학습 데몬을 DEBUG 레벨로 기록해, 작업이 멈춘 원인을 버그 리포트에 담을 수 "
+        "있게 합니다. 데몬이 다음에 시작될 때 적용됩니다(앱을 닫거나 데몬을 종료한 뒤 "
+        "다시 여세요)."
+    ),
+    "settings_debug_report_desc": (
+        "무한 로딩에 걸렸나요? 디버그 모드를 켜고 증상을 재현한 다음 '디버그 리포트 "
+        "복사'를 눌러 결과를 버그 리포트에 붙여넣어 주세요. 데몬 로그와 최근 작업 "
+        "상태가 함께 담깁니다."
+    ),
+    "settings_debug_copy_report": "디버그 리포트 복사",
     "settings_mcp_header": "MCP 서버 (에이전트 연동)",
     "settings_mcp_desc": "로컬 학습 데몬을 MCP 클라이언트(Claude Code, Claude Desktop 등)에 "
     "노출합니다. 아래 명령을 터미널에서 실행하면 Claude Code에 등록됩니다:",

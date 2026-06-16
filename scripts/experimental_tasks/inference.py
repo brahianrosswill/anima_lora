@@ -265,19 +265,17 @@ def cmd_test_directedit(extra):
 
     from PIL import Image  # noqa: PLC0415
 
-    anima_ckpt = (
-        ROOT / "models" / "captioners" / "anima-tagger-v1" / "model.safetensors"
+    from library.captioning.anima_tagger import (  # noqa: PLC0415
+        DEFAULT_TAGGER_DIR,
+        AnimaTagger,
+        ensure_tagger_checkpoint,
     )
-    if not anima_ckpt.exists():
-        raise SystemExit(
-            f"Anima Tagger checkpoint missing at {anima_ckpt} — "
-            "train via `python -m scripts.anima_tagger.cli`."
-        )
 
+    # Auto-fetch the published checkpoint (sorryhyun/anima-tagger) when absent —
+    # same path every other tagger entry point takes (autotag.py / autotag_server.py).
+    ckpt_dir = ensure_tagger_checkpoint(ROOT / DEFAULT_TAGGER_DIR)
     print(f"  > tagging source: {ref_image}")
-    from library.captioning.anima_tagger import AnimaTagger  # noqa: PLC0415
-
-    tagger = AnimaTagger(ckpt_dir=anima_ckpt.parent)
+    tagger = AnimaTagger(ckpt_dir=ckpt_dir)
 
     src_caption = tagger.predict_caption(Image.open(ref_image))
     if not src_caption:

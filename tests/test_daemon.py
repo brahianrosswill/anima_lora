@@ -178,6 +178,81 @@ def test_serial_queue(daemon):
     assert g1["latest"]["ev"] == "run_end"
 
 
+def _isolate_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "JOBS_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(config, "PIDFILE", tmp_path / "daemon.json")
+    monkeypatch.setattr(config, "DAEMON_LOG", tmp_path / "daemon.log")
+    monkeypatch.setattr(gpu, "gpu_pids", lambda: set())
+
+
+def test_worker_survives_build_exception(tmp_path, monkeypatch):
+    """A job whose _build_cmd raises must fail ERROR without killing the worker;
+    the next queued job still runs. Regression for the silent-worker-death hang
+    that left every later job stuck `queued` forever with no error (the stall
+    watchdog only guards *running* jobs, so a never-launched job spins forever)."""
+    _isolate_state(tmp_path, monkeypatch)
+
+    def build_or_boom(self, job):
+        if job.method == "boom":
+            raise RuntimeError("kaboom while building the command")
+        return _fake_build_cmd(self, job)
+
+    monkeypatch.setattr(JobManager, "_build_cmd", build_or_boom)
+    mgr = JobManager()
+    mgr.start()
+    try:
+        bad = mgr.submit(
+            method="boom", preset="default", methods_subdir=None, start=True
+        )
+        good = mgr.submit(
+            method="lora",
+            preset="default",
+            methods_subdir=None,
+            overrides={"duration": 0.2},
+            start=True,
+        )
+        assert _wait_until(lambda: mgr.get(bad.id).state == "error", timeout=10)
+        assert _wait_until(lambda: mgr.get(good.id).state == "done", timeout=15)
+        assert "launch failed" in (mgr.get(bad.id).error or "")
+        assert mgr.worker_alive() is True
+    finally:
+        mgr.shutdown(kill_jobs=False)
+
+
+def test_worker_survives_prelaunch_exception(tmp_path, monkeypatch):
+    """An exception *before* launch (here in the GPU guard, outside
+    _launch_and_monitor's own try) is caught by the worker-loop crash guard:
+    the job fails ERROR and the worker keeps draining the queue."""
+    _isolate_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(JobManager, "_build_cmd", _fake_build_cmd)
+
+    def boom_guard(self, job, **kw):
+        if job.method == "boom":
+            raise RuntimeError("guard blew up")
+
+    monkeypatch.setattr(JobManager, "_gpu_guard", boom_guard)
+    mgr = JobManager()
+    mgr.start()
+    try:
+        bad = mgr.submit(
+            method="boom", preset="default", methods_subdir=None, start=True
+        )
+        good = mgr.submit(
+            method="lora",
+            preset="default",
+            methods_subdir=None,
+            overrides={"duration": 0.2},
+            start=True,
+        )
+        assert _wait_until(lambda: mgr.get(bad.id).state == "error", timeout=10)
+        assert _wait_until(lambda: mgr.get(good.id).state == "done", timeout=15)
+        assert "unexpected error" in (mgr.get(bad.id).error or "")
+        assert mgr.worker_alive() is True
+    finally:
+        mgr.shutdown(kill_jobs=False)
+
+
 def test_cli_queue_submits_instead_of_launching(daemon, monkeypatch):
     """`train(..., extra=["--queue"])` enqueues on the daemon and returns,
     rather than calling accelerate_launch inline."""

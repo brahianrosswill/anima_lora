@@ -21,8 +21,12 @@ from .server import serve_with_fallback
 
 def _setup_logging() -> None:
     config.ensure_state_dirs()
+    # ANIMA_DEBUG (set by the GUI's "Debug mode" setting before it spawns us)
+    # turns on DEBUG-level logging so daemon.log captures the launch/queue
+    # decisions a bug report needs.
+    level = logging.DEBUG if os.environ.get("ANIMA_DEBUG") else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[logging.StreamHandler(sys.stderr)],  # stderr → daemon.log file
     )

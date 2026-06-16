@@ -404,6 +404,16 @@ STRINGS: dict[str, str] = {
     "settings_theme_dark": "深色",
     "settings_theme_light": "浅色",
     "settings_theme_sepia": "护眼棕",
+    "settings_debug_mode": "调试模式",
+    "settings_debug_mode_tooltip": (
+        "以 DEBUG 级别记录训练守护进程日志，以便在错误报告中包含任务卡住的原因。"
+        "在守护进程下次启动时生效（关闭应用，或停止守护进程后重新打开）。"
+    ),
+    "settings_debug_report_desc": (
+        "卡在无限加载？启用调试模式并复现问题，然后点击“复制调试报告”，把结果粘贴到 "
+        "你的错误报告中——它会打包守护进程日志和最近的任务状态。"
+    ),
+    "settings_debug_copy_report": "复制调试报告",
     "settings_mcp_header": "MCP 服务器（智能体接入）",
     "settings_mcp_desc": "将本地训练守护进程暴露给 MCP 客户端（Claude Code、Claude Desktop 等）。"
     "在终端中运行以下命令即可注册到 Claude Code:",

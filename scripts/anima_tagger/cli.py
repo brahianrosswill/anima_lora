@@ -371,7 +371,7 @@ def parse_args() -> argparse.Namespace:
     # into --feature_cache_dir under post_image_dataset/.
     p.add_argument(
         "--out_dir",
-        default="models/captioners/anima-tagger-v1",
+        default="models/captioners/anima-tagger-v2",
     )
     p.add_argument(
         "--feature_cache_dir",

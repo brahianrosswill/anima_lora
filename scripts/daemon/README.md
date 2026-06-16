@@ -156,9 +156,13 @@ Daemon-level events (job start/finish, etc.), plus `: keepalive` comments while 
 
 ### `GET /health`
 
-`{"ok", "pid", "port", "root", "active_job", "paused"}`. `root` is the checkout
-the daemon belongs to — useful to confirm you're talking to *this* repo's daemon
-and not another checkout's (see `daemon_matches_root` in `client.py`).
+`{"ok", "pid", "port", "root", "active_job", "paused", "worker_alive",
+"worker_idle_for"}`. `root` is the checkout the daemon belongs to — useful to
+confirm you're talking to *this* repo's daemon and not another checkout's (see
+`daemon_matches_root` in `client.py`). `worker_idle_for` is seconds since the job
+worker thread last advanced; a large value while a job sits `queued` means the
+worker is wedged behind a long-running job (normal) or — with `worker_alive`
+false — has died (a bug worth a report).
 
 ### `POST /shutdown`
 

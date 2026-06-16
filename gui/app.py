@@ -11,6 +11,7 @@ from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -259,6 +260,25 @@ class SettingsDialog(QDialog):
         font_row.addStretch()
         prefs_lay.addLayout(font_row)
 
+        # Debug mode: turns on DEBUG-level daemon logging (picked up the next time
+        # the daemon starts) so a bug report can carry the launch/queue decisions.
+        # Pairs with the "Copy debug report" button below.
+        self.debug_check = QCheckBox(t("settings_debug_mode"))
+        self.debug_check.setToolTip(t("settings_debug_mode_tooltip"))
+        self.debug_check.setChecked(bool(get_setting("debug_mode", False)))
+        self.debug_check.toggled.connect(self._toggle_debug)
+        prefs_lay.addWidget(self.debug_check)
+
+        dbg_desc = QLabel(t("settings_debug_report_desc"))
+        dbg_desc.setWordWrap(True)
+        prefs_lay.addWidget(dbg_desc)
+        dbg_row = QHBoxLayout()
+        dbg_row.addStretch()
+        self.debug_report_btn = QPushButton(t("settings_debug_copy_report"))
+        self.debug_report_btn.clicked.connect(self._copy_debug_report)
+        dbg_row.addWidget(self.debug_report_btn)
+        prefs_lay.addLayout(dbg_row)
+
         lay.addWidget(prefs_group)
 
         mcp_group = QGroupBox(t("settings_mcp_header"))
@@ -306,6 +326,30 @@ class SettingsDialog(QDialog):
         QApplication.clipboard().setText(text)
         btn.setText(t("settings_mcp_copied"))
         QTimer.singleShot(1500, lambda: btn.setText(t("settings_mcp_copy")))
+
+    def _toggle_debug(self, checked: bool) -> None:
+        """Persist the flag and reflect it into the live process env. A daemon
+        already running keeps its old log level until it restarts (the report
+        still works); a newly-spawned one inherits ANIMA_DEBUG from here."""
+        set_setting("debug_mode", bool(checked))
+        if checked:
+            os.environ["ANIMA_DEBUG"] = "1"
+        else:
+            os.environ.pop("ANIMA_DEBUG", None)
+
+    def _copy_debug_report(self) -> None:
+        from gui.debug_report import build_debug_report
+
+        try:
+            report = build_debug_report()
+        except Exception as exc:  # noqa: BLE001 — diagnostics must never crash the dialog
+            report = f"failed to build debug report: {exc}"
+        QApplication.clipboard().setText(report)
+        self.debug_report_btn.setText(t("settings_mcp_copied"))
+        QTimer.singleShot(
+            1500,
+            lambda: self.debug_report_btn.setText(t("settings_debug_copy_report")),
+        )
 
     def _change_lang(self, idx: int):
         lang = self.lang_combo.itemData(idx)
@@ -706,6 +750,11 @@ def main():
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
     _dark(app)
+    # Reflect the persisted "Debug mode" setting into the env *before* the daemon
+    # is spawned below, so a freshly-started daemon logs at DEBUG (see
+    # scripts/daemon/__main__._setup_logging).
+    if get_setting("debug_mode", False):
+        os.environ["ANIMA_DEBUG"] = "1"
     # Bring the local training daemon up at launch (idempotent). Best-effort: a failure never blocks the GUI.
     gui_daemon.ensure_daemon_quietly()
     global _WINDOW

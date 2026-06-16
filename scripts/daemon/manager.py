@@ -85,6 +85,10 @@ class JobManager:
         # a running job left alone). Default set so non-opt-in callers run now.
         self._run_gate = threading.Event()
         self._run_gate.set()
+        # Worker liveness: bumped every loop iteration and every monitor poll.
+        # Exposed via /health so a wedged-or-dead worker is observable (the GUI
+        # spinner otherwise looks identical to a healthy long-running job).
+        self._worker_heartbeat = time.time()
         self._worker = threading.Thread(
             target=self._run, name="anima-job-worker", daemon=True
         )
@@ -282,39 +286,83 @@ class JobManager:
 
     def _run(self) -> None:
         # Drain re-attached orphans before touching the queue so the serial
-        # GPU invariant holds across a daemon restart.
+        # GPU invariant holds across a daemon restart. Crash-guarded like the
+        # main loop: a monitor that raises must not strand the queue behind it.
         for job_id in self._adopt:
+            self._worker_heartbeat = time.time()
             job = self.get(job_id)
-            if job is not None:
+            if job is None:
+                continue
+            try:
                 self._monitor(job, popen=None)
+            except Exception:  # noqa: BLE001
+                logger.exception("monitor crashed for adopted job %s", job_id)
+                self._fail_safely(job_id, "daemon monitor crashed; see daemon.log")
         while True:
             job_id = self._queue.get()
+            self._worker_heartbeat = time.time()
             if job_id == _SENTINEL:
                 break
             with self._lock:
                 if self._stopping:
                     break
-                job = self._jobs.get(job_id)
-            if job is None or job.state != STATE_QUEUED:
-                continue
-            if job.stop_requested:
-                self._finalize(job, STATE_STOPPED, detail="cancelled while queued")
-                continue
-            # Hold here while the queue is paused (the GUI's "Start Queue" button
-            # resumes it). Re-validate after waking: the job may have been
-            # cancelled while held, or the daemon may be shutting down.
-            if not self._await_run_gate(job):
-                continue
-            with self._lock:
-                if job.state != STATE_QUEUED or job.stop_requested:
-                    continue
-            # Auto-chained train steps skip the guard: the daemon just ran the
-            # preceding preprocess on this same serial queue, so the only VRAM
-            # in flight is that step's still-releasing allocation, which the
-            # guard would needlessly wait on. Standalone jobs still guard.
-            if not job.from_chain:
-                self._gpu_guard(job)
-            self._launch_and_monitor(job)
+            # One bad job must NEVER kill the worker thread: a dead worker leaves
+            # every later job stuck `queued` forever with no error and no
+            # watchdog (the stall watchdog only guards *running* jobs). Catch
+            # everything, fail the offending job loudly, and keep draining.
+            try:
+                self._process_one(job_id)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "worker crashed handling job %s; queue continues", job_id
+                )
+                self._fail_safely(
+                    job_id, "daemon worker hit an unexpected error; see daemon.log"
+                )
+
+    def _process_one(self, job_id: str) -> None:
+        """Launch + monitor a single dequeued job. Uses ``return`` (not the
+        loop's ``continue``) so it can run under the crash guard in ``_run``."""
+        job = self._jobs.get(job_id)
+        if job is None or job.state != STATE_QUEUED:
+            return
+        if job.stop_requested:
+            self._finalize(job, STATE_STOPPED, detail="cancelled while queued")
+            return
+        # Hold here while the queue is paused (the GUI's "Start Queue" button
+        # resumes it). Re-validate after waking: the job may have been
+        # cancelled while held, or the daemon may be shutting down.
+        if not self._await_run_gate(job):
+            return
+        with self._lock:
+            if job.state != STATE_QUEUED or job.stop_requested:
+                return
+        # Auto-chained train steps skip the guard: the daemon just ran the
+        # preceding preprocess on this same serial queue, so the only VRAM
+        # in flight is that step's still-releasing allocation, which the
+        # guard would needlessly wait on. Standalone jobs still guard.
+        if not job.from_chain:
+            self._gpu_guard(job)
+        self._launch_and_monitor(job)
+
+    def _fail_safely(self, job_id: str, error: str) -> None:
+        """Finalize a job ERROR without ever propagating — the last line of
+        defense so the worker survives even a finalize that itself raises."""
+        job = self.get(job_id)
+        if job is None or job.state in TERMINAL_STATES:
+            return
+        try:
+            self._finalize(job, STATE_ERROR, error=error)
+        except Exception:  # noqa: BLE001
+            logger.exception("failed to finalize crashed job %s", job_id)
+
+    def worker_idle_for(self) -> float:
+        """Seconds since the worker last advanced. Large + a job stuck ``queued``
+        ⇒ the worker is wedged or dead. Exposed via /health."""
+        return round(time.time() - self._worker_heartbeat, 1)
+
+    def worker_alive(self) -> bool:
+        return self._worker.is_alive()
 
     def _await_run_gate(self, job: Job) -> bool:
         """Block while the queue is paused. Returns True when cleared to launch,
@@ -334,9 +382,12 @@ class JobManager:
         return not self._stopping
 
     def _launch_and_monitor(self, job: Job) -> None:
-        cmd, env = self._build_cmd(job)
         d = config.job_dir(job.id)
         try:
+            # _build_cmd runs the full config merge + lazy task-runner import for
+            # train jobs; keep it INSIDE the guard so a bad config / import error
+            # fails just this job instead of crashing the worker.
+            cmd, env = self._build_cmd(job)
             popen = proc.spawn_detached(
                 cmd,
                 cwd=config.ROOT,
@@ -344,7 +395,7 @@ class JobManager:
                 env=env,
             )
         except Exception as exc:  # noqa: BLE001
-            self._finalize(job, STATE_ERROR, error=f"spawn failed: {exc}")
+            self._finalize(job, STATE_ERROR, error=f"launch failed: {exc}")
             return
         with self._lock:
             job.state = STATE_RUNNING
@@ -361,6 +412,7 @@ class JobManager:
         process we spawned (``popen`` reaps the child) and an adopted orphan
         (``popen is None`` → psutil liveness)."""
         while self._proc_running(job, popen):
+            self._worker_heartbeat = time.time()
             if self._kill_on_shutdown:
                 self._kill_job_tree(job)
                 break

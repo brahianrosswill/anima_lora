@@ -472,6 +472,18 @@ STRINGS: dict[str, str] = {
         "Point size of the interface font. Applies immediately; the window "
         "rebuilds when you close Settings so every panel relayouts. Default 10."
     ),
+    "settings_debug_mode": "Debug mode",
+    "settings_debug_mode_tooltip": (
+        "Log the training daemon at DEBUG level so a bug report can include why a "
+        "job hung. Takes effect the next time the daemon starts (close the app, "
+        "or stop the daemon, then reopen)."
+    ),
+    "settings_debug_report_desc": (
+        "Stuck on an endless spinner? Enable Debug mode, reproduce it, then click "
+        "Copy debug report and paste the result into your bug report — it bundles "
+        "the daemon log and recent job states."
+    ),
+    "settings_debug_copy_report": "Copy debug report",
     "settings_mcp_header": "MCP server (agent access)",
     "settings_mcp_desc": "Expose the local training daemon to MCP clients (Claude Code, "
     "Claude Desktop, …). Run this in a terminal to register it with Claude Code:",

@@ -420,6 +420,18 @@ STRINGS: dict[str, str] = {
     "settings_theme_dark": "ダーク",
     "settings_theme_light": "ライト",
     "settings_theme_sepia": "セピア",
+    "settings_debug_mode": "デバッグモード",
+    "settings_debug_mode_tooltip": (
+        "学習デーモンを DEBUG レベルで記録し、ジョブが固まった原因をバグ報告に含め "
+        "られるようにします。次にデーモンが起動したときに反映されます（アプリを閉じ "
+        "るか、デーモンを停止してから開き直してください）。"
+    ),
+    "settings_debug_report_desc": (
+        "無限ローディングで止まっていますか？ デバッグモードを有効にして症状を再現し、"
+        "「デバッグレポートをコピー」を押して結果をバグ報告に貼り付けてください。デー "
+        "モンのログと最近のジョブ状態がまとめられます。"
+    ),
+    "settings_debug_copy_report": "デバッグレポートをコピー",
     "settings_mcp_header": "MCP サーバー（エージェント連携）",
     "settings_mcp_desc": "ローカル学習デーモンを MCP クライアント（Claude Code、Claude Desktop "
     "など）に公開します。以下のコマンドをターミナルで実行すると Claude Code に登録されます:",
