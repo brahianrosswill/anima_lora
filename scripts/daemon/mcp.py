@@ -125,8 +125,6 @@ class MCPServer:
         self._tools = [t for t in TOOLS if t["name"] not in _SKIP] + [TAIL_LOG_TOOL]
         self._by_name = {t["name"]: t for t in self._tools}
 
-    # ----- JSON-RPC dispatch -----
-
     def handle(self, msg: dict) -> Optional[dict]:
         method = msg.get("method")
         msg_id = msg.get("id")
@@ -179,8 +177,6 @@ class MCPServer:
             "serverInfo": SERVER_INFO,
         }
 
-    # ----- tools/call -----
-
     def _call(self, params: dict) -> dict:
         name = params.get("name")
         args = dict(params.get("arguments") or {})
@@ -208,9 +204,8 @@ class MCPServer:
         if name == "tail_log":
             return self._tail_log(args)
         if name == "get_progress":
-            # Handled locally: the generic GET dispatch below drops query
-            # args, and reading the on-disk progress.jsonl directly also
-            # works with the daemon down.
+            # Handled locally: the generic GET dispatch drops query args, and
+            # reading progress.jsonl directly also works with the daemon down.
             return self._get_progress(args)
         if name in _ENSURE:
             client = self._ensure()

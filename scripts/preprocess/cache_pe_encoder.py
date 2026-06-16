@@ -146,7 +146,6 @@ def main() -> None:
 
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
 
-    # Centroid-only: no encoding, just pool existing caches.
     if args.centroid_only:
         centroid_cache_dir = cache_dir or (ROOT / "post_image_dataset" / "lora")
         if not centroid_cache_dir.is_absolute():
@@ -177,10 +176,8 @@ def main() -> None:
         print(f"--dir not found: {data_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # Pre-flight: skip the (slow) vision-encoder load when every sidecar already
-    # exists. A --centroid request still runs (it only reads the caches, no
-    # encoder needed). total == 0 falls through so the original "no images"
-    # error path is preserved.
+    # Pre-flight: skip the encoder load when every sidecar exists (--centroid
+    # still runs — caches only). total == 0 falls through to the "no images" path.
     pending, total = count_pending_pe(
         data_dir, args.encoder, cache_dir=cache_dir, recursive=args.recursive
     )

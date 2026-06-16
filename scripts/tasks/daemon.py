@@ -57,10 +57,9 @@ def cmd_daemon(extra):
     )
 
 
-# The compact per-job view daemon-status prints by default. Full records run
-# ~1KB each (argv, env, paths) and the history grows unboundedly — an agent
-# polling status needs "what's queued/running/failed", not the whole record
-# (GET /jobs/{id} has that). Keep this the summary an LLM can read in one go.
+# Compact per-job view daemon-status prints by default. Full records run ~1KB each
+# and the history grows unboundedly — a polling agent needs "what's queued/running/
+# failed", not the whole record (GET /jobs/{id} has that).
 _STATUS_JOB_FIELDS = (
     "id",
     "method",

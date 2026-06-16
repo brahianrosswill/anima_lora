@@ -116,9 +116,8 @@ def _run_sam(image_dir: Path, out_dir: Path, extra: list[str], config_path: str)
 
 
 def _run_mit(image_dir: Path, out_dir: Path, extra: list[str]) -> None:
-    # MIT_TEXT_THRESHOLD / MIT_DILATE let the GUI's Preprocessing tab tune
-    # the MIT masker without editing this file. Defaults match the script's
-    # own argparse defaults so direct CLI use is unchanged.
+    # MIT_TEXT_THRESHOLD / MIT_DILATE let the GUI tune the MIT masker; defaults
+    # match the script's argparse so direct CLI use is unchanged.
     cmd = [
         PY,
         "scripts/preprocess/generate_masks_mit.py",

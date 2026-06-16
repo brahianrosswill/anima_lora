@@ -66,10 +66,9 @@ def _dc_ac(h: torch.Tensor, ac_tokens: int) -> tuple[torch.Tensor, torch.Tensor]
     adaptive-avg-pooled to ``ac_tokens`` so seeds at any resolution compare.
     """
     B, D = h.shape[0], h.shape[-1]
-    tok = h.reshape(B, -1, D)  # (B, N_tok, D)
-    dc = tok.mean(dim=1)  # (B, D) — the DC component
-    ac = tok - dc.unsqueeze(1)  # (B, N_tok, D), DC removed
-    # pool the token axis to a fixed count (transpose so pool runs over tokens)
+    tok = h.reshape(B, -1, D)
+    dc = tok.mean(dim=1)
+    ac = tok - dc.unsqueeze(1)
     ac = F.adaptive_avg_pool1d(ac.transpose(1, 2), ac_tokens).transpose(1, 2)
     return dc, ac.reshape(B, -1)
 
@@ -195,12 +194,10 @@ def run_diversity_validation(
     X = torch.cat([_dc_ac(x.float(), ac_tokens)[1] for x in x_preds], 0)
     xpred_ac_sim = _mean_pairwise_cos(X)
 
-    # --- Flow-matching reconstruction MSE (the fidelity half) ---
-    # Hooks are removed by now, so these forwards aren't captured. Rectified
-    # flow's velocity target is constant along the straight path: v* = ε − x0,
-    # independent of σ. We evaluate the student at its OWN grid sigmas (the only
-    # σ it's trained to act on), each through its matching per-step head, and
-    # average. Fixed disjoint seed so the number is comparable across passes.
+    # Flow-matching reconstruction MSE (fidelity half). Rectified flow's velocity
+    # target is constant along the straight path (v* = ε − x0, σ-independent), so
+    # evaluate the student at its OWN grid sigmas through each matching per-step
+    # head. Fixed disjoint seed so the number is comparable across passes.
     fm_mse = float("nan")
     if clean_latent is not None:
         x0 = clean_latent.to(device, dtype=dtype)

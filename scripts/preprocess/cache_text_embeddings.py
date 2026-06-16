@@ -130,14 +130,12 @@ def main() -> None:
 
     if pending:
         print(f"{pending}/{total} captions need encoding.")
-    # Load text encoder + tokenizers
     print(f"Loading Qwen3 text encoder from {args.qwen3} ...")
     text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
         args.qwen3, dtype=torch.bfloat16, device=str(device)
     )
     t5_tokenizer = anima_utils.load_t5_tokenizer(args.t5_tokenizer_path)
 
-    # Optionally load LLM adapter for crossattn_emb caching
     llm_adapter = None
     if args.dit:
         print(f"Loading LLM adapter from {args.dit} ...")
@@ -150,11 +148,9 @@ def main() -> None:
     )
     encoding_strategy = AnimaTextEncodingStrategy()
 
-    # Stage the T5("") sidecar while Qwen3 + LLM adapter are already on
-    # device. Every training/distill run reuses this one tiny file as the
-    # CFG-uncond crossattn input -- matches `library/inference/text.py`.
-    # Skipped when ``--dit`` is omitted (only TE outputs cached; no
-    # llm_adapter, so we can't produce crossattn embeddings here).
+    # Stage the T5("") CFG-uncond sidecar while the models are on device; every
+    # training/distill run reuses this file (matches library/inference/text.py).
+    # Skipped without --dit (no llm_adapter → can't produce crossattn here).
     if llm_adapter is not None:
         from library.inference.uncond import (
             DEFAULT_UNCOND_DIR,

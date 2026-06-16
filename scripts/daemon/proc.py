@@ -21,11 +21,6 @@ from typing import Optional
 import psutil
 
 
-# --------------------------------------------------------------------------
-# liveness — identify a process by (pid, create_time), never PID alone
-# --------------------------------------------------------------------------
-
-
 def create_time(pid: int) -> Optional[float]:
     """``psutil.Process(pid).create_time()`` or ``None`` if the PID is gone."""
     try:
@@ -47,11 +42,6 @@ def is_alive(pid: Optional[int], ct: Optional[float], *, tol: float = 1.0) -> bo
     if actual is None:
         return False
     return abs(actual - ct) <= tol
-
-
-# --------------------------------------------------------------------------
-# detached spawn
-# --------------------------------------------------------------------------
 
 
 def spawn_detached(
@@ -105,13 +95,7 @@ def spawn_detached(
     try:
         return subprocess.Popen(cmd, **kwargs)
     finally:
-        # The child has dup'd the fd; our handle is no longer needed.
-        log.close()
-
-
-# --------------------------------------------------------------------------
-# tree teardown
-# --------------------------------------------------------------------------
+        log.close()  # the child has dup'd the fd; our handle is done
 
 
 def kill_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
@@ -145,11 +129,7 @@ def kill_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
             pass
 
 
-# --------------------------------------------------------------------------
 # pidfile — single-daemon lock keyed on (pid, create_time)
-# --------------------------------------------------------------------------
-
-
 def write_pidfile(
     path: Path, *, pid: int, port: int, root: Optional[Path] = None
 ) -> None:

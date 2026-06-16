@@ -80,19 +80,14 @@ class JobManager:
         self._subscribers: set["queue.Queue[dict]"] = set()
         self._stopping = False
         self._kill_on_shutdown = False
-        # Queue run gate: set → the worker launches queued jobs as the GPU frees
-        # (the historical always-on behavior); cleared → the queue is *paused*,
-        # so dequeued jobs are held (still `queued`) until `resume()`. A running
-        # job is never interrupted by a pause — only the *next* launch waits.
-        # Default set so callers that don't opt into hold-then-start (CLI,
-        # ComfyUI node) keep running immediately.
+        # Queue run gate: set → worker launches queued jobs as the GPU frees;
+        # cleared → queue paused (dequeued jobs held `queued` until `resume()`,
+        # a running job left alone). Default set so non-opt-in callers run now.
         self._run_gate = threading.Event()
         self._run_gate.set()
         self._worker = threading.Thread(
             target=self._run, name="anima-job-worker", daemon=True
         )
-
-    # ----- lifecycle -----
 
     def start(self) -> None:
         config.ensure_state_dirs()
@@ -112,8 +107,6 @@ class JobManager:
             self._kill_job_tree(current)
         self._run_gate.set()  # release a worker parked on a paused queue
         self._queue.put(_SENTINEL)  # wake the worker so it can exit
-
-    # ----- submission / query -----
 
     def submit(
         self,
@@ -225,8 +218,6 @@ class JobManager:
         self._broadcast({"ev": "submitted", "job_id": job.id, "state": job.state})
         return job
 
-    # ----- queue run gate (pause / start) -----
-
     def pause(self) -> None:
         """Hold the queue: queued jobs stay ``queued`` until :meth:`resume`. A
         job already running is left alone — only the next launch waits."""
@@ -265,8 +256,6 @@ class JobManager:
             return None
         return round(time.time() - mtime, 1)
 
-    # ----- stop (job-scoped) -----
-
     def stop(self, job_id: Optional[str] = None) -> Optional[Job]:
         """Abort a job. ``None`` → the running job. Queued → cancelled in place;
         running → tree killed, GPU freed. The daemon stays up and advances to
@@ -278,22 +267,18 @@ class JobManager:
             job.stop_requested = True
             state = job.state
             if state == STATE_QUEUED:
-                # Finalize the queued job *now* (under the lock — _finalize takes
-                # the RLock reentrantly) so its cancellation is visible to clients
-                # immediately, instead of whenever the worker happens to dequeue
-                # it. While another job is running the worker is blocked monitoring
-                # it and would never reach this id, so the old lazy path left a
-                # stopped-but-still-"queued" entry the UI couldn't clear. The
-                # worker skips any dequeued id whose state isn't QUEUED, so the
-                # stale FIFO entry is harmless.
+                # Finalize the queued job *now* (reentrant RLock) so its cancel
+                # is visible immediately: the worker is blocked monitoring a
+                # running job and won't reach this id, so the old lazy path left
+                # a stopped-but-"queued" entry the UI couldn't clear. The worker
+                # skips dequeued ids whose state isn't QUEUED → stale FIFO entry
+                # is harmless.
                 self._finalize(job, STATE_STOPPED, detail="cancelled while queued")
                 return job
             job.persist()
         if state == STATE_RUNNING:
             self._kill_job_tree(job)
         return job
-
-    # ----- worker -----
 
     def _run(self) -> None:
         # Drain re-attached orphans before touching the queue so the serial
@@ -492,11 +477,9 @@ class JobManager:
         if rc == 0:
             self._finalize(job, STATE_DONE)
         else:
-            # No run_end and a nonzero/unknown exit — the trainer died before it
-            # could write its terminal event. Classify the code into something
-            # actionable: signal deaths (OOM-killer SIGKILL, CUDA SIGABRT,
-            # segfault) leave NO Python traceback in stdout.log, so the exit
-            # code is the only signal the user gets.
+            # No run_end + nonzero exit: the trainer died before its terminal
+            # event. Classify the code — signal deaths (SIGKILL/OOM, CUDA
+            # SIGABRT, segfault) leave no traceback, so it's the only signal.
             self._finalize(job, STATE_ERROR, error=_classify_exit(rc))
 
     def _finalize(
@@ -515,11 +498,10 @@ class JobManager:
             if detail:
                 job.status_detail = detail
             job.ckpt_path = tail.last_ckpt_path(job.progress_path)
-            # Daemon-managed auto-chain: a successfully finished command job that
-            # carries a chain_train spec enqueues its follow-on training job
-            # right here, so the chain survives the GUI closing. Recorded on this
-            # job (chained_job_id) and persisted in the same write that flips us
-            # to `done`, so a client observing this job sees both atomically.
+            # Auto-chain: a done command job with a chain_train spec enqueues its
+            # follow-on train job here (survives the GUI closing). chained_job_id
+            # persists in the same write that flips us to `done` → atomic for a
+            # client observing this job.
             if (
                 state == STATE_DONE
                 and job.kind == "command"
@@ -545,8 +527,6 @@ class JobManager:
                 )
             job.persist()
         self._broadcast({"ev": "ended", "job_id": job.id, "state": state})
-
-    # ----- gpu guard -----
 
     def _gpu_guard(
         self,
@@ -621,8 +601,6 @@ class JobManager:
         if job.pid is not None:
             proc.kill_tree(job.pid)
 
-    # ----- command building -----
-
     def _build_cmd(self, job: Job) -> tuple[list[str], dict]:
         from .client import venv_python
 
@@ -633,24 +611,18 @@ class JobManager:
         # Windows cp949 → UnicodeEncodeError). Inherited by grandchildren.
         env.setdefault("PYTHONUTF8", "1")
         env.setdefault("PYTHONIOENCODING", "utf-8")
-        # tqdm redraws ride "\r"; at the default 0.1s cadence a cached-dataset
-        # scan writes thousands of bar updates into stdout.log, drowning the
-        # lines a reader actually tails for (warnings, tracebacks). One redraw
-        # per 10s is plenty: the GUI's TqdmProgressTracker only parses the
-        # latest line, and training progress has its own progress.jsonl stream.
+        # tqdm redraws ride "\r"; at 0.1s cadence they drown stdout.log's real
+        # lines (warnings/tracebacks). 10s is plenty — the GUI tracker parses
+        # only the latest line, and training has its own progress.jsonl.
         env.setdefault("TQDM_MININTERVAL", "10")
 
-        # Command jobs (preprocess / mask) are a plain task invocation. Launch
-        # under pythonw.exe (windowless): a uv-venv python.exe is a trampoline
-        # that re-execs the real interpreter, and CREATE_NO_WINDOW doesn't
-        # survive that re-exec — so a python.exe child pops a console window
-        # that, when closed (or torn down with the GUI), kills the job with
-        # STATUS_CONTROL_C_EXIT (0xC000013A). pythonw.exe never allocates a
-        # console; the tqdm progress the GUI tails from stdout.log still lands
-        # because spawn_detached redirects the child's stdout/stderr to that
-        # file (a real handle, not an inherited console). No --progress_jsonl
-        # injection — these emit tqdm to stdout and the monitor finalizes them
-        # on exit code (no run_end event).
+        # Command jobs (preprocess / mask): a plain task invocation under
+        # pythonw.exe (windowless). A uv-venv python.exe re-execs the real
+        # interpreter and CREATE_NO_WINDOW doesn't survive that, so it pops a
+        # console whose close kills the job with STATUS_CONTROL_C_EXIT
+        # (0xC000013A); pythonw never allocates one (stdout still lands via
+        # spawn_detached's file redirect). No --progress_jsonl — these emit tqdm
+        # to stdout and finalize on exit code (no run_end event).
         if job.kind == "command":
             env.update(job.extra_env or {})
             return [venv_python(windowless=True), *job.argv], env
@@ -661,13 +633,10 @@ class JobManager:
 
         overrides = dict(job.overrides or {})
         extra = list(job.extra or [])
-        # Translate dict overrides into --key value pairs unless already present.
-        # NOTE: most train.py bool flags are `store_true`, so a True override
-        # emits `--flag` but a False one can only be expressed by *omitting* it —
-        # train.py then keeps whatever the base→preset→method chain set. That's
-        # fine for the ComfyUI node's overrides (the only preset that turns these
-        # bools on is low_vram, which it never pairs with a False override), but
-        # a caller can't force a preset-on flag back off through this path.
+        # Dict overrides → --key value (unless already in extra). NOTE: train.py
+        # bools are `store_true`, so a True override emits `--flag` but a False
+        # one can only be expressed by omitting it (train.py then keeps the
+        # chain's value) — a caller can't force a preset-on flag back off here.
         for key, val in overrides.items():
             flag = f"--{key}"
             if flag in extra:
@@ -692,15 +661,11 @@ class JobManager:
                 methods_subdir=job.methods_subdir,
                 extra=extra,
             )
-        # Windowless interpreter for the same reason as command jobs above: the
-        # train.py worker (and, under ANIMA_ACCELERATE_LAUNCH, the accelerate
-        # launcher parent + the workers it re-spawns via sys.executable) all run
-        # as pythonw.exe, so nothing pops a closable console that would
-        # CTRL_CLOSE the run.
+        # Windowless interpreter for the same reason as command jobs above, so
+        # nothing in the train tree (incl. accelerate-launched workers) pops a
+        # closable console that would CTRL_CLOSE the run.
         cmd = build_launch_cmd(*args, python_exe=venv_python(windowless=True))
         return cmd, env
-
-    # ----- reconciliation (boot) -----
 
     def _reconcile(self) -> None:
         self._jobs = load_all()
@@ -721,8 +686,6 @@ class JobManager:
             elif job.state == STATE_QUEUED:
                 self._queue.put(job.id)
 
-    # ----- helpers -----
-
     def _current_running_locked(self) -> Optional[Job]:
         for job in self._jobs.values():
             if job.state == STATE_RUNNING:
@@ -733,8 +696,6 @@ class JobManager:
         """The currently-running job, if any (lock-safe public accessor)."""
         with self._lock:
             return self._current_running_locked()
-
-    # ----- pub/sub for SSE -----
 
     def subscribe(self) -> "queue.Queue[dict]":
         q: "queue.Queue[dict]" = queue.Queue(maxsize=256)

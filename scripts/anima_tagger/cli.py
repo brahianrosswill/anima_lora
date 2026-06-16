@@ -33,8 +33,8 @@ from pathlib import Path
 from library.env import load_dotenv  # noqa: E402
 from library.log import setup_logging  # noqa: E402
 
-# Pull CAPTION_CORPUS_DIR (and any other overrides) from anima_lora/.env
-# before argparse builds defaults. CLI flags still win over env values.
+# Pull CAPTION_CORPUS_DIR from anima_lora/.env before argparse builds defaults;
+# CLI flags still win over env values.
 load_dotenv()
 
 setup_logging()
@@ -103,9 +103,7 @@ def parse_args() -> argparse.Namespace:
         "for more GPU throughput / lower for less VRAM (default: 8).",
     )
 
-    # Vocab-build inputs. All three default to subpaths of
-    # ``$CAPTION_CORPUS_DIR``; pass --caption_roots / --tag_cache / --rules
-    # explicitly to override.
+    # Vocab-build inputs default to subpaths of ``$CAPTION_CORPUS_DIR``.
     raw_default = _corpus_default("retrieved")
     curated_default = _corpus_default("selected")
     p.add_argument(
@@ -142,7 +140,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val_frac", type=float, default=0.05)
     p.add_argument("--seed", type=int, default=42)
 
-    # Train-mode knobs.
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch_size", type=int, default=96)
     p.add_argument(
@@ -209,11 +206,8 @@ def parse_args() -> argparse.Namespace:
         "shards are present.",
     )
 
-    # Pool architecture. ``map`` = K learnable queries attend over PE patch
-    # tokens (CLS + mean concatenated as auxiliary channels). ``mean`` =
-    # legacy mean-pool path (head consumes a pre-pooled [B, d_enc] feature).
-    # build_features / train / calibrate all read --pool_kind to pick the
-    # cache subdir and the head shape.
+    # build_features / train / calibrate all read --pool_kind to pick the cache
+    # subdir and head shape — they must agree.
     p.add_argument(
         "--pool_kind",
         choices=["map", "mean"],
@@ -261,10 +255,8 @@ def parse_args() -> argparse.Namespace:
         "(default on — gives the legacy baseline as a residual).",
     )
 
-    # Aux encoder MAP-pool knobs. Only consulted when --aux_encoder is set;
-    # otherwise inert. Defaults mirror the main pool — change per-encoder
-    # only when there's a reason (e.g. PE-Spatial's d=768 admits more head
-    # divisors so a bigger n_heads_aux is fine if it pays off in F1).
+    # Aux encoder MAP-pool knobs (PE-Spatial's d=768 admits more head divisors,
+    # so a bigger n_heads_aux is fine).
     p.add_argument(
         "--pool_n_queries_aux",
         type=int,
@@ -306,7 +298,6 @@ def parse_args() -> argparse.Namespace:
         "if the manifest carries labels).",
     )
 
-    # Predict mode: single-image debug entry.
     p.add_argument(
         "--image",
         default=None,
@@ -324,8 +315,8 @@ def parse_args() -> argparse.Namespace:
         help="Predict mode: number of top kept tags to show with --show_scores.",
     )
 
-    # scan_role_markers mode: rank character-typed tags by solo co-occurrence
-    # (high ratio → likely a class/affiliation marker mis-typed as character).
+    # scan_role_markers: high solo co-occurrence ratio → likely a class marker
+    # mis-typed as character.
     p.add_argument(
         "--min_solo",
         type=int,
@@ -376,9 +367,8 @@ def parse_args() -> argparse.Namespace:
         "ready to paste into tag_rules.yaml.",
     )
 
-    # Output. --out_dir holds the model checkpoint + vocab; the bulky
-    # dataset-derived feature caches are decoupled into --feature_cache_dir so
-    # they sit alongside the other dataset caches under post_image_dataset/.
+    # --out_dir holds the checkpoint + vocab; bulky feature caches are decoupled
+    # into --feature_cache_dir under post_image_dataset/.
     p.add_argument(
         "--out_dir",
         default="models/captioners/anima-tagger-v1",
@@ -414,9 +404,8 @@ def parse_args() -> argparse.Namespace:
                 "to anima_lora/.env, or pass the paths via CLI flags."
             )
 
-    # Dual encoder is mandatory for the flag-driven modes. calibrate / predict
-    # read encoder + aux config from out_dir/config.json, so they don't apply
-    # this check.
+    # Dual encoder is mandatory here; calibrate / predict read it from
+    # config.json so they skip this check.
     if args.mode in ("train", "build_features"):
         if not args.aux_encoder:
             raise SystemExit(

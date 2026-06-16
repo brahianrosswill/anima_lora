@@ -7,10 +7,8 @@ import os
 from ._common import PY, _path, run
 
 
-# Subfolders under the source dir are walked by default — matches the
-# `recursive = true` subset default in configs/base.toml. Stems must stay
-# unique across the tree (cache filenames are stem-keyed and flat). Pass
-# `--no_recursive` (or edit configs) to opt out.
+# Subfolders are walked by default (matches base.toml's `recursive = true`).
+# Stems must stay unique across the tree — cache filenames are stem-keyed and flat.
 def _min_pixels_args() -> list[str]:
     """``--min_pixels <N>`` derived from the variant TOML's
     ``drop_lowres_images`` + ``min_pixels`` keys (resolved through the same
@@ -177,7 +175,6 @@ def _pop_target_res(extra) -> list[str]:
     it = iter(extra)
     for tok in it:
         if tok == "--target_res":
-            # drop the flag, then drop trailing int values until the next flag
             for nxt in it:
                 if nxt.startswith("--"):
                     cleaned.append(nxt)
@@ -207,7 +204,6 @@ def _resolve_lowres_filter(extra) -> tuple[list[str], list[str]]:
     drop = "--drop_lowres" in cleaned
     cleaned = [a for a in cleaned if a not in ("--no_drop_lowres", "--drop_lowres")]
 
-    # An explicit threshold in ARGS is authoritative; leave it in place.
     if "--min_pixels" in cleaned:
         return [], cleaned
     if no_drop:  # disable wins over enable when both are passed
@@ -248,8 +244,7 @@ def cmd_preprocess_reconcile(extra):
     regenerates only the images whose bucket moved.
     """
     # _target_res_args returns [] for a bare [1024]/absent config AND when ARGS
-    # already carries --target_res. Inject the 1024 default only in the former
-    # case (no explicit flag in ARGS) so we never duplicate it.
+    # already carries --target_res. Inject the 1024 default only in the former case.
     tr_args = _target_res_args(extra)
     if not tr_args and "--target_res" not in extra:
         tr_args = ["--target_res", "1024"]
@@ -295,10 +290,8 @@ def cmd_preprocess_vae(extra):
 
 
 def cmd_preprocess_te(extra):
-    # CAPTION_SHUFFLE_VARIANTS / CAPTION_TAG_DROPOUT_RATE let the GUI's
-    # Preprocessing tab control these without editing this file. Defaults
-    # match the historical hardcoded values so non-GUI invocations are
-    # unchanged.
+    # CAPTION_SHUFFLE_VARIANTS / CAPTION_TAG_DROPOUT_RATE let the GUI tune these;
+    # defaults match the historical values so non-GUI invocations are unchanged.
     shuffle_variants = os.environ.get("CAPTION_SHUFFLE_VARIANTS", "4")
     tag_dropout_rate = os.environ.get("CAPTION_TAG_DROPOUT_RATE", "0.1")
     mp_args, extra = _resolve_lowres_filter(extra)
@@ -372,9 +365,6 @@ def cmd_preprocess_pe(extra):
             "--encoder",
             "pe",
             "--recursive",
-            # Emit the dataset-mean PE centroid sidecar after the cache pass so
-            # IP-Adapter's mean-centering (ip_centroid_path) and DCW v4 have it
-            # without a separate --centroid_only run.
             "--centroid",
             *extra,
         ]
@@ -429,51 +419,38 @@ def cmd_caption_index(extra):
     )
 
 
-# Same default the build_caption_index.py CLI uses. `cmd_preprocess` auto-fetches
-# this (~0.7 MB) vocab on demand when it's absent: GUI users reach preprocess
-# without ever running `make download-models` (via `download-tagger`), and the
-# caption index it gates is a hard requirement for soft-tokens contrastive
-# training (train.py raises FileNotFoundError without it). The fetch is
-# best-effort — a partial/offline setup that can't pull it falls through to the
-# skip path rather than aborting the already-done GPU work.
+# `cmd_preprocess` auto-fetches this (~0.7 MB) vocab on demand: the caption index
+# it gates is a hard requirement for soft-tokens contrastive training (train.py
+# raises FileNotFoundError without it). Fetch is best-effort.
 _CAPTION_INDEX_VOCAB = "models/captioners/anima-tagger-v2/vocab.json"
 
 
 def cmd_preprocess(extra):
-    # PE features are NOT cached here by default — only CMMD validation / DCW v4
-    # need them, and those paths chain `preprocess-pe` explicitly. Leaving PE out
-    # keeps the default LoRA preprocess fast on machines that won't use the vision
-    # tower. The one exception is a `use_repa=true` variant in scope: REPA aligns
-    # against PE features every step, so they're chained in at the end (see the
-    # `_repa_pe_encoder()` block below).
+    # PE features are NOT cached here by default (CMMD/DCW v4 chain `preprocess-pe`
+    # explicitly) — keeps the default LoRA preprocess fast. Exception: a
+    # `use_repa=true` variant aligns against PE every step, so they're chained at
+    # the end (see the `_repa_pe_encoder()` block below).
     #
-    # Fail fast BEFORE any GPU work: if this is a use_repa=true auto-chain whose
-    # REPA vision checkpoint isn't on disk, the PE step at the end would stall on
-    # a silent download inside the daemon and wedge the serial queue. Surface an
-    # actionable error in seconds instead of after the full resize/VAE/TE pass.
+    # Fail fast BEFORE any GPU work: a use_repa=true auto-chain with a missing REPA
+    # checkpoint would stall the PE step on a silent daemon download and wedge the
+    # serial queue. Surface an actionable error instead of after the full pass.
     encoder = _repa_pe_encoder()
     if encoder is not None:
         _require_repa_encoder_model(encoder)
     cmd_preprocess_resize(extra)
-    # The VAE/TE steps read on-disk shapes — strip the low-res convenience flags
-    # AND the resize-only --target_res so their argparse never sees an arg it
-    # doesn't define. (resize pops lowres itself via _resolve_lowres_filter.)
+    # VAE/TE steps read on-disk shapes — strip the low-res convenience flags AND
+    # the resize-only --target_res so their argparse never sees an undefined arg.
     downstream = _pop_target_res(extra)
     _, vae_extra = _resolve_lowres_filter(downstream)
     cmd_preprocess_vae(vae_extra)
     cmd_preprocess_te(downstream)
-    # Build the method-agnostic caption index (pure data, no GPU, ~seconds) as a
-    # free by-product — it's consumed by the IP-Adapter pair sampler, artist
-    # balancing, dataset analytics, AND soft-tokens contrastive training (which
-    # hard-errors without it). Best-effort: the lowres/resize flags in `extra`
-    # aren't part of its argparse, so pass none.
+    # Caption index as a free by-product — consumed by the IP-Adapter pair sampler,
+    # artist balancing, analytics, AND soft-tokens (which hard-errors without it).
     vocab = _path("caption_index_vocab", _CAPTION_INDEX_VOCAB)
     if not os.path.exists(vocab):
-        # GUI users reach preprocess without running `make download-models`, so
-        # fetch the tiny tagger vocab on demand. Catch broadly: run() exits via
-        # SystemExit on a non-zero `hf`, and a missing `hf` binary raises OSError
-        # — either way fall through to the skip below instead of aborting the
-        # already-done GPU work.
+        # GUI users reach preprocess without `make download-models`, so fetch the
+        # tiny tagger vocab on demand. Catch broadly (SystemExit from run(), OSError
+        # from a missing `hf`) so we skip rather than abort the already-done GPU work.
         print("  [preprocess] tagger vocab missing; fetching it for caption-index")
         try:
             from .downloads import cmd_download_tagger
@@ -491,13 +468,9 @@ def cmd_preprocess(extra):
             f"(soft-tokens contrastive training needs it)."
         )
 
-    # REPA arm: when the variant config in scope has `use_repa=true`, cache the
-    # vision-encoder PE sidecars REPA aligns against in this same pass. train.py
-    # errors out asking for them otherwise; chaining here means the ConfigTab
-    # "Train" auto-preprocess (and `make preprocess METHOD=<repa-variant>`)
-    # builds them without a second manual step. Idempotent — cache_pe_encoder.py
-    # skips images already cached. PE-less variants never pay for the tower.
-    # `encoder` was resolved (and its checkpoint required) at the top.
+    # REPA arm: a `use_repa=true` variant needs the PE sidecars REPA aligns against
+    # (train.py errors without them); chaining here builds them in one pass. `encoder`
+    # was resolved (and its checkpoint required) at the top.
     if encoder is not None:
         print(f"  [preprocess] use_repa=true → caching REPA PE features ({encoder})")
         if encoder == "pe_spatial":
@@ -573,12 +546,9 @@ def cmd_preprocess_config(extra):
             "preprocess-config requires --dataset_config <path> and --src <dir>"
         )
 
-    # A real-time scanner (e.g. Windows Defender) often holds a brief exclusive
-    # lock on a *just-created* file, surfaced as PermissionError [Errno 13] on
-    # Windows. The ComfyUI trainer node writes this config milliseconds before
-    # the daemon's preprocess job opens it, so retry through that transient lock
-    # rather than failing the whole chain. A genuinely unreadable file still
-    # raises after the budget is spent.
+    # Retry through a transient PermissionError: a real-time scanner (Windows
+    # Defender) briefly locks the just-created config the ComfyUI trainer node
+    # writes milliseconds before the daemon's preprocess job opens it.
     import time
 
     last_err: OSError | None = None
@@ -606,10 +576,9 @@ def cmd_preprocess_config(extra):
     for sub in subsets:
         image_dir = sub["image_dir"]
         cache_dir = sub.get("cache_dir") or image_dir
-        # 1) bucket-resize originals → image_dir. cache_latents.py keys caches
-        #    by the on-disk (native) size, so the resized size must already be
-        #    the constant-token bucket the trainer will select. Captions stay
-        #    in --src (TE caching reads them there).
+        # 1) bucket-resize originals → image_dir. cache_latents.py keys caches by
+        #    the on-disk size, so the resized size must already be the constant-token
+        #    bucket the trainer selects. Captions stay in --src (TE reads them there).
         run(
             [
                 PY,
@@ -627,7 +596,6 @@ def cmd_preprocess_config(extra):
                 *rest,
             ]
         )
-        # 2) VAE latents → cache_dir
         run(
             [
                 PY,
@@ -645,7 +613,7 @@ def cmd_preprocess_config(extra):
                 "--recursive",
             ]
         )
-        # 3) text embeddings (captions read from --src) → cache_dir
+        # 3) text embeddings — captions read from --src
         run(
             [
                 PY,

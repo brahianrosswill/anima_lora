@@ -132,9 +132,6 @@ def _save_cfg_dict(args, cfg, d_in, best_f1):
     }
 
 
-# ── dual-encoder bucket-grouped DataLoader path ──────────────────────────
-
-
 def _drop_packed_sidecars(datasets, logger) -> None:
     """Delete the per-stem token sidecars now that the mmap shards hold the
     same data. Verifies every live shard exists + is non-empty FIRST, so a
@@ -142,7 +139,7 @@ def _drop_packed_sidecars(datasets, logger) -> None:
     redundant sidecars than lose both copies). DESTRUCTIVE — repacking a
     different split later needs `--mode build_features` to re-encode.
     """
-    # Guard: all shards referenced by either split must be present.
+    # Guard: every live shard must exist + be non-empty before any unlink.
     for ds in datasets:
         for side, dirpath in ds._pack_dirs.items():
             row_map = ds._pack_main if side == "main" else ds._pack_aux
@@ -153,8 +150,7 @@ def _drop_packed_sidecars(datasets, logger) -> None:
                         "skipping sidecar drop — shard missing/empty: %s", shard
                     )
                     return
-    # Sidecar Paths live on the dataset (self.paths / self.paths_aux). Both
-    # splits share the same cache dirs, so union + dedup before unlinking.
+    # Both splits share cache dirs, so union + dedup before unlinking.
     sidecars = set()
     for ds in datasets:
         sidecars.update(Path(p) for p in ds.paths)
@@ -337,9 +333,8 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         vocab_dict = json.load(f)
     spec = get_encoder_info(args.encoder).bucket_spec
 
-    # Per-side pool layout. Aux cache_dir is keyed on its own pool_kind so
-    # mixed configs (mean main + map aux) read from tokens-pe_spatial/ while the
-    # main side reads from pooled-pe/ or tokens-pe/ (under the feature root).
+    # Aux cache_dir is keyed on its own pool_kind so mixed configs read from
+    # tokens-pe_spatial/ while the main side reads pooled-pe/ or tokens-pe/.
     pool_kind_aux = args.pool_kind_aux
     spec_aux = (
         get_encoder_info(aux_encoder).bucket_spec if pool_kind_aux == "map" else None
@@ -352,10 +347,9 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
             f"--encoder {args.encoder} --aux_encoder {aux_encoder} "
             f"--pool_kind_aux {pool_kind_aux}` first."
         )
-    # Consolidate the per-stem sidecars into per-bucket mmap shards so the
-    # loader stops opening ~30k tiny files per epoch (see CachedDualDataset
-    # docstring). Built once under <feature_root>/packed; reused across runs
-    # while the split is unchanged.
+    # Consolidate per-stem sidecars into per-bucket mmap shards so the loader
+    # stops opening ~30k tiny files per epoch. Built once under
+    # <feature_root>/packed; reused across runs while the split is unchanged.
     pack_root = feature_root / "packed"
     ram_resident = bool(getattr(args, "ram_resident", True))
     train_ds = CachedDualDataset(
@@ -382,11 +376,9 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         pack_root=pack_root,
         ram_resident=ram_resident,
     )
-    # Shard dirs are keyed by a hash of their stem list, so a changed split
-    # (new images / different val_frac / seed) builds fresh dirs and orphans
-    # the old ~40 GB. train+val are the only live splits this run, so prune any
-    # other packed-shard dir to keep disk bounded to one split's worth. Only
-    # touches <feature_root>/packed/ — never the per-stem sidecars.
+    # Shard dirs are hash-keyed on the stem list, so a changed split orphans the
+    # old ~40 GB; prune any non-live packed-shard dir to bound disk to one
+    # split. Only touches <feature_root>/packed/ — never the per-stem sidecars.
     live_dirs = {d for ds in (train_ds, val_ds) for d in ds._pack_dirs.values()}
     if pack_root.exists():
         for child in pack_root.iterdir():
@@ -488,8 +480,8 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
     else:
         logger.info("no typed groups — pure BCE on every tag")
 
-    # RAM-resident reads hit no disk, so a full global shuffle is free
-    # (chunk_size=0); the on-disk mmap path instead wants chunked locality.
+    # RAM-resident reads hit no disk → full global shuffle is free (chunk_size=0);
+    # the on-disk mmap path wants chunked locality instead.
     chunk_size = 0 if ram_resident else int(getattr(args, "shuffle_chunk_size", 2048))
     train_sampler = BucketBatchSampler(
         train_ds.buckets,
@@ -503,10 +495,8 @@ def _train_cached_dual(args: argparse.Namespace) -> None:
         val_ds.buckets, batch_size=args.batch_size, seed=args.seed, shuffle=False
     )
     collate_fn = collate_dual_token_batch
-    # RAM-resident serving: every batch is an in-memory index + stack, so there's
-    # no disk IO for DataLoader workers to hide — running inline (num_workers=0)
-    # avoids forking the ~40 GB resident set and pickling each batch over a pipe.
-    # The on-disk mmap path keeps a few persistent prefetch workers.
+    # RAM-resident serving has no disk IO to hide, so run inline (num_workers=0)
+    # to avoid forking the ~40 GB resident set; the mmap path keeps prefetch workers.
     if ram_resident:
         n_train_workers = 0
     else:

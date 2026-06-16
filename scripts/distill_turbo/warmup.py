@@ -79,7 +79,6 @@ def run_fake_warmup(
         eps = torch.randn_like(latents)
         t_e = t.view(B, 1, 1, 1)
         x_t = (1.0 - t_e) * latents + t_e * eps
-        # Student (init) x_pred — no grad: the student is not trained here.
         with torch.no_grad():
             v_student = forward_fn(
                 "student", x_t, t, crossattn_emb, no_grad=True

@@ -76,8 +76,7 @@ def main() -> None:
     _emit(READY)
     logger.info("autotag worker ready (device=%s, ckpt=%s)", device, ckpt_dir)
 
-    # readline() (not `for line in sys.stdin`) so each request is served the
-    # moment it arrives — iterating the file object read-aheads and would block
+    # readline() (not `for line in sys.stdin`): iterating read-aheads and blocks
     # until the buffer fills, stalling the interactive protocol.
     while True:
         raw = sys.stdin.readline()

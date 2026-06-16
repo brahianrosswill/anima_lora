@@ -289,8 +289,6 @@ class _Handler(BaseHTTPRequestHandler):
     def manager(self) -> JobManager:
         return self.server.manager  # type: ignore[attr-defined]
 
-    # ----- low-level write helpers -----
-
     def _send_json(self, obj, status: int = 200) -> None:
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
@@ -340,8 +338,6 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args) -> None:  # quieter than default stderr spam
         logger.debug("http: " + fmt, *args)
 
-    # ----- routing -----
-
     def do_GET(self) -> None:  # noqa: N802
         path, _, query = self.path.partition("?")
         if path in ("/", "/readme"):
@@ -380,8 +376,6 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "not found", "path": path}, 404)
 
-    # ----- handlers -----
-
     def _handle_readme(self) -> None:
         try:
             text = _README.read_text(encoding="utf-8")
@@ -407,8 +401,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _handle_submit(self) -> None:
         body = self._read_json()
-        # ``start`` (optional): True → run now (resume the queue), False → add to
-        # the queue but hold it paused, omitted/None → leave the gate as-is.
+        # start: True → run now (resume queue), False → enqueue paused, None → as-is.
         start = body.get("start")
         if (body.get("kind") or "train") == "command":
             argv = body.get("argv")

@@ -19,16 +19,12 @@ import toml
 
 from ._common import PY, ROOT, run, train
 
-# EasyControl control-task projects are *descriptor-driven*: each is a single
-# self-contained ``configs/easycontrol/<EASYADAPTER>.toml`` (top-level ``name``
-# slug + ``[staging]`` / ``[preprocess]`` / ``[training]`` knob tables + a
-# ``[general]`` / ``[[datasets]]`` blueprint tail) consumed by the shared
-# machinery below — the same shape for ``near_twins`` and ``colorize``. They all
-# train the base ``easycontrol`` method with the descriptor's ``[training]`` table
-# folded in as CLI overrides. Selected at runtime via the EASYADAPTER env var
-# (exported by the Makefile), e.g. ``make easycontrol EASYADAPTER=colorize``. The
-# per-adapter staging/preprocess command bodies are registered in
-# ``_EASY_ADAPTERS`` (defined below, after those functions).
+# EasyControl control-task projects are descriptor-driven: a self-contained
+# ``configs/easycontrol/<EASYADAPTER>.toml`` (``name`` slug + [staging]/[preprocess]/
+# [training] knob tables + a [[datasets]] blueprint tail) selected via the
+# EASYADAPTER env var. All train the base ``easycontrol`` method with the
+# descriptor's [training] table folded in as CLI overrides. Per-adapter
+# staging/preprocess bodies are registered in ``_EASY_ADAPTERS`` (below).
 
 
 def _easyadapter() -> str:
@@ -163,20 +159,17 @@ def _easy_train_extra(adapter: str, extra) -> list[str]:
             f"`make easycontrol-staging EASYADAPTER={adapter}` first."
         )
 
-    # Resolve the blueprint's subset paths against the current `name` slug
-    # (interpolate the `{name}` placeholder; retarget any baked-in legacy slug),
-    # so a `name` change reroutes training. ``text_cache_dir`` rides the slug too
-    # (colorize redirects the TE cache; near_twins leaves it unset).
+    # Resolve subset paths against the current `name` slug so a `name` change
+    # reroutes training. ``text_cache_dir`` rides the slug too (colorize redirects
+    # the TE cache; near_twins leaves it unset).
     for ds in blueprint.get("datasets", []):
         for s in ds.get("subsets", []):
             for key in ("image_dir", "cache_dir", "cond_cache_dir", "text_cache_dir"):
                 if key in s:
                     s[key] = _resolve_blueprint_path(s[key], name)
 
-    # Write the blueprint-only dataset config under the slug base dir (a gitignored
-    # data dir that exists once preprocess has run). Regenerated each invocation so
-    # it tracks the source file, and stable-pathed so the --queue daemon path can
-    # re-read it later.
+    # Write the blueprint-only dataset config under the slug base dir. Stable-pathed
+    # so the --queue daemon path can re-read it later, regenerated each invocation.
     base_dir = ROOT / base
     base_dir.mkdir(parents=True, exist_ok=True)
     ds_path = base_dir / "dataset_config.toml"
@@ -188,8 +181,7 @@ def _easy_train_extra(adapter: str, extra) -> list[str]:
         encoding="utf-8",
     )
 
-    # output_name defaults to the name-derived slug so it tracks `name` without a
-    # manual [training] entry; an explicit [training].output_name still wins.
+    # output_name defaults to the name-derived slug; an explicit [training].output_name wins.
     training = dict(cfg.get("training") or {})
     training.setdefault("output_name", f"anima_easycontrol_{name}")
 
@@ -257,10 +249,8 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     resized = pp.get("resized_dir", f"{base}/resized")
     cache = pp.get("cache_dir", f"{base}/cache")
     recursive = ["--recursive"] if pp.get("recursive", True) else []
-    # Bucket tiers: the descriptor's [preprocess].target_res wins, else fall back
-    # to base.toml's target_res (the same merged base→preset→method chain the main
-    # `make preprocess` reads) so this tracks the shared tier contract; final
-    # fallback [1024] keeps it working with no config at all.
+    # Bucket tiers: descriptor's [preprocess].target_res wins, else base.toml's
+    # target_res (tracks the shared tier contract); final fallback [1024].
     target_res = pp.get("target_res")
     if target_res is None:
         from ._common import _path_overrides
@@ -272,9 +262,8 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
         ["--target_res", *[str(e) for e in target_res]] if target_res else []
     )
 
-    # 1. Resize the native-res staging tree into constant-token buckets. min_pixels
-    #    defaults to 0 here (not 0.5MP) so a small member can't be dropped and
-    #    orphan its pair partner. Captions ride along (copy_captions default).
+    # 1. Resize staging tree into buckets. min_pixels defaults to 0 (not 0.5MP) so a
+    #    small member can't be dropped and orphan its pair partner.
     run(
         [
             PY,
@@ -289,7 +278,6 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
             *recursive,
         ]
     )
-    # 2. VAE latents from the bucket-resized tree.
     run(
         [
             PY,
@@ -307,7 +295,7 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
             *recursive,
         ]
     )
-    # 3. Text-encoder outputs from the same tree (captions copied during resize).
+    # Text-encoder outputs (captions copied during resize).
     run(
         [
             PY,
@@ -327,13 +315,8 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
             *recursive,
         ]
     )
-    # 3.5. Optional vision-encoder sidecars for the REPA auxiliary loss
-    #      ([training] network_args "use_repa=1"). Gated on [preprocess]
-    #      pe_encoder so plain runs skip the encoder pass. Writes
-    #      {stem}_anima_<encoder>.safetensors next to the TE caches (where
-    #      datasets._try_load_repa_pe resolves them); idempotent (pre-skips
-    #      cached). Encodes the _tags twins too — harmless, only _no_tags
-    #      targets are dataset items.
+    # Optional REPA vision-encoder sidecars, gated on [preprocess] pe_encoder so
+    # plain runs skip the encoder pass. Idempotent (pre-skips cached).
     pe_encoder = pp.get("pe_encoder")
     if pe_encoder:
         run(
@@ -349,7 +332,7 @@ def _near_twins_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
                 *recursive,
             ]
         )
-    # 4. Pair the cond/ tree (the _tags reference latent for each _no_tags target).
+    # Pair the cond/ tree (the _tags reference latent for each _no_tags target).
     _near_twins_build_cond(pp, base)
 
 
@@ -489,16 +472,10 @@ def _colorize_preprocess(adapter: str, cfg: dict, base: str, extra) -> None:
     )
 
 
-# Per-adapter materialization command bodies. The training path is generic
-# (``_easy_train_extra`` folds the descriptor's blueprint + [training] table onto
-# the base easycontrol method); only these two steps differ per adapter:
-#   stage      — data generation that materializes the training/condition tree
-#   preprocess — VAE/TE caching over that tree
-# Both receive ``(adapter, cfg, base, extra)`` (adapter = the registry key / the
-# ``configs/easycontrol/<adapter>.toml`` stem). ``sanitize`` is the text/bubble-
-# removal project; it reuses the near-twin miner stage/preprocess wholesale (same
-# pair-mining pipeline, different discriminator tags) — the only per-adapter bit is
-# the descriptor file the miner reads, keyed off ``adapter``.
+# Per-adapter materialization bodies (training is generic via _easy_train_extra);
+# only `stage` (data gen) + `preprocess` (VAE/TE caching) differ per adapter. Both
+# receive ``(adapter, cfg, base, extra)``. ``sanitize`` reuses the near-twin miner
+# wholesale (same pipeline, different discriminator tags via its descriptor file).
 _EASY_ADAPTERS = {
     "near_twins": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},
     "sanitize": {"stage": _near_twins_stage, "preprocess": _near_twins_preprocess},

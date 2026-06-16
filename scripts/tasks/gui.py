@@ -37,8 +37,7 @@ def _ensure_shortcut_icon() -> Path | None:
         img = Image.open(src)
         if img.mode != "RGBA":
             img = img.convert("RGBA")
-        # Multi-resolution ICO so Windows picks the right size for taskbar /
-        # desktop / file explorer at any DPI.
+        # Multi-resolution ICO so Windows picks the right size at any DPI.
         img.save(
             dst,
             format="ICO",
