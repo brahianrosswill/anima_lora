@@ -50,19 +50,20 @@ def cmd_download_pe(_extra):
     # PE-Core-L14-336 — only the .pt checkpoint is needed; vision tower is
     # vendored at library/models/pe.py (no perception_models clone required).
     dst = ROOT / "models" / "pe"
-    if _skip("PE-Core", [dst / "PE-Core-L14-336.pt"], _extra):
-        return
-    dst.mkdir(parents=True, exist_ok=True)
-    run(
-        [
-            "hf",
-            "download",
-            "facebook/PE-Core-L14-336",
-            "PE-Core-L14-336.pt",
-            "--local-dir",
-            "models/pe",
-        ]
-    )
+    # Skip only the PE-Core fetch when it's already present — still fall through
+    # to PE-Spatial below, which may be missing even when PE-Core is on disk.
+    if not _skip("PE-Core", [dst / "PE-Core-L14-336.pt"], _extra):
+        dst.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                "hf",
+                "download",
+                "facebook/PE-Core-L14-336",
+                "PE-Core-L14-336.pt",
+                "--local-dir",
+                "models/pe",
+            ]
+        )
     # PE-Spatial-B16-512 is the default REPA alignment encoder, so fetch it
     # alongside PE-Core whenever PE is downloaded.
     cmd_download_pe_spatial(_extra)
