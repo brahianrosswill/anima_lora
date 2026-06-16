@@ -153,11 +153,21 @@ def confirm_train_using_cache(
     Distinct from ``confirm_existing_caches`` (which reassures during
     Preprocess) — this gates Train and exposes the empty-cache case as a
     separate ``None`` so the caller can branch into the auto-preprocess flow.
+
+    ``require_pe`` (set when ``use_repa`` is on) makes the PE feature cache
+    mandatory: a core latent/TE cache that lacks PE sidecars still returns
+    ``None`` so the caller auto-chains a (PE-caching) preprocess pass, rather
+    than launching a REPA run whose alignment target is silently absent. This
+    is the common "preprocessed before enabling REPA" case.
     """
     counts = count_preprocess_caches(cache_dir)
-    has_any = (
-        counts["latents"] > 0 or counts["te"] > 0 or (require_pe and counts["pe"] > 0)
-    )
+    has_core = counts["latents"] > 0 or counts["te"] > 0
+    # REPA on + a built core cache but no PE sidecars → treat as cache-missing
+    # so Train rebuilds the PE caches. preprocess is idempotent (it skips the
+    # latents/TE already on disk), so this only adds the missing PE pass.
+    if require_pe and has_core and counts["pe"] == 0:
+        return None
+    has_any = has_core or (require_pe and counts["pe"] > 0)
     if not has_any:
         return None
 

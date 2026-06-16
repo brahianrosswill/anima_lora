@@ -797,6 +797,28 @@ class BaseDataset(torch.utils.data.Dataset):
                 return False
         return True
 
+    def count_repa_pe_sidecars(self) -> Tuple[int, int]:
+        """Return ``(present, total)`` REPA PE sidecars for this dataset.
+
+        Read-only probe (no model, no GPU). ``present`` counts images whose
+        ``{stem}_anima_{repa_pe_encoder}.safetensors`` resolves on disk via the
+        same fallback chain ``_try_load_repa_pe`` uses; ``total`` is the image
+        count. The trainer calls this when ``use_repa`` is on to catch a
+        fully-absent / partial PE cache before it silently disables the REPA
+        alignment term. Returns ``(0, 0)`` when PE loading is off.
+        """
+        if not self.load_repa_pe:
+            return (0, 0)
+        present = 0
+        total = 0
+        for info in self.image_data.values():
+            total += 1
+            if any(
+                os.path.exists(p) for p in self._repa_pe_sidecar_candidates(info)
+            ):
+                present += 1
+        return (present, total)
+
     def new_cache_latents(self, model: Any, accelerator: Accelerator):
         r"""
         a brand new method to cache latents. This method caches latents with caching strategy.

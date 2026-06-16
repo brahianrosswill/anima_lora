@@ -56,6 +56,27 @@ def cache_path_for(
     )
 
 
+def count_pending_pe(
+    data_dir: Path,
+    encoder: str,
+    *,
+    cache_dir: Path | None = None,
+    recursive: bool = False,
+) -> tuple[int, int]:
+    """Return ``(pending, total)`` PE sidecars **without loading the encoder**.
+
+    ``pending`` is the number of images whose ``{stem}_anima_{encoder}``
+    sidecar isn't on disk; ``total`` is every enumerated image. Mirrors the
+    pre-skip in :func:`cache_pe_features` (pure existence), so the entry point
+    can skip the (slow) vision-encoder load when ``pending == 0``."""
+    image_files = walk_images(data_dir, recursive=recursive)
+    pending, _ = partition_cached(
+        image_files,
+        lambda p: cache_path_for(p, encoder, cache_dir=cache_dir, image_dir=data_dir),
+    )
+    return len(pending), len(image_files)
+
+
 class _PEImageGroup(Dataset):
     """Reads images from one ``(W, H)`` resolution group.
 

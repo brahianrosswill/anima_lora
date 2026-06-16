@@ -1295,13 +1295,31 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         variant = self._current_variant()
         cache_dir = self._resolve_cache_dir(variant)
 
+        # Resolve the merged config up front — we need ``use_repa`` to decide
+        # whether the PE feature cache is required before the cache-state branch
+        # (so a config preprocessed *before* REPA was enabled still re-runs
+        # preprocess to build the missing PE sidecars rather than launching a
+        # silent no-op REPA run).
+        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
+        merged = self._gui_scoped_paths(merged)
+        # TOML bools arrive as real bools; tolerate a stringified value too.
+        _use_repa = merged.get("use_repa")
+        require_pe = _use_repa is True or str(_use_repa).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
         # Three-way branch on cache state:
         #   • Cache exists → confirm with the user that we're reusing it.
         #   • Cache missing → silently auto-chain Preprocess → Train so the
         #     user doesn't bounce off a "run preprocess first" wall.
+        # With use_repa on, an existing latent/TE cache that lacks PE sidecars
+        # counts as "missing" (require_pe) so we auto-chain the PE-caching
+        # preprocess instead of training REPA against an absent target.
         # The auto-chain decision is recorded on the instance so
         # _on_finished can pick it up once preprocess succeeds.
-        decision = confirm_train_using_cache(self, cache_dir)
+        decision = confirm_train_using_cache(self, cache_dir, require_pe=require_pe)
         if decision is False:
             return
 
@@ -1311,8 +1329,6 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         # resume/fresh choice has to be captured here and baked in. The helper
         # does its wipe-for-fresh synchronously, so it's settled before training
         # ever runs. Returns True with no prompt when there's nothing to resume.
-        merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
-        merged = self._gui_scoped_paths(merged)
         if not confirm_resumable_checkpoint(self, merged):
             return
 

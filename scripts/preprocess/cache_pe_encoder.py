@@ -40,6 +40,7 @@ import torch
 
 from library.preprocess import (
     cache_pe_features,
+    count_pending_pe,
     tqdm_progress,
     write_pe_centroid,
 )
@@ -175,6 +176,30 @@ def main() -> None:
     if not data_dir.is_dir():
         print(f"--dir not found: {data_dir}", file=sys.stderr)
         sys.exit(1)
+
+    # Pre-flight: skip the (slow) vision-encoder load when every sidecar already
+    # exists. A --centroid request still runs (it only reads the caches, no
+    # encoder needed). total == 0 falls through so the original "no images"
+    # error path is preserved.
+    pending, total = count_pending_pe(
+        data_dir, args.encoder, cache_dir=cache_dir, recursive=args.recursive
+    )
+    if total > 0 and pending == 0:
+        print(
+            f"{args.encoder} feature caching: all {total} images already cached "
+            "— skipping encoder load."
+        )
+        if args.centroid:
+            out_path = (
+                Path(args.centroid_out)
+                if args.centroid_out
+                else _default_centroid_out(args.encoder)
+            )
+            n, centroid = write_pe_centroid(
+                cache_dir, out_path, encoder=args.encoder, limit=args.centroid_limit
+            )
+            _report_centroid(n, centroid, out_path)
+        return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     save_dtype = {

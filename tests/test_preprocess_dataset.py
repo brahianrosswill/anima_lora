@@ -116,6 +116,103 @@ def test_count_preprocess_caches_path_pattern_filters_nested_caches(
     }
 
 
+def test_confirm_train_using_cache_requires_pe_when_repa_on(tmp_path: Path) -> None:
+    """use_repa Train gating: a built latent/TE cache that lacks PE sidecars
+    must return None (→ auto-chain the PE-caching preprocess) rather than
+    offering to reuse the cache and launching a silent-no-op REPA run.
+
+    Only the ``None`` branches are exercised — they return before any
+    QMessageBox is constructed, so no QApplication is needed.
+    """
+    from gui.dialogs import confirm_train_using_cache
+
+    # Core caches present, PE absent.
+    (tmp_path / "cover_1024x1024_anima.npz").touch()
+    (tmp_path / "cover_anima_te.safetensors").touch()
+
+    # REPA on → PE mandatory → treat as cache-missing (auto-preprocess).
+    assert confirm_train_using_cache(None, tmp_path, require_pe=True) is None
+
+
+def test_confirm_train_using_cache_empty_returns_none(tmp_path: Path) -> None:
+    from gui.dialogs import confirm_train_using_cache
+
+    assert confirm_train_using_cache(None, tmp_path) is None
+    assert confirm_train_using_cache(None, tmp_path, require_pe=True) is None
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight cache-coverage probes — let the entry points skip the (slow) model
+# load when a dataset is already fully cached. Model-free.
+# ---------------------------------------------------------------------------
+
+
+def test_count_pending_latents_per_resolution(tmp_path: Path) -> None:
+    from library.preprocess import count_pending_latents, get_latents_npz_path
+
+    data = tmp_path / "imgs"
+    cache = tmp_path / "cache"
+    _write_image(data / "a.png", (64, 64))
+    _write_image(data / "b.png", (64, 64))
+
+    assert count_pending_latents(data, cache_dir=cache) == (2, 2)
+
+    # Cache a's 64x64 latent (key latents_{H//8}x{W//8} = latents_8x8).
+    npz = get_latents_npz_path(data / "a.png", (64, 64), cache_dir=cache, image_dir=data)
+    npz.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(npz, **{"latents_8x8": np.zeros((16, 8, 8), dtype=np.float32)})
+    assert count_pending_latents(data, cache_dir=cache) == (1, 2)
+
+
+def test_count_pending_pe_existence(tmp_path: Path) -> None:
+    from library.preprocess import count_pending_pe, pe_cache_path_for
+
+    data = tmp_path / "imgs"
+    cache = tmp_path / "cache"
+    _write_image(data / "a.png", (64, 64))
+    _write_image(data / "b.png", (64, 64))
+
+    assert count_pending_pe(data, "pe_spatial", cache_dir=cache) == (2, 2)
+
+    sidecar = pe_cache_path_for(
+        data / "a.png", "pe_spatial", cache_dir=cache, image_dir=data
+    )
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.touch()
+    assert count_pending_pe(data, "pe_spatial", cache_dir=cache) == (1, 2)
+
+
+def test_count_pending_text_counts_uncaptioned(tmp_path: Path) -> None:
+    # Uncaptioned images are candidates too (encoded with an empty caption), so
+    # they count toward pending until their TE cache exists.
+    from library.preprocess import count_pending_text
+    from library.preprocess.text import _te_cache_path
+
+    data = tmp_path / "imgs"
+    cache = tmp_path / "cache"
+    _write_image(data / "a.png", (64, 64))
+    _write_image(data / "b.png", (64, 64))  # no .txt — still a candidate
+    (data / "a.txt").write_text("hello", encoding="utf-8")
+
+    assert count_pending_text(data, cache_dir=cache, min_pixels=0) == (2, 2)
+
+    te = _te_cache_path(data / "a.png", cache, data)
+    te.parent.mkdir(parents=True, exist_ok=True)
+    te.touch()
+    assert count_pending_text(data, cache_dir=cache, min_pixels=0) == (1, 2)
+
+
+def test_count_pending_text_min_pixels_filter(tmp_path: Path) -> None:
+    from library.preprocess import count_pending_text
+
+    data = tmp_path / "imgs"
+    _write_image(data / "small.png", (16, 16))  # 256 px — below threshold
+    _write_image(data / "big.png", (64, 64))  # 4096 px
+
+    # total reflects the post-min_pixels candidate set (small filtered out).
+    assert count_pending_text(data, min_pixels=1000) == (1, 1)
+
+
 # ---------------------------------------------------------------------------
 # Model-free end-to-end coverage for the loops moved into library/preprocess/
 # (item A of the proposal). cache_pe_features / cache_latents /

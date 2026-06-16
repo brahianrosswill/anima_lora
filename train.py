@@ -326,10 +326,32 @@ class AnimaTrainer:
             for dataset in train_dataset_group.datasets:
                 dataset.load_repa_pe = True
                 dataset.repa_pe_encoder = repa_encoder
+            # Probe PE sidecar coverage now. A missing PE cache makes the REPA
+            # alignment term a silent no-op — the loss skips any batch without
+            # repa_pe_features (library/training/repa.py) — so a run with
+            # use_repa but no `make preprocess-pe` would train as if REPA were
+            # off, with no error. Fail fast on a fully-absent cache; warn on a
+            # partial one (the all-or-nothing collate tolerates per-batch gaps).
+            present, total = train_dataset_group.count_repa_pe_sidecars()
+            if total > 0 and present == 0:
+                raise RuntimeError(
+                    f"use_repa is enabled but none of the {total} training "
+                    f"images have a {repa_encoder} PE feature cache "
+                    f"(*_anima_{repa_encoder}.safetensors) — the REPA "
+                    f"alignment loss would be a silent no-op. Run "
+                    f"`make preprocess-pe ARGS='--encoder {repa_encoder}'` "
+                    f"first, or disable use_repa."
+                )
+            if present < total:
+                logger.warning(
+                    f"REPA: only {present}/{total} training images have a "
+                    f"{repa_encoder} PE sidecar; the alignment term is skipped "
+                    f"for batches missing one. Run `make preprocess-pe "
+                    f"ARGS='--encoder {repa_encoder}'` to cover the rest."
+                )
             logger.info(
                 f"REPA: PE feature loading enabled (encoder={repa_encoder}); "
-                f"batches carry repa_pe_features. Run "
-                f"`make preprocess-pe ARGS='--encoder {repa_encoder}'` if absent."
+                f"batches carry repa_pe_features ({present}/{total} cached)."
             )
 
         # Soft-tokens contrastive negatives. The objective's knobs live in

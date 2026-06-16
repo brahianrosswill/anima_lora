@@ -23,7 +23,11 @@ from pathlib import Path
 import torch
 
 
-from library.preprocess import cache_text_embeddings, tqdm_progress
+from library.preprocess import (
+    cache_text_embeddings,
+    count_pending_text,
+    tqdm_progress,
+)
 from library.runtime.cli import add_io_args
 
 
@@ -100,9 +104,32 @@ def main() -> None:
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-flight: skip the (slow) Qwen3 + LLM-adapter load when every TE cache
+    # already exists. When --dit is set the run also stages the one-time uncond
+    # sidecar (needs the loaded model), so a missing sidecar still forces a load.
+    from library.inference.uncond import default_uncond_path
+
+    pending, total = count_pending_text(
+        data_dir,
+        cache_dir=cache_dir,
+        recursive=args.recursive,
+        path_pattern=args.path_pattern,
+        min_pixels=args.min_pixels,
+    )
+    uncond_needed = bool(args.dit) and not default_uncond_path().exists()
+    if pending == 0 and not uncond_needed:
+        print(
+            f"Text embedding caching: all {total} captions already cached "
+            "— skipping text-encoder load."
+        )
+        return
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     N = args.caption_shuffle_variants
 
+    if pending:
+        print(f"{pending}/{total} captions need encoding.")
     # Load text encoder + tokenizers
     print(f"Loading Qwen3 text encoder from {args.qwen3} ...")
     text_encoder, qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
