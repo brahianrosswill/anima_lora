@@ -258,6 +258,14 @@ def run(cmd: list[str], **kwargs):
     # children's Python stdio line-/un-buffered so the GUI sees output as it
     # happens. Inherited by grandchildren too.
     env.setdefault("PYTHONUNBUFFERED", "1")
+    # Force UTF-8 stdio in children regardless of the console's locale codec.
+    # On non-UTF-8 consoles (e.g. Korean Windows cp949) a child printing an
+    # em-dash or other non-ASCII char would otherwise crash with
+    # UnicodeEncodeError. PYTHONUTF8=1 flips the interpreter to UTF-8 mode;
+    # PYTHONIOENCODING is the belt-and-suspenders fallback. Inherited by
+    # grandchildren too.
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     cmd = list(cmd)
     if cmd and not Path(cmd[0]).is_absolute():
         resolved = shutil.which(cmd[0], path=env["PATH"])

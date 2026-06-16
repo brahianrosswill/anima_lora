@@ -628,6 +628,11 @@ class JobManager:
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        # Force UTF-8 stdio in the job tree so a non-ASCII char (em-dash, etc.)
+        # never crashes a child on a non-UTF-8 console locale (e.g. Korean
+        # Windows cp949 → UnicodeEncodeError). Inherited by grandchildren.
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         # tqdm redraws ride "\r"; at the default 0.1s cadence a cached-dataset
         # scan writes thousands of bar updates into stdout.log, drowning the
         # lines a reader actually tails for (warnings, tracebacks). One redraw
