@@ -53,7 +53,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
-    QSpinBox,
     QTextBrowser,
     QTextEdit,
     QToolButton,
@@ -78,8 +77,6 @@ from gui.i18n import t
 from gui.progress import TqdmProgressTracker, make_progress_bar
 from gui.theme import tok
 from library.datasets.curation_actions import (
-    center_crop_rect_for_resize_bucket_within,
-    inset_crop_rect_by_percent,
     load_curation_decisions,
     move_linked_files,
     rel_key,
@@ -605,9 +602,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         # never move/edit source files; they only write a JSON sidecar that
         # resize_images.py reads when present.
         self._preprocess_decisions: dict[Path, str] = {}
-        self._crop_bounds: dict[Path, tuple[int, int, int, int]] = {}
-        self._crop_preview_enabled = False
-        self._syncing_crop_controls = False
         # _overlay_pm is lazily composed on first toggle and cached so flipping
         # the checkbox doesn't re-run the QPainter pipeline.
         self._source_pm: QPixmap | None = None
@@ -732,54 +726,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         img_head.addStretch()
         rl.addLayout(img_head)
 
-        crop_row = QHBoxLayout()
-        crop_row.setContentsMargins(0, 0, 0, 0)
-        self.crop_preview_cb = QCheckBox(t("dataset_crop_preview"))
-        self.crop_preview_cb.setToolTip(t("dataset_crop_preview_tooltip"))
-        self.crop_preview_cb.toggled.connect(self._on_crop_preview_toggled)
-        crop_row.addWidget(self.crop_preview_cb)
-        crop_row.addWidget(QLabel(t("dataset_crop_margin")))
-        self.crop_margin_spins: dict[str, QSpinBox] = {}
-        for key, label in (
-            ("left", t("dataset_crop_margin_left")),
-            ("top", t("dataset_crop_margin_top")),
-            ("right", t("dataset_crop_margin_right")),
-            ("bottom", t("dataset_crop_margin_bottom")),
-        ):
-            crop_row.addWidget(QLabel(label))
-            spin = QSpinBox()
-            spin.setRange(0, 95)
-            spin.setAlignment(Qt.AlignRight)
-            spin.setSuffix(" %")
-            spin.setFixedWidth(104)
-            spin.setToolTip(t("dataset_crop_margin_tooltip"))
-            self.crop_margin_spins[key] = spin
-            crop_row.addWidget(spin)
-        self.crop_margin_apply_btn = self._make_button_with_menu(
-            t("dataset_crop_margin_apply"),
-            t("dataset_crop_margin_apply_tooltip"),
-            self._apply_crop_margins,
-            [
-                (t("dataset_crop_margin_apply_visible"), self._apply_crop_margins_visible),
-                (t("dataset_crop_margin_apply_all"), self._apply_crop_margins_all),
-            ],
-        )
-        crop_row.addWidget(self.crop_margin_apply_btn)
-        self.crop_clear_btn = QPushButton(t("dataset_crop_clear"))
-        self.crop_clear_btn.setToolTip(t("dataset_crop_clear_tooltip"))
-        self.crop_clear_btn.clicked.connect(self._clear_current_crop)
-        crop_row.addWidget(self.crop_clear_btn)
-        self.crop_label = QLabel("")
-        self.crop_label.setFixedWidth(300)
-        self.crop_label.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        crop_row.addWidget(self.crop_label)
-        crop_row.addStretch()
-        rl.addLayout(crop_row)
-
         self.img = ScaledImageLabel()
         self.img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.img.setMinimumSize(400, 400)
-        self.img.cropRectChanged.connect(self._on_crop_bounds_changed)
         rl.addWidget(self.img, 1)
 
         self.image_meta = QLabel(t("dataset_image_meta_empty"))
@@ -1202,7 +1151,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             # Deletion marks are path-scoped to one dir; drop them on a switch.
             self._marked.clear()
             self._preprocess_decisions.clear()
-            self._crop_bounds.clear()
             self._refresh_delete_button()
             self._refresh_preprocess_controls()
         self._current_dir = d
@@ -1560,7 +1508,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _load_preprocess_decisions(self) -> None:
         self._preprocess_decisions.clear()
-        self._crop_bounds.clear()
         if self._current_dir is None:
             return
         path = self._curation_decisions_path()
@@ -1580,19 +1527,13 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 self._preprocess_decisions[path] = action
             elif action == "move":
                 self._marked.add(path)
-            crop = value.get("crop_bounds")
-            if isinstance(crop, list | tuple) and len(crop) == 4:
-                try:
-                    self._crop_bounds[path] = tuple(int(v) for v in crop)
-                except (TypeError, ValueError):
-                    pass
 
     def _save_preprocess_decisions(self) -> None:
         if self._current_dir is None:
             return
         images: dict[str, dict] = {}
         for path in sorted(
-            set(self._preprocess_decisions) | set(self._marked) | set(self._crop_bounds),
+            set(self._preprocess_decisions) | set(self._marked),
             key=lambda p: rel_key(p, self._current_dir),
         ):
             item: dict = {}
@@ -1602,9 +1543,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 action = self._preprocess_decisions.get(path)
                 if action in {"use", "skip"}:
                     item["action"] = action
-            crop = self._crop_bounds.get(path)
-            if crop is not None:
-                item["crop_bounds"] = list(crop)
             if item:
                 images[rel_key(path, self._current_dir)] = item
         save_curation_decisions(
@@ -1664,7 +1602,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._disk_text = text
         self._set_caption_text(text if text else "")
         self._refresh_image_meta(p)
-        self._refresh_crop_controls(p)
         self._refresh_preprocess_controls()
         self._refresh_buttons()
         self._refresh_inline_diff()
@@ -1694,7 +1631,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _on_overlay_toggled(self, _checked: bool) -> None:
         self._apply_image_view()
-        self._refresh_crop_overlay(self._current_image_path())
 
     def _current_index(self) -> int:
         """Index into ``self._images`` of the currently selected image.
@@ -1762,187 +1698,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             )
         )
 
-    def _full_crop_bounds_for_path(
-        self, path: Path
-    ) -> tuple[int, int, int, int] | None:
-        width, height = self._image_size(path)
-        if width <= 0 or height <= 0:
-            return None
-        return (0, 0, width, height)
-
-    def _store_crop_bounds(
-        self, path: Path, rect: tuple[int, int, int, int] | None
-    ) -> None:
-        if self._set_crop_bounds(path, rect):
-            self._mark_preprocess_dirty()
-
-    def _set_crop_bounds(
-        self, path: Path, rect: tuple[int, int, int, int] | None
-    ) -> bool:
-        full = self._full_crop_bounds_for_path(path)
-        if rect is None or rect == full:
-            return self._crop_bounds.pop(path, None) is not None
-        if self._crop_bounds.get(path) == rect:
-            return False
-        self._crop_bounds[path] = rect
-        return True
-
-    def _preview_crop_bounds_for_path(
-        self, path: Path
-    ) -> tuple[int, int, int, int] | None:
-        if not self._crop_preview_enabled:
-            return None
-        return self._crop_bounds.get(path) or self._full_crop_bounds_for_path(path)
-
-    def _preview_crop_rect_for_path(
-        self, path: Path
-    ) -> tuple[int, int, int, int] | None:
-        bounds = self._preview_crop_bounds_for_path(path)
-        if bounds is None:
-            return None
-        return center_crop_rect_for_resize_bucket_within(bounds)
-
-    def _on_crop_preview_toggled(self, checked: bool) -> None:
-        if self._syncing_crop_controls:
-            return
-        self._crop_preview_enabled = checked
-        path = self._current_image_path()
-        self._refresh_crop_overlay(path)
-        self._refresh_preprocess_controls()
-
-    def _refresh_crop_controls(self, path: Path | None) -> None:
-        self._syncing_crop_controls = True
-        try:
-            self.crop_preview_cb.setChecked(self._crop_preview_enabled)
-            margins = self._crop_margin_values_for_path(path)
-            for key, value in margins.items():
-                self.crop_margin_spins[key].setValue(value)
-        finally:
-            self._syncing_crop_controls = False
-        self._refresh_crop_overlay(path)
-        self._refresh_preprocess_controls()
-
-    def _crop_margin_values_for_path(self, path: Path | None) -> dict[str, int]:
-        empty = {"left": 0, "top": 0, "right": 0, "bottom": 0}
-        if path is None:
-            return empty
-        bounds = self._crop_bounds.get(path)
-        if bounds is None:
-            return empty
-        width, height = self._image_size(path)
-        if width <= 0 or height <= 0:
-            return empty
-        x, y, crop_w, crop_h = bounds
-        return {
-            "left": max(0, round(x * 100 / width)),
-            "top": max(0, round(y * 100 / height)),
-            "right": max(0, round((width - x - crop_w) * 100 / width)),
-            "bottom": max(0, round((height - y - crop_h) * 100 / height)),
-        }
-
-    def _refresh_crop_overlay(self, path: Path | None) -> None:
-        if path is None:
-            self.img.set_crop_rect(None)
-            self.crop_label.setText("")
-            return
-        crop_bounds = self._preview_crop_bounds_for_path(path)
-        crop_rect = self._preview_crop_rect_for_path(path)
-        self.img.set_crop_rect(crop_bounds, final_rect=crop_rect, editable=True)
-        if crop_rect is None:
-            self.crop_label.setText("")
-            return
-        bx, by, bw, bh = crop_bounds or crop_rect
-        x, y, w, h = crop_rect
-        self.crop_label.setText(
-            t(
-                "dataset_crop_rect",
-                bx=bx,
-                by=by,
-                bw=bw,
-                bh=bh,
-                x=x,
-                y=y,
-                w=w,
-                h=h,
-            )
-        )
-
-    def _apply_crop_margins(self) -> None:
-        path = self._current_image_path()
-        if path is None:
-            return
-        self._apply_crop_margins_to_paths([path])
-
-    def _apply_crop_margins_visible(self) -> None:
-        self._apply_crop_margins_to_paths(self._images)
-
-    def _apply_crop_margins_all(self) -> None:
-        self._apply_crop_margins_to_paths(self._all_images)
-
-    def _crop_margin_values_from_controls(self) -> dict[str, int]:
-        return {
-            "left": self.crop_margin_spins["left"].value(),
-            "top": self.crop_margin_spins["top"].value(),
-            "right": self.crop_margin_spins["right"].value(),
-            "bottom": self.crop_margin_spins["bottom"].value(),
-        }
-
-    def _apply_crop_margins_to_paths(self, paths: list[Path]) -> None:
-        targets = [p for p in paths if p is not None]
-        if not targets:
-            return
-        margins = self._crop_margin_values_from_controls()
-        current = self._current_image_path()
-        if all(value == 0 for value in margins.values()):
-            changed = False
-            for target in targets:
-                changed = self._set_crop_bounds(target, None) or changed
-            if changed:
-                self._mark_preprocess_dirty()
-            if current in targets:
-                self._crop_preview_enabled = False
-            self._refresh_crop_controls(current)
-            self._refresh_mark_styles()
-            return
-
-        changed = False
-        for target in targets:
-            width, height = self._image_size(target)
-            if width <= 0 or height <= 0:
-                continue
-            rect = inset_crop_rect_by_percent(
-                image_width=width,
-                image_height=height,
-                left=margins["left"],
-                top=margins["top"],
-                right=margins["right"],
-                bottom=margins["bottom"],
-            )
-            changed = self._set_crop_bounds(target, rect) or changed
-        if changed:
-            self._mark_preprocess_dirty()
-        self._crop_preview_enabled = True
-        self._refresh_crop_controls(current)
-        self._refresh_mark_styles()
-
-    def _on_crop_bounds_changed(self, rect: tuple[int, int, int, int]) -> None:
-        path = self._current_image_path()
-        if path is None:
-            return
-        self._store_crop_bounds(path, rect)
-        self._refresh_crop_overlay(path)
-        self._refresh_preprocess_controls()
-        self._refresh_mark_styles()
-
-    def _clear_current_crop(self) -> None:
-        path = self._current_image_path()
-        if path is None or path not in self._crop_bounds:
-            return
-        self._crop_bounds.pop(path, None)
-        self._mark_preprocess_dirty()
-        self._refresh_crop_controls(path)
-        self._refresh_mark_styles()
-
     def _current_image_path(self) -> Path | None:
         idx = self._current_index()
         if 0 <= idx < len(self._images):
@@ -1983,7 +1738,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._refresh_preprocess_controls()
 
     def _clear_all_decisions(self) -> None:
-        """Clear all use/skip/move decisions without touching crop bounds."""
+        """Clear all use/skip/move decisions."""
         changed = bool(self._preprocess_decisions or self._marked)
         if not changed:
             return
@@ -1998,19 +1753,10 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         if path is None:
             return t("dataset_preprocess_decision_none")
         if path in self._marked:
-            if path in self._crop_bounds:
-                return t("dataset_preprocess_decision_move_crop")
             return t("dataset_preprocess_decision_move")
         action = self._preprocess_decisions.get(path)
-        crop = path in self._crop_bounds
-        if action == "skip" and crop:
-            return t("dataset_preprocess_decision_skip_crop")
         if action == "skip":
             return t("dataset_preprocess_decision_skip")
-        if action == "use" and crop:
-            return t("dataset_preprocess_decision_use_crop")
-        if crop:
-            return t("dataset_preprocess_decision_crop")
         if action == "use":
             return t("dataset_preprocess_decision_use")
         return t("dataset_preprocess_decision_none")
@@ -2030,8 +1776,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             enabled and (current_has_decision or has_any_decision)
         )
         self.preprocess_save_btn.setEnabled(self._current_dir is not None)
-        self.crop_margin_apply_btn.setEnabled(enabled)
-        self.crop_clear_btn.setEnabled(enabled and path in self._crop_bounds)
         self.preprocess_decision_label.setText(self._preprocess_decision_text(path))
 
     def _toggle_mark_current(self) -> None:
@@ -2070,9 +1814,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def _refresh_mark_styles(self) -> None:
         """Repaint tree leaves by pending source-delete/preprocess state.
 
-        Crop-only settings are intentionally not color-coded. Status markers are
-        text prefixes instead of item icons/backgrounds so filenames keep their
-        original alignment in the tree."""
+        Status markers are text prefixes instead of item icons/backgrounds so
+        filenames keep their original alignment in the tree."""
         for leaf, idx in self._tree_item_to_index.items():
             path = self._images[idx] if idx < len(self._images) else None
             base = leaf.data(0, _TREE_BASE_TEXT_ROLE) or leaf.text(0)
@@ -2208,7 +1951,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.overlay_cb.setEnabled(False)
         self.img.clear()
         self._refresh_image_meta(None)
-        self._refresh_crop_controls(None)
         self._refresh_preprocess_controls()
 
     def _set_caption_text(self, text: str) -> None:

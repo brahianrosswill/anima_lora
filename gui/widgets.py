@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 from PySide6.QtCore import QPointF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -836,16 +836,10 @@ class ScaledImageLabel(QLabel):
     MIN_ZOOM = 1.0
     MAX_ZOOM = 8.0
     _ZOOM_STEP = 1.25
-    cropRectChanged = Signal(tuple)
 
     def __init__(self):
         super().__init__()
         self._src: QPixmap | None = None
-        self._crop_rect: tuple[int, int, int, int] | None = None
-        self._final_crop_rect: tuple[int, int, int, int] | None = None
-        self._crop_editable = False
-        self._crop_drag_handle: str | None = None
-        self._crop_drag_offset: tuple[int, int] | None = None
         self._zoom = 1.0
         # Top-left of the drawn image in widget coords; None = auto-centered.
         self._tl: QPointF | None = None
@@ -855,33 +849,11 @@ class ScaledImageLabel(QLabel):
 
     def set_source(self, pm: QPixmap):
         self._src = pm
-        self._crop_rect = None
-        self._final_crop_rect = None
-        self._crop_editable = False
-        self._crop_drag_handle = None
-        self._crop_drag_offset = None
         self._reset_zoom()
-        self.update()
-
-    def set_crop_rect(
-        self,
-        crop_rect: tuple[int, int, int, int] | None,
-        *,
-        final_rect: tuple[int, int, int, int] | None = None,
-        editable: bool = False,
-    ) -> None:
-        self._crop_rect = crop_rect
-        self._final_crop_rect = final_rect
-        self._crop_editable = editable and crop_rect is not None
         self.update()
 
     def clear(self):
         self._src = None
-        self._crop_rect = None
-        self._final_crop_rect = None
-        self._crop_editable = False
-        self._crop_drag_handle = None
-        self._crop_drag_offset = None
         self._reset_zoom()
         super().clear()
 
@@ -940,157 +912,6 @@ class ScaledImageLabel(QLabel):
         painter.drawPixmap(
             int(round(tl.x())), int(round(tl.y())), d.width(), d.height(), self._src
         )
-        self._paint_crop_overlay(painter, tl, d)
-
-    def _paint_crop_overlay(self, painter: QPainter, tl: QPointF, d: QSize) -> None:
-        if self._src is None or self._src.isNull() or self._crop_rect is None:
-            return
-        red_rect = self._display_rect_for_image_rect(self._crop_rect, tl, d)
-        if red_rect is None:
-            return
-        painter.save()
-        try:
-            rx, ry, rw, rh = red_rect
-            painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor("#e74c3c"), 2, Qt.SolidLine))
-            painter.drawRect(rx, ry, rw, rh)
-            if self._crop_editable:
-                painter.setBrush(QColor("#e74c3c"))
-                handle = 5
-                points = (
-                    (rx, ry),
-                    (rx + rw // 2, ry),
-                    (rx + rw, ry),
-                    (rx, ry + rh // 2),
-                    (rx + rw, ry + rh // 2),
-                    (rx, ry + rh),
-                    (rx + rw // 2, ry + rh),
-                    (rx + rw, ry + rh),
-                )
-                for px, py in points:
-                    painter.drawRect(px - handle, py - handle, handle * 2, handle * 2)
-                painter.setBrush(Qt.NoBrush)
-            green_rect = self._display_rect_for_image_rect(self._final_crop_rect, tl, d)
-            if green_rect is not None:
-                gx, gy, gw, gh = green_rect
-                painter.setPen(QPen(QColor("#2ecc71"), 2, Qt.DashLine))
-                painter.drawRect(gx, gy, gw, gh)
-        finally:
-            painter.restore()
-
-    def _display_rect_for_image_rect(
-        self,
-        rect: tuple[int, int, int, int] | None,
-        tl: QPointF,
-        d: QSize,
-    ) -> tuple[int, int, int, int] | None:
-        if rect is None or self._src is None or self._src.isNull():
-            return None
-        x, y, w, h = rect
-        if w <= 0 or h <= 0:
-            return None
-        scale_x = d.width() / self._src.width()
-        scale_y = d.height() / self._src.height()
-        rx = int(round(tl.x() + x * scale_x))
-        ry = int(round(tl.y() + y * scale_y))
-        rw = max(1, int(round(w * scale_x)))
-        rh = max(1, int(round(h * scale_y)))
-        return (rx, ry, rw, rh)
-
-    def _widget_to_image_pos(self, pos: QPointF) -> tuple[int, int] | None:
-        if self._src is None or self._src.isNull():
-            return None
-        tl = self._current_tl()
-        scale = self._fit_scale() * self._zoom
-        if scale <= 0:
-            return None
-        x = round((pos.x() - tl.x()) / scale)
-        y = round((pos.y() - tl.y()) / scale)
-        return (
-            max(0, min(self._src.width() - 1, x)),
-            max(0, min(self._src.height() - 1, y)),
-        )
-
-    def _crop_handle_at(self, pos: QPointF) -> str | None:
-        if not self._crop_editable or self._crop_rect is None:
-            return None
-        rect = self._display_rect_for_image_rect(
-            self._crop_rect, self._current_tl(), self._display_size()
-        )
-        if rect is None:
-            return None
-        x, y, w, h = rect
-        px, py = pos.x(), pos.y()
-        threshold = 16
-        near_left = abs(px - x) <= threshold and y - threshold <= py <= y + h + threshold
-        near_right = (
-            abs(px - (x + w)) <= threshold and y - threshold <= py <= y + h + threshold
-        )
-        near_top = abs(py - y) <= threshold and x - threshold <= px <= x + w + threshold
-        near_bottom = (
-            abs(py - (y + h)) <= threshold and x - threshold <= px <= x + w + threshold
-        )
-        if near_left and near_top:
-            return "top_left"
-        if near_right and near_top:
-            return "top_right"
-        if near_left and near_bottom:
-            return "bottom_left"
-        if near_right and near_bottom:
-            return "bottom_right"
-        if near_left:
-            return "left"
-        if near_right:
-            return "right"
-        if near_top:
-            return "top"
-        if near_bottom:
-            return "bottom"
-        if (
-            x + threshold <= px <= x + w - threshold
-            and y + threshold <= py <= y + h - threshold
-        ):
-            return "move"
-        return None
-
-    def _resize_crop_rect(self, handle: str, pos: QPointF) -> None:
-        if self._src is None or self._crop_rect is None:
-            return
-        image_pos = self._widget_to_image_pos(pos)
-        if image_pos is None:
-            return
-        px, py = image_pos
-        x, y, w, h = self._crop_rect
-        if handle == "move":
-            off_x, off_y = self._crop_drag_offset or (w // 2, h // 2)
-            left = max(0, min(px - off_x, self._src.width() - w))
-            top = max(0, min(py - off_y, self._src.height() - h))
-            rect = (left, top, w, h)
-            if rect != self._crop_rect:
-                self._crop_rect = rect
-                self.cropRectChanged.emit(rect)
-                self.update()
-            return
-
-        left, top, right, bottom = x, y, x + w, y + h
-        min_size = 8
-        if "left" in handle:
-            left = min(px, right - min_size)
-        if "right" in handle:
-            right = max(px, left + min_size)
-        if "top" in handle:
-            top = min(py, bottom - min_size)
-        if "bottom" in handle:
-            bottom = max(py, top + min_size)
-        left = max(0, min(left, self._src.width() - min_size))
-        top = max(0, min(top, self._src.height() - min_size))
-        right = max(left + min_size, min(right, self._src.width()))
-        bottom = max(top + min_size, min(bottom, self._src.height()))
-        rect = (left, top, right - left, bottom - top)
-        if rect != self._crop_rect:
-            self._crop_rect = rect
-            self.cropRectChanged.emit(rect)
-            self.update()
 
     def wheelEvent(self, ev):
         if not (ev.modifiers() & Qt.ControlModifier):
@@ -1122,18 +943,6 @@ class ScaledImageLabel(QLabel):
         ev.accept()
 
     def mousePressEvent(self, ev):
-        if ev.button() == Qt.LeftButton and self._crop_editable:
-            handle = self._crop_handle_at(ev.position())
-            if handle is not None:
-                self._crop_drag_handle = handle
-                if handle == "move" and self._crop_rect is not None:
-                    img_pos = self._widget_to_image_pos(ev.position())
-                    if img_pos is not None:
-                        x, y, _w, _h = self._crop_rect
-                        self._crop_drag_offset = (img_pos[0] - x, img_pos[1] - y)
-                self.setCursor(Qt.SizeAllCursor if handle == "move" else Qt.CrossCursor)
-                ev.accept()
-                return
         if ev.button() == Qt.LeftButton and self._zoom > 1.0:
             self._pan_last = ev.position()
             self.setCursor(Qt.ClosedHandCursor)
@@ -1141,10 +950,6 @@ class ScaledImageLabel(QLabel):
             super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
-        if self._crop_drag_handle is not None:
-            self._resize_crop_rect(self._crop_drag_handle, ev.position())
-            ev.accept()
-            return
         if self._pan_last is not None:
             pos = ev.position()
             delta = pos - self._pan_last
@@ -1154,19 +959,9 @@ class ScaledImageLabel(QLabel):
             self._clamp_tl()
             self.update()
         else:
-            if self._crop_editable and self._crop_handle_at(ev.position()) is not None:
-                self.setCursor(Qt.CrossCursor)
-            elif self._crop_editable:
-                self.unsetCursor()
             super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
-        if self._crop_drag_handle is not None:
-            self._crop_drag_handle = None
-            self._crop_drag_offset = None
-            self.unsetCursor()
-            ev.accept()
-            return
         if self._pan_last is not None:
             self._pan_last = None
             self.unsetCursor()

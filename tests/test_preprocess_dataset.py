@@ -451,41 +451,6 @@ def test_resize_to_buckets_applies_curation_skip_decision(tmp_path: Path) -> Non
     assert (src / "move.png").exists()
 
 
-def test_resize_to_buckets_applies_curation_crop_to_output_only(
-    tmp_path: Path,
-) -> None:
-    from library.preprocess import resize_to_buckets
-
-    src = tmp_path / "src"
-    dst = tmp_path / "dst"
-    src.mkdir()
-    img = Image.new("RGB", (200, 100), "red")
-    for x in range(100, 200):
-        for y in range(100):
-            img.putpixel((x, y), (0, 0, 255))
-    img.save(src / "split.png")
-
-    stats, _ = resize_to_buckets(
-        src,
-        dst,
-        target_res=[512],
-        min_pixels=0,
-        workers=1,
-        verbose=False,
-        curation_decisions={
-            "split.png": {"action": "use", "crop_bounds": [100, 0, 100, 100]},
-        },
-    )
-
-    assert stats.written == 1
-    with Image.open(dst / "split.png") as out:
-        center = out.getpixel((out.width // 2, out.height // 2))
-    assert center[2] > 200
-    with Image.open(src / "split.png") as original:
-        assert original.size == (200, 100)
-        assert original.getpixel((0, 50)) == (255, 0, 0)
-
-
 def test_resize_to_buckets_default_tier_does_not_upscale_to_multitier(
     tmp_path: Path,
 ) -> None:
