@@ -95,6 +95,10 @@ _FIELD_ORDER = {
     "pretrained_model_name_or_path": 30,
     "qwen3": 31,
     "vae": 32,
+    # Keep the REPA DoG-target toggle pinned directly under the use_repa switch
+    # it modifies (both live in the Architecture group).
+    "use_repa": 90,
+    "repa_target_dog": 91,
     "sample_prompts": 10,
     "sample_every_n_epochs": 11,
     "sample_at_first": 12,

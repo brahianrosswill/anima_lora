@@ -21,12 +21,26 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from ._common import PY, ROOT, run
+from ._common import PY, ROOT, _path, run
 
 MASK_OUTPUT_DIR = ROOT / "post_image_dataset" / "masks"
 RESIZED_IMAGE_DIR = ROOT / "post_image_dataset" / "resized"
 SAM_CONFIG = ROOT / "configs" / "sam_mask.yaml"
 _UNSET = object()
+
+
+def _resized_image_dir() -> Path:
+    """Scoped resized dir to mask, honoring GUI ``path_scope``.
+
+    Reads ``resized_image_dir`` from the merged config chain (the GUI passes a
+    config snapshot via ``CONFIG_FILE`` whose ``resized_image_dir`` is already
+    scoped to ``post_image_dataset/resized/<path_scope>``). Without a snapshot
+    (direct ``make mask``) this falls back to the unscoped default, so CLI
+    behavior is unchanged. Scoping the input also lands masks at
+    ``masks/<rel>`` — exactly where training resolves them — instead of the
+    unscoped ``masks/<scope>/<rel>``.
+    """
+    return ROOT / _path("resized_image_dir", "post_image_dataset/resized")
 
 
 def _runtime_sam_config() -> dict | None:
@@ -148,6 +162,7 @@ def cmd_mask(extra):
     sam_cfg = _load_sam_config(runtime_sam_cfg)
     pattern = _config_path_pattern(sam_cfg)
     pattern_args = ["--path-pattern", pattern] if pattern else []
+    resized_dir = _resized_image_dir()
     with tempfile.TemporaryDirectory(prefix="anima-masks-") as tmp_root:
         sam_config_path = _sam_config_path(
             sam_cfg,
@@ -157,11 +172,11 @@ def cmd_mask(extra):
         merge_sources: list[str] = []
         if run_sam:
             tmp_sam = Path(tmp_root) / "sam"
-            _run_sam(RESIZED_IMAGE_DIR, tmp_sam, [*pattern_args], sam_config_path)
+            _run_sam(resized_dir, tmp_sam, [*pattern_args], sam_config_path)
             merge_sources.append(str(tmp_sam))
         if run_mit:
             tmp_mit = Path(tmp_root) / "mit"
-            _run_mit(RESIZED_IMAGE_DIR, tmp_mit, [*pattern_args])
+            _run_mit(resized_dir, tmp_mit, [*pattern_args])
             merge_sources.append(str(tmp_mit))
         MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         run(

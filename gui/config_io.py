@@ -184,6 +184,7 @@ _GROUPS = {
         "specialize_experts_by_sigma_buckets",
         "sigma_bucket_boundaries",
         "use_repa",
+        "repa_target_dog",
         "network_train_unet_only",
     },
     "Paths": {

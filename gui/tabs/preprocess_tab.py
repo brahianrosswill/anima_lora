@@ -1338,6 +1338,11 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         if not (run_sam or run_mit):
             QMessageBox.warning(self, t("error"), t("preprocess_mask_nothing_enabled"))
             return
+        # Carry the scoped paths (path_scope-appended ``resized_image_dir``) so
+        # masking only scans the configured subfolder — without the snapshot the
+        # task falls back to the unscoped ``post_image_dataset/resized`` and
+        # re-masks every previously-preprocessed group each run.
+        snapshot = self.preprocess_config_snapshot()
         self._submit(
             label="mask",
             argv=["tasks.py", "mask"],
@@ -1354,6 +1359,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
                     ensure_ascii=False,
                 ),
             },
+            config_snapshot=snapshot,
             attach=not queue,
         )
 
