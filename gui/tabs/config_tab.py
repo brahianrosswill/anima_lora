@@ -65,7 +65,7 @@ from gui import (
 )
 from gui import daemon as gui_daemon
 from gui._job_mixin import DaemonJobMixin
-from gui.theme import tok
+from gui.theme import rich_text_pt as _explain_pt, tok
 from gui.explanations import field_help, method_guide
 from gui.i18n import t
 from gui.process import kill_process_tree, setup_kill_safe
@@ -381,7 +381,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._explain.setOpenLinks(False)
         self._explain.anchorClicked.connect(self._on_explain_anchor)
         self._explain.setStyleSheet(
-            f"QTextBrowser {{ font-size: 14px; padding: 12px; background: {tok('panel')}; color: {tok('text')}; }}"
+            f"QTextBrowser {{ font-size: 120%; padding: 12px; background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
         # Identity of the gallery render currently showing (None = panel holds
@@ -779,20 +779,20 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         title = html.escape(t(title_key))
         if not imgs:
             self._set_explain_html(
-                f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"
+                f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{title}</h2>"
                 f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t(empty_key))}</p>",
                 gallery_sig=sig,
             )
             return
-        parts = [f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>"]
+        parts = [f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{title}</h2>"]
         for p in imgs:
             url = p.resolve().as_uri()
             magnify = "magnify" + url[len("file") :]
             parts.append(
                 f"<p style='margin:0 0 10px 0;'>"
                 f"<a href='{magnify}'><img src='{url}' style='max-width:100%;'/></a><br/>"
-                f"<span style='color:{tok('text_dim')}; font-size:11px;'>{html.escape(p.name)}</span> "
-                f"<a href='{magnify}' style='text-decoration:none; font-size:12px;'>🔍</a>"
+                f"<span style='color:{tok('text_dim')}; font-size:{_explain_pt(11)};'>{html.escape(p.name)}</span> "
+                f"<a href='{magnify}' style='text-decoration:none; font-size:{_explain_pt(12)};'>🔍</a>"
                 f"</p>"
             )
         sb = self._explain.verticalScrollBar()
@@ -866,10 +866,12 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         # poll (during training) stops refreshing over what they're reading.
         self._explain_mode = "help"
         parts = [
-            f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{html.escape(field)}</h2>"
+            f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{html.escape(field)}</h2>"
         ]
         if help_text:
-            parts.append(f"<p style='font-size:15px; line-height:1.6;'>{help_text}</p>")
+            parts.append(
+                f"<p style='font-size:{_explain_pt(15)}; line-height:1.6;'>{help_text}</p>"
+            )
         else:
             parts.append(
                 f"<p style='color:{tok('text_dim')}; font-style:italic;'>{html.escape(t('no_help_available'))}</p>"

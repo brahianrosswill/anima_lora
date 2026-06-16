@@ -71,7 +71,7 @@ from gui._job_mixin import DaemonJobMixin
 from gui.explanations import preprocess_field_help, preprocess_guide
 from gui.i18n import t
 from gui.progress import TQDM_RE, TqdmProgressTracker, make_progress_bar
-from gui.theme import tok
+from gui.theme import rich_text_pt as _explain_pt, tok
 from gui.tabs.config_tab import ConfigTab, SplitButtonStyle
 from gui.widgets import ClickableLabel, DirtyTrackingMixin, make_field_label
 from library.datasets.path_filter import filter_paths_by_glob
@@ -666,7 +666,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self._explain = QTextBrowser()
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
-            f"QTextBrowser {{ font-size: 14px; padding: 12px; "
+            f"QTextBrowser {{ font-size: 120%; padding: 12px; "
             f"background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
@@ -897,12 +897,12 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
 
     def _show_field_help(self, field_label: str, help_text: str | None) -> None:
         parts = [
-            f"<h2 style='margin:0 0 10px 0; font-size:18px;'>"
+            f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>"
             f"{html.escape(field_label)}</h2>"
         ]
         if help_text:
             parts.append(
-                f"<p style='font-size:15px; line-height:1.6;'>"
+                f"<p style='font-size:{_explain_pt(15)}; line-height:1.6;'>"
                 f"{html.escape(help_text)}</p>"
             )
         else:

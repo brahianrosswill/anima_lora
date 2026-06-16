@@ -25,10 +25,20 @@ This module may import Qt (it is only ever imported from the Qt side); keep
 from __future__ import annotations
 
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QPainter,
+    QPalette,
+    QPixmap,
+    QPolygon,
+)
 from PySide6.QtWidgets import QApplication
 
 from gui._paths import DEFAULT_THEME, get_setting, set_setting
@@ -244,6 +254,18 @@ def set_font_size(size: int) -> None:
     set_setting("font_size", max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, int(size))))
 
 
+def rich_text_pt(px_at_default: float) -> str:
+    """A rich-text ``font-size`` (in pt) that scales with the app font knob.
+
+    The explanation-panel QTextDocument default font already tracks the Settings
+    font size, but inline ``font-size:<n>px`` in Qt rich text is *absolute* — Qt
+    honours only ``px``/``pt`` there (``em``/``%`` are silently ignored), so a px
+    literal pins that text regardless of the knob. Convert a design value
+    expressed "in px at the 10pt default" into a pt size scaled by the current
+    app font so headings/body track the knob. 10pt ≈ 13.33px at 96dpi."""
+    return f"{px_at_default * current_font_size() / 13.333:.1f}pt"
+
+
 def _build_palette(t: Theme) -> QPalette:
     p = QPalette()
     for role, color in [
@@ -270,16 +292,65 @@ def _build_palette(t: Theme) -> QPalette:
     return p
 
 
-def _build_stylesheet(t: Theme, font_family: str = "") -> str:
-    # Enforce the UI font family through the stylesheet, not just app.setFont().
-    # On Windows the native style paints many controls with the system font and
-    # ignores the application QFont (QFontInfo still *reports* the app font, so
-    # this is invisible to code — only the pixels are wrong). A stylesheet rule
-    # has higher precedence than the native style, so listing the family on the
-    # base QWidget forces every widget to actually render in the bundled font.
-    # Family only — size/weight stay on the QFont so per-widget overrides (the
-    # monospace log views set their own font-family directly and still win).
-    font_rule = f"* {{ font-family: {font_family}; }}\n" if font_family else ""
+_ARROW_DIR = Path(tempfile.gettempdir()) / "anima_gui_arrows"
+_arrow_cache: dict[tuple[str, str], str] = {}
+
+
+def _arrow_icon(color: str, direction: str) -> str:
+    """Render a small filled-triangle arrow PNG in ``color`` and return its path.
+
+    Qt's stylesheet engine doesn't support the CSS border-triangle trick (it
+    paints a filled box — the 'white tofu'), and the native spin-arrow primitive
+    renders dark-on-dark in the dark theme. So we paint our own theme-coloured
+    arrow with QPainter and feed it to ``image: url(...)``. Cached per
+    (color, direction); files live in a temp dir keyed by colour so a theme
+    switch regenerates them."""
+    key = (color, direction)
+    cached = _arrow_cache.get(key)
+    if cached:
+        return cached
+    _ARROW_DIR.mkdir(parents=True, exist_ok=True)
+    # 2x size for crisp rendering on HiDPI; the stylesheet draws it at ~11px.
+    w, h = 22, 14
+    pm = QPixmap(w, h)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(Qt.NoPen)
+    pad_x, pad_y = 4, 3
+    if direction == "up":
+        tri = QPolygon([QPoint(pad_x, h - pad_y), QPoint(w - pad_x, h - pad_y), QPoint(w // 2, pad_y)])
+    else:
+        tri = QPolygon([QPoint(pad_x, pad_y), QPoint(w - pad_x, pad_y), QPoint(w // 2, h - pad_y)])
+    p.drawPolygon(tri)
+    p.end()
+    safe = color.lstrip("#")
+    path = _ARROW_DIR / f"{direction}_{safe}.png"
+    pm.save(str(path), "PNG")
+    # Qt CSS wants forward slashes even on Windows.
+    url = path.as_posix()
+    _arrow_cache[key] = url
+    return url
+
+
+def _build_stylesheet(t: Theme, font_family: str = "", font_size: int = DEFAULT_FONT_SIZE) -> str:
+    # Enforce the UI font family AND size through the stylesheet, not just
+    # app.setFont(). On Windows the native style paints many controls with the
+    # system font and ignores the application QFont (QFontInfo still *reports*
+    # the app font, so this is invisible to code — only the pixels are wrong),
+    # and for any widget Qt resolves through the stylesheet (e.g. labels that
+    # carry their own colour stylesheet) the point size from app.setFont() does
+    # not reliably propagate. A stylesheet rule has higher precedence, so naming
+    # both family and size on the base QWidget forces every widget to render in
+    # the bundled font at the chosen size — so the Settings font-size knob scales
+    # tab titles and field labels too. Per-widget overrides (monospace log views
+    # set their own family + px size) are more specific and still win.
+    font_rule = (
+        f"* {{ font-family: {font_family}; font-size: {font_size}pt; }}\n"
+        if font_family
+        else f"* {{ font-size: {font_size}pt; }}\n"
+    )
     return f"""
         {font_rule}
         QGroupBox {{
@@ -291,9 +362,47 @@ def _build_stylesheet(t: Theme, font_family: str = "") -> str:
         QPushButton:hover {{ background: {t.surface_hover}; }}
         QScrollArea {{ border: none; }}
         QSplitter::handle {{ background: {t.border_dim}; }}
-        QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit, QListWidget {{
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit, QListWidget {{
             background: {t.input_bg}; color: {t.text}; border: 1px solid {t.border};
             border-radius: 3px; padding: 2px 4px;
+        }}
+        /* Spin buttons: both steppers sit side by side on the right edge (down
+           then up) instead of the cramped native vertical stack, and the arrows
+           are enlarged so they're legible. */
+        QSpinBox, QDoubleSpinBox {{ padding-right: 34px; }}
+        /* height is intentionally oversized: Qt clamps the spin-button to the
+           field height, so this fills it edge-to-edge at any font size (no
+           top/bottom gap) instead of the native ~15px centred box. */
+        QSpinBox::up-button, QDoubleSpinBox::up-button {{
+            subcontrol-origin: border; subcontrol-position: right;
+            width: 16px; height: 200px; border-left: 1px solid {t.border}; background: {t.surface};
+        }}
+        QSpinBox::down-button, QDoubleSpinBox::down-button {{
+            subcontrol-origin: border; subcontrol-position: right; margin-right: 16px;
+            width: 16px; height: 200px; border-left: 1px solid {t.border}; background: {t.surface};
+        }}
+        QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+        QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+            background: {t.surface_hover};
+        }}
+        QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+        QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+            background: {t.accent};
+        }}
+        /* Theme-coloured arrow icons painted by _arrow_icon — Qt can't render a
+           CSS border-triangle (paints a white box) and the native arrow is
+           dark-on-dark in the dark theme. */
+        QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+            image: url({_arrow_icon(t.text, "up")}); width: 11px; height: 7px;
+        }}
+        QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+            image: url({_arrow_icon(t.text, "down")}); width: 11px; height: 7px;
+        }}
+        QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover {{
+            image: url({_arrow_icon(t.text_bright, "up")});
+        }}
+        QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {{
+            image: url({_arrow_icon(t.text_bright, "down")});
         }}
         QComboBox QAbstractItemView {{
             background: {t.input_bg}; color: {t.text}; selection-background-color: {t.accent};
@@ -302,7 +411,7 @@ def _build_stylesheet(t: Theme, font_family: str = "") -> str:
         QTabBar::tab {{
             background: {t.input_bg}; color: {t.text}; border: 1px solid {t.border_dim};
             padding: 6px 14px;
-            font-size: 13.5px; font-weight: 500;
+            font-size: {font_size + 1}pt; font-weight: 500;
             border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px;
         }}
         QTabBar::tab:selected {{ background: {t.tab_selected}; color: {t.text_bright}; }}
@@ -388,5 +497,5 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
     family_css = ", ".join(f'"{f}"' for f in families)
 
     app.setPalette(_build_palette(t))
-    app.setStyleSheet(_build_stylesheet(t, family_css))
+    app.setStyleSheet(_build_stylesheet(t, family_css, current_font_size()))
     return t

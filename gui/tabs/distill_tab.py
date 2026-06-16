@@ -47,7 +47,7 @@ from gui.explanations import method_overview
 from gui.i18n import t
 from gui._job_mixin import DaemonJobMixin
 from gui.progress import TqdmProgressTracker, make_progress_bar
-from gui.theme import tok
+from gui.theme import rich_text_pt as _explain_pt, tok
 from gui.widgets import DirtyTrackingMixin, make_field_label
 
 
@@ -140,7 +140,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         self._explain = QTextBrowser()
         self._explain.setOpenExternalLinks(True)
         self._explain.setStyleSheet(
-            "QTextBrowser { font-size: 14px; padding: 12px; "
+            "QTextBrowser { font-size: 120%; padding: 12px; "
             f"background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(300)
@@ -299,7 +299,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
             paras.append(" ".join(cur))
         if paras:
             body = "".join(
-                f"<p style='font-size:14px; line-height:1.6;'>{html.escape(p)}</p>"
+                f"<p style='font-size:{_explain_pt(14)}; line-height:1.6;'>{html.escape(p)}</p>"
                 for p in paras
             )
         else:
@@ -308,16 +308,16 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
                 f"{html.escape(t('click_field_for_help'))}</p>"
             )
         self._explain.setHtml(
-            f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{title}</h2>{body}"
+            f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{title}</h2>{body}"
         )
 
     def _show_explain(self, field: str, help_text: str) -> None:
         parts = [
-            f"<h2 style='margin:0 0 10px 0; font-size:18px;'>{html.escape(field)}</h2>"
+            f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{html.escape(field)}</h2>"
         ]
         if help_text:
             parts.append(
-                f"<p style='font-size:15px; line-height:1.6;'>"
+                f"<p style='font-size:{_explain_pt(15)}; line-height:1.6;'>"
                 f"{html.escape(help_text)}</p>"
             )
         else:

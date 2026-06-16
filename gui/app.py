@@ -223,7 +223,7 @@ class SettingsDialog(QDialog):
         self.conf_spin.valueChanged.connect(
             lambda v: set_setting("autotag_confidence", round(float(v), 2))
         )
-        self.conf_spin.setFixedWidth(80)
+        self.conf_spin.setFixedWidth(125)
         conf_row.addWidget(self.conf_spin)
         conf_row.addStretch()
         prefs_lay.addLayout(conf_row)
@@ -260,7 +260,7 @@ class SettingsDialog(QDialog):
         self.font_spin.setToolTip(t("settings_font_size_tooltip"))
         self.font_spin.setValue(gui_theme.current_font_size())
         self.font_spin.valueChanged.connect(self._change_font_size)
-        self.font_spin.setFixedWidth(80)
+        self.font_spin.setFixedWidth(125)
         font_row.addWidget(self.font_spin)
         font_row.addStretch()
         prefs_lay.addLayout(font_row)
