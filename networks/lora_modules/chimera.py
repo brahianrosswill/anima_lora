@@ -63,9 +63,8 @@ class _ChimeraRoutingMixin:
     """
 
     def _register_routing_buffers(self, K_c: int, K_f: int) -> None:
-        # Uniform 1/K placeholders, overwritten per-step by the network-level
-        # routers via direct slot assignment. Non-persistent — re-derived on
-        # construction.
+        # Uniform 1/K placeholders, slot-assigned per-step by the network-level
+        # routers. Non-persistent — re-derived on construction.
         self.register_buffer(
             "_content_routing_weights",
             torch.full((1, K_c), 1.0 / max(K_c, 1), dtype=torch.float32),
@@ -579,9 +578,7 @@ class ChimeraHydraLoRAModule(_ChimeraRoutingMixin, BaseLoRAModule):
         zero = torch.tensor(0.0, device=self.P_bases_c.device)
         return zero, zero
 
-    # ------------------------------------------------------------------
     # Save-pipeline hooks: dual-A distill + per-pool MoE writer.
-    # ------------------------------------------------------------------
 
     @classmethod
     def distill_save_state_dict(
