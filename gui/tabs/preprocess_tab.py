@@ -940,6 +940,8 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         caches = count_preprocess_caches(
             _path("lora_cache_dir", LORA_CACHE_DIR),
             path_pattern,
+            pe_encoder=str(snapshot.get("repa_encoder") or "pe_spatial").strip()
+            or None,
         )
         mask_n = _count_masks(_path("mask_dir", MASK_DIR), path_pattern)
         if n_resized == 0:

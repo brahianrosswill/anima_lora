@@ -16,7 +16,14 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 
 from gui._paths import ROOT
 from gui.i18n import t
-from library.datasets.path_filter import filter_paths_by_glob
+
+# Cache discovery (suffix conventions + the by-name counter) lives in the
+# torch-free leaf library/io/cache_names.py — one source of truth shared with the
+# preprocess pipeline. Importing it keeps GUI startup torch-free (gui/CLAUDE.md)
+# while killing the suffix drift that made this code blind to PE-Spatial sidecars.
+# Re-exported so existing `from gui.dialogs import count_preprocess_caches`
+# call sites keep working.
+from library.io.cache_names import count_preprocess_caches  # noqa: F401
 
 
 def confirm_resumable_checkpoint(parent: QWidget | None, merged: dict) -> bool:
@@ -64,57 +71,22 @@ def confirm_resumable_checkpoint(parent: QWidget | None, merged: dict) -> bool:
     return True
 
 
-# Cache-file suffixes written by the preprocess scripts. Kept in sync with
-# scripts/preprocess/cache_latents.py, cache_text_embeddings.py, cache_pe_encoder.py.
-_LATENT_SUFFIX = "_anima.npz"
-_TE_SUFFIX = "_anima_te.safetensors"
-_PE_SUFFIX = "_anima_pe.safetensors"
-
-
-def count_preprocess_caches(
-    cache_dir: Path, path_pattern: str | None = None
-) -> dict[str, int]:
-    """Count existing latent / TE / PE cache sidecars under a cache directory.
-
-    Returns zeros (without raising) if the directory does not exist. Used to
-    surface a reassurance popup that ``make preprocess`` reuses existing caches
-    rather than wiping them — a recurring point of confusion for new users.
-
-    Walks recursively so nested caches (mirroring a subfoldered source tree)
-    are counted.
-    """
-    out = {"latents": 0, "te": 0, "pe": 0}
-    if not cache_dir.is_dir():
-        return out
-    paths = [p for p in cache_dir.rglob("*") if p.is_file()]
-    if path_pattern and path_pattern != "*":
-        keep = filter_paths_by_glob(
-            [str(p) for p in paths],
-            str(cache_dir),
-            path_pattern,
-        )
-        paths = [p for p, k in zip(paths, keep) if k]
-    for p in paths:
-        n = p.name
-        if n.endswith(_TE_SUFFIX):
-            out["te"] += 1
-        elif n.endswith(_PE_SUFFIX):
-            out["pe"] += 1
-        elif n.endswith(_LATENT_SUFFIX):
-            out["latents"] += 1
-    return out
-
-
 def confirm_existing_caches(
-    parent: QWidget | None, cache_dir: Path, require_pe: bool = False
+    parent: QWidget | None,
+    cache_dir: Path,
+    require_pe: bool = False,
+    pe_encoder: str | None = None,
 ) -> bool:
     """Reassure the user that existing preprocess caches will be reused, not
     deleted. Returns True to proceed, False if the user cancelled.
 
     No-op (returns True without prompting) when the cache directory is empty
     or missing, so the call site can wrap every preprocess launch in this.
+
+    ``pe_encoder`` selects which PE sidecar variant is counted (defaults to the
+    REPA default ``pe_spatial``) — see :func:`count_preprocess_caches`.
     """
-    counts = count_preprocess_caches(cache_dir)
+    counts = count_preprocess_caches(cache_dir, pe_encoder=pe_encoder)
     has_any = (
         counts["latents"] > 0 or counts["te"] > 0 or (require_pe and counts["pe"] > 0)
     )
@@ -144,7 +116,10 @@ def confirm_existing_caches(
 
 
 def confirm_train_using_cache(
-    parent: QWidget | None, cache_dir: Path, require_pe: bool = False
+    parent: QWidget | None,
+    cache_dir: Path,
+    require_pe: bool = False,
+    pe_encoder: str | None = None,
 ) -> bool | None:
     """Train-side cache confirmation: returns True to launch training against
     the existing cache, False if the user cancelled, or None when no cache was
@@ -158,9 +133,12 @@ def confirm_train_using_cache(
     mandatory: a core latent/TE cache that lacks PE sidecars still returns
     ``None`` so the caller auto-chains a (PE-caching) preprocess pass, rather
     than launching a REPA run whose alignment target is silently absent. This
-    is the common "preprocessed before enabling REPA" case.
+    is the common "preprocessed before enabling REPA" case. ``pe_encoder`` must
+    match the variant's ``repa_encoder`` (defaults to ``pe_spatial``) so the PE
+    sidecars REPA will actually read are the ones we look for — otherwise a
+    fully-cached PE-Spatial run is misread as cache-missing.
     """
-    counts = count_preprocess_caches(cache_dir)
+    counts = count_preprocess_caches(cache_dir, pe_encoder=pe_encoder)
     has_core = counts["latents"] > 0 or counts["te"] > 0
     # REPA on + a built core cache but no PE sidecars → treat as cache-missing
     # so Train rebuilds the PE caches. preprocess is idempotent (it skips the

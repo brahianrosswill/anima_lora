@@ -17,11 +17,20 @@ import numpy as np
 import torch
 from safetensors.torch import load_file
 
-logger = logging.getLogger(__name__)
+# Suffix conventions live in the torch-free leaf so torch-free consumers (the
+# GUI) share one definition. Re-exported here for back-compat with the many
+# call sites importing them from ``library.io.cache``.
+from library.io.cache_names import (  # noqa: F401
+    DEFAULT_PE_ENCODER,
+    LATENT_CACHE_SUFFIX,
+    POOLED_CACHE_SUFFIX,
+    TE_CACHE_SUFFIX,
+    classify_cache_file,
+    count_preprocess_caches,
+    pe_cache_suffix,
+)
 
-LATENT_CACHE_SUFFIX = "_anima.npz"
-TE_CACHE_SUFFIX = "_anima_te.safetensors"
-POOLED_CACHE_SUFFIX = "_anima_pooled.safetensors"
+logger = logging.getLogger(__name__)
 
 
 def resolve_cache_path(

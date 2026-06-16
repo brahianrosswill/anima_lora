@@ -228,6 +228,30 @@ def _write_te_cache(path: Path, crossattn: "object") -> None:
     save_file({"crossattn_emb": crossattn}, str(path))
 
 
+def test_count_preprocess_caches_is_pe_encoder_aware(tmp_path: Path) -> None:
+    # Regression: the PE sidecar suffix is ``_anima_{encoder}.safetensors`` and
+    # the default REPA encoder is ``pe_spatial`` — counting must default to that,
+    # not the PE-Core ``pe`` variant (a hardcoded ``_anima_pe`` once made the GUI
+    # blind to a fully-cached PE-Spatial dataset and force-relaunch preprocess).
+    from library.io.cache_names import (
+        LATENT_CACHE_SUFFIX,
+        TE_CACHE_SUFFIX,
+        count_preprocess_caches,
+        pe_cache_suffix,
+    )
+
+    (tmp_path / f"a{LATENT_CACHE_SUFFIX}").write_bytes(b"")
+    (tmp_path / f"a{TE_CACHE_SUFFIX}").write_bytes(b"")
+    (tmp_path / f"a{pe_cache_suffix('pe_spatial')}").write_bytes(b"")
+
+    # Default encoder (pe_spatial) sees the spatial sidecar.
+    counts = count_preprocess_caches(tmp_path)
+    assert counts == {"latents": 1, "te": 1, "pe": 1}
+
+    # Asking for the PE-Core encoder finds no matching sidecar.
+    assert count_preprocess_caches(tmp_path, pe_encoder="pe")["pe"] == 0
+
+
 def test_cache_pooled_text_pools_and_is_idempotent(tmp_path: Path) -> None:
     import torch
     from safetensors.torch import load_file

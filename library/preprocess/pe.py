@@ -18,6 +18,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 from library.io.cache import resolve_cache_path
+from library.io.cache_names import pe_cache_suffix
 from library.datasets.image_utils import IMAGE_TRANSFORMS
 from library.preprocess._dataset import (
     PreprocessStats,
@@ -43,7 +44,7 @@ def cache_path_for(
     source subpath when ``image_dir`` is given); otherwise it lives next to
     the image (legacy layout).
     """
-    suffix = f"_anima_{encoder}.safetensors"
+    suffix = pe_cache_suffix(encoder)
     if cache_dir is None:
         return image_path.with_name(image_path.stem + suffix)
     return Path(
@@ -230,7 +231,7 @@ def compute_pe_centroid(
     """
     from safetensors.torch import load_file
 
-    suffix = f"_anima_{encoder}.safetensors"
+    suffix = pe_cache_suffix(encoder)
     files = sorted(p for p in cache_dir.rglob(f"*{suffix}") if p.is_file())
     files = [p for p in files if not p.name.startswith("anima_pe_centroid")]
     if not files:

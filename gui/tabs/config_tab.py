@@ -1309,6 +1309,10 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             "true",
             "yes",
         )
+        # The PE sidecar suffix is encoder-specific ({stem}_anima_{encoder}.…),
+        # so the cache probe must look for the encoder REPA will actually read
+        # (pe_spatial by default) — not a hardcoded variant.
+        pe_encoder = str(merged.get("repa_encoder") or "pe_spatial").strip() or None
 
         # Three-way branch on cache state:
         #   • Cache exists → confirm with the user that we're reusing it.
@@ -1319,7 +1323,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         # preprocess instead of training REPA against an absent target.
         # The auto-chain decision is recorded on the instance so
         # _on_finished can pick it up once preprocess succeeds.
-        decision = confirm_train_using_cache(self, cache_dir, require_pe=require_pe)
+        decision = confirm_train_using_cache(
+            self, cache_dir, require_pe=require_pe, pe_encoder=pe_encoder
+        )
         if decision is False:
             return
 
