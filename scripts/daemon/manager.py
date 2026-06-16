@@ -605,6 +605,12 @@ class JobManager:
         path). If we can't probe memory at all we assume free rather than
         deadlock the queue. Tunable via ANIMA_DAEMON_GPU_{BUSY_FRAC,RETRIES,DELAY}.
         """
+        # A resident inference server (scripts/inference_server.py) holds a warm
+        # DiT on the card. Politely ask it to free VRAM before we launch — it
+        # stays alive and reloads on its next request. Best-effort; if none is
+        # running this is a couple of cheap stat() calls.
+        self._evict_resident_inference()
+
         for attempt in range(retries):
             # Reap leftovers from our own (now-terminal/dead) jobs. Safe even
             # when gpu_pids() is polluted: only pids that match a known job act.
@@ -652,6 +658,47 @@ class JobManager:
     def _kill_job_tree(self, job: Job) -> None:
         if job.pid is not None:
             proc.kill_tree(job.pid)
+
+    def _evict_resident_inference(self) -> None:
+        """Ask a resident inference server (if any) to free VRAM before launch.
+
+        Discovery mirrors scripts/inference_server.py's pidfiles (in-repo +
+        per-user mirror + $ANIMA_INFERENCE_PIDFILE). Done inline (no import) so
+        the daemon stays decoupled from the inference server; every failure is
+        swallowed — coexistence is a courtesy, and the server's own idle-TTL
+        eventually frees the card anyway.
+        """
+        import json
+        import urllib.request
+        from pathlib import Path
+
+        candidates = []
+        override = os.environ.get("ANIMA_INFERENCE_PIDFILE")
+        if override:
+            candidates.append(Path(override))
+        candidates += [
+            config.ROOT / "output" / "inference" / "server.json",
+            Path.home() / ".anima" / "inference.json",
+        ]
+        for pf in candidates:
+            try:
+                port = json.loads(pf.read_text()).get("port")
+            except (OSError, ValueError):
+                continue
+            if not port:
+                continue
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"http://127.0.0.1:{port}/unload", method="POST"
+                    ),
+                    timeout=5,
+                ).read()
+                logger.info("gpu_guard: inference server (port %s) unloaded", port)
+                time.sleep(1.0)  # let VRAM release before we measure
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+            return
 
     def _build_cmd(self, job: Job) -> tuple[list[str], dict]:
         from .client import venv_python
