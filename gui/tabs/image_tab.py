@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -586,6 +587,11 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             _app.aboutToQuit.connect(self._kill_tagger_worker)
         self._search_text: str = ""
         self._sort_desc: bool = False
+        # Group-first ordering: when on, the tree is flattened across folders so
+        # every similarity group floats to the very top as a single root-level
+        # green node (members shown with their folder prefix), and the ungrouped
+        # images follow below in the normal folder tree. Off = per-folder tree.
+        self._group_first: bool = False
         # Similarity-group curation (make curate-group). _groups is the manifest's
         # group list; the tree view folds images under green per-group nodes (the
         # old dropdown filter was replaced by this always-on tree grouping).
@@ -611,7 +617,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.dc.currentTextChanged.connect(self._load_dir)
         top.addWidget(self.dc, 1)
         self.reload_btn = QPushButton("↻")
-        self.reload_btn.setFixedWidth(28)
+        self.reload_btn.setMinimumWidth(32)
         self.reload_btn.setToolTip(t("dataset_reload_tooltip"))
         self.reload_btn.clicked.connect(self._reload_current_dir)
         top.addWidget(self.reload_btn)
@@ -659,11 +665,20 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._on_search_changed)
         search_row.addWidget(self.search, 1)
-        self.sort_btn = QPushButton("↑")
-        self.sort_btn.setFixedWidth(28)
+        self.sort_btn = QPushButton("a-z")
+        self.sort_btn.setMinimumWidth(48)
         self.sort_btn.setToolTip(t("dataset_sort_asc_tooltip"))
         self.sort_btn.clicked.connect(self._toggle_sort)
         search_row.addWidget(self.sort_btn)
+        # Group-first toggle: floats all similarity groups to the top of the
+        # tree, flattened across folders (see _rebuild_tree_group_first). Label
+        # reflects the active layout — "그룹" when on, "트리" when off.
+        self.group_first_btn = QPushButton(t("dataset_view_tree"))
+        self.group_first_btn.setMinimumWidth(56)
+        self.group_first_btn.setCheckable(True)
+        self.group_first_btn.setToolTip(t("dataset_group_first_tooltip"))
+        self.group_first_btn.clicked.connect(self._toggle_group_first)
+        search_row.addWidget(self.group_first_btn)
         ll.addLayout(search_row)
 
         self.tree = QTreeWidget()
@@ -1181,6 +1196,17 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             for m in g.get("members", []):
                 stem_to_group[Path(m).stem] = gi
 
+        if self._group_first:
+            self._rebuild_tree_group_first(visible, stem_to_group)
+        else:
+            self._rebuild_tree_folders(visible, stem_to_group)
+        self.tree.expandAll()
+
+    def _rebuild_tree_folders(
+        self, visible: list[Path], stem_to_group: dict[str, int]
+    ) -> None:
+        """Folder-primary layout (default): groups nest under their folder, then
+        float above the ungrouped files at the same level."""
         # Cache folder QTreeWidgetItems by their relative parent path so
         # sibling images in the same folder share one parent node. Group
         # sub-nodes are keyed by (folder, group index) so each folder gets its
@@ -1213,7 +1239,71 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 0, t("dataset_group_label", n=key[1] + 1, size=group_counts[key])
             )
         self._float_groups_to_top(folder_items, group_nodes)
-        self.tree.expandAll()
+
+    def _rebuild_tree_group_first(
+        self, visible: list[Path], stem_to_group: dict[str, int]
+    ) -> None:
+        """Group-first layout: every similarity group becomes a single
+        root-level green node holding all its visible members (across folders,
+        labelled with their folder prefix), sorted by group index. The ungrouped
+        images follow below in the normal folder tree."""
+        # Bucket the visible images: grouped ones by group index (preserving
+        # filename order), the rest collected for the folder tree below.
+        group_members: dict[int, list[tuple[int, Path]]] = {}
+        ungrouped: list[tuple[int, Path]] = []
+        for idx, p in enumerate(visible):
+            gi = stem_to_group.get(p.stem)
+            if gi is None:
+                ungrouped.append((idx, p))
+            else:
+                group_members.setdefault(gi, []).append((idx, p))
+
+        # Top-level green group nodes, members shown with their folder prefix so
+        # cross-folder groups stay legible (stems alone would be ambiguous).
+        for gi in sorted(group_members):
+            members = group_members[gi]
+            node = QTreeWidgetItem(
+                self.tree,
+                [t("dataset_group_label", n=gi + 1, size=len(members))],
+            )
+            node.setForeground(0, QColor("#27ae60"))
+            font = node.font(0)
+            font.setBold(True)
+            node.setFont(0, font)
+            for idx, p in members:
+                leaf = QTreeWidgetItem(node, [self._display_label(p)])
+                self._tree_item_to_index[leaf] = idx
+
+        # Divider between the group block and the ungrouped folder tree (only
+        # when both sections exist, so it never dangles).
+        if group_members and ungrouped:
+            self._add_tree_separator()
+
+        # Ungrouped images keep their folder hierarchy, appended after the groups.
+        folder_items: dict[Path, QTreeWidgetItem] = {}
+        for idx, p in ungrouped:
+            if self._current_dir is None:
+                rel = Path(p.name)
+            else:
+                try:
+                    rel = p.relative_to(self._current_dir)
+                except ValueError:
+                    rel = Path(p.name)
+            folder = self._ensure_tree_folder(rel.parent, folder_items)
+            leaf = QTreeWidgetItem(folder, [p.stem])
+            self._tree_item_to_index[leaf] = idx
+
+    def _add_tree_separator(self) -> None:
+        """Append a non-selectable horizontal divider row at the tree root.
+
+        A real 2px QFrame line (set as the row's item widget) reads clearly on
+        the tree's light background, unlike dash glyphs which wash out."""
+        sep = QTreeWidgetItem(self.tree, [""])
+        sep.setFlags(Qt.NoItemFlags)  # non-selectable, non-navigable
+        line = QFrame()
+        line.setFixedHeight(2)
+        line.setStyleSheet("background:#8a8a8a;")
+        self.tree.setItemWidget(sep, 0, line)
 
     def _float_groups_to_top(
         self,
@@ -1294,11 +1384,18 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _toggle_sort(self) -> None:
         self._sort_desc = not self._sort_desc
-        self.sort_btn.setText("↓" if self._sort_desc else "↑")
+        self.sort_btn.setText("z-a" if self._sort_desc else "a-z")
         self.sort_btn.setToolTip(
             t("dataset_sort_desc_tooltip")
             if self._sort_desc
             else t("dataset_sort_asc_tooltip")
+        )
+        self._apply_filter_and_sort()
+
+    def _toggle_group_first(self) -> None:
+        self._group_first = self.group_first_btn.isChecked()
+        self.group_first_btn.setText(
+            t("dataset_view_group") if self._group_first else t("dataset_view_tree")
         )
         self._apply_filter_and_sort()
 
