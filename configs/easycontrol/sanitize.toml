@@ -31,6 +31,17 @@ match_frac_min = 0.3
 cell_match_min = 0.9
 max_extra_diff = 25
 
+# Identity (cond==target) regularizer. Fills a fraction of the staged tree with
+# clean singles that carry NO tag_any tag, staged as cond==target so the adapter
+# learns the no-op — without it every training example is a change, so the model
+# acquires a standing bias to globally transform clean inputs (the desaturation /
+# wash-out failure mode). identity_saturation_min additionally biases those
+# singles vivid, injecting the saturated clean targets the mined twins under-
+# represent (94% are pale). Sized as a fraction of the FINAL tree. An A/B dial —
+# set add_identity_pairs = 0.0 to restore the pairs-only baseline.
+add_identity_pairs = 0.25
+identity_saturation_min = 0.4
+
 # Resize + VAE/TE caching pass over the mined pair tree (read by
 # `make easycontrol-preprocess EASYADAPTER=sanitize`). The native-res staging
 # tree is first resized into constant-token buckets under resized_dir (that
@@ -89,10 +100,16 @@ network_args = [
     "use_repa=true",
     "repa_weight=0.05",
     "repa_layer=8",
-    "repa_target_dog=true"
+    "repa_target_dog=true",
+    # Timestep reweighting A/B (signed; 0/absent = uniform = current shipped arm).
+    # >0 tilts REPA toward HIGH noise, where (DiT frozen) the alignment target is
+    # only reachable through the clean cond → pure cond-utilization pressure. <0
+    # tilts toward LOW noise, where REPA otherwise decouples from the cond. Mean-1
+    # under uniform σ, so this is a shape-not-scale A/B. Uncomment to test.
+    "repa_timestep_weighting=1.0",
 ]
 # Keep the REPA arm from clobbering the baseline checkpoint during the A/B.
-output_name = "anima_easycontrol_sanitize_repaMA2"
+output_name = "anima_easycontrol_sanitize_repaMA3"
 
 learning_rate = 2e-5
 max_train_epochs = 12
