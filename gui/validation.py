@@ -11,10 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-# Held-out slice written when the user enables validation but neither the form
-# nor base.toml carries a positive validation_split_num. Matches the historical
-# base.toml default referenced in library/config/loader.py and stays under the
-# _MIN_TRAIN_IMAGES_FOR_VALIDATION=100 auto-disable threshold's headroom.
+# Held-out slice written when validation is enabled but no positive validation_split_num
+# exists (form or base.toml). Matches the historical base.toml default (library/config/loader.py).
 _DEFAULT_VALIDATION_SPLIT_NUM = 16
 
 
@@ -179,10 +177,8 @@ def apply_validation_choice(
     existing = out.get("datasets")
     if enabled:
         base_vsn = base_split_num or 0
-        # Pick the count that should actually take effect. Falling back to a
-        # positive default (rather than stripping) is essential when base.toml
-        # disables validation (validation_split_num=0): otherwise enabling is a
-        # no-op because the stripped override just lets base's 0 win.
+        # Fall back to a positive default (not strip): with base's validation_split_num=0,
+        # stripping would let base's 0 win and silently turn validation back off.
         if split_num and split_num > 0:
             effective = int(split_num)
         elif base_vsn > 0:
@@ -190,8 +186,7 @@ def apply_validation_choice(
         else:
             effective = _DEFAULT_VALIDATION_SPLIT_NUM
         if effective == base_vsn and base_vsn > 0:
-            # Base already enables this exact count — strip any override so
-            # base.toml stays the single source of truth (avoids noise keys).
+            # Base already enables this exact count — strip any override so base.toml wins.
             if not isinstance(existing, list) or not existing:
                 return
             first = existing[0]

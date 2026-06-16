@@ -153,7 +153,6 @@ class TensorBoardPanel(QGroupBox):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(4)
 
-        # Scrollable run list
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         # As a bottom-of-form panel the list is capped so it doesn't crowd the
@@ -176,7 +175,6 @@ class TensorBoardPanel(QGroupBox):
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._inner_lay.insertWidget(0, self._empty_label)
 
-        # Button bar
         btn_bar = QHBoxLayout()
 
         # Scoped to the single in-progress run — highlighted while training is
@@ -205,9 +203,7 @@ class TensorBoardPanel(QGroupBox):
 
         outer.addLayout(btn_bar)
 
-        # Complementary hint shown only while a run is live (i.e. when the
-        # current-run button is activated) — reminds the user to hit the reload
-        # button if the run hasn't surfaced in TensorBoard yet. Hidden when idle.
+        # Shown only while a run is live — reminds the user to hit reload if it hasn't surfaced in TensorBoard yet.
         self._hint_label = QLabel(t("tb_appear_hint"))
         self._hint_label.setStyleSheet(f"color:{tok('ok')};font-size:11px;padding:2px;")
         self._hint_label.setWordWrap(True)
@@ -222,8 +218,6 @@ class TensorBoardPanel(QGroupBox):
         self._refresh_timer.start()
 
         self._update_current_btn()
-
-    # ── Public API ──────────────────────────────────────────────────────────
 
     def set_log_dir(self, log_dir: str) -> None:
         """Point the panel at a logging base directory and refresh the list."""
@@ -262,8 +256,6 @@ class TensorBoardPanel(QGroupBox):
         """Stop the TensorBoard server and halt background polling."""
         self._manager.stop()
         self._refresh_timer.stop()
-
-    # ── Internal ────────────────────────────────────────────────────────────
 
     def _update_current_btn(self) -> None:
         """Highlight + enable the current-run button only while a run is live."""
@@ -341,7 +333,6 @@ class TensorBoardPanel(QGroupBox):
         # isn't unique.
         existing_keys = {str(d) for d in dirs}
 
-        # Remove stale rows
         for row in list(self._rows):
             if str(row.run_dir) not in existing_keys:
                 self._rows.remove(row)
@@ -350,7 +341,7 @@ class TensorBoardPanel(QGroupBox):
 
         known_keys = {str(row.run_dir) for row in self._rows}
 
-        # Add new rows (newest-first — insert before existing rows)
+        # Newest-first: insert before existing rows.
         insert_pos = 0
         for d in dirs:
             if str(d) not in known_keys:
@@ -369,11 +360,9 @@ class TensorBoardPanel(QGroupBox):
                 known_keys.add(str(d))
                 insert_pos += 1
 
-        # Update current highlighting on existing rows
         for row in self._rows:
             row.mark_current(self._is_current(row.run_dir))
 
-        # Toggle the empty-state label
         has_rows = bool(self._rows)
         self._empty_label.setVisible(not has_rows)
 

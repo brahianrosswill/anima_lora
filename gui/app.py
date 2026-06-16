@@ -105,7 +105,6 @@ class GuidebookDialog(QDialog):
 
         self.browser = QTextBrowser()
         self.browser.setOpenExternalLinks(True)
-        # Resolve relative links/images against the markdown file's directory.
         self.browser.setSearchPaths([str(md_path.parent)])
         self.browser.document().setBaseUrl(
             QUrl.fromLocalFile(str(md_path.parent) + "/")
@@ -183,8 +182,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(t("settings_title"))
         self.setMinimumWidth(560)
-        # Set when the user picks a new language and opts into an immediate
-        # reload; MainWindow checks it after exec() and rebuilds itself.
+        # Set when the user opts into an immediate reload; MainWindow checks it after exec().
         self.reload_requested = False
 
         lay = QVBoxLayout(self)
@@ -228,9 +226,7 @@ class SettingsDialog(QDialog):
         conf_row.addStretch()
         prefs_lay.addLayout(conf_row)
 
-        # Theme selector — Dark / Light / Sepia. Applied live across the app
-        # palette + stylesheet; closing the dialog rebuilds the window so each
-        # tab's per-widget tokens (gui.theme.tok) repaint in the new theme.
+        # Closing the dialog rebuilds the window so each tab's per-widget tokens (gui.theme.tok) repaint.
         theme_row = QHBoxLayout()
         theme_label = QLabel(t("settings_theme"))
         theme_label.setToolTip(t("settings_theme_tooltip"))
@@ -247,9 +243,7 @@ class SettingsDialog(QDialog):
         theme_row.addStretch()
         prefs_lay.addLayout(theme_row)
 
-        # App font size — point size handed to QApplication.setFont. Applied live
-        # (apply_theme re-runs); closing the dialog rebuilds the window so widgets
-        # that sized themselves to the old metrics relayout cleanly.
+        # Closing the dialog rebuilds the window so widgets sized to the old metrics relayout cleanly.
         font_row = QHBoxLayout()
         font_label = QLabel(t("settings_font_size"))
         font_label.setToolTip(t("settings_font_size_tooltip"))
@@ -315,8 +309,7 @@ class SettingsDialog(QDialog):
 
     def _change_lang(self, idx: int):
         lang = self.lang_combo.itemData(idx)
-        # save_language also flips the in-process language, so the prompt
-        # below (and a rebuilt MainWindow) already render in the new language.
+        # save_language also flips the in-process language, so the prompt below already renders in it.
         save_language(lang)
         choice = QMessageBox.question(
             self,
@@ -364,12 +357,9 @@ class MainWindow(QMainWindow):
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
 
-        # Right-click anywhere — including over text widgets that would otherwise
-        # show Qt's default copy/select-all menu (explanation panels, log
-        # consoles) — opens our app menu. An app-wide event filter catches the
-        # ContextMenu event before it reaches the target widget so the menu is
-        # uniform everywhere. Removed in closeEvent so a _reload_ui rebuild
-        # doesn't stack filters.
+        # App-wide event filter catches ContextMenu before the target widget so right-click is
+        # uniform everywhere (text widgets would otherwise show Qt's copy/select-all menu).
+        # Removed in closeEvent so a _reload_ui rebuild doesn't stack filters.
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -378,7 +368,6 @@ class MainWindow(QMainWindow):
         main_lay = QVBoxLayout(central)
         main_lay.setContentsMargins(0, 0, 0, 0)
 
-        # Top button bar (guidebook / models / update / overlays / settings)
         lang_bar = QHBoxLayout()
         if ICON_PATH.exists():
             icon_label = QLabel()
@@ -425,10 +414,7 @@ class MainWindow(QMainWindow):
         )
         lang_bar.addWidget(self.issues_btn)
 
-        # The Queue view is a top-bar toggle because the daemon job queue is
-        # global — it spans every method, so it lives as an overlay over the
-        # tab set rather than a tab inside it. Like TensorBoard; the two
-        # overlays are mutually exclusive.
+        # Top-bar toggle, not a tab: the daemon job queue is global (spans every method); overlays are mutually exclusive.
         self.queue_btn = QPushButton(t("tab_queue"))
         self.queue_btn.setCheckable(True)
         self._queue_idle_style = (
@@ -446,10 +432,7 @@ class MainWindow(QMainWindow):
         self.queue_btn.toggled.connect(self._toggle_queue_view)
         lang_bar.addWidget(self.queue_btn)
 
-        # TensorBoard is a top-bar toggle because the run list is shared across
-        # every method — a single global view rather than a per-tab duplicate.
-        # Toggling it on swaps the whole tab area for the TensorBoard panel;
-        # toggling off returns to the tab set.
+        # Top-bar toggle, not a tab: the run list is shared across every method (one global view).
         self.tensorboard_btn = QPushButton(t("tab_tensorboard"))
         self.tensorboard_btn.setCheckable(True)
         self._tensorboard_idle_style = (
@@ -474,15 +457,9 @@ class MainWindow(QMainWindow):
         lang_bar.addWidget(self.settings_btn)
         main_lay.addLayout(lang_bar)
 
-        # One tab set holds everything; the TensorBoard / Queue overlays share
-        # a QStackedWidget with it so toggling swaps the visible view in place
-        # — same window, no popup. All widgets stay alive across switches so
-        # subprocess state and log buffers survive toggling.
-        # The TensorBoard runs panel is a single shared instance (the run list
-        # is method-agnostic). It's reached via the top-bar TensorBoard toggle
-        # rather than a tab. Both ConfigTab and MethodsTab keep a reference to
-        # its `.panel` so either can sync the log dir on variant switch /
-        # launch / run_start.
+        # Overlays share a QStackedWidget with the tab set; all widgets stay alive across switches
+        # so subprocess state and log buffers survive toggling. ConfigTab and MethodsTab both hold
+        # a reference to this shared panel's `.panel` to sync the log dir on variant switch / launch.
         self._tb_tab = TensorBoardTab()
 
         # Built before ConfigTab so the Train auto-chain can flush this tab's
@@ -501,18 +478,11 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._preprocess_tab, t("tab_preprocess"))
         self.tabs.addTab(ImageViewerTab(), t("tab_images"))
         self.tabs.addTab(MergeTab(), t("tab_merge"))
-        # Experimental tabs sit at the end of the same set (the old top-bar
-        # toggle that swapped a separate tab bar is gone). MethodsTab folds
-        # every trainable experimental method behind one dropdown — FeRA /
-        # ChimeraHydra / Soft Tokens (flat train.py methods) plus SPD / Turbo
-        # (bespoke distill loops) — so they don't need a tab each. EasyControl
-        # has its own preprocess/dataset lifecycle, so it keeps a dedicated tab.
+        # MethodsTab folds every trainable experimental method behind one dropdown; EasyControl keeps
+        # a dedicated tab because it has its own preprocess/dataset lifecycle.
         self.tabs.addTab(MethodsTab(tb_panel=self._tb_tab.panel), t("tab_experimental"))
         self.tabs.addTab(EasyControlTab(), t("tab_easycontrol"))
 
-        # The Queue view is a global overlay reached via the top-bar toggle
-        # (like TensorBoard), not a tab — the daemon queue spans every method.
-        # Lives in the stack below.
         self._queue_tab = QueueTab()
 
         self.tab_stack = QStackedWidget()
@@ -526,9 +496,7 @@ class MainWindow(QMainWindow):
         self._update_queue_btn_style(False)
 
     def closeEvent(self, event):
-        # Drop the app-wide context-menu filter so a _reload_ui rebuild (which
-        # closes this window and constructs a fresh one) doesn't leave a dead
-        # window filtering events.
+        # Drop the app-wide context-menu filter so a _reload_ui rebuild doesn't leave a dead window filtering events.
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
@@ -622,9 +590,7 @@ class MainWindow(QMainWindow):
         """The default right-click menu — currently just a link to the repo."""
         menu = QMenu(self)
         visit = menu.addAction(t("visit_github"))
-        visit.triggered.connect(
-            lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPO_URL))
-        )
+        visit.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_REPO_URL)))
         menu.exec(global_pos)
 
     def _open_guidebook(self):
@@ -667,8 +633,7 @@ def _ensure_source_image_dir() -> None:
     load_path_overrides); falls back to `image_dataset/`.
     """
     src = "image_dataset"
-    # preprocess.toml supplies the default; a legacy key in base.toml overrides
-    # it (read second), matching load_path_overrides' precedence.
+    # Read order matches load_path_overrides' precedence: a legacy base.toml key (read second) wins.
     for fname in ("preprocess.toml", "base.toml"):
         cfg_path = _REPO_ROOT / "configs" / fname
         try:
@@ -716,8 +681,7 @@ def _prefer_cleartype_font_engine() -> None:
     try:
         import ctypes
 
-        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4. Harmless if it fails
-        # (awareness already set) — we still get a usable DPI below.
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4. Harmless if it fails (awareness already set).
         ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
         dpi = ctypes.windll.user32.GetDpiForSystem()  # 96 == 100%
     except (OSError, AttributeError):
@@ -733,10 +697,8 @@ def main():
     load_language()
     _ensure_source_image_dir()
     _prefer_cleartype_font_engine()
-    # Don't round fractional display scaling (125% / 150%) to the nearest
-    # integer — pass it through so the UI scales to the screen's real DPI
-    # instead of snapping to 100%/200% (which is what made text look small on
-    # HiDPI Windows laptops). Must be set before QApplication is constructed.
+    # Pass fractional display scaling (125%/150%) through instead of snapping to 100%/200%
+    # (tiny text on HiDPI Windows). Must be set before QApplication is constructed.
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -744,10 +706,7 @@ def main():
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
     _dark(app)
-    # Bring the local training daemon up at launch (idempotent — reuses one
-    # already started by the CLI / a previous session, spawns one otherwise) so
-    # the queue, the Train button, and re-attach are ready immediately. Best-
-    # effort: a failure here never blocks the GUI from opening.
+    # Bring the local training daemon up at launch (idempotent). Best-effort: a failure never blocks the GUI.
     gui_daemon.ensure_daemon_quietly()
     global _WINDOW
     _WINDOW = MainWindow()

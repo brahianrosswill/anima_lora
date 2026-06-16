@@ -52,9 +52,8 @@ def _adapter_dirs() -> dict[str, Path]:
     ]:
         if path.exists() and any(path.glob("*.safetensors")):
             dirs[name] = path
-    # Any subdirectory of output/ckpt/ or output_temp/ with .safetensors (e.g.
-    # iteration snapshots). Skip *-checkpoint-state dirs — those are
-    # optimizer/state shards, not adapters.
+    # Subdirs with .safetensors (iteration snapshots). Skip *-checkpoint-state dirs —
+    # those are optimizer/state shards, not adapters.
     for parent, label in (
         (ROOT / "output" / "ckpt", "output/ckpt"),
         (ROOT / "output_temp", "output_temp"),

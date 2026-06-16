@@ -25,10 +25,7 @@ from PySide6.QtWidgets import QProgressBar
 
 from gui.theme import tok
 
-# Matches tqdm lines like:
-#   "Denoising steps:  40%|####      | 12/30 [00:12<00:34,  2.50it/s]"
-# The trailing "[...]" block carries the rate as either "X.XXit/s" or
-# "X.XXs/it"; both are captured optionally so non-timed bars still parse.
+# The trailing "[...]" rate block is captured optionally so non-timed bars still parse.
 TQDM_RE = re.compile(
     r"^(?P<label>.*?):?\s*(?P<pct>\d+)%\|[^|]*\|\s*(?P<cur>\d+)/(?P<tot>\d+)"
     r"(?:[^\[]*\[[^\]]*?(?P<rate>[\d.]+)(?P<unit>it/s|s/it)[^\]]*\])?"
@@ -101,9 +98,7 @@ class TqdmProgressTracker:
         label = m.group("label").strip() or "progress"
         rate_str = self._update_rate(label, cur, tot)
         if tot > 0:
-            # Leaving indeterminate mode: setRange(0, tot) clears the marquee
-            # animation; first determinate update replaces the "Starting…"
-            # label seamlessly.
+            # setRange(0, tot) leaves indeterminate mode, clearing the marquee animation.
             self._bar.setRange(0, tot)
             self._bar.setValue(cur)
             self._bar.setFormat(f"{label}: {cur}/{tot} (%p%){rate_str}")

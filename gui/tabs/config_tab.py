@@ -95,8 +95,7 @@ _FIELD_ORDER = {
     "pretrained_model_name_or_path": 30,
     "qwen3": 31,
     "vae": 32,
-    # Keep the REPA DoG-target toggle pinned directly under the use_repa switch
-    # it modifies (both live in the Architecture group).
+    # Keep repa_target_dog pinned directly under the use_repa switch it modifies.
     "use_repa": 90,
     "repa_target_dog": 91,
     "sample_prompts": 10,
@@ -153,45 +152,33 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self, methods: list[str] | None = None, tb_panel=None, preprocess_tab=None
     ):
         super().__init__()
-        # The TensorBoard runs panel lives on its own dedicated tab now; we only
-        # hold a reference so we can sync its log dir / current run. May be None.
+        # Reference only, to sync its log dir / current run. May be None.
         self._tb_panel = tb_panel
-        # The PreprocessingTab owns the target_res tier widget; we flush it to
-        # preprocess.toml before the Train auto-chain preprocesses (the tier
-        # value otherwise lives only in that widget, not on disk). May be None.
+        # Used to flush its target_res tier widget to preprocess.toml before the
+        # Train auto-chain preprocesses. May be None.
         self._preprocess_tab = preprocess_tab
         self._w: dict[str, QWidget] = {}
         self._preprocessed = (ROOT / "post_image_dataset").exists()
-        # Advanced section starts collapsed; user's expand/collapse state
-        # persists across _reload (variant switches, save round-trips).
+        # Expand/collapse state persists across _reload (variant switches, saves).
         self._advanced_expanded = False
-        # Dirty = form has edits not yet flushed to the variant file.
-        # Train/Preprocess auto-saves before launching, since the subprocess
-        # re-reads the file from disk and would otherwise miss form edits.
+        # Train/Preprocess auto-saves before launching, since the subprocess re-reads the file from disk and would otherwise miss form edits.
         self._dirty = False
         lay = QVBoxLayout(self)
 
-        # Top bar: method + save + preprocess + train + stop
-        # The preset combo is intentionally absent — gui-methods variants
-        # (lora-8gb, tlora, etc.) already encode the hardware/perf knobs
-        # users used to pick via presets, and all saves now write directly to
-        # the current variant file (no preset/variant routing distinction).
-        # `methods=` lets callers restrict the picker (e.g. the standard tab
-        # shows only lora; the experimental tab mounts a method picker for
-        # postfix). When only one method is allowed, the picker hides itself.
+        # No preset combo — gui-methods variants already encode the hardware/perf
+        # knobs, and all saves write directly to the current variant file.
+        # `methods=` lets callers restrict the picker; a single method hides it.
         top = QHBoxLayout()
         # Exposed so MethodsTab can mount its own Method picker inline at the
-        # front of this row (next to Variant) when it embeds this tab.
+        # front of this row when it embeds this tab.
         self._top_bar = top
         method_items = methods if methods is not None else list_methods()
         self._method_label = QLabel("Method")
         top.addWidget(self._method_label)
         self.method_combo = QComboBox()
         self.method_combo.addItems(method_items)
-        # Size to the longest entry so names like "easycontrol" / "hydralora"
-        # don't get visually clipped on first show. setMinimumContentsLength
-        # reserves char-width room; the AdjustToContents policy keeps the
-        # combo from shrinking back below that on re-layout.
+        # setMinimumContentsLength reserves char-width room for the longest entry;
+        # AdjustToContents keeps the combo from shrinking back below that.
         self.method_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.method_combo.setMinimumContentsLength(
             max((len(m) for m in method_items), default=10)
@@ -204,17 +191,13 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             self._method_label.setVisible(False)
             self.method_combo.setVisible(False)
 
-        # Variant picker sits inline next to the method picker — selecting a
-        # variant swaps the gui-methods/<variant>.toml file the form is bound
-        # to. "+ New" creates a custom variant under gui-methods/custom/;
-        # "Guide" replays the method-level help in the right panel.
+        # Selecting a variant swaps the gui-methods/<variant>.toml file the form
+        # is bound to. "+ New" creates a custom variant under gui-methods/custom/.
         self._variant_label = QLabel(t("variant"))
         top.addWidget(self._variant_label)
         self.variant_combo = QComboBox()
-        # Reserve room for the longest variant stem we ship (e.g.
-        # "chimera_hydra", "hydralora-8gb", "custom/<name>"). Without
-        # this, Qt sizes to the shortest entry and the displayed text on
-        # selection ends up elided with "…".
+        # Reserve room for the longest variant stem; without this Qt sizes to the
+        # shortest entry and the selected text ends up elided with "…".
         self.variant_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.variant_combo.setMinimumContentsLength(20)
         self.variant_combo.currentTextChanged.connect(lambda _: self._reload())
@@ -223,11 +206,6 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.new_variant_btn.setToolTip(t("new_variant_tooltip"))
         self.new_variant_btn.clicked.connect(self._create_variant)
         top.addWidget(self.new_variant_btn)
-        # The right-hand panel already shows the variant guide by default
-        # (and on every variant switch via _reload → _show_explain_placeholder).
-        # A dedicated "Guide" button next to Save was visually redundant — to
-        # return to the guide after clicking a field, just switch variants or
-        # click another field.
 
         self._save_btn = QPushButton(t("save"))
         self._save_btn_idle_style = ""
@@ -237,17 +215,12 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._save_btn.clicked.connect(self._save_preset)
         top.addWidget(self._save_btn)
 
-        # Train is a split button: the main action trains the current variant
-        # now; the dropdown queues it on the daemon instead ("don't start now,
-        # add to the queue"). Folding Queue into Train's menu drops the separate
-        # Queue button while keeping both behaviors one click apart.
+        # Train is a split button: the main action trains now; the dropdown
+        # queues it on the daemon instead.
         self.train_btn = QToolButton()
-        # SplitButtonStyle widens the dropdown indicator and paints its divider +
-        # tint from the *style* (not a ::menu-button stylesheet rule, which would
-        # re-center the label across the whole button) — so the label stays
-        # centred in the action segment. Symmetric padding only; the style owns
-        # the arrow geometry. Set the style before the stylesheet, and keep a ref
-        # (the widget doesn't own it).
+        # SplitButtonStyle owns the arrow geometry (a ::menu-button stylesheet
+        # rule would re-center the label across the whole button). Set the style
+        # before the stylesheet, and keep a ref (the widget doesn't own it).
         self._split_style = SplitButtonStyle()
         self.train_btn.setStyle(self._split_style)
         self._train_idle_style = (
@@ -272,10 +245,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         train_only_action = queue_menu.addAction(t("queue_train_only"))
         train_only_action.triggered.connect(lambda _checked=False: self._queue_train())
         self.train_btn.setMenu(queue_menu)
-        # Always enabled — when no cache exists yet, clicking Train silently
-        # chains a Preprocess run first (see _start_training). It stays enabled
-        # while a daemon job is attached too, so the dropdown can keep queuing
-        # more variants behind the running one (the main action is guarded).
+        # Always enabled — Train silently chains a Preprocess run when no cache
+        # exists (see _start_training), and the dropdown can keep queuing
+        # variants while a job is attached (the main action is guarded).
         self.train_btn.setEnabled(True)
         top.addWidget(self.train_btn)
 
@@ -306,11 +278,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         lay.addLayout(top)
 
         # Config-health banner: flags dataset-blueprint keys the trainer will
-        # reject (e.g. a stale `resolution` in base.toml's [[datasets]]) before
-        # a run dies in the daemon with a raw voluptuous traceback. Rebuilt on
-        # every _reload; hidden when the config is clean. These keys live in the
-        # `[[datasets]]` sections, which aren't rendered as form fields, so the
-        # "Remove" button is the only in-GUI way to delete them.
+        # reject before the run dies in the daemon. These keys live in the
+        # `[[datasets]]` sections (not form fields), so the "Remove" button is
+        # the only in-GUI way to delete them. Rebuilt on every _reload.
         self._config_warning_box = QWidget()
         self._config_warning_box.setStyleSheet(
             "background:#5c1a1a;border:1px solid #a33;border-radius:4px;"
@@ -330,8 +300,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
 
         self.progress = make_progress_bar()
         self._progress_tracker = TqdmProgressTracker(self.progress)
-        # Phase-0 structured progress: tails the run's progress.jsonl and takes
-        # over the bar once events appear; tqdm parsing above is the fallback.
+        # Tails the run's progress.jsonl and takes over the bar once events
+        # appear; the tqdm parsing above is the fallback.
         self._jsonl_reader = JsonlProgressReader(
             self.progress, on_run_start=self._on_run_start_event
         )
@@ -340,10 +310,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._jsonl_timer.timeout.connect(self._jsonl_reader.poll)
         lay.addWidget(self.progress)
 
-        # Vertical splitter: config form on top, log on bottom
         vsplit = QSplitter(Qt.Vertical)
 
-        # Horizontal splitter: form on left, explanation panel on right
         hsplit = QSplitter(Qt.Horizontal)
 
         sc = QScrollArea()
@@ -352,10 +320,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         outer = QVBoxLayout(self._form)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # Inner container holds the dynamically-rebuilt grouped form fields
-        # (cleared on every _reload). The extra-args button and textarea sit
-        # below it inside the same scroll area, but outside the cleared layout
-        # so they persist across reloads.
+        # Inner container holds the grouped form fields, cleared on every
+        # _reload. The extra-args button/textarea sit below it but outside the
+        # cleared layout so they persist across reloads.
         self._form_inner = QWidget()
         self._fl = QVBoxLayout(self._form_inner)
         self._fl.setContentsMargins(0, 0, 0, 0)
@@ -379,18 +346,16 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         hsplit.addWidget(sc)
 
         self._explain = QTextBrowser()
-        # Links are handled manually (setOpenLinks off so the browser never
-        # navigates away from the rendered HTML): ``magnify:`` anchors from the
-        # image galleries open the zoom dialog, everything else goes to the OS.
+        # setOpenLinks off so the browser never navigates away from the rendered
+        # HTML; links are dispatched manually in _on_explain_anchor.
         self._explain.setOpenLinks(False)
         self._explain.anchorClicked.connect(self._on_explain_anchor)
         self._explain.setStyleSheet(
             f"QTextBrowser {{ font-size: 120%; padding: 12px; background: {tok('panel')}; color: {tok('text')}; }}"
         )
         self._explain.setMinimumWidth(320)
-        # Identity of the gallery render currently showing (None = panel holds
-        # something other than a gallery). Lets the 400ms job poll skip setHtml
-        # when nothing changed — a setHtml resets the scroll position to top.
+        # Identity of the gallery render currently showing (None = not a gallery);
+        # lets the poll skip setHtml when nothing changed (setHtml resets scroll).
         self._gallery_sig: tuple | None = None
         self._show_explain_placeholder()
         hsplit.addWidget(self._explain)
@@ -406,7 +371,6 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.log.setPlaceholderText(t("log_placeholder"))
         vsplit.addWidget(self.log)
 
-        # Small "Copy" button floating in the top-right corner of the log box.
         self._log_copy_btn = QToolButton(self.log)
         self._log_copy_btn.setText(t("copy_log"))
         self._log_copy_btn.setToolTip(t("copy_log_tooltip"))
@@ -423,10 +387,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         vsplit.setSizes([500, 200])
         lay.addWidget(vsplit)
 
-        # QProcess for training. The launchers we spawn (``accelerate launch``,
-        # ``python tasks.py …``) fork the real training process, which is what
-        # holds VRAM. Run the child in its own session so kill_process_tree
-        # can take down the whole subtree on Stop / window close.
+        # The launchers we spawn fork the real training process, which holds
+        # VRAM. Run the child in its own session so kill_process_tree can take
+        # down the whole subtree on Stop / window close.
         self._proc = QProcess(self)
         self._proc.setWorkingDirectory(str(ROOT))
         setup_kill_safe(self._proc)
@@ -436,15 +399,12 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._stdout_buf = ""
         self._stderr_buf = ""
 
-        # Daemon-backed training (Phase 2). Training is submitted to the local
-        # daemon — not run as a child of this QProcess — so it survives the GUI
-        # closing. The tab observes the job by polling the per-job files the
-        # daemon writes (job.json / progress.jsonl / stdout.log) off a single
-        # timer; no SSE thread (daemon is localhost-only, files are right here).
+        # Training is submitted to the local daemon (not a child of this QProcess)
+        # so it survives the GUI closing; the tab observes it by polling the
+        # per-job files the daemon writes off a single timer (no SSE thread).
         self._job_id: str | None = None
-        # Kind of the observed daemon job: "train" or "preprocess" (the
-        # auto-chain cache build). Drives the chain-to-train decision in
-        # _on_job_finished and the busy-button label.
+        # "train" or "preprocess" (the auto-chain cache build). Drives the
+        # chain-to-train decision in _on_job_finished and the busy-button label.
         self._job_kind: str | None = None
         self._stdout_tailer = gui_daemon.FileTailer()
         self._job_timer = QTimer(self)
@@ -457,10 +417,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         # CLI / ComfyUI node submitted) so closing+reopening re-attaches.
         self._try_reattach()
 
-    # Preset selection is no longer surfaced in the GUI — variants encode the
-    # hardware/perf knobs that used to live in presets. The merge still uses
-    # 'default' under the hood so the form shows reasonable effective values
-    # when a variant file is sparse. All saves write to the variant file.
+    # Preset selection isn't surfaced in the GUI; the merge still uses 'default'
+    # under the hood so a sparse variant file shows reasonable effective values.
     _IMPLICIT_PRESET = "default"
 
     def _current_variant(self) -> str:
@@ -477,9 +435,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         current = [
             self.variant_combo.itemText(i) for i in range(self.variant_combo.count())
         ]
-        # Rebuilding the combo resets currentText to the first item, which
-        # would clobber the user's selection on every _reload. Only rebuild
-        # when the variant list actually changed (i.e. method family switched).
+        # Rebuilding resets currentText to the first item, clobbering the user's
+        # selection — only rebuild when the variant list actually changed.
         if current != variants:
             self.variant_combo.blockSignals(True)
             self.variant_combo.clear()
@@ -514,8 +471,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             if it.widget():
                 it.widget().deleteLater()
 
-        # Partition fields by Basic vs Advanced first, then by sub-group
-        # (Architecture/Training/Performance/Paths/Other). Basic stays
+        # Partition fields by Basic vs Advanced, then by sub-group. Basic stays
         # always-visible; Advanced is wrapped in a collapsible container.
         basic: dict[str, dict] = {g: {} for g in _GROUPS}
         basic["Other"] = {}
@@ -525,8 +481,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             sub = _K2G.get(k, "Other")
             (basic if is_basic_field(k) else advanced)[sub][k] = v
 
-        # "preset" origin shows where the value comes from today, but on Save
-        # everything routes to the variant file — no preset/variant split.
+        # Origin shows where the value comes from today, but on Save everything
+        # routes to the variant file — no preset/variant split.
         variant_label = f"gui-methods/{variant}.toml"
         origin_style = {
             "base": (
@@ -565,7 +521,6 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             box.setLayout(form)
             return box
 
-        # Basic — flat list of sub-group boxes.
         basic_box = QGroupBox(t("basic_section"))
         basic_layout = QVBoxLayout()
         basic_layout.setContentsMargins(8, 12, 8, 8)
@@ -576,8 +531,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         basic_box.setLayout(basic_layout)
         self._fl.addWidget(basic_box)
 
-        # Advanced — collapsible. QGroupBox.setCheckable + a child container
-        # whose visibility is bound to the checkbox gives a free toggle UI.
+        # QGroupBox.setCheckable + a child container whose visibility is bound to
+        # the checkbox gives a free collapsible toggle UI.
         advanced_box = QGroupBox(t("advanced_section"))
         advanced_box.setCheckable(True)
         advanced_box.setChecked(self._advanced_expanded)
@@ -603,9 +558,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
 
         self._fl.addStretch()
 
-        # Reload rebuilt the form to match disk → no pending edits.
-        # Connect change signals AFTER the values have been seeded by _widget,
-        # so the initial setValue/addItems calls don't trip the dirty flag.
+        # Connect change signals AFTER the values are seeded by _widget, so the
+        # initial setValue/addItems calls don't trip the dirty flag.
         for w in self._w.values():
             self._connect_dirty_signal(w)
 
@@ -711,24 +665,15 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         use_valid_w.toggled.connect(_on_use_valid)
         vsn_w.valueChanged.connect(_on_split_changed)
 
-    # ── Dirty tracking — _connect_dirty_signal / _mark_dirty / _clear_dirty /
-    #    _update_save_button are inherited from DirtyTrackingMixin. ──
-
-    # ── Explanation panel ──
-
     def _show_explain_placeholder(self) -> None:
-        # Neutral state: the live sample poll (during training) may take the
-        # panel over with previews; a field click pins it back to help.
+        # Neutral state: the live sample poll may take the panel over with
+        # previews; a field click pins it back to help.
         self._explain_mode = None
-        # When the current method ships variant presets, the right-panel
-        # default is the variant guide + Apply-semantics callout (replacing
-        # the old collapsible box on the left-side form).
         method = (
             self.method_combo.currentText() if hasattr(self, "method_combo") else ""
         )
         # Prefer a variant-specific guide (e.g. easycontrol vs colorize, which
-        # share the "easycontrol" method) and fall back to the method-family
-        # guide when the picked variant has none registered.
+        # share the "easycontrol" method); fall back to the method-family guide.
         variant = self._current_variant() if hasattr(self, "variant_combo") else ""
         guide = method_guide(variant) or method_guide(method)
         if guide:
@@ -788,7 +733,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
                 gallery_sig=sig,
             )
             return
-        parts = [f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{title}</h2>"]
+        parts = [
+            f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{title}</h2>"
+        ]
         for p in imgs:
             url = p.resolve().as_uri()
             magnify = "magnify" + url[len("file") :]
@@ -866,8 +813,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
     def _show_explain(
         self, field: str, help_text: str | None, notes: tuple[str, ...]
     ) -> None:
-        # User clicked a field label — pin the panel to help so the live sample
-        # poll (during training) stops refreshing over what they're reading.
+        # Pin the panel to help so the live sample poll stops refreshing over
+        # what the user is reading.
         self._explain_mode = "help"
         parts = [
             f"<h2 style='margin:0 0 10px 0; font-size:{_explain_pt(18)};'>{html.escape(field)}</h2>"
@@ -886,8 +833,6 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             )
         self._set_explain_html("".join(parts))
 
-    # ── Save ──
-
     def _save_preset(self, *, silent: bool = False):
         """Write the form (and any extra-args TOML) into the current variant
         file. No preset/variant routing — the variant file is the single
@@ -897,9 +842,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
 
         method_orig = _load(path)
         base = _load_base()
-        # Default-preset overlay is the implicit baseline used by _reload, so
-        # we treat it as part of the "effective baseline" when deciding which
-        # form values are worth writing to disk (skips redundant entries).
+        # Default-preset overlay is part of the effective baseline when deciding
+        # which form values are worth writing to disk (skips redundant entries).
         from gui import _load_all_presets  # local import: only needed for save
 
         implicit_pset = _load_all_presets().get(self._IMPLICIT_PRESET, {})
@@ -967,10 +911,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
                 base_enabled=_base_folder_repeats(base),
             )
 
-        # Extra-args textarea: parse as TOML and merge in. Textarea overrides
-        # the form for any duplicate key (it's the more explicit signal).
-        # Bare backslashes (Windows path paste) break TOML escape parsing —
-        # try once verbatim, then retry after \→/ before surfacing the error.
+        # Extra-args textarea: parse as TOML and merge in (overrides the form on
+        # duplicate keys). Bare backslashes (Windows path paste) break TOML escape
+        # parsing — try verbatim, then retry after \→/ before surfacing the error.
         extra_text = self.extra_args_edit.toPlainText().strip()
         extras: dict[str, Any] = {}
         if extra_text:
@@ -1018,13 +961,10 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             QMessageBox.warning(self, t("error"), t("new_variant_exists", name=name))
             return
         new_path.parent.mkdir(parents=True, exist_ok=True)
-        # Seed from the currently-selected variant so the form has all
-        # method-specific knobs. network_dim / network_alpha only live in
-        # gui-methods/<variant>.toml — an empty seed silently drops them from
-        # the form, then sparse-diff Save persists nothing, then training
-        # falls back to argparse defaults (network_alpha=1) and produces a
-        # near-zero-scale adapter. Strip [variant] since it described the
-        # source family.
+        # Seed from the selected variant so the form has all method-specific
+        # knobs: network_dim/network_alpha live only in gui-methods/<variant>.toml,
+        # and an empty seed would diff to nothing on Save → training falls back to
+        # argparse defaults and produces a near-zero-scale adapter. Strip [variant].
         seed: dict[str, Any] = {}
         current = self.variant_combo.currentText()
         if current:
@@ -1036,8 +976,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             _save(new_path, seed)
         else:
             new_path.write_text("", encoding="utf-8")
-        # Rebuild combo and select the new entry. _reload fires via the
-        # currentTextChanged signal once we set the index.
+        # _reload fires via currentTextChanged once we set the index.
         method = self.method_combo.currentText()
         variants = list_gui_variants(method)
         self.variant_combo.blockSignals(True)
@@ -1052,8 +991,6 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
 
     def _toggle_extra_args(self):
         self.extra_args_edit.setVisible(self.extra_args_btn.isChecked())
-
-    # ── Training ──
 
     def _has_lora_output(self) -> bool:
         out = ROOT / "output" / "ckpt"
@@ -1272,9 +1209,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._attach_to_job(job_id, replay_log=False, kind="preprocess")
 
     def _start_training(self):
-        # The split button stays enabled while a daemon job is attached (so its
-        # dropdown can queue more variants), so guard the foreground action: a
-        # second attach would hijack the bar away from the running job.
+        # Guard the foreground action while a job is attached (the button stays
+        # enabled for queuing): a second attach would hijack the bar.
         if self._job_id is not None:
             QMessageBox.information(self, "", t("train_busy_use_queue"))
             return
@@ -1284,10 +1220,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         if self._dirty:
             self._save_preset(silent=True)
 
-        # Flush the Preprocess tab's cache settings to preprocess.toml too.
-        # An auto-chain preprocess (cache-missing branch below) runs
-        # `tasks.py preprocess`, which reads the tiers/filter from preprocess.toml
-        # and caption shuffle knobs from the env — not directly from widgets.
+        # Flush the Preprocess tab's cache settings to preprocess.toml: the
+        # auto-chain `tasks.py preprocess` reads tiers/filter from there and
+        # caption shuffle knobs from the env, not directly from widgets.
         if self._preprocess_tab is not None:
             if not self._preprocess_tab.persist_preprocess_inputs():
                 return
@@ -1295,11 +1230,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         variant = self._current_variant()
         cache_dir = self._resolve_cache_dir(variant)
 
-        # Resolve the merged config up front — we need ``use_repa`` to decide
-        # whether the PE feature cache is required before the cache-state branch
-        # (so a config preprocessed *before* REPA was enabled still re-runs
-        # preprocess to build the missing PE sidecars rather than launching a
-        # silent no-op REPA run).
+        # Resolve ``use_repa`` before the cache-state branch so a config
+        # preprocessed before REPA was enabled re-runs preprocess to build the
+        # missing PE sidecars rather than launching a silent no-op REPA run.
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         merged = self._gui_scoped_paths(merged)
         # TOML bools arrive as real bools; tolerate a stringified value too.
@@ -1309,32 +1242,24 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             "true",
             "yes",
         )
-        # The PE sidecar suffix is encoder-specific ({stem}_anima_{encoder}.…),
-        # so the cache probe must look for the encoder REPA will actually read
-        # (pe_spatial by default) — not a hardcoded variant.
+        # The PE sidecar suffix is encoder-specific ({stem}_anima_{encoder}.…), so
+        # the probe must look for the encoder REPA will actually read.
         pe_encoder = str(merged.get("repa_encoder") or "pe_spatial").strip() or None
 
-        # Three-way branch on cache state:
-        #   • Cache exists → confirm with the user that we're reusing it.
-        #   • Cache missing → silently auto-chain Preprocess → Train so the
-        #     user doesn't bounce off a "run preprocess first" wall.
-        # With use_repa on, an existing latent/TE cache that lacks PE sidecars
-        # counts as "missing" (require_pe) so we auto-chain the PE-caching
-        # preprocess instead of training REPA against an absent target.
-        # The auto-chain decision is recorded on the instance so
-        # _on_finished can pick it up once preprocess succeeds.
+        # Three-way branch on cache state: exists → confirm reuse; missing →
+        # silently auto-chain Preprocess → Train. With use_repa on, a cache
+        # lacking PE sidecars counts as "missing" (require_pe) so we build them
+        # rather than training REPA against an absent target.
         decision = confirm_train_using_cache(
             self, cache_dir, require_pe=require_pe, pe_encoder=pe_encoder
         )
         if decision is False:
             return
 
-        # Resume prompt up-front (before any submit) for BOTH paths. The daemon
-        # now owns the preprocess→train chain, so it can't pause to ask once
-        # preprocess finishes (the GUI may be closed by then) — the user's
-        # resume/fresh choice has to be captured here and baked in. The helper
-        # does its wipe-for-fresh synchronously, so it's settled before training
-        # ever runs. Returns True with no prompt when there's nothing to resume.
+        # Resume prompt up-front for BOTH paths: the daemon owns the
+        # preprocess→train chain and can't pause to ask later (the GUI may be
+        # closed), so the resume/fresh choice is captured and baked in here (the
+        # helper wipes-for-fresh synchronously). True with no prompt = nothing to resume.
         if not confirm_resumable_checkpoint(self, merged):
             return
 
@@ -1443,16 +1368,14 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         detached. That's what lets training survive the GUI closing. The caller
         owns all pre-launch confirmations (cache-reuse popup, resume prompt).
         """
-        # Sync the TensorBoard panel to the logging_dir for this variant so it
-        # starts scanning for the new run dir immediately.
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         merged = self._gui_scoped_paths(merged)
         logging_dir = merged.get("logging_dir")
         if logging_dir and self._tb_panel is not None:
             self._tb_panel.set_log_dir(logging_dir)
 
-        # Flip to busy + repaint before the submit so the UI feels responsive
-        # (the daemon auto-start + /health wait can take a moment on cold start).
+        # Flip to busy + repaint before the submit (daemon auto-start + /health
+        # wait can take a moment on cold start) so the UI feels responsive.
         self.train_btn.setText(t("train") + " ...")
         self.train_btn.setStyleSheet(self._train_busy_style)
         self.train_btn.setEnabled(False)
@@ -1481,8 +1404,6 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
 
         self._log(t("daemon_queued", job_id=job_id))
         self._attach_to_job(job_id, replay_log=False)
-
-    # ── Daemon job observation ──
 
     def _try_reattach(self) -> None:
         """Bind to a daemon job still running when this tab is constructed.
@@ -1530,15 +1451,12 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._job_id = job_id
         self._job_kind = kind
         self._running_mode = kind
-        # Cache the running job's sample dir once so the 400ms live-preview poll
-        # doesn't re-merge the config chain every tick (resolved from the
-        # submitted variant; output_dir is per-variant). None for non-train jobs.
+        # Cache the sample dir once so the 400ms poll doesn't re-merge the config
+        # chain every tick. None for non-train jobs.
         self._sample_dir = self._resolve_sample_dir() if kind == "train" else None
-        # Floor the live sample gallery at this job's start time so a fresh run
-        # never surfaces the previous run's stale previews (they pile up under
-        # <output_dir>/sample with timestamped names and are never cleared). On
-        # re-attach the persisted start time keeps the current run's earlier
-        # samples visible; None (non-train / unreadable record) means no filter.
+        # Floor the sample gallery at this job's start so a fresh run never
+        # surfaces the previous run's stale previews (never cleared on disk); the
+        # persisted start time keeps the current run's earlier samples on reattach.
         self._sample_floor = (
             gui_daemon.read_job_started_at(job_id) if kind == "train" else None
         )
@@ -1546,7 +1464,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._jsonl_reader.watch(gui_daemon.progress_path(job_id))
         self._stdout_tailer.watch(gui_daemon.stdout_path(job_id))
         if not replay_log:
-            self._stdout_tailer.read_new()  # discard backlog
+            self._stdout_tailer.read_new()  # discard backlog so only new lines show
         chain_after = getattr(self, "_chain_train_after_preprocess", False)
         if kind == "preprocess":
             self.train_btn.setText(
@@ -1555,12 +1473,10 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         else:
             self.train_btn.setText(t("train_running_daemon"))
         self.train_btn.setStyleSheet(self._train_busy_style)
-        # Keep the Train split button + the variant pickers live while a job is
-        # attached: the user can select another variant and use the dropdown to
-        # Queue it behind the running one. The button's main (foreground-train)
-        # action is guarded in _start_training; only Test (local GPU) is blocked.
-        # The running job uses an immutable config snapshot captured at submit, so
-        # editing the form afterward can't disturb it.
+        # Keep the Train split button + pickers live so the user can Queue
+        # another variant behind the running one (foreground-train is guarded in
+        # _start_training; only Test is blocked). The running job uses an
+        # immutable snapshot, so editing the form afterward can't disturb it.
         self.train_btn.setEnabled(True)
         self.test_btn.setEnabled(False)
         self.method_combo.setEnabled(True)
@@ -1595,11 +1511,9 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             return
         self._jsonl_reader.poll()
         self._drain_job_stdout()
-        # Live training-sample preview: refresh the gallery as new per-epoch
-        # samples land on disk, but only while the panel isn't pinned to field
-        # help (mode None or already showing samples). _show_sample_output is a
-        # no-op until the first sample exists, so it won't clobber the guide
-        # before there's anything to show.
+        # Refresh the sample gallery as samples land, but only while the panel
+        # isn't pinned to field help. _show_sample_output is a no-op until the
+        # first sample exists, so it won't clobber the guide prematurely.
         if self._job_kind == "train" and getattr(self, "_explain_mode", None) in (
             None,
             "sample",
@@ -1611,7 +1525,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
 
     def _on_job_finished(self, state: str | None) -> None:
         self._job_timer.stop()
-        # Drain the last progress event + any trailing stdout before tearing down.
+        # Drain the last progress event + trailing stdout before tearing down.
         self._jsonl_reader.poll()
         self._drain_job_stdout()
         if self._stdout_buf:
@@ -1627,12 +1541,10 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self.progress.setVisible(False)
         self._log("\n" + gui_daemon.format_finish_banner(job_id, state) + "\n")
 
-        # Auto-chain Train after a successful preprocess command job when the
-        # user originally clicked Train against an empty cache. The DAEMON owns
-        # the chain now: on a successful tagged preprocess it has already
-        # enqueued the training job and recorded its id (chained_job_id), so we
-        # just hop the UI onto that job. On failure/Stop there's no chained job,
-        # so we clear the flag and stay idle — never training over a broken cache.
+        # Auto-chain Train after a successful preprocess when the user clicked
+        # Train against an empty cache. The daemon already enqueued the training
+        # job (chained_job_id) so we just hop the UI onto it; on failure/Stop
+        # there's no chained job, so we stay idle — never train over a broken cache.
         if kind == "preprocess":
             chain = getattr(self, "_chain_train_after_preprocess", False)
             self._chain_train_after_preprocess = False
@@ -1649,9 +1561,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
                         lambda jid=chained: self._reattach_chained_training(jid),
                     )
                     return  # stay busy — training is starting
-        # Show the final training samples on success, mirroring how a finished
-        # Test run surfaces its output (announce=True so an empty run still
-        # explains where samples would appear).
+        # Show the final training samples on success (announce=True so an empty
+        # run still explains where samples would appear).
         if kind == "train" and state == "done":
             self._show_sample_output(announce=True)
         self._restore_idle_ui()
@@ -1684,9 +1595,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
             self._tb_panel.clear_current_run()
 
     def _stop_training(self):
-        # A daemon training job is aborted via the daemon (the job timer then
-        # observes the 'stopped' state and restores the UI). A QProcess-backed
-        # test/preprocess run is killed directly.
+        # A daemon job is aborted via the daemon (the job timer observes the
+        # 'stopped' state and restores the UI); a QProcess test run is killed directly.
         if self._job_id:
             try:
                 gui_daemon.stop_job(self._job_id)
@@ -1727,8 +1637,7 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         tail = parts[-1]  # incomplete trailing fragment — keep buffered
         for line in parts[:-1]:
             if self._jsonl_reader.active:
-                # JSONL drives the bar now; just swallow tqdm lines so they
-                # don't spam the log, but don't let tqdm move the bar.
+                # JSONL drives the bar; swallow tqdm lines so they don't move it.
                 if TQDM_RE.search(line):
                     continue
             elif self._progress_tracker.feed(line):
@@ -1745,9 +1654,8 @@ class ConfigTab(DaemonJobMixin, DirtyTrackingMixin, QWidget):
         self._jsonl_reader.reset()
 
     def _on_finished(self, exit_code: int, _status: QProcess.ExitStatus):
-        # QProcess now backs only the Test button — training and the auto-chain
-        # preprocess both run as daemon jobs (see _attach_to_job /
-        # _on_job_finished). Test output is shown on success; nothing chains.
+        # QProcess now backs only the Test button (training + auto-chain
+        # preprocess are daemon jobs). Test output is shown on success; nothing chains.
         for buf_name in ("_stdout_buf", "_stderr_buf"):
             leftover = getattr(self, buf_name, "")
             if leftover and not TQDM_RE.search(leftover):

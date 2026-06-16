@@ -62,8 +62,6 @@ from gui.tabs.config_tab import ConfigTab
 from gui.theme import tok
 from gui.widgets import make_field_label
 
-# EasyControl descriptor projects live here as self-contained
-# configs/easycontrol/<stem>.toml files (the near_twins-style multi-table shape).
 _DESCRIPTOR_DIR = ROOT / "configs" / "easycontrol"
 
 
@@ -91,12 +89,8 @@ def _descriptor_variants() -> list[tuple[int, str, str]]:
 
 class EasyControlTab(ConfigTab):
     # variant stem → EASYADAPTER value (absent → default ref==target EasyControl).
-    # Descriptor variants (configs/easycontrol/<stem>.toml) set EASYADAPTER=<stem>
-    # so the preprocess/train task dispatch routes through the descriptor machinery.
     _VARIANT_ENV = {"colorize": "colorize"}
-    # variant stem → cache dir the preprocess-reuse prompt inspects. Colorize's
-    # condition latents land in easycontrol/colorize/cond/; default EasyControl in
-    # its own cache. (text/cond split for colorize is covered well enough by cond.)
+    # variant stem → cache dir the preprocess-reuse prompt inspects.
     _CACHE_DIRS = {
         "easycontrol": "post_image_dataset/easycontrol",
         "colorize": "post_image_dataset/easycontrol/colorize/cond",
@@ -111,18 +105,11 @@ class EasyControlTab(ConfigTab):
 
         super().__init__(methods=["easycontrol"])
 
-        # The easycontrol route trains exactly the shipped family variants
-        # (EASYADAPTER picks the method name), so custom variants can't map onto
-        # it — hide the "+ New" button. _refresh_variant_row also drops customs.
+        # Custom variants can't map onto the easycontrol route — hide "+ New".
         self.new_variant_btn.setVisible(False)
-        # test-easycontrol needs a REF_IMAGE the plain Test button can't
-        # supply, so hide Test on this tab.
+        # test-easycontrol needs a REF_IMAGE the plain Test button can't supply.
         self.test_btn.setVisible(False)
 
-        # "How to build your own EasyControl adapter" — opens ADAPTER_GUIDE.md in
-        # the in-app markdown viewer (same dialog as the top-bar Guidebook). The
-        # guide is the build-your-own-control-task reference (colorize worked
-        # through in detail).
         self.adapter_guide_btn = QPushButton(t("adapter_guide"))
         self.adapter_guide_btn.setToolTip(t("adapter_guide_tooltip"))
         self.adapter_guide_btn.setStyleSheet(
@@ -133,10 +120,8 @@ class EasyControlTab(ConfigTab):
             self._top_bar.indexOf(self.train_btn), self.adapter_guide_btn
         )
 
-        # ConfigTab has no Preprocess button (it auto-chains a daemon preprocess).
-        # EasyControl preprocessing is the bespoke easycontrol-preprocess
-        # (mangafy for colorize), so it gets an explicit button before Train.
-        # (preprocess_btn itself is built above the super() call.)
+        # EasyControl preprocessing is the bespoke easycontrol-preprocess, so it
+        # gets an explicit button before Train rather than ConfigTab's auto-chain.
         self.preprocess_btn.setStyleSheet(
             "background:#2980b9;color:white;font-weight:bold;padding:4px 16px;"
         )
@@ -145,31 +130,22 @@ class EasyControlTab(ConfigTab):
             self._top_bar.indexOf(self.train_btn), self.preprocess_btn
         )
 
-        # Train still rides ConfigTab's daemon path (so it survives the GUI
-        # closing), but through a slimmer handler: EasyControl has its own
-        # explicit Preprocess button + bespoke caches, so it skips ConfigTab's
-        # cache-existence check / auto-chain-preprocess logic and submits the
-        # variant straight to the daemon.
+        # Slimmer handler than ConfigTab: EasyControl has its own Preprocess
+        # button + bespoke caches, so it skips the cache-existence/auto-chain logic.
         self.train_btn.clicked.disconnect()
         self.train_btn.clicked.connect(self._ec_start_train)
 
-    # ── Adapter guide ──────────────────────────────────────────────
-
     def _open_adapter_guide(self) -> None:
-        # Lazy import: gui.app imports this tab, so a top-level import would be
-        # circular. The dialog is a generic markdown viewer (takes any path).
+        # Lazy import: gui.app imports this tab, so a top-level import would be circular.
         from gui.app import GuidebookDialog
         from gui.i18n import current_language
 
-        # Localized guide: ADAPTER_GUIDE.<lang>.md, English (ADAPTER_GUIDE.md) as
-        # the fallback for `en` and any language whose translation is missing.
+        # Localized guide: ADAPTER_GUIDE.<lang>.md, English (ADAPTER_GUIDE.md) fallback.
         base = ROOT / "easycontrol_adapters"
         path = base / f"ADAPTER_GUIDE.{current_language()}.md"
         if not path.exists():
             path = base / "ADAPTER_GUIDE.md"
         GuidebookDialog(path, self).exec()
-
-    # ── Variant list: family built-ins + descriptors (no customs) ──
 
     @staticmethod
     def _descriptor_stems() -> list[str]:
@@ -181,8 +157,7 @@ class EasyControlTab(ConfigTab):
         return variant in self._descriptor_stems()
 
     def _refresh_variant_row(self, method: str) -> None:
-        # gui-methods method variants first, then descriptor variants (colorize),
-        # de-duped in case a stem somehow exists in both trees.
+        # gui-methods method variants first, then descriptor variants, de-duped.
         gui_variants = [
             v for v in list_gui_variants(method) if not v.startswith("custom/")
         ]
@@ -199,21 +174,15 @@ class EasyControlTab(ConfigTab):
                 self.variant_combo.addItems(variants)
             self.variant_combo.blockSignals(False)
 
-    # ── Descriptor variants: file-edited launcher (no form) ────────
-
     # Descriptor tables rendered as form groups, in this order. Everything else in
-    # the file (the [general]/[[datasets]] blueprint, the [variant] GUI metadata) is
-    # preserved verbatim on save but not surfaced as editable fields.
+    # the file (blueprint, [variant] metadata) is preserved verbatim but not editable.
     _DESC_TABLE_ORDER = ("staging", "preprocess", "training")
     _DESC_SKIP_TABLES = frozenset({"general", "datasets", "variant"})
 
     def _reload(self) -> None:
-        # Descriptor variants are multi-table (top-level name + [staging]/
-        # [preprocess]/[training] knob tables + a [[datasets]] blueprint tail). We
-        # render the scalar knob tables as form groups (like the other tabs) and
-        # leave the blueprint/metadata untouched. Method variants fall through to
-        # ConfigTab's normal form build. (Refresh the combo first so the variant row
-        # is populated even when we short-circuit before super()._reload.)
+        # Descriptor variants render scalar knob tables as form groups; method
+        # variants fall through to ConfigTab's normal form build. Refresh the combo
+        # first so the variant row is populated even when we short-circuit early.
         method = self.method_combo.currentText()
         if not method:
             return
@@ -253,8 +222,8 @@ class EasyControlTab(ConfigTab):
         [[datasets]] blueprint survive untouched."""
         self._origin = {}
         self._w.clear()
-        # (table-or-None, key, widget, original-plain-value) for every field, so
-        # Save can route each value back into the right tomlkit table.
+        # (table-or-None, key, widget, original-plain-value) so Save can route each
+        # value back into the right tomlkit table.
         self._desc_widgets: list[tuple[str | None, str, QWidget, object]] = []
         while self._fl.count():
             it = self._fl.takeAt(0)
@@ -273,7 +242,6 @@ class EasyControlTab(ConfigTab):
         header.setStyleSheet(f"color:{tok('text')}; padding:4px 2px 8px 2px;")
         self._fl.addWidget(header)
 
-        # Top-level scalars (the `name` slug, etc.) → a leading "descriptor" group.
         top = {
             k: v
             for k, v in self._desc_doc.items()
@@ -282,7 +250,6 @@ class EasyControlTab(ConfigTab):
         if top:
             self._fl.addWidget(self._desc_group(t("ec_desc_group_top"), top, None))
 
-        # Knob tables in canonical order, then any other table not in the skip set.
         tables = [k for k in self._desc_doc if isinstance(self._desc_doc[k], dict)]
         ordered = [k for k in self._DESC_TABLE_ORDER if k in tables] + [
             k
@@ -324,9 +291,8 @@ class EasyControlTab(ConfigTab):
         return box
 
     def _save_preset(self, *, silent: bool = False):
-        # Method variants write the grouped form back to gui-methods/<variant>.toml
-        # via ConfigTab. Descriptor variants write the changed field values back into
-        # the tomlkit doc and re-dump it (comments + blueprint preserved).
+        # Method variants write back via ConfigTab; descriptor variants re-dump the
+        # tomlkit doc (comments + blueprint preserved).
         variant = self._current_variant()
         if self._is_descriptor_variant(variant):
             self._save_descriptor(variant, silent=silent)
@@ -339,10 +305,8 @@ class EasyControlTab(ConfigTab):
             return
         for table, key, w, orig in self._desc_widgets:
             val = _read(w, orig)
-            # Sparse writeback: only touch fields the user actually changed, so an
-            # unedited field keeps its original tomlkit formatting (quote style,
-            # multi-line arrays, float notation like 2e-5). Writing every field back
-            # would re-render them all and churn the hand-formatted file.
+            # Sparse writeback: only touch changed fields so unedited ones keep their
+            # original tomlkit formatting (quote style, arrays, float notation).
             if val == orig:
                 continue
             target = doc if table is None else doc.get(table)
@@ -354,13 +318,9 @@ class EasyControlTab(ConfigTab):
         if not silent:
             QMessageBox.information(self, t("saved"), f"Saved {path.relative_to(ROOT)}")
 
-    # ── EASYADAPTER routing ────────────────────────────────────────
-
     def _ec_adapter(self) -> str | None:
-        # A descriptor variant's stem IS its EASYADAPTER value (the task dispatch
-        # loads configs/easycontrol/<stem>.toml), so route those generically —
-        # otherwise only colorize (in _VARIANT_ENV) would set EASYADAPTER and
-        # near_twins would silently run the default ref==target preprocess.
+        # A descriptor variant's stem IS its EASYADAPTER value (task dispatch loads
+        # configs/easycontrol/<stem>.toml), so route those generically.
         variant = self._current_variant()
         if self._is_descriptor_variant(variant):
             return variant
@@ -379,11 +339,8 @@ class EasyControlTab(ConfigTab):
         return env
 
     def _ec_cache_dir(self) -> Path:
-        # Descriptor variants cache under their `name` slug (defaults to the file
-        # stem), which can differ from the dropdown stem — e.g. near_twins.toml
-        # ships name = "sanitize", so its caches live under easycontrol/sanitize/.
-        # Read the slug from the descriptor so the preprocess-reuse prompt inspects
-        # the right tree even after a slug rename.
+        # Descriptor variants cache under their `name` slug, which can differ from
+        # the dropdown stem (e.g. near_twins.toml ships name = "sanitize").
         variant = self._current_variant()
         if self._is_descriptor_variant(variant):
             slug = variant
@@ -428,10 +385,8 @@ class EasyControlTab(ConfigTab):
         if not confirm_existing_caches(self, self._ec_cache_dir()):
             return
         argv = ["tasks.py", "easycontrol-preprocess"]
-        # The CLI splits staging (mangafy) from preprocess (cond/text caching), but
-        # the GUI has a single Preprocess button — so for a descriptor variant run
-        # the whole pipeline in one shot. --no-skip_mangafy re-enables the mangafy
-        # stage that easycontrol-preprocess otherwise skips (it's the staging step).
+        # Single GUI button runs the whole pipeline in one shot; --no-skip_mangafy
+        # re-enables the staging stage easycontrol-preprocess otherwise skips.
         if self._is_descriptor_variant(self._current_variant()):
             argv.append("--no-skip_mangafy")
         self._ec_launch(argv, "ec_preprocess")
@@ -443,18 +398,14 @@ class EasyControlTab(ConfigTab):
                 return
             self._ec_start_train_descriptor(variant)
             return
-        # Method variant: flush form edits so train.py reads the same
-        # gui-methods/<variant>.toml, then submit it as method=variant.
+        # Method variant: flush form edits so train.py reads the same TOML.
         if self._dirty:
             self._save_preset(silent=True)
         merged, _ = merged_gui_variant_preset(variant, self._IMPLICIT_PRESET)
         if not confirm_resumable_checkpoint(self, merged):
             return
-        # The variant stem ("easycontrol") IS the train.py method — EASYADAPTER is
-        # read only at task dispatch, never deeper — so submit it to the daemon
-        # exactly like the LoRA tab. ConfigTab._launch_training POSTs {method=variant,
-        # preset, methods_subdir="gui-methods"} and binds the bar/log to the detached
-        # job (which then survives the GUI closing).
+        # The variant stem IS the train.py method (EASYADAPTER read only at dispatch),
+        # so submit to the daemon exactly like the LoRA tab.
         self._launch_training(variant)
 
     def _descriptor_merged(self, variant: str) -> dict:
@@ -479,8 +430,6 @@ class EasyControlTab(ConfigTab):
         the GUI closing, exactly like a method-variant train."""
         if not confirm_resumable_checkpoint(self, self._descriptor_merged(variant)):
             return
-        # Build the descriptor argv (writes the validator-safe blueprint sidecar to
-        # a stable path and returns --dataset_config + folded [training] flags).
         from scripts.tasks.training import _easy_train_extra
 
         try:
@@ -490,9 +439,8 @@ class EasyControlTab(ConfigTab):
 
             QMessageBox.warning(self, t("error"), str(e))
             return
-        # Mirror ConfigTab._launch_training's busy-UI + attach, but submit the base
-        # easycontrol method (methods/ tree, not gui-methods) with the descriptor
-        # argv appended. Sync the TensorBoard panel to the resolved logging_dir.
+        # Submit the base easycontrol method (methods/ tree, not gui-methods) with
+        # the descriptor argv appended; mirror ConfigTab's busy-UI + attach.
         merged = self._descriptor_merged(variant)
         logging_dir = merged.get("logging_dir")
         if logging_dir and self._tb_panel is not None:
@@ -530,17 +478,13 @@ class EasyControlTab(ConfigTab):
         self._log(t("daemon_queued", job_id=job_id))
         self._attach_to_job(job_id, replay_log=False)
 
-    # Daemon training disables Train/Test/combos via ConfigTab; also gray out the
-    # EasyControl-only Preprocess button. Overriding _attach_to_job (not just the
-    # launch site) covers re-attach on GUI reopen too. _restore_idle_ui re-enables
-    # it on finish.
+    # Also gray out the EasyControl-only Preprocess button on attach. Overriding
+    # _attach_to_job (not just the launch site) covers re-attach on GUI reopen too.
     def _attach_to_job(
         self, job_id: str, *, replay_log: bool, kind: str = "train"
     ) -> None:
         super()._attach_to_job(job_id, replay_log=replay_log, kind=kind)
         self.preprocess_btn.setEnabled(False)
-
-    # ── Busy / idle state ──────────────────────────────────────────
 
     def _ec_set_busy(self, busy: bool) -> None:
         self.preprocess_btn.setEnabled(not busy)
@@ -551,7 +495,6 @@ class EasyControlTab(ConfigTab):
 
     def _restore_idle_ui(self):
         super()._restore_idle_ui()
-        # ConfigTab's restore handles Train/Test/combos; re-enable Preprocess too.
         self.preprocess_btn.setEnabled(True)
 
     def _try_reattach(self) -> None:

@@ -30,21 +30,12 @@ from gui.validation import (
     _variant_validation_split_num,
 )
 
-# Built-in variant families are discovered from each gui-methods/*.toml file's
-# ``[variant]`` table (``family`` / ``label`` / ``description`` / optional
-# ``order`` / ``experimental``). The hand-curated _FAMILY_VARIANTS map was
-# retired in the Track 2 refactor — adding or renaming a variant is now a
-# one-file change.
-#
-# Display order within a family is ``[variant].order`` (ascending; ties broken
-# by file stem). Family ordering in the method combo stays curated via
-# ``_METHOD_ORDER``; a family omitted from it is kept off the GUI without
-# renaming its file (the picker also accepts an explicit ``methods=`` subset,
-# which is how the experimental MethodsTab surfaces soft_tokens / spd / turbo).
-# Customs under
-# ``configs/gui-methods/custom/`` are intentionally permissive — they don't
-# need a ``[variant]`` block and are surfaced under every family the same way
-# they were before.
+# Built-in variant families are discovered from each gui-methods/*.toml file's ``[variant]`` table
+# (``family`` / ``label`` / optional ``order``); adding/renaming a variant is a one-file change.
+# Display order within a family is ``[variant].order`` (ascending; ties broken by file stem); family
+# ordering in the method combo stays curated via ``_METHOD_ORDER`` (a family omitted from it is hidden
+# without renaming its file). Customs under ``configs/gui-methods/custom/`` need no ``[variant]`` block
+# and are surfaced under every family.
 
 
 def _read_variant_metadata(path) -> dict:
@@ -242,12 +233,8 @@ _GROUPS = {
     },
 }
 _K2G = {k: g for g, ks in _GROUPS.items() for k in ks}
-# Preprocess-time knobs (target_res, drop_lowres_images, min_pixels) are owned by
-# the Preprocess tab. The tab persists GUI-profile overrides in the selected
-# gui-method variant metadata and uses configs/preprocess.toml only as the CLI
-# default/fallback. target_res is dual-use (train.py reads it only to size the
-# compile cache). Hide them from the config form to keep a single source of truth
-# and avoid the two surfaces silently drifting.
+# Preprocess-time knobs (target_res, drop_lowres_images, min_pixels) are owned by the Preprocess tab;
+# hidden from the config form to keep a single source of truth and avoid the two surfaces drifting.
 _SKIP = {
     "base_config",
     "dataset_config",
@@ -259,19 +246,14 @@ _SKIP = {
     "min_pixels",
 }
 
-# Virtual keys appear in the form like normal fields but don't round-trip as
-# flat TOML keys — they're derived from / written into structured sections
-# (e.g. ``use_valid`` toggles a `[[datasets]]` validation_split_num override).
-# The save loop in ConfigTab skips these, and per-key apply helpers handle the
-# structured write.
+# Virtual keys appear in the form like normal fields but don't round-trip as flat TOML keys — they're
+# derived from / written into structured sections (e.g. ``use_valid`` toggles a `[[datasets]]` override).
+# ConfigTab's save loop skips these; per-key apply helpers handle the structured write.
 _VIRTUAL_KEYS = {"use_valid", "validation_split_num", "repeat_by_folder_name"}
 
-# Fields shown under the "Basic" section. Everything else falls under the
-# collapsible "Advanced" section. Picked to cover the knobs a first-time user
-# realistically wants to touch (rate/length/output, headline architecture
-# size, headline VRAM knobs) without exposing the long tail of regularizer /
-# router / adapter-internal parameters. Keep only the common GUI path controls
-# in Basic; concrete path overrides stay in Advanced for users who need them.
+# Fields shown under "Basic"; everything else falls under the collapsible "Advanced" section.
+# Picked to cover the knobs a first-time user realistically wants without the long tail of
+# regularizer / router / adapter-internal params; concrete path overrides stay in Advanced.
 _BASIC = {
     "learning_rate",
     "max_train_epochs",
@@ -300,9 +282,6 @@ _BASIC = {
 
 def is_basic_field(key: str) -> bool:
     return key in _BASIC
-
-
-# ── Helpers ────────────────────────────────────────────────────
 
 
 def _load(p) -> dict:
@@ -445,9 +424,8 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
         merged[k] = v
         origin[k] = "method"
 
-    # GUI-only path scope is stored under [variant] so CLI config loading strips
-    # it with the rest of the variant metadata. The Config tab surfaces it as a
-    # normal field and expands it into concrete paths at submit time.
+    # GUI-only path scope is stored under [variant] so CLI config loading strips it as metadata;
+    # the Config tab surfaces it as a normal field and expands it into concrete paths at submit time.
     meta = meth.get("variant")
     if isinstance(meta, dict) and isinstance(meta.get("path_scope"), str):
         merged["path_scope"] = meta["path_scope"]
@@ -456,10 +434,8 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
         merged["path_scope"] = ""
         origin["path_scope"] = "base"
 
-    # Inject the `use_valid` virtual key derived from the [[datasets]] block.
-    # The variant file may shallow-override base.toml's validation_split_num /
-    # validation_split via _apply_dataset_overrides in library/config/io.py; we
-    # surface that as a single checkbox the user can flip in the form.
+    # Inject the `use_valid` virtual key derived from the [[datasets]] block (the variant may
+    # shallow-override base.toml's validation_split_num); surfaced as a single form checkbox.
     variant_override = _variant_validation_override(meth)
     if variant_override is not None:
         merged["use_valid"] = variant_override
@@ -468,10 +444,7 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
         merged["use_valid"] = _base_validation_enabled(base)
         origin["use_valid"] = "base"
 
-    # Inject `validation_split_num` (integer) from the same [[datasets]] block.
-    # Shown as a basic field so users can resize the held-out slice directly
-    # without dropping to base.toml. When the variant doesn't override it, the
-    # value comes from base.toml.
+    # Inject `validation_split_num` (integer) from the same [[datasets]] block; falls back to base.toml.
     variant_vsn = _variant_validation_split_num(meth)
     if variant_vsn is not None:
         merged["validation_split_num"] = variant_vsn
@@ -480,10 +453,8 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
         merged["validation_split_num"] = _base_validation_split_num(base)
         origin["validation_split_num"] = "base"
 
-    # Inject `repeat_by_folder_name` (Kohya-style {n}_folder repeats) the same
-    # way — it's a dataset-blueprint key, not a flat TOML key, so the form
-    # surfaces it as a virtual checkbox written back into the variant's
-    # [[datasets]] override.
+    # Inject `repeat_by_folder_name` (Kohya-style {n}_folder repeats): a dataset-blueprint key, not a
+    # flat TOML key, so the form surfaces it as a virtual checkbox written into the [[datasets]] override.
     variant_rbf = _variant_folder_repeats_override(meth)
     if variant_rbf is not None:
         merged["repeat_by_folder_name"] = variant_rbf
@@ -492,11 +463,9 @@ def merged_gui_variant_preset(variant: str, preset: str) -> tuple[dict, dict[str
         merged["repeat_by_folder_name"] = _base_folder_repeats(base)
         origin["repeat_by_folder_name"] = "base"
 
-    # Surface the sample-image knobs as first-class fields even when no TOML in
-    # the chain has set them (their argparse defaults are None/None/False, so
-    # they'd otherwise never appear in `merged`). A variant that does set them
-    # keeps its value + "method" origin from the merge loop above. Cadence uses
-    # 0 as the "disabled" sentinel (train.py coerces non-positive → None).
+    # Surface the sample-image knobs as first-class fields even when no TOML in the chain set them
+    # (their argparse defaults would otherwise keep them out of `merged`); a variant that does set
+    # them keeps its "method" origin. Cadence uses 0 as the "disabled" sentinel (train.py: non-positive → None).
     for _k, _default in (
         ("sample_prompts", []),
         ("sample_every_n_epochs", 0),

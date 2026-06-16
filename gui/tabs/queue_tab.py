@@ -125,10 +125,8 @@ class QueueTab(LazyTabMixin, QWidget):
         self._selected_job_id: str | None = None
         self._last_log_text: str | None = None
         self._paused: bool = False
-        # While False, refresh() auto-follows the live (running/queued) job so the
-        # progress bar tracks the active run. A manual click in the job list pins
-        # the selection (sets this True) so the user can inspect a finished job
-        # without the view jumping back to whatever is training.
+        # While False, refresh() auto-follows the live job; a manual list click pins
+        # the selection (True) so inspecting a finished job isn't yanked back.
         self._user_pinned: bool = False
 
         outer = QVBoxLayout(self)
@@ -138,9 +136,7 @@ class QueueTab(LazyTabMixin, QWidget):
         self.refresh_btn.clicked.connect(self.refresh)
         top.addWidget(self.refresh_btn)
 
-        # Toggle: "Start Queue" resumes a paused queue (runs jobs added via the
-        # dropdowns); "Pause Queue" holds it. Label/style flip with state in
-        # refresh(); disabled when no daemon is up.
+        # Toggle: resume / hold the queue; label/style flip in refresh().
         self.queue_btn = QPushButton(t("queue_start"))
         self.queue_btn.clicked.connect(self._toggle_queue)
         self.queue_btn.setEnabled(False)
@@ -212,8 +208,7 @@ class QueueTab(LazyTabMixin, QWidget):
     def refresh(self) -> None:
         selected = self._selected_job_id
         try:
-            # Passive: a monitor that polls on a timer must never spawn a daemon
-            # just by being open, nor block the UI thread waiting for one.
+            # Passive: a timer-polled monitor must never spawn a daemon nor block on one.
             jobs, self._paused = gui_daemon.queue_snapshot_passive()
         except Exception as exc:  # noqa: BLE001
             self._jobs = []
@@ -231,15 +226,12 @@ class QueueTab(LazyTabMixin, QWidget):
 
         self._jobs = list(reversed(jobs))
 
-        # If the pinned job has fallen off the list (e.g. cleared/expired),
-        # drop the pin so auto-follow resumes.
+        # If the pinned job fell off the list, drop the pin so auto-follow resumes.
         if self._user_pinned and not any(j.get("id") == selected for j in self._jobs):
             self._user_pinned = False
 
-        # Unless the user has pinned a selection, follow the live job so the
-        # progress bar tracks the run the daemon is actually executing — this is
-        # what keeps the bar moving when the queue advances from one job to the
-        # next (a finished selection would otherwise leave it frozen).
+        # Unless pinned, follow the live job so the bar keeps moving as the queue
+        # advances (a finished selection would otherwise leave it frozen).
         desired = selected
         if not self._user_pinned:
             live = next(
@@ -312,9 +304,8 @@ class QueueTab(LazyTabMixin, QWidget):
         self.refresh()
 
     def _selection_changed(self, current: QListWidgetItem | None, _prev) -> None:
-        # Only genuine user clicks reach here — refresh() rebuilds the list under
-        # blockSignals — so a change of selection means the user picked a job to
-        # inspect. Pin it so auto-follow stops yanking the view to the live job.
+        # refresh() rebuilds the list under blockSignals, so only genuine user clicks
+        # reach here — pin the selection so auto-follow stops yanking to the live job.
         self._user_pinned = current is not None
         self._selected_job_id = current.data(Qt.UserRole) if current else None
         self._last_log_text = None

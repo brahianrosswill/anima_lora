@@ -191,18 +191,13 @@ class ModelsDialog(_StreamingDialog):
     """
 
     def __init__(self, parent=None):
-        # Each entry: (status_label, paths, button) — populated in _build_actions
-        # so _after_finished can refresh every row after a download-all run.
+        # (status_label, paths, button) — _after_finished refreshes every row after download-all.
         self._rows: list[tuple[QLabel, list[str], QPushButton]] = []
         self._login_thread: _HFLoginThread | None = None
         super().__init__(t("models_title"), parent)
 
     def _build_actions(self, layout: QVBoxLayout) -> None:
-        # ── HuggingFace authentication ──
-        # SAM3 is gated and several repos are rate-limited for anonymous pulls,
-        # so we accept a pasted token here and persist it via huggingface_hub
-        # (same cache `hf auth login` writes) — the `hf download` calls below
-        # then pick it up unchanged.
+        # Token persisted via huggingface_hub (same cache `hf auth login` writes); the gated SAM3 repo needs it.
         auth_row = QHBoxLayout()
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
@@ -230,7 +225,6 @@ class ModelsDialog(_StreamingDialog):
         intro.setStyleSheet(f"color:{tok('text_dim')};")
         layout.addWidget(intro)
 
-        # Download-all button (Anima + SAM3 + MIT + PE).
         all_row = QHBoxLayout()
         self.all_btn = QPushButton(t("models_download_all"))
         self.all_btn.setStyleSheet(
@@ -241,7 +235,6 @@ class ModelsDialog(_StreamingDialog):
         all_row.addStretch()
         layout.addLayout(all_row)
 
-        # Per-group rows.
         for key, label_key, paths in _MODEL_GROUPS:
             row = QHBoxLayout()
 
@@ -279,8 +272,7 @@ class ModelsDialog(_StreamingDialog):
         _paths: list[str],
         _btn: QPushButton,
     ) -> None:
-        # _after_finished refreshes every row, so we don't need to track which
-        # row was clicked.
+        # _after_finished refreshes every row, so no need to track which row was clicked.
         self._run([f"download-{key}"])
 
     def _refresh_auth_status(self) -> None:
@@ -334,8 +326,7 @@ class ModelsDialog(_StreamingDialog):
             b.setEnabled(not busy)
 
     def _after_finished(self, exit_code: int) -> None:
-        # Refresh every row's status — handles both per-group downloads and
-        # download-models, which touches several groups in one run.
+        # Refresh every row — download-models touches several groups in one run.
         for status_lbl, paths, btn in self._rows:
             installed = _all_exist(paths)
             status_lbl.setText(
@@ -372,10 +363,7 @@ GITHUB_ISSUES_URL = f"{GITHUB_REPO_URL}/issues"
 RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 MANIFEST_FILE = ROOT / ".anima_release.json"
 
-# Cache of the most recent GitHub release tag, persisted in gui_settings.json
-# so the on-launch badge check doesn't hit GitHub every time the app starts.
-# 6h is short enough to surface a release the same day it ships, long enough
-# to avoid being a per-launch network dependency for power users.
+# Release-tag cache (gui_settings.json) so the on-launch badge check doesn't hit GitHub every start; 6h balances freshness vs per-launch network cost.
 _GUI_SETTINGS_FILE = Path(__file__).resolve().parent / "gui_settings.json"
 UPDATE_CACHE_TTL_SECONDS = 6 * 3600
 _UPDATE_CACHE_KEY = "update_check"
@@ -482,15 +470,12 @@ class UpdateDialog(_StreamingDialog):
     def __init__(self, parent=None):
         self._check_thread: _UpdateCheckThread | None = None
         self._latest_url: str = ""
-        # Track which kind of run is in flight so _after_finished can show
-        # the right post-run feedback (success toast vs dry-run summary vs
-        # failure warning) instead of a buried "Finished (exit code 0)".
+        # Which run is in flight, so _after_finished can pick the right post-run feedback.
         self._last_run_kind: str | None = None  # "real" | "dry" | None
         super().__init__(t("update_title"), parent)
         self._kick_check()
 
     def _build_actions(self, layout: QVBoxLayout) -> None:
-        # ── Version + status row ──
         version_row = QHBoxLayout()
         version_row.setSpacing(12)
 
@@ -518,7 +503,6 @@ class UpdateDialog(_StreamingDialog):
         version_row.addWidget(self.check_btn)
         layout.addLayout(version_row)
 
-        # ── Release notes panel ──
         notes_label = QLabel(t("update_release_notes"))
         notes_label.setStyleSheet(f"color:{tok('text_dim')};margin-top:4px;")
         layout.addWidget(notes_label)
@@ -538,7 +522,6 @@ class UpdateDialog(_StreamingDialog):
         self.notes_view.setPlaceholderText(t("update_status_checking"))
         layout.addWidget(self.notes_view)
 
-        # ── Warning + run buttons (existing controls) ──
         warn = QLabel(t("update_warning"))
         warn.setWordWrap(True)
         warn.setStyleSheet(
@@ -645,15 +628,7 @@ class UpdateDialog(_StreamingDialog):
             self._run(["update", conflict_flag])
 
     def _after_finished(self, exit_code: int) -> None:
-        # Promote the post-run state into the persistent UI instead of leaving
-        # it buried in the streaming log. Three cases:
-        #   - real run, exit 0  → refresh version label from the new manifest
-        #                          + flip status badge to a bright "Updated →
-        #                          vX.Y (relaunch)" + show a success modal so
-        #                          the user can't miss it.
-        #   - dry run, exit 0   → show a "dry run completed" modal pointing
-        #                          back at the log.
-        #   - any non-zero      → show a warning modal with the exit code.
+        # Promote post-run state into the persistent UI instead of burying it in the streaming log.
         kind = self._last_run_kind
         self._last_run_kind = None
         if exit_code != 0:

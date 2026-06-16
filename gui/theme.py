@@ -232,9 +232,7 @@ def set_theme(name: str) -> None:
         set_setting("theme", name)
 
 
-# App font size (point size handed to app.setFont). 10pt is the design default —
-# see the note in apply_theme(). The slider in SettingsDialog persists an override
-# here; clamped so a stray value can't shrink the UI to nothing or blow it up.
+# App font size handed to app.setFont; clamped so a stray override can't shrink/blow up the UI.
 DEFAULT_FONT_SIZE = 10
 FONT_SIZE_MIN = 8
 FONT_SIZE_MAX = 18
@@ -320,9 +318,17 @@ def _arrow_icon(color: str, direction: str) -> str:
     p.setPen(Qt.NoPen)
     pad_x, pad_y = 4, 3
     if direction == "up":
-        tri = QPolygon([QPoint(pad_x, h - pad_y), QPoint(w - pad_x, h - pad_y), QPoint(w // 2, pad_y)])
+        tri = QPolygon(
+            [
+                QPoint(pad_x, h - pad_y),
+                QPoint(w - pad_x, h - pad_y),
+                QPoint(w // 2, pad_y),
+            ]
+        )
     else:
-        tri = QPolygon([QPoint(pad_x, pad_y), QPoint(w - pad_x, pad_y), QPoint(w // 2, h - pad_y)])
+        tri = QPolygon(
+            [QPoint(pad_x, pad_y), QPoint(w - pad_x, pad_y), QPoint(w // 2, h - pad_y)]
+        )
     p.drawPolygon(tri)
     p.end()
     safe = color.lstrip("#")
@@ -334,18 +340,10 @@ def _arrow_icon(color: str, direction: str) -> str:
     return url
 
 
-def _build_stylesheet(t: Theme, font_family: str = "", font_size: int = DEFAULT_FONT_SIZE) -> str:
-    # Enforce the UI font family AND size through the stylesheet, not just
-    # app.setFont(). On Windows the native style paints many controls with the
-    # system font and ignores the application QFont (QFontInfo still *reports*
-    # the app font, so this is invisible to code — only the pixels are wrong),
-    # and for any widget Qt resolves through the stylesheet (e.g. labels that
-    # carry their own colour stylesheet) the point size from app.setFont() does
-    # not reliably propagate. A stylesheet rule has higher precedence, so naming
-    # both family and size on the base QWidget forces every widget to render in
-    # the bundled font at the chosen size — so the Settings font-size knob scales
-    # tab titles and field labels too. Per-widget overrides (monospace log views
-    # set their own family + px size) are more specific and still win.
+def _build_stylesheet(
+    t: Theme, font_family: str = "", font_size: int = DEFAULT_FONT_SIZE
+) -> str:
+    # Enforce font family+size via stylesheet (not just app.setFont): Windows native style ignores the app QFont, and stylesheet-resolved widgets don't reliably inherit its point size.
     font_rule = (
         f"* {{ font-family: {font_family}; font-size: {font_size}pt; }}\n"
         if font_family
@@ -366,13 +364,9 @@ def _build_stylesheet(t: Theme, font_family: str = "", font_size: int = DEFAULT_
             background: {t.input_bg}; color: {t.text}; border: 1px solid {t.border};
             border-radius: 3px; padding: 2px 4px;
         }}
-        /* Spin buttons: both steppers sit side by side on the right edge (down
-           then up) instead of the cramped native vertical stack, and the arrows
-           are enlarged so they're legible. */
+        /* Spin steppers placed side by side on the right edge instead of the cramped native vertical stack. */
         QSpinBox, QDoubleSpinBox {{ padding-right: 34px; }}
-        /* height is intentionally oversized: Qt clamps the spin-button to the
-           field height, so this fills it edge-to-edge at any font size (no
-           top/bottom gap) instead of the native ~15px centred box. */
+        /* height intentionally oversized: Qt clamps the spin-button to field height, so this fills it edge-to-edge at any font size. */
         QSpinBox::up-button, QDoubleSpinBox::up-button {{
             subcontrol-origin: border; subcontrol-position: right;
             width: 16px; height: 200px; border-left: 1px solid {t.border}; background: {t.surface};
@@ -389,9 +383,7 @@ def _build_stylesheet(t: Theme, font_family: str = "", font_size: int = DEFAULT_
         QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
             background: {t.accent};
         }}
-        /* Theme-coloured arrow icons painted by _arrow_icon — Qt can't render a
-           CSS border-triangle (paints a white box) and the native arrow is
-           dark-on-dark in the dark theme. */
+        /* Theme-coloured arrows painted by _arrow_icon — Qt can't render a CSS border-triangle (paints a white box) and the native arrow is dark-on-dark in the dark theme. */
         QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
             image: url({_arrow_icon(t.text, "up")}); width: 11px; height: 7px;
         }}
@@ -463,14 +455,7 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
     t = THEMES[resolved]
     _active = t
 
-    # App font: the bundled Pretendard (design-system primary sans) leads the
-    # stack. Pretendard covers Latin + Korean Hangul + Japanese kana, but NOT
-    # Han ideographs (kanji/hanzi) or emoji — so the only fallbacks that remain
-    # load-bearing are the CJK font (kanji/hanzi for the JA/ZH UI strings) and
-    # the color-emoji font (📖 ⚙ 🔍 … wayfinding markers). Naming a CJK family
-    # alone doesn't cascade to an emoji font, so emoji would render as tofu;
-    # listing both explicitly fixes that. (A plain Latin fallback would be
-    # redundant with Pretendard, so it's omitted.)
+    # Pretendard leads but lacks Han ideographs + emoji, so CJK and color-emoji fonts must both be named explicitly (a CJK family alone won't cascade to emoji → tofu).
     if sys.platform == "win32":
         families = ["Malgun Gothic", "Segoe UI Emoji"]
     elif sys.platform == "darwin":
@@ -482,18 +467,12 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
         families.insert(0, bundled)
     font = QFont()
     font.setFamilies(families)
-    # 10pt, not the OS-native 9pt: Pretendard has a smaller x-height / apparent
-    # size than Windows' Segoe UI at the same point size, so matching 9pt makes
-    # every label read a notch smaller than native apps. 10pt brings Pretendard
-    # back in line with Segoe UI 9pt visually. The user can override this from
-    # Settings (persisted as "font_size"); current_font_size() clamps it.
+    # 10pt not the OS-native 9pt: Pretendard's smaller apparent size matches Segoe UI 9pt only at 10pt.
     font.setPointSize(current_font_size())
     font.setStyleHint(QFont.SansSerif)
     app.setFont(font)
 
-    # Same family stack handed to the stylesheet so the family is enforced even
-    # for native-styled controls that ignore app.setFont() on Windows. Quote
-    # each name (Qt CSS needs quotes for multi-word families like "Malgun Gothic").
+    # Same stack handed to the stylesheet (enforces family on native-styled Windows controls); quote each name (Qt CSS needs quotes for multi-word families).
     family_css = ", ".join(f'"{f}"' for f in families)
 
     app.setPalette(_build_palette(t))

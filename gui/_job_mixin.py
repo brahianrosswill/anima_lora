@@ -36,7 +36,6 @@ from gui.i18n import t
 class DaemonJobMixin:
     _job_id: str | None = None
 
-    # ── submit ────────────────────────────────────────────────────────────
     def _submit_job(self, submit_fn, *, on_fail=None) -> str | None:
         """Run ``submit_fn`` (a daemon submit_* call) and return its job id.
 
@@ -60,7 +59,6 @@ class DaemonJobMixin:
             return None
         return job_id
 
-    # ── stdout observer ───────────────────────────────────────────────────
     def _init_job_observer(self, interval_ms: int = 400) -> None:
         """Set up the job-observer state. Call once from ``__init__``."""
         self._job_id = None

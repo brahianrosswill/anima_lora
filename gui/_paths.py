@@ -22,9 +22,7 @@ GUI_SETTINGS_FILE = Path(__file__).resolve().parent / "gui_settings.json"
 # Default autotagger probability floor applied on top of the model's per-tag
 # F1 thresholds (see AnimaTagger.predict_caption min_confidence).
 DEFAULT_AUTOTAG_CONFIDENCE = 0.5
-# Default GUI accent color (the dark theme's highlight / selection blue).
-# Kept for backward compat; the live accent now comes from the active theme
-# (see gui/theme.py). Legacy ``theme_color`` settings are ignored.
+# Kept for backward compat; the live accent now comes from the active theme (gui/theme.py).
 DEFAULT_THEME_COLOR = "#3c78c8"
 # Default named theme (see gui/theme.py THEMES). One of "dark" / "light" / "sepia".
 DEFAULT_THEME = "dark"
@@ -60,9 +58,7 @@ METHODS_DIR = CONFIGS_DIR / "methods"
 GUI_METHODS_DIR = CONFIGS_DIR / "gui-methods"
 PRESETS_FILE = CONFIGS_DIR / "presets.toml"
 CUSTOM_DIR = CONFIGS_DIR / "custom"
-# User-created variants live alongside the curated gui-methods files but in
-# their own subdirectory so they're easy to find and don't pollute the
-# built-in family list.
+# User-created variants get their own subdir so they don't pollute the built-in family list.
 CUSTOM_VARIANTS_DIR = GUI_METHODS_DIR / "custom"
 
 

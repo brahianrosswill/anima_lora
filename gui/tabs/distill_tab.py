@@ -76,10 +76,8 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
 
         lay = QVBoxLayout(self)
 
-        # ── Top bar: title + file path + Save / Preprocess / Train / Stop ──
         top = QHBoxLayout()
-        # Exposed so MethodsTab can mount its Method picker inline at the
-        # front of this row when this editor is the active page.
+        # Exposed so MethodsTab can mount its Method picker inline at the front.
         self._top_bar = top
         title = QLabel(self.METHOD_LABEL)
         title.setStyleSheet("font-weight:bold;font-size:14px;")
@@ -122,7 +120,6 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         self.progress.setVisible(False)
         lay.addWidget(self.progress)
 
-        # ── Body: (form | explanation) on top, log on bottom ──
         vsplit = QSplitter(Qt.Vertical)
         hsplit = QSplitter(Qt.Horizontal)
 
@@ -159,16 +156,12 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         lay.addWidget(vsplit)
         self._show_explain_placeholder()
 
-        # ── Daemon job observation (command job → no progress.jsonl, tqdm
-        # parsing drives the bar). _poll_job / _drain_job_stdout come from
-        # DaemonJobMixin; _emit_log_line below routes lines to this tab's log. ──
+        # Command job → no progress.jsonl; tqdm parsing drives the bar.
         self._init_job_observer()
 
     def _lazy_init(self) -> None:
         self._load_and_build()
         self._try_reattach()
-
-    # ── Form build ────────────────────────────────────────────────
 
     def _load_and_build(self) -> None:
         try:
@@ -236,8 +229,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
                 # _widget caps ints at 10k; iterations / step counts run higher.
                 w.setRange(0, 100_000_000)
                 w.setValue(int(orig))
-            # Tooltip = preceding comment block + this line's inline trailing
-            # comment (turbo.toml documents most knobs inline; spd.toml blocks).
+            # Tooltip = preceding comment block + this line's inline trailing comment.
             parts = [" ".join(pending).strip(), self._comment_text(item)]
             tip = "  ".join(p for p in parts if p)
             pending = []
@@ -275,13 +267,9 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
             lines.append(self._comment_text(item))
         return lines
 
-    # ── Explanation panel ──
-
     def _show_explain_placeholder(self) -> None:
-        # Prefer the localized HTML guide (gui/explanations/guides/<lang>/
-        # <method>.html) when one is registered — it carries its own <h2> and
-        # is translated. Methods without a guide fall back to the config's
-        # English file-header comment block built below.
+        # Prefer the localized HTML guide when registered; else fall back to the
+        # config's English file-header comment block built below.
         guide = method_overview(self._config_path.stem)
         if guide:
             self._explain.setHtml(guide)
@@ -327,10 +315,8 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
             )
         self._explain.setHtml("".join(parts))
 
-    # ── Dirty tracking — _connect_dirty_signal / _mark_dirty / _clear_dirty /
-    #    _update_save_button are inherited from DirtyTrackingMixin. ──
-
-    # ── Save ──
+    # Dirty tracking (_connect_dirty_signal / _mark_dirty / _clear_dirty /
+    # _update_save_button) is inherited from DirtyTrackingMixin.
 
     def _save(self, *, silent: bool = False) -> bool:
         if self._doc is None:
@@ -352,8 +338,6 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
             QMessageBox.information(self, t("saved"), f"Saved {rel}")
         return True
 
-    # ── Training (daemon) ──
-
     def _start_train(self):
         self._launch(self.TRAIN_TASK, ["tasks.py", self.TRAIN_TASK])
 
@@ -361,8 +345,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         if self._job_id:
             QMessageBox.information(self, "", t("distill_job_running"))
             return
-        # train.py / the distill script re-reads the TOML from disk, so flush
-        # any unsaved form edits before launching.
+        # The distill script re-reads the TOML from disk, so flush unsaved edits.
         if self._dirty and not self._save(silent=True):
             return
         self._set_busy()
@@ -380,7 +363,6 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         self._log(t("daemon_queued", job_id=job_id))
         self._attach(job_id, replay=False)
 
-    def _try_reattach(self) -> None:
         """Re-bind to our own train job still running from a previous session.
 
         Only re-claims a *command* job whose label matches this tab's train
@@ -407,7 +389,7 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         self._watch_job(job_id, replay_log=replay)
 
     def _emit_log_line(self, line: str) -> None:
-        # This tab's log sink is _log (insertPlainText, no auto-newline).
+        # _log uses insertPlainText (no auto-newline), so add one here.
         self._log(line + "\n")
 
     def _on_job_finished(self, state: str | None) -> None:
@@ -432,8 +414,6 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
         next launch)."""
         self._job_timer.stop()
 
-    # ── UI state ──
-
     def _set_busy(self):
         self.train_btn.setText(t("train") + " ...")
         self.train_btn.setStyleSheet(self._train_busy_style)
@@ -455,26 +435,14 @@ class _DistillConfigTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidge
 
 
 class SPDTrainTab(_DistillConfigTab):
-    # SPD "Case B": a trajectory LoRA distilled to follow the multi-resolution
-    # SPD inference path. Trains on the SAME data + cache as ordinary LoRA
-    # (image_dataset/ → post_image_dataset/lora/, VAE + TE only — no PE) via the
-    # bespoke loop `make exp-spd` (scripts/distill_spd.py, NOT train.py), so it
-    # has no dataset of its own. Output anima_spd*.safetensors is a normal LoRA —
-    # infer with the SPD sampler at the trained schedule (`make exp-test-spd`).
-    # See docs/inference/spd.md.
+    # SPD trajectory LoRA via the bespoke loop `make exp-spd` (NOT train.py). See docs/inference/spd.md.
     CONFIG_PATH = "configs/methods/spd.toml"
     TRAIN_TASK = "exp-spd"
     METHOD_LABEL = "SPD"
 
 
 class TurboTrainTab(_DistillConfigTab):
-    # Turbo Anima: a few-step LoRA student distilled from the CFG=4 teacher
-    # via DP-DMD (diversity-preserved DMD). Like SPD it trains on the SAME data +
-    # cache as ordinary LoRA training, through the bespoke loop `make exp-turbo`
-    # (scripts/distill_turbo/distill.py, NOT train.py). Output anima_turbo.safetensors is
-    # a normal LoRA — infer at 2 steps cfg=1.0 (`make exp-test-turbo`). The
-    # turbo.toml schema is bespoke/sectioned. See
-    # docs/experimental/dpdmd.md.
+    # Turbo few-step LoRA student via DP-DMD through the bespoke loop `make exp-turbo` (NOT train.py). See docs/experimental/dpdmd.md.
     CONFIG_PATH = "configs/methods/turbo.toml"
     TRAIN_TASK = "exp-turbo"
     METHOD_LABEL = "Turbo"

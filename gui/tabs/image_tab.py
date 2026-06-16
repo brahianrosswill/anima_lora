@@ -75,8 +75,7 @@ from gui.theme import tok
 
 # Stdio protocol sentinels of the resident autotag worker (kept in sync with
 # ``scripts/anima_tagger/autotag_server.py``). Hardcoded rather than imported
-# because that module pulls in torch, which the GUI must stay free of for fast
-# startup (see gui/CLAUDE.md).
+# because that module pulls in torch, which the GUI must stay free of.
 _AUTOTAG_READY = "ANIMA_AUTOTAG_READY"
 _AUTOTAG_RESULT_PREFIX = "ANIMA_AUTOTAG_RESULT\t"
 _AUTOTAG_ERROR_PREFIX = "ANIMA_AUTOTAG_ERROR\t"
@@ -87,16 +86,11 @@ _AUTOTAG_IDLE_MS = 10 * 60 * 1000
 _AUTOTAG_GPU_WATCH_MS = 700
 
 
-# Mask overlay tint — translucent red on top of the *masked-out* region (the
-# inverted mask: where the trainer ignores pixels). 55% opacity is strong
-# enough to see the masked region clearly without burying source detail.
-# We pre-multiply on the fly by filling an opaque red and then driving alpha
-# from the mask + QPainter.setOpacity rather than baking alpha into the color.
+# Tint over the *masked-out* (inverted) region; alpha driven from the mask +
+# QPainter.setOpacity rather than baked into the color.
 _MASK_OVERLAY_COLOR_OPAQUE = QColor(255, 60, 60, 255)
 _MASK_OVERLAY_OPACITY = 0.55
 
-# Foreground tint for images marked for deletion (toggled with the Delete key,
-# removed by the 삭제 button). Bright red so marks stand out in both views.
 _DELETE_MARK_COLOR = QColor("#e74c3c")
 
 
@@ -156,8 +150,7 @@ def _compose_mask_overlay(source: QPixmap, mask_path: Path) -> QPixmap:
     if (src_w, src_h) == (mask_w, mask_h):
         aligned = gray
     elif src_w * mask_h >= src_h * mask_w:
-        # ar_src >= ar_mask: bucket cropped left/right of the original.
-        # Match height, letterbox width.
+        # ar_src >= ar_mask: bucket cropped left/right; match height, letterbox width.
         scaled_w = max(1, round(mask_w * src_h / mask_h))
         scaled = gray.scaled(
             scaled_w, src_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
@@ -171,8 +164,7 @@ def _compose_mask_overlay(source: QPixmap, mask_path: Path) -> QPixmap:
         finally:
             painter.end()
     else:
-        # ar_src < ar_mask: bucket cropped top/bottom of the original.
-        # Match width, letterbox height.
+        # ar_src < ar_mask: bucket cropped top/bottom; match width, letterbox height.
         scaled_h = max(1, round(mask_h * src_w / mask_w))
         scaled = gray.scaled(
             src_w, scaled_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
@@ -200,10 +192,8 @@ def _compose_mask_overlay(source: QPixmap, mask_path: Path) -> QPixmap:
     return result
 
 
-# Inline-highlight palette for the editor: a translucent green for inserted
-# spans (visible on the dark theme without overpowering the text). We don't
-# render deletions inline — the user already removed those characters, so we
-# surface them via the (+X / −Y) summary in the caption header instead.
+# Translucent green for inserted spans; deletions aren't rendered inline (they
+# surface via the (+X / −Y) summary in the caption header).
 _ADD_BG = QColor(60, 130, 70, 120)
 
 
@@ -269,10 +259,8 @@ def _append_history(caption_path: Path, prev_text: str) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-# Border colors for inline tag boxes. Plain tags get a near-white border per
-# the user's request — clearly distinct from the dark editor background and
-# the light text. @artist boundary and "On the …" / "In the …" section
-# headers keep their warm/cool tints so the trainer's split rules
+# Border colors for inline tag boxes. @artist and "On the …" / "In the …"
+# section headers keep warm/cool tints so the trainer's split rules
 # (anima_smart_shuffle in library/anima/training.py) stay visible.
 _BOX_BORDER_PLAIN = QColor("#e0e0e0")
 _BOX_BORDER_ARTIST = QColor("#c9a227")
@@ -303,11 +291,9 @@ def _tag_ranges(text: str):
 
 
 def _tag_border_color(tag: str) -> QColor:
-    # Mirror library.anima.training._is_artist_tag: `@<non-space>` is an
-    # artist handle (`@sincos`, `@no-artist` placeholder), while `@ @`
-    # (booru `@_@` eye-shape, space-form) is a general-category tag and
-    # must not steal the warm artist tint. Kept inline so this module
-    # stays free of heavy library/* imports at GUI startup.
+    # Mirror library.anima.training._is_artist_tag: `@<non-space>` is an artist
+    # handle, but `@ @` (space-form booru eye-shape) is a general tag and must
+    # not steal the artist tint. Inline to keep this module free of library/*.
     if len(tag) >= 2 and tag[0] == "@" and not tag[1].isspace():
         return _BOX_BORDER_ARTIST
     if (
@@ -342,9 +328,8 @@ class BoxedCaptionEdit(QTextEdit):
         super().__init__(parent)
         font = self.font()
         font.setPixelSize(14)
-        # 115% letter spacing widens the natural gap between adjacent boxes
-        # (the comma+space stretches with the rest of the text), which is
-        # cheaper than fiddling with per-box geometry to manufacture gaps.
+        # 115% letter spacing widens the gap between adjacent boxes instead of
+        # manufacturing gaps via per-box geometry.
         font.setLetterSpacing(QFont.PercentageSpacing, 115)
         self.setFont(font)
         self._apply_block_format()
@@ -359,9 +344,7 @@ class BoxedCaptionEdit(QTextEdit):
         cursor = QTextCursor(self.document())
         cursor.select(QTextCursor.Document)
         fmt = QTextBlockFormat()
-        # ProportionalHeight = 1 (Qt's QTextBlockFormat.LineHeightTypes).
-        # 140% gives clear vertical separation between wrapped lines without
-        # making the editor feel stretched.
+        # 140% ProportionalHeight: vertical separation between wrapped lines.
         fmt.setLineHeight(
             140, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
         )
@@ -409,12 +392,8 @@ class BoxedCaptionEdit(QTextEdit):
         line_height = cr.height()
         rects: list[QRect] = []
 
-        # Box pads slightly OUTWARD from the text so the glyphs sit inside
-        # with a 1px halo. Negative pad → outward extension. Keeping the
-        # outward extension small (1px instead of 2px) leaves more of the
-        # comma+space between tags untouched, so adjacent boxes have a
-        # visibly wider gap. Going to 0 would put glyph edges right on the
-        # border line, which reads as "text escaping the box."
+        # Negative pad → box extends 1px OUTWARD so glyphs sit inside with a
+        # halo; small extension leaves the comma+space gap between boxes wide.
         pad_x = -1
         pad_y = -1
 
@@ -555,8 +534,7 @@ class CaptionVersionsDialog(QDialog):
 class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def __init__(self):
         super().__init__()
-        # Daemon job observer (curate-group runs as a command job) so the
-        # grouping progress bar lives in this tab, not only the Queue tab.
+        # Daemon job observer so curate-group's progress bar lives in this tab.
         self._init_job_observer()
         self._all_images: list[Path] = []  # unfiltered, alphabetical (from _imgs)
         self._images: list[Path] = []  # currently displayed (filter + sort applied)
@@ -567,11 +545,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._current_caption_path: Path | None = None
         self._disk_text: str = ""  # last value seen on disk (for diff baseline)
         self._suspend_dirty = False  # while we set text programmatically
-        # Resident autotag worker (a torch subprocess holding the tagger model
-        # so consecutive Autotag clicks skip the reload). GUI-owned via QProcess
-        # — spawned on first use, kept alive ("loaded, waiting"), torn down
-        # before any other GPU work (grouping/training/preprocess) frees the
-        # card. See _run_autotag / _kill_tagger_worker.
+        # Resident autotag worker: a torch QProcess holding the tagger model so
+        # consecutive clicks skip the reload; torn down before any other GPU
+        # work frees the card. See _run_autotag / _kill_tagger_worker.
         self._tagger_proc: QProcess | None = None
         self._tagger_ready = False
         self._tagger_buf = ""  # partial-line buffer for the worker's stdout
@@ -587,22 +563,15 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             _app.aboutToQuit.connect(self._kill_tagger_worker)
         self._search_text: str = ""
         self._sort_desc: bool = False
-        # Group-first ordering: when on, the tree is flattened across folders so
-        # every similarity group floats to the very top as a single root-level
-        # green node (members shown with their folder prefix), and the ungrouped
-        # images follow below in the normal folder tree. Off = per-folder tree.
+        # Group-first: float every similarity group to the top, flattened across
+        # folders. Off = per-folder tree. See _rebuild_tree_group_first.
         self._group_first: bool = False
-        # Similarity-group curation (make curate-group). _groups is the manifest's
-        # group list; the tree view folds images under green per-group nodes (the
-        # old dropdown filter was replaced by this always-on tree grouping).
-        # Grouping is stem-keyed so it works whether this tab views image_dataset/
-        # or post_image_dataset/resized/ (stems are unique + shared).
+        # Similarity-group manifest (make curate-group). Stem-keyed so it works
+        # whether this tab views image_dataset/ or post_image_dataset/resized/.
         self._groups: list[dict] = []
-        # Images marked for deletion (Delete key toggles the current one red; the
-        # 삭제 button moves the whole set to the OS trash). Keyed by full path so a
-        # mark survives filter/sort/view rebuilds; cleared when the dir changes.
+        # Images marked for deletion. Keyed by full path so a mark survives
+        # filter/sort/view rebuilds; cleared when the dir changes.
         self._marked: set[Path] = set()
-        # Source pixmap + resolved mask for the currently shown image.
         # _overlay_pm is lazily composed on first toggle and cached so flipping
         # the checkbox doesn't re-run the QPainter pipeline.
         self._source_pm: QPixmap | None = None
@@ -625,8 +594,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.open_dir_btn.setToolTip(t("dataset_open_dir_tooltip"))
         self.open_dir_btn.clicked.connect(self._open_current_dir)
         top.addWidget(self.open_dir_btn)
-        # Group button, accented blue like the preprocess "run" buttons. Submits
-        # `make curate-group`; results surface as green folds in the tree view.
         self.group_btn = QPushButton(t("dataset_group_rebuild"))
         self.group_btn.setToolTip(t("dataset_group_rebuild_tooltip"))
         self.group_btn.setStyleSheet(
@@ -643,17 +610,12 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         top.addWidget(self.cnt)
         lay.addLayout(top)
 
-        # Grouping progress bar (curate-group). Hidden until a run starts; the
-        # tracker drives it from the job's tqdm stdout, then hides it on finish.
         self.group_progress = make_progress_bar()
         self._progress_tracker = TqdmProgressTracker(self.group_progress)
         lay.addWidget(self.group_progress)
 
         sp = QSplitter(Qt.Horizontal)
 
-        # Left panel: search + sort row, then the tree of images. The tree folds
-        # images under their folder + green per-similarity-group nodes; selecting
-        # a leaf routes through _show(index) via the _images array.
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
@@ -670,9 +632,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.sort_btn.setToolTip(t("dataset_sort_asc_tooltip"))
         self.sort_btn.clicked.connect(self._toggle_sort)
         search_row.addWidget(self.sort_btn)
-        # Group-first toggle: floats all similarity groups to the top of the
-        # tree, flattened across folders (see _rebuild_tree_group_first). Label
-        # reflects the active layout — "그룹" when on, "트리" when off.
         self.group_first_btn = QPushButton(t("dataset_view_tree"))
         self.group_first_btn.setMinimumWidth(56)
         self.group_first_btn.setCheckable(True)
@@ -685,7 +644,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.tree.setHeaderHidden(True)
         self.tree.setUniformRowHeights(True)
         self.tree.currentItemChanged.connect(self._on_tree_item_changed)
-        # Map item → image index so tree selections route through _show(index).
         self._tree_item_to_index: dict[QTreeWidgetItem, int] = {}
         ll.addWidget(self.tree, 1)
         sp.addWidget(left)
@@ -694,18 +652,14 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
 
-        # Mask-overlay toggle. Disabled when the current image has no merged
-        # mask under post_image_dataset/masks/; the checked state is preserved
-        # across image navigation so it acts as a sticky "show overlay when
-        # available" preference.
+        # Mask-overlay toggle. Checked state persists across navigation as a
+        # sticky "show overlay when available" preference.
         img_head = QHBoxLayout()
         img_head.setContentsMargins(0, 0, 0, 0)
         self.overlay_cb = QCheckBox(t("dataset_mask_overlay"))
         self.overlay_cb.setEnabled(False)
         self.overlay_cb.toggled.connect(self._on_overlay_toggled)
         img_head.addWidget(self.overlay_cb)
-        # Delete button: removes the images marked red via the Delete key. Red
-        # accent to match the marks; disabled until at least one is marked.
         self.delete_btn = QPushButton(t("dataset_delete"))
         self.delete_btn.setToolTip(t("dataset_delete_tooltip"))
         self.delete_btn.setStyleSheet(
@@ -714,7 +668,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         )
         self.delete_btn.clicked.connect(self._delete_marked)
         img_head.addWidget(self.delete_btn)
-        # Cancel button: clears all deletion marks (same as pressing Esc).
         self.cancel_mark_btn = QPushButton(t("dataset_delete_clear"))
         self.cancel_mark_btn.setToolTip(t("dataset_delete_clear_tooltip"))
         self.cancel_mark_btn.clicked.connect(self._clear_marks)
@@ -727,12 +680,10 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.img.setMinimumSize(400, 400)
         rl.addWidget(self.img, 1)
 
-        # Caption header: label + buttons
         cap_head = QHBoxLayout()
         self.cap_label = QLabel(t("caption"))
         cap_head.addWidget(self.cap_label)
-        # Resident-tagger status ("loading…" / "loaded, waiting"). Hidden until
-        # the worker is spawned; updated from the worker's stdout sentinels.
+        # Resident-tagger status, updated from the worker's stdout sentinels.
         self.autotag_status = QLabel()
         self.autotag_status.setStyleSheet(
             f"QLabel{{color:{tok('link')};font-size:11px;}}"
@@ -746,9 +697,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self.revert_btn = QPushButton(t("caption_revert"))
         self.revert_btn.setEnabled(False)
         self.revert_btn.clicked.connect(self._revert)
-        # Autotag: run the Anima Tagger on the current image and append its
-        # predicted tags into the editor (review, then Save writes the .txt).
-        # Accented blue like the other "run a model" actions.
         self.autotag_btn = QPushButton(t("caption_autotag"))
         self.autotag_btn.setToolTip(t("caption_autotag_tooltip"))
         self.autotag_btn.setStyleSheet(
@@ -764,11 +712,9 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         cap_head.addWidget(self.versions_btn)
         rl.addLayout(cap_head)
 
-        # Caption editor with inline tag-box overlay. Each comma-separated
-        # tag is outlined by a thin rectangle painted on the viewport;
-        # @artist and section headers use accent colors so the trainer's
-        # split rules (anima_smart_shuffle in library/anima/training.py)
-        # stay visible without a separate preview pane.
+        # Caption editor with inline tag-box overlay; @artist and section
+        # headers use accent colors so the trainer's split rules
+        # (anima_smart_shuffle in library/anima/training.py) stay visible.
         self.cap = BoxedCaptionEdit()
         self.cap.setMaximumHeight(180)
         self.cap.textChanged.connect(self._on_text_changed)
@@ -790,9 +736,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         QShortcut(QKeySequence("Right"), self, lambda: self._nav(1))
         QShortcut(QKeySequence("Left"), self, lambda: self._nav(-1))
         QShortcut(QKeySequence.Save, self, self._save)
-        # Delete toggles the deletion mark on the current image; Esc un-marks it.
-        # Both act per-current-image and are scoped to the tree (WidgetShortcut)
-        # so they don't hijack the caption editor on focus.
+        # Delete/Esc are scoped to the tree (WidgetShortcut) so they don't
+        # hijack the caption editor on focus.
         _del = QShortcut(QKeySequence.Delete, self.tree, self._toggle_mark_current)
         _del.setContext(Qt.WidgetShortcut)
         _esc = QShortcut(QKeySequence(Qt.Key_Escape), self.tree, self._unmark_current)
@@ -800,19 +745,14 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._refresh_delete_button()
 
     def _lazy_init(self) -> None:
-        # Walking the image dir + building the tree is deferred to first show.
         if self._dirs:
             self._load_dir(self.dc.currentText())
-
-    # ── data loading ──────────────────────────────────────────
 
     def _open_current_dir(self):
         """Open the currently loaded dataset directory in the OS file manager."""
         if self._current_dir is None or not self._current_dir.exists():
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._current_dir)))
-
-    # ── similarity groups (curate-group) ──────────────────────
 
     def _groups_manifest_path(self) -> Path:
         return ROOT / "post_image_dataset" / "groups" / "groups.json"
@@ -842,11 +782,10 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 self, "", t("dataset_group_queued", job_id=self._job_id)
             )
             return
-        # Grouping is GPU work (PE-Spatial) — free the resident tagger first so
-        # the two don't fight over VRAM.
+        # Grouping is GPU work — free the resident tagger first so they don't
+        # fight over VRAM.
         self._kill_tagger_worker()
-        # Busy UI + indeterminate bar before the submit so a cold-start daemon
-        # spin-up still feels responsive.
+        # Busy UI before the submit so a cold-start daemon spin-up feels responsive.
         self.group_btn.setEnabled(False)
         self._progress_tracker.reset()
         self._progress_tracker.mark_starting(t("dataset_group_rebuild"))
@@ -877,7 +816,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._progress_tracker.reset()
         self._restore_group_idle_ui()
         if gui_daemon.is_success(state):
-            # Reload the manifest + re-render both views so new groups show now.
             prev = (
                 self._current_caption_path.stem
                 if self._current_caption_path is not None
@@ -892,8 +830,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _restore_group_idle_ui(self) -> None:
         self.group_btn.setEnabled(True)
-
-    # ── autotag (resident tagger worker) ──────────────────────
 
     def _run_autotag(self) -> None:
         """Tag the current image with the resident Anima Tagger.
@@ -948,9 +884,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def _send_autotag_request(self, image_path: Path) -> None:
         if self._tagger_proc is None:
             return
-        # Prefix the per-request confidence floor (Settings → Autotag
-        # confidence); read fresh each request so a settings change applies
-        # without respawning the resident worker.
+        # Read the confidence floor fresh each request so a settings change
+        # applies without respawning the resident worker.
         try:
             conf = float(get_setting("autotag_confidence", DEFAULT_AUTOTAG_CONFIDENCE))
         except (TypeError, ValueError):
@@ -1003,9 +938,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             combined = existing.rstrip().rstrip(",").rstrip() + ", " + caption
         else:
             combined = caption
-        # Set programmatically, then refresh manually so the diff highlight +
-        # Save/Revert dirty state pick up the appended span (the suspend-dirty
-        # guard otherwise swallows the textChanged signal).
+        # Refresh manually: the suspend-dirty guard swallows the textChanged
+        # signal, so diff highlight + dirty state wouldn't update otherwise.
         self._set_caption_text(combined)
         self._refresh_buttons()
         self._refresh_inline_diff()
@@ -1078,7 +1012,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
 
     def _load_dir(self, name: str, *, preserve_selection: bool = False):
         if not self._confirm_discard_if_dirty():
-            # Roll the combo back without re-firing _load_dir.
             return
         d = self._dirs.get(name)
         if not d:
@@ -1142,8 +1075,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             visible.reverse()
         self._images = visible
 
-        # Try to keep the current selection visible after refilter/resort.
-        # Falls back to ``prev_stem`` when called from _load_dir.
+        # Keep the current selection visible after refilter/resort; falls back
+        # to ``prev_stem`` when called from _load_dir.
         target_stem: str | None = prev_stem
         if target_stem is None and self._current_caption_path is not None:
             target_stem = self._current_caption_path.stem
@@ -1164,7 +1097,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         finally:
             self.tree.blockSignals(False)
 
-        # Re-apply deletion marks to the freshly rebuilt items.
         self._refresh_mark_styles()
 
         total = len(self._all_images)
@@ -1189,8 +1121,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._tree_item_to_index.clear()
         if not visible:
             return
-        # Map each member stem → group index so grouped images get routed under
-        # a green sub-node within their folder; the rest stay flat in the folder.
         stem_to_group: dict[str, int] = {}
         for gi, g in enumerate(self._groups):
             for m in g.get("members", []):
@@ -1207,10 +1137,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     ) -> None:
         """Folder-primary layout (default): groups nest under their folder, then
         float above the ungrouped files at the same level."""
-        # Cache folder QTreeWidgetItems by their relative parent path so
-        # sibling images in the same folder share one parent node. Group
-        # sub-nodes are keyed by (folder, group index) so each folder gets its
-        # own green node per group.
+        # Folders keyed by relative parent path; group sub-nodes by (folder,
+        # group index) so each folder gets its own green node per group.
         folder_items: dict[Path, QTreeWidgetItem] = {}
         group_nodes: dict[tuple[Path, int], QTreeWidgetItem] = {}
         group_counts: dict[tuple[Path, int], int] = {}
@@ -1247,8 +1175,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         root-level green node holding all its visible members (across folders,
         labelled with their folder prefix), sorted by group index. The ungrouped
         images follow below in the normal folder tree."""
-        # Bucket the visible images: grouped ones by group index (preserving
-        # filename order), the rest collected for the folder tree below.
         group_members: dict[int, list[tuple[int, Path]]] = {}
         ungrouped: list[tuple[int, Path]] = []
         for idx, p in enumerate(visible):
@@ -1258,8 +1184,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
             else:
                 group_members.setdefault(gi, []).append((idx, p))
 
-        # Top-level green group nodes, members shown with their folder prefix so
-        # cross-folder groups stay legible (stems alone would be ambiguous).
+        # Members shown with their folder prefix so cross-folder groups stay
+        # legible (stems alone would be ambiguous).
         for gi in sorted(group_members):
             members = group_members[gi]
             node = QTreeWidgetItem(
@@ -1274,12 +1200,10 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 leaf = QTreeWidgetItem(node, [self._display_label(p)])
                 self._tree_item_to_index[leaf] = idx
 
-        # Divider between the group block and the ungrouped folder tree (only
-        # when both sections exist, so it never dangles).
+        # Divider only when both sections exist, so it never dangles.
         if group_members and ungrouped:
             self._add_tree_separator()
 
-        # Ungrouped images keep their folder hierarchy, appended after the groups.
         folder_items: dict[Path, QTreeWidgetItem] = {}
         for idx, p in ungrouped:
             if self._current_dir is None:
@@ -1299,7 +1223,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         A real 2px QFrame line (set as the row's item widget) reads clearly on
         the tree's light background, unlike dash glyphs which wash out."""
         sep = QTreeWidgetItem(self.tree, [""])
-        sep.setFlags(Qt.NoItemFlags)  # non-selectable, non-navigable
+        sep.setFlags(Qt.NoItemFlags)
         line = QFrame()
         line.setFixedHeight(2)
         line.setStyleSheet("background:#8a8a8a;")
@@ -1317,8 +1241,7 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         the original filename order is preserved.
         """
         group_set = set(group_nodes.values())
-        # Every parent that can hold a mix: each folder node + the invisible root
-        # (top-level images that live directly under the viewed directory).
+        # Each folder node + the invisible root (top-level images).
         parents = [*folder_items.values(), self.tree.invisibleRootItem()]
         for parent in parents:
             children = parent.takeChildren()
@@ -1505,8 +1428,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
     def _on_overlay_toggled(self, _checked: bool) -> None:
         self._apply_image_view()
 
-    # ── deletion marking ──────────────────────────────────────
-
     def _current_index(self) -> int:
         """Index into ``self._images`` of the currently selected image.
 
@@ -1615,10 +1536,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        # Remember where the user was so the rebuilt tree doesn't snap back to
-        # the top: prefer the image they currently have open; if that one is
-        # itself being deleted, anchor on its position so we can land on the
-        # nearest surviving neighbour instead.
+        # Remember where the user was so the rebuilt tree doesn't snap to the
+        # top; anchor on position to land on the nearest surviving neighbour.
         open_stem = (
             self._current_caption_path.stem
             if self._current_caption_path is not None
@@ -1640,8 +1559,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 errors.append(f"{p.name}: {e}")
         self._marked.clear()
         self._refresh_delete_button()
-        # Drop the editor context so the post-delete reload doesn't prompt about
-        # a caption whose image we just removed, then re-scan from disk.
+        # Drop the editor context so the reload doesn't prompt about a caption
+        # whose image we just removed.
         self._current_caption_path = None
         self._disk_text = ""
         self._set_caption_text("")
@@ -1698,8 +1617,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         self._overlay_pm = None
         self.overlay_cb.setEnabled(False)
         self.img.clear()
-
-    # ── caption editing ───────────────────────────────────────
 
     def _set_caption_text(self, text: str) -> None:
         self._suspend_dirty = True
@@ -1763,7 +1680,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         new_text = self.cap.toPlainText()
         try:
             # Snapshot the prior on-disk version into history before overwriting.
-            # Skip when the previous file didn't exist (nothing to preserve).
             if cp.exists():
                 _append_history(cp, self._disk_text)
             cp.write_text(new_text, encoding="utf-8")
@@ -1785,10 +1701,8 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
         cp = self._current_caption_path
         if cp is None:
             return
-        # Diff inside the dialog compares against the on-disk text, so save
-        # any pending edits or warn? We keep it simple: dialog always uses
-        # disk as the comparison baseline. If user restores a version, it
-        # replaces *editor* contents (becomes a pending edit until they Save).
+        # Dialog always diffs against the on-disk text; a restored version
+        # replaces editor contents (a pending edit until Save).
         dlg = CaptionVersionsDialog(cp, self._disk_text, self)
         if dlg.exec() == QDialog.Accepted:
             restored = dlg.restored_text()
@@ -1796,8 +1710,6 @@ class ImageViewerTab(DaemonJobMixin, LazyTabMixin, QWidget):
                 self._set_caption_text(restored)
                 self._refresh_buttons()
                 self._refresh_inline_diff()
-
-    # ── navigation helpers ────────────────────────────────────
 
     def _row_for_path(self, cp: Path | None) -> int | None:
         if cp is None:

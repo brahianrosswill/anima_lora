@@ -63,9 +63,6 @@ class PickerLineEdit(QLineEdit):
         super().mousePressEvent(ev)
 
 
-# ── Bakeability scan ─────────────────────────────────────────────
-
-
 def _format_size(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -98,13 +95,10 @@ def _scan_adapter(path: Path) -> dict:
         "ortho_sp": 0,  # .S_p keys (OrthoLoRA / OrthoHydraLoRA)
         "other": 0,
     }
-    # Postfix weights store their mode in safetensors metadata; detect that
-    # first since the key names (cond_mlp / postfix_embeds / ortho_basis)
-    # don't share a useful prefix we could grep.
+    # Postfix mode lives in metadata — its key names share no greppable prefix.
     metadata_mode: str | None = None
     try:
-        # framework="np" — we only read keys + metadata, never tensors, so this
-        # must NOT be "pt" (that drags torch in, ~1.4s, for nothing).
+        # framework="np" — keys + metadata only; "pt" would drag torch in (~1.4s).
         with safe_open(str(path), framework="np") as f:
             keys = list(f.keys())
             try:
@@ -177,9 +171,6 @@ def _scan_adapter(path: Path) -> dict:
     }
 
 
-# ── Tab ──────────────────────────────────────────────────────────
-
-
 class MergeTab(LazyTabMixin, QWidget):
     def __init__(self):
         super().__init__()
@@ -190,7 +181,6 @@ class MergeTab(LazyTabMixin, QWidget):
 
         lay = QVBoxLayout(self)
 
-        # ── Top bar: directory combo + refresh + count ───────────
         top = QHBoxLayout()
         top.addWidget(QLabel(t("directory")))
         self.dir_combo = QComboBox()
@@ -204,7 +194,6 @@ class MergeTab(LazyTabMixin, QWidget):
         top.addWidget(self.count_label)
         lay.addLayout(top)
 
-        # ── Split: file list | details ───────────────────────────
         sp = QSplitter(Qt.Horizontal)
 
         self.file_list = QListWidget()
@@ -231,7 +220,6 @@ class MergeTab(LazyTabMixin, QWidget):
         )
         rlay.addWidget(self.verdict_label)
 
-        # Merge options
         opt_box = QGroupBox(t("merge_options"))
         opt_lay = QFormLayout(opt_box)
 
@@ -262,7 +250,6 @@ class MergeTab(LazyTabMixin, QWidget):
 
         rlay.addWidget(opt_box)
 
-        # Action bar
         bar = QHBoxLayout()
         self.merge_btn = QPushButton(t("merge_button"))
         self._idle_style = (
@@ -282,7 +269,6 @@ class MergeTab(LazyTabMixin, QWidget):
         bar.addStretch()
         rlay.addLayout(bar)
 
-        # Log
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setStyleSheet("font-family:monospace;font-size:11px;")
@@ -293,9 +279,7 @@ class MergeTab(LazyTabMixin, QWidget):
         sp.setSizes([260, 760])
         lay.addWidget(sp, 1)
 
-        # QProcess. merge_to_dit.py is a single Python process so the tree
-        # is shallow, but reuse the same kill-safe setup as training so Stop
-        # always kills the whole subtree (and frees the loaded DiT weights).
+        # Kill-safe setup so Stop kills the whole subtree (frees the loaded DiT weights).
         self._proc = QProcess(self)
         self._proc.setWorkingDirectory(str(ROOT))
         setup_kill_safe(self._proc)
@@ -306,14 +290,11 @@ class MergeTab(LazyTabMixin, QWidget):
         self._clear_details()
 
     def _lazy_init(self) -> None:
-        # Deferred to first show: scanning the dir + classifying the latest
-        # adapter is what used to make the whole window wait on this tab.
+        # Deferred to first show: the dir scan + adapter classify used to block window startup.
         if self._dirs:
             self._load_dir(self.dir_combo.currentText())
         else:
             self.count_label.setText(t("merge_no_adapter"))
-
-    # ── Dir / file list ──────────────────────────────────────────
 
     def _refresh_dirs(self):
         previous = self.dir_combo.currentText()
@@ -387,10 +368,9 @@ class MergeTab(LazyTabMixin, QWidget):
         self.verdict_label.setStyleSheet(
             f"padding:8px; border-radius:3px; background:{bg}; color:{fg};"
         )
-        # Match allow-partial to the current file's severity (don't let the
-        # previous selection's state linger).
+        # Match allow-partial to this file so the previous selection's state can't linger.
         self.allow_partial.setChecked(scan["severity"] == "partial")
-        # Only "ok" / "partial" are actually mergeable.
+        # Only "ok" / "partial" are mergeable.
         self.merge_btn.setEnabled(
             self._proc.state() == QProcess.NotRunning
             and scan["severity"] in ("ok", "partial")
@@ -405,8 +385,6 @@ class MergeTab(LazyTabMixin, QWidget):
         )
         self._current_scan = None
         self.merge_btn.setEnabled(False)
-
-    # ── Browse (DiT / out only; adapter comes from the list) ─────
 
     def _browse_dit(self):
         start = str(ROOT / "models" / "diffusion_models")
@@ -423,8 +401,6 @@ class MergeTab(LazyTabMixin, QWidget):
         )
         if f:
             self.out_edit.setText(f)
-
-    # ── Run / stop ───────────────────────────────────────────────
 
     def _start_merge(self):
         import sys as _sys
@@ -490,7 +466,7 @@ class MergeTab(LazyTabMixin, QWidget):
         )
         self.stop_btn.setEnabled(False)
         self.dir_combo.setEnabled(True)
-        # A merged file may have been created — refresh the list so it shows up.
+        # A merged file may have been created — refresh so it shows up.
         if exit_code == 0:
             self._refresh_dirs()
 

@@ -657,11 +657,7 @@ def _widget(v: Any, key: str = "") -> QWidget:
         return w
     if isinstance(v, int):
         w = QSpinBox()
-        # Per-key range overrides for fields that legitimately exceed the
-        # default 10k cap (silently clips otherwise). Keep these explicit
-        # rather than raising the global ceiling — most int fields are
-        # small (epochs, ranks, expert counts) and a 10k cap keeps the
-        # user from typoing a giant value into them.
+        # 10k default cap guards against typos; per-key overrides for fields that legitimately exceed it.
         if key == "min_pixels":
             w.setRange(0, 100_000_000)  # 100MP — covers any real image
         else:
@@ -704,10 +700,7 @@ def _read(w: QWidget, orig: Any = None) -> Any:
             return json.loads(txt)
         except (json.JSONDecodeError, ValueError):
             pass
-    # Normalize Windows-style backslashes pasted into path/string fields.
-    # Forward slashes are valid on every OS Python runs on, and avoid
-    # downstream TOML escape errors (e.g. "C:\Users" → \U is not a valid
-    # TOML escape).
+    # Normalize pasted Windows backslashes — forward slashes work everywhere and dodge TOML escape errors (e.g. "C:\Users" → \U is invalid).
     if "\\" in txt:
         txt = txt.replace("\\", "/")
     return txt
@@ -868,8 +861,6 @@ class ScaledImageLabel(QLabel):
         self._tl = None
         self._pan_last = None
 
-    # ── geometry helpers ──────────────────────────────────────
-
     def _fit_scale(self) -> float:
         sw, sh = self._src.width(), self._src.height()
         if sw <= 0 or sh <= 0:
@@ -903,8 +894,6 @@ class ScaledImageLabel(QLabel):
         else:
             y = min(0.0, max(float(self.height() - d.height()), y))
         self._tl = QPointF(x, y)
-
-    # ── events ────────────────────────────────────────────────
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

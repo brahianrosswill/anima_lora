@@ -17,12 +17,9 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 from gui._paths import ROOT
 from gui.i18n import t
 
-# Cache discovery (suffix conventions + the by-name counter) lives in the
-# torch-free leaf library/io/cache_names.py — one source of truth shared with the
-# preprocess pipeline. Importing it keeps GUI startup torch-free (gui/CLAUDE.md)
-# while killing the suffix drift that made this code blind to PE-Spatial sidecars.
-# Re-exported so existing `from gui.dialogs import count_preprocess_caches`
-# call sites keep working.
+# Cache discovery lives in the torch-free leaf library/io/cache_names.py — one source
+# of truth shared with the preprocess pipeline (keeps GUI startup torch-free). Re-exported
+# so existing `from gui.dialogs import count_preprocess_caches` call sites keep working.
 from library.io.cache_names import count_preprocess_caches  # noqa: F401
 
 
@@ -50,10 +47,8 @@ def confirm_resumable_checkpoint(parent: QWidget | None, merged: dict) -> bool:
         return False
     if choice == QMessageBox.Yes:
         return True
-    # No → start fresh. Wipe both the state dir and the sibling
-    # ``-checkpoint.safetensors`` adapter so train.py's auto_resume sees
-    # nothing on disk. Bail with a warning if the deletion fails — better
-    # than silently launching a resume the user explicitly opted out of.
+    # No → start fresh: wipe the state dir + sibling adapter so train.py's auto_resume
+    # sees nothing. Bail on failure rather than silently resuming against the user's choice.
     import shutil
 
     sidecar = state_dir.parent / f"{state_dir.name.removesuffix('-state')}.safetensors"

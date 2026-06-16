@@ -34,11 +34,9 @@ from gui.tabs.distill_tab import SPDTrainTab, TurboTrainTab
 class MethodsTab(QWidget):
     """Unified experimental method picker (flat-config + distill editors)."""
 
-    # Flat methods routed through the embedded ConfigTab (train.py --method,
-    # gui-methods/<variant>.toml). soft_tokens is a normal flat method;
-    # ChimeraHydra is the LoRA-family research variant kept behind the
-    # experimental gate (FeRA was retired from the picker — ChimeraHydra
-    # superseded it; the fera.toml / network module still exist for the CLI).
+    # Flat methods routed through the embedded ConfigTab (train.py --method).
+    # FeRA was retired from the picker (superseded by ChimeraHydra) but its
+    # fera.toml / network module still exist for the CLI.
     _FLAT_METHODS = ("chimera", "soft_tokens")
 
     def __init__(self, tb_panel=None):
@@ -47,25 +45,18 @@ class MethodsTab(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        # Embedded editors. The distill tabs are LazyTabMixin — their TOML scan
-        # is deferred to the first time the stack shows them (i.e. when picked).
+        # Distill tabs are LazyTabMixin — their TOML scan is deferred until picked.
         self._config = ConfigTab(methods=list(self._FLAT_METHODS), tb_panel=tb_panel)
-        # The wrapper owns method selection, so hide ConfigTab's own method
-        # picker; its inline variant picker stays (it switches the bound
-        # gui-methods/<variant>.toml within the selected family).
+        # The wrapper owns method selection, so hide ConfigTab's own method picker
+        # (its inline variant picker stays).
         self._config._method_label.setVisible(False)
         self._config.method_combo.setVisible(False)
         self._spd = SPDTrainTab()
         self._turbo = TurboTrainTab()
-        # Distill method key → editor widget.
         self._distill: dict[str, QWidget] = {"spd": self._spd, "turbo": self._turbo}
 
-        # The Method picker rides *inside* whichever editor page is active —
-        # mounted at the front of that page's own top bar (`_top_bar`) so it
-        # sits inline next to Variant / Save / Train exactly like ConfigTab's
-        # native picker does on the standard tabs, instead of on its own row
-        # above the editor. insertWidget reparents it automatically when the
-        # page switches.
+        # The Method picker rides inside whichever editor page is active, mounted at
+        # the front of that page's _top_bar; insertWidget reparents it on page switch.
         self._picker = QWidget()
         picker_row = QHBoxLayout(self._picker)
         picker_row.setContentsMargins(0, 0, 0, 0)
@@ -86,20 +77,16 @@ class MethodsTab(QWidget):
             self._stack.addWidget(w)
         lay.addWidget(self._stack)
 
-        # Sync the stack + embedded ConfigTab to the initial selection.
         self._on_method(self._combo.currentText())
 
     def _on_method(self, method: str) -> None:
         editor = self._distill.get(method)
         page = editor if editor is not None else self._config
         self._stack.setCurrentWidget(page)
-        # Move the picker into the active page's top bar (reparents away from
-        # the previous page).
         page._top_bar.insertWidget(0, self._picker)
         if editor is not None:
             return
-        # Drive the embedded ConfigTab to the chosen flat method (its hidden
-        # combo still emits currentTextChanged → _reload).
+        # Drive the embedded ConfigTab's hidden combo (still emits → _reload).
         if self._config.method_combo.currentText() != method:
             self._config.method_combo.setCurrentText(method)
 

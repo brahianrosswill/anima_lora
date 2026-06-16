@@ -322,12 +322,9 @@ def is_success(state: Optional[str]) -> bool:
     return state == STATE_DONE
 
 
-# Exception markers scanned (tail-first) when a job ends in error. The real
-# traceback is streamed live but scrolls far above the finish banner; on
-# failure we re-surface its salient line right next to the banner so the cause
-# sits where the user is already looking. High-value (actionable) patterns are
-# preferred over a generic ``SomethingError:`` so an accelerate-launch
-# CalledProcessError wrapper doesn't mask the child's real OOM/missing-file.
+# Exception markers scanned (tail-first) when a job ends in error, re-surfaced next to the
+# finish banner. High-value (actionable) patterns beat a generic ``SomethingError:`` so an
+# accelerate-launch CalledProcessError wrapper doesn't mask the child's real OOM/missing-file.
 _HIGH_VALUE_RE = re.compile(
     r"(torch\.cuda\.OutOfMemoryError|CUDA out of memory|CUDA error:?|"
     r"FileNotFoundError|ModuleNotFoundError|ImportError|"
