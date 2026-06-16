@@ -95,6 +95,17 @@ def main() -> None:
             "fnmatch glob. Use | to separate alternatives. Default: *"
         ),
     )
+    parser.add_argument(
+        "--match_images_from",
+        type=str,
+        default=None,
+        help=(
+            "Only cache text for source images whose relative stem also exists "
+            "under this image directory. Used by the preprocess chain to mirror "
+            "the already-resized/curated image set while still reading captions "
+            "from the original source directory."
+        ),
+    )
     args = parser.parse_args()
 
     from library.anima import weights as anima_utils
@@ -104,6 +115,20 @@ def main() -> None:
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
+    keep_rel_stems = None
+    if args.match_images_from:
+        match_dir = Path(args.match_images_from)
+        if match_dir.is_dir():
+            from library.preprocess import walk_images
+
+            keep_rel_stems = {
+                p.relative_to(match_dir).with_suffix("").as_posix()
+                for p in walk_images(
+                    match_dir,
+                    recursive=args.recursive,
+                    pattern=args.path_pattern,
+                )
+            }
 
     # Pre-flight: skip the (slow) Qwen3 + LLM-adapter load when every TE cache
     # already exists. When --dit is set the run also stages the one-time uncond
@@ -115,6 +140,7 @@ def main() -> None:
         cache_dir=cache_dir,
         recursive=args.recursive,
         path_pattern=args.path_pattern,
+        keep_rel_stems=keep_rel_stems,
         min_pixels=args.min_pixels,
     )
     uncond_needed = bool(args.dit) and not default_uncond_path().exists()
@@ -195,6 +221,7 @@ def main() -> None:
         cache_dir=cache_dir,
         recursive=args.recursive,
         path_pattern=args.path_pattern,
+        keep_rel_stems=keep_rel_stems,
         batch_size=args.batch_size,
         caption_shuffle_variants=N,
         caption_tag_dropout_rate=tag_dropout_rate,

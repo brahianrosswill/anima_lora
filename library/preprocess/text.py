@@ -10,6 +10,7 @@ tokenize→encode→(LLM-adapter)→save loop, and the pooled reduction live her
 from __future__ import annotations
 
 import logging
+import os
 import random
 from collections.abc import Callable, Collection
 from pathlib import Path
@@ -130,6 +131,7 @@ def _walk_te_candidates(
     recursive: bool,
     path_pattern: str | None,
     keep_stems: Collection[str] | None,
+    keep_rel_stems: Collection[str] | None,
     min_pixels: int,
     verbose: bool,
 ) -> list[Path]:
@@ -149,6 +151,26 @@ def _walk_te_candidates(
             print(
                 f"Stem filter: keeping {len(candidates)}/{pre} captions "
                 "(matched-subset only)."
+            )
+
+    if keep_rel_stems is not None:
+        keep = frozenset(keep_rel_stems)
+        pre = len(candidates)
+        filtered: list[Path] = []
+        for p in candidates:
+            try:
+                key = p.relative_to(data_dir).with_suffix("").as_posix()
+            except ValueError:
+                rel_dir = os.path.relpath(p.parent, data_dir)
+                rel_dir = "" if rel_dir == "." else rel_dir
+                key = (Path(rel_dir) / p.stem).as_posix() if rel_dir else p.stem
+            if key in keep:
+                filtered.append(p)
+        candidates = filtered
+        if verbose and len(candidates) != pre:
+            print(
+                f"Matched-image filter: keeping {len(candidates)}/{pre} captions "
+                "(resized outputs only)."
             )
 
     kept: list[Path] = []
@@ -181,6 +203,7 @@ def count_pending_text(
     recursive: bool = False,
     path_pattern: str | None = None,
     keep_stems: Collection[str] | None = None,
+    keep_rel_stems: Collection[str] | None = None,
     min_pixels: int = 500_000,
 ) -> tuple[int, int]:
     """Return ``(pending, total)`` TE caches **without loading the encoder**.
@@ -195,6 +218,7 @@ def count_pending_text(
         recursive=recursive,
         path_pattern=path_pattern,
         keep_stems=keep_stems,
+        keep_rel_stems=keep_rel_stems,
         min_pixels=min_pixels,
         verbose=False,
     )
@@ -216,6 +240,7 @@ def cache_text_embeddings(
     recursive: bool = False,
     path_pattern: str | None = None,
     keep_stems: Collection[str] | None = None,
+    keep_rel_stems: Collection[str] | None = None,
     batch_size: int = 16,
     caption_shuffle_variants: int = 0,
     caption_tag_dropout_rate: float = 0.0,
@@ -251,12 +276,16 @@ def cache_text_embeddings(
     is in the set — the matched subset the VAE/cond stage already materialized,
     so the TE cache mirrors that set rather than re-encoding the whole caption
     master.
+
+    ``keep_rel_stems`` is the path-safe variant for nested datasets. Each key is
+    the image path relative to ``data_dir`` without its extension.
     """
     candidates = _walk_te_candidates(
         data_dir,
         recursive=recursive,
         path_pattern=path_pattern,
         keep_stems=keep_stems,
+        keep_rel_stems=keep_rel_stems,
         min_pixels=min_pixels,
         verbose=verbose,
     )

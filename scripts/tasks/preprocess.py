@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from ._common import PY, _path, run
+from ._common import PY, ROOT, _path, run
 
 
 # Subfolders are walked by default (matches base.toml's `recursive = true`).
@@ -94,6 +95,17 @@ def _preprocess_path_pattern_args(extra) -> list[str]:
     if not pattern or pattern == "*":
         return []
     return ["--path_pattern", pattern]
+
+
+def _curation_decisions_args() -> list[str]:
+    """Optional GUI curation decisions consumed by resize only."""
+
+    path = Path(_path("curation_decisions", "post_image_dataset/curation_decisions.json"))
+    if not path.is_absolute():
+        path = ROOT / path
+    if not path.is_file():
+        return []
+    return ["--curation_decisions", str(path)]
 
 
 def _repa_pe_encoder() -> str | None:
@@ -217,6 +229,7 @@ def cmd_preprocess_resize(extra):
     mp_args, extra = _resolve_lowres_filter(extra)
     tr_args = _target_res_args(extra)
     pp_args = _preprocess_path_pattern_args(extra)
+    cd_args = _curation_decisions_args()
     run(
         [
             PY,
@@ -230,6 +243,7 @@ def cmd_preprocess_resize(extra):
             *mp_args,
             *tr_args,
             *pp_args,
+            *cd_args,
             *extra,
         ]
     )
@@ -304,6 +318,8 @@ def cmd_preprocess_te(extra):
             _path("source_image_dir", "image_dataset"),
             "--cache_dir",
             _path("lora_cache_dir", "post_image_dataset/lora"),
+            "--match_images_from",
+            _path("resized_image_dir", "post_image_dataset/resized"),
             "--qwen3",
             "models/text_encoders/qwen_3_06b_base.safetensors",
             "--dit",

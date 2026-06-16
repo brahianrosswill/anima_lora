@@ -24,6 +24,60 @@ def _write_image(path: Path, size: tuple[int, int]) -> None:
     Image.fromarray(arr).save(path)
 
 
+def test_move_linked_files_preserves_layout_and_sidecars(tmp_path: Path) -> None:
+    from library.datasets.curation_actions import move_linked_files
+
+    source = tmp_path / "image_dataset"
+    target = tmp_path / "post_image_dataset" / "moved"
+    image = source / "charA" / "cover.png"
+    _write_image(image, (8, 8))
+    for suffix in (".txt", ".caption", ".json", ".txt.history.jsonl"):
+        image.with_suffix(suffix).write_text(suffix, encoding="utf-8")
+
+    moved = move_linked_files(image, source_root=source, target_root=target)
+
+    expected = [
+        target / "charA" / "cover.png",
+        target / "charA" / "cover.txt",
+        target / "charA" / "cover.caption",
+        target / "charA" / "cover.json",
+        target / "charA" / "cover.txt.history.jsonl",
+    ]
+    assert moved == expected
+    assert all(path.exists() for path in expected)
+    assert not image.exists()
+    assert not image.with_suffix(".txt").exists()
+
+
+def test_load_curation_decisions_rebases_to_source_subdir(tmp_path: Path) -> None:
+    from library.datasets.curation_actions import (
+        load_curation_decisions,
+        save_curation_decisions,
+    )
+
+    source = tmp_path / "image_dataset"
+    decisions_path = tmp_path / "post_image_dataset" / "curation_decisions.json"
+    save_curation_decisions(
+        decisions_path,
+        source_dir=str(source),
+        images={
+            "fuzichoco/keep.png": {"action": "use"},
+            "fuzichoco/skip.png": {"action": "skip"},
+            "other/skip.png": {"action": "skip"},
+        },
+    )
+
+    decisions = load_curation_decisions(
+        decisions_path,
+        source_dir=source / "fuzichoco",
+    )
+
+    assert decisions == {
+        "keep.png": {"action": "use"},
+        "skip.png": {"action": "skip"},
+    }
+
+
 def test_walk_images_flat(tmp_path: Path) -> None:
     from library.preprocess import walk_images
 
@@ -213,6 +267,35 @@ def test_count_pending_text_min_pixels_filter(tmp_path: Path) -> None:
     assert count_pending_text(data, min_pixels=1000) == (1, 1)
 
 
+def test_count_pending_text_keep_rel_stems_filters_nested_paths(tmp_path: Path) -> None:
+    from library.preprocess import count_pending_text
+    from library.preprocess.text import _te_cache_path
+
+    data = tmp_path / "imgs"
+    cache = tmp_path / "cache"
+    _write_image(data / "charA" / "cover.png", (64, 64))
+    _write_image(data / "charB" / "cover.png", (64, 64))
+
+    assert count_pending_text(
+        data,
+        cache_dir=cache,
+        recursive=True,
+        keep_rel_stems={"charA/cover"},
+        min_pixels=0,
+    ) == (1, 1)
+
+    te = _te_cache_path(data / "charA" / "cover.png", cache, data)
+    te.parent.mkdir(parents=True, exist_ok=True)
+    te.touch()
+    assert count_pending_text(
+        data,
+        cache_dir=cache,
+        recursive=True,
+        keep_rel_stems={"charA/cover"},
+        min_pixels=0,
+    ) == (0, 1)
+
+
 # ---------------------------------------------------------------------------
 # Model-free end-to-end coverage for the loops moved into library/preprocess/
 # (item A of the proposal). cache_pe_features / cache_latents /
@@ -333,6 +416,74 @@ def test_resize_to_buckets_path_pattern_preserves_filtered_layout(
     assert sum(bucket_counts.values()) == 1
     assert (dst / "charA" / "a.png").exists()
     assert not (dst / "charB" / "b.png").exists()
+
+
+def test_resize_to_buckets_applies_curation_skip_decision(tmp_path: Path) -> None:
+    from library.preprocess import resize_to_buckets
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    _write_image(src / "keep.png", (900, 900))
+    _write_image(src / "skip.png", (900, 900))
+    _write_image(src / "move.png", (900, 900))
+
+    stats, bucket_counts = resize_to_buckets(
+        src,
+        dst,
+        min_pixels=0,
+        workers=1,
+        verbose=False,
+        curation_decisions={
+            "keep.png": {"action": "use"},
+            "skip.png": {"action": "skip"},
+            "move.png": {"action": "move"},
+        },
+    )
+
+    assert stats.seen == 3
+    assert stats.skipped == 2
+    assert stats.written == 1
+    assert sum(bucket_counts.values()) == 1
+    assert (dst / "keep.png").exists()
+    assert not (dst / "skip.png").exists()
+    assert not (dst / "move.png").exists()
+    assert (src / "skip.png").exists()
+    assert (src / "move.png").exists()
+
+
+def test_resize_to_buckets_applies_curation_crop_to_output_only(
+    tmp_path: Path,
+) -> None:
+    from library.preprocess import resize_to_buckets
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    img = Image.new("RGB", (200, 100), "red")
+    for x in range(100, 200):
+        for y in range(100):
+            img.putpixel((x, y), (0, 0, 255))
+    img.save(src / "split.png")
+
+    stats, _ = resize_to_buckets(
+        src,
+        dst,
+        target_res=[512],
+        min_pixels=0,
+        workers=1,
+        verbose=False,
+        curation_decisions={
+            "split.png": {"action": "use", "crop_bounds": [100, 0, 100, 100]},
+        },
+    )
+
+    assert stats.written == 1
+    with Image.open(dst / "split.png") as out:
+        center = out.getpixel((out.width // 2, out.height // 2))
+    assert center[2] > 200
+    with Image.open(src / "split.png") as original:
+        assert original.size == (200, 100)
+        assert original.getpixel((0, 50)) == (255, 0, 0)
 
 
 def test_resize_to_buckets_default_tier_does_not_upscale_to_multitier(

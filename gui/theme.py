@@ -40,6 +40,7 @@ from PySide6.QtGui import (
     QPolygon,
 )
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QProxyStyle, QStyle
 
 from gui._paths import DEFAULT_THEME, get_setting, set_setting
 
@@ -130,8 +131,8 @@ _DARK = Theme(
     warn="#fbbf24",
     err="#f87171",
     scroll_bg="#242424",
-    scroll_handle="#7a7a7a",
-    scroll_handle_hover="#a0a0a0",
+    scroll_handle="#b8b8b8",
+    scroll_handle_hover="#d0d0d0",
 )
 
 _LIGHT = Theme(
@@ -205,6 +206,52 @@ THEME_LABEL_KEYS = {
 # The live theme, resolved once per apply_theme() so tok() stays cheap and never
 # re-reads the settings file per widget.
 _active: Theme = THEMES[DEFAULT_THEME]
+_base_style = None
+_scroll_handle_style = None
+
+
+class _ScrollHandleStyle(QProxyStyle):
+    """Keep native scrollbars, but repaint only the current-position handle."""
+
+    def __init__(self, base_style):
+        super().__init__(base_style)
+        self._handle = QColor(_active.scroll_handle)
+        self._handle_hover = QColor(_active.scroll_handle_hover)
+
+    def set_scroll_colors(self, handle: str, hover: str) -> None:
+        self._handle = QColor(handle)
+        self._handle_hover = QColor(hover)
+
+    def drawComplexControl(self, control, option, painter, widget=None):
+        super().drawComplexControl(control, option, painter, widget)
+        if control != QStyle.CC_ScrollBar:
+            return
+        rect = self.subControlRect(
+            QStyle.CC_ScrollBar, option, QStyle.SC_ScrollBarSlider, widget
+        )
+        if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+            return
+        is_hover = (
+            option.activeSubControls & QStyle.SC_ScrollBarSlider
+            and option.state & QStyle.State_MouseOver
+        )
+        color = self._handle_hover if is_hover else self._handle
+        if rect.height() >= rect.width():
+            handle_rect = rect.adjusted(3, 2, -3, -2)
+        else:
+            handle_rect = rect.adjusted(2, 3, -2, -3)
+        if (
+            not handle_rect.isValid()
+            or handle_rect.width() <= 0
+            or handle_rect.height() <= 0
+        ):
+            handle_rect = rect
+        radius = min(handle_rect.width(), handle_rect.height()) / 2
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(handle_rect, radius, radius)
+        painter.restore()
 
 
 def current_theme_name() -> str:
@@ -450,7 +497,7 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
     ``name`` defaults to the persisted theme. Updates the module-global active
     theme so subsequent ``tok()`` lookups (and rebuilt widgets) use it. Returns
     the applied Theme. The font is set here too (kept from the old ``_dark``)."""
-    global _active
+    global _active, _base_style, _scroll_handle_style
     resolved = name if (name in THEMES) else current_theme_name()
     t = THEMES[resolved]
     _active = t
@@ -474,6 +521,13 @@ def apply_theme(app: QApplication, name: str | None = None) -> Theme:
 
     # Same stack handed to the stylesheet (enforces family on native-styled Windows controls); quote each name (Qt CSS needs quotes for multi-word families).
     family_css = ", ".join(f'"{f}"' for f in families)
+
+    if _base_style is None:
+        _base_style = app.style()
+        _scroll_handle_style = _ScrollHandleStyle(_base_style)
+        app.setStyle(_scroll_handle_style)
+    if _scroll_handle_style is not None:
+        _scroll_handle_style.set_scroll_colors(t.scroll_handle, t.scroll_handle_hover)
 
     app.setPalette(_build_palette(t))
     app.setStyleSheet(_build_stylesheet(t, family_css, current_font_size()))

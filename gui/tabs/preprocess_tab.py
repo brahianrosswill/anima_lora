@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import html
 import json
+import shutil
 import sys
 import copy
 from pathlib import Path
@@ -100,6 +101,7 @@ DEFAULT_RUN_SAM_MASK = True
 DEFAULT_RUN_MIT_MASK = True
 PREPROCESS_METHODS = ["lora", "tlora", "hydralora"]
 _GUI_PREPROCESS_KEYS = {
+    "path_scope",
     "source_image_dir",
     "preprocess_path_pattern",
     "drop_lowres_images",
@@ -217,6 +219,14 @@ def _count_resized(resized_dir: Path, path_pattern: str | None = None) -> int:
             lambda p: p.suffix.lower() in IMAGE_EXTS,
         )
     )
+
+
+def _count_tree_files(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return 1
+    return sum(1 for p in path.rglob("*") if p.is_file())
 
 
 class _RuleCard(QGroupBox):
@@ -416,6 +426,11 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self.open_dataset_btn.setToolTip(t("preprocess_open_dataset_dir_tooltip"))
         self.open_dataset_btn.clicked.connect(self._open_dataset_dir)
         status_row.addWidget(self.open_dataset_btn)
+        self.clear_scope_cache_btn = QToolButton()
+        self.clear_scope_cache_btn.setText(t("preprocess_clear_scope_cache"))
+        self.clear_scope_cache_btn.setToolTip(t("preprocess_clear_scope_cache_tooltip"))
+        self.clear_scope_cache_btn.clicked.connect(self._clear_scope_preprocess_files)
+        status_row.addWidget(self.clear_scope_cache_btn)
         outer.addLayout(status_row)
 
         vsplit = QSplitter(Qt.Vertical)
@@ -445,6 +460,14 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         img_form.addRow(
             self._field_label("source_image_dir", t("preprocess_source_image_dir")),
             self.source_dir_edit,
+        )
+
+        self.path_scope_edit = QLineEdit()
+        self.path_scope_edit.setPlaceholderText("data_group1")
+        self.path_scope_edit.setToolTip(preprocess_field_help("path_scope") or "")
+        img_form.addRow(
+            self._field_label("path_scope", t("path_scope")),
+            self.path_scope_edit,
         )
 
         self.preprocess_path_pattern_edit = QLineEdit(
@@ -680,6 +703,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             "source_image_dir",
             pp_cfg.get("source_image_dir", DEFAULT_SOURCE_IMAGE_DIR),
         )
+        path_scope = meta.get("path_scope", "")
 
         target_res = meta.get(
             "target_res", pp_cfg.get("target_res", DEFAULT_TARGET_RES)
@@ -729,6 +753,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         self._loading_variant = True
         try:
             self.source_dir_edit.setText(str(source_dir or DEFAULT_SOURCE_IMAGE_DIR))
+            self.path_scope_edit.setText(str(path_scope or ""))
             self.preprocess_path_pattern_edit.setText(str(path_pattern or "*"))
             self.drop_lowres_chk.setChecked(bool(drop_lowres))
             self.min_pixels_spin.setValue(int(min_pixels))
@@ -784,6 +809,7 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
     def _connect_dirty_signals(self) -> None:
         for widget in (
             self.source_dir_edit,
+            self.path_scope_edit,
             self.preprocess_path_pattern_edit,
             self.drop_lowres_chk,
             self.min_pixels_spin,
@@ -901,6 +927,99 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             target = ROOT
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
+    def _snapshot_path(self, snapshot: dict[str, object], key: str, default: Path) -> Path:
+        raw = snapshot.get(key)
+        if not raw:
+            return default
+        p = Path(str(raw))
+        return p if p.is_absolute() else ROOT / p
+
+    def _normalize_scope_or_warn(self) -> str | None:
+        raw = self.path_scope_edit.text().strip()
+        if not raw:
+            return ""
+        scope = ConfigTab._normalize_path_scope(raw)
+        if scope is None:
+            QMessageBox.warning(
+                self,
+                t("error"),
+                t("preprocess_invalid_path_scope", value=raw),
+            )
+            return None
+        return scope
+
+    def _clear_scope_preprocess_files(self) -> None:
+        scope = self._normalize_scope_or_warn()
+        if scope is None:
+            return
+        snapshot = self.preprocess_config_snapshot()
+        resized = self._snapshot_path(snapshot, "resized_image_dir", RESIZED_DIR)
+        lora = self._snapshot_path(snapshot, "lora_cache_dir", LORA_CACHE_DIR)
+        targets = [resized, lora]
+
+        for target in targets:
+            try:
+                target.relative_to(ROOT)
+            except ValueError:
+                QMessageBox.warning(
+                    self,
+                    t("error"),
+                    t("preprocess_clear_scope_cache_outside_root", path=str(target)),
+                )
+                return
+            if target == ROOT:
+                QMessageBox.warning(
+                    self,
+                    t("error"),
+                    t("preprocess_clear_scope_cache_outside_root", path=str(target)),
+                )
+                return
+
+        resized_count = _count_tree_files(resized)
+        lora_count = _count_tree_files(lora)
+        if resized_count == 0 and lora_count == 0:
+            QMessageBox.information(
+                self,
+                t("preprocess_clear_scope_cache"),
+                t("preprocess_clear_scope_cache_empty"),
+            )
+            self._refresh_status()
+            return
+
+        scope_label = scope or t("preprocess_clear_scope_cache_all_scope")
+        answer = QMessageBox.question(
+            self,
+            t("preprocess_clear_scope_cache"),
+            t(
+                "preprocess_clear_scope_cache_confirm",
+                scope=scope_label,
+                resized=str(resized),
+                resized_count=resized_count,
+                lora=str(lora),
+                lora_count=lora_count,
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        removed = 0
+        for target in targets:
+            if not target.exists():
+                continue
+            removed += _count_tree_files(target)
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        QMessageBox.information(
+            self,
+            t("preprocess_clear_scope_cache"),
+            t("preprocess_clear_scope_cache_done", count=removed),
+        )
+        self._refresh_status()
+
     def _add_rule_card(self, rule: dict | None = None) -> None:
         card = _RuleCard(rule or {}, self._show_field_help)
         card.changed.connect(self._mark_dirty)
@@ -990,6 +1109,11 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
         source_dir = self.source_dir_edit.text().strip()
         if source_dir:
             merged["source_image_dir"] = source_dir
+        path_scope = self.path_scope_edit.text().strip()
+        if path_scope:
+            merged["path_scope"] = path_scope
+        else:
+            merged.pop("path_scope", None)
         snapshot = ConfigTab._gui_scoped_paths(copy.deepcopy(merged))
         snapshot.update(self.preprocess_overrides())
         for key in (
@@ -1074,6 +1198,14 @@ class PreprocessingTab(DaemonJobMixin, DirtyTrackingMixin, LazyTabMixin, QWidget
             meta.pop("source_image_dir", None)
         else:
             meta["source_image_dir"] = source_dir
+
+        scope = self._normalize_scope_or_warn()
+        if scope is None:
+            return False
+        if scope:
+            meta["path_scope"] = scope
+        else:
+            meta.pop("path_scope", None)
 
         path_pattern = (
             self.preprocess_path_pattern_edit.text().strip()
