@@ -34,13 +34,34 @@ def _resized_image_dir() -> Path:
 
     Reads ``resized_image_dir`` from the merged config chain (the GUI passes a
     config snapshot via ``CONFIG_FILE`` whose ``resized_image_dir`` is already
-    scoped to ``post_image_dataset/resized/<path_scope>``). Without a snapshot
-    (direct ``make mask``) this falls back to the unscoped default, so CLI
-    behavior is unchanged. Scoping the input also lands masks at
-    ``masks/<rel>`` — exactly where training resolves them — instead of the
-    unscoped ``masks/<scope>/<rel>``.
+    scoped to ``post_image_dataset/resized/<path_scope>``). Scoping the input
+    is what stops a scoped run from re-masking every other folder. Without a
+    snapshot (direct ``make mask``) this falls back to the unscoped default, so
+    CLI behavior is unchanged.
     """
     return ROOT / _path("resized_image_dir", "post_image_dataset/resized")
+
+
+def _scoped_mask_output_dir(resized_dir: Path) -> Path:
+    """Re-apply the ``path_scope`` offset onto the mask output root.
+
+    SAM/MIT emit masks with rel paths taken **relative to the scoped resized
+    dir** (``resized/<scope>``), so a scoped run drops the ``<scope>`` prefix.
+    But training resolves masks relative to the **unscoped** cache root
+    (``lora/<scope>/<rel>`` → ``masks/<scope>/<rel>``, see
+    ``CachedDataset._resolve_mask_path``), so masking must land them under
+    ``masks/<scope>`` — not flat in ``masks/`` — or the trainer won't find
+    them. Mirror whatever scope ``resized_dir`` carries over the unscoped
+    ``post_image_dataset/resized`` default. Unscoped (direct ``make mask``)
+    returns the bare output dir, so CLI behavior is unchanged.
+    """
+    try:
+        scope = resized_dir.resolve().relative_to(RESIZED_IMAGE_DIR.resolve())
+    except ValueError:
+        return MASK_OUTPUT_DIR
+    if str(scope) == ".":
+        return MASK_OUTPUT_DIR
+    return MASK_OUTPUT_DIR / scope
 
 
 def _runtime_sam_config() -> dict | None:
@@ -164,6 +185,7 @@ def cmd_mask(extra):
     pattern = _config_path_pattern(sam_cfg)
     pattern_args = ["--path-pattern", pattern] if pattern else []
     resized_dir = _resized_image_dir()
+    mask_output_dir = _scoped_mask_output_dir(resized_dir)
     with tempfile.TemporaryDirectory(prefix="anima-masks-") as tmp_root:
         sam_config_path = _sam_config_path(
             sam_cfg,
@@ -179,14 +201,14 @@ def cmd_mask(extra):
             tmp_mit = Path(tmp_root) / "mit"
             _run_mit(resized_dir, tmp_mit, [*pattern_args])
             merge_sources.append(str(tmp_mit))
-        MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        mask_output_dir.mkdir(parents=True, exist_ok=True)
         run(
             [
                 PY,
                 "scripts/preprocess/merge_masks.py",
                 *merge_sources,
                 "--output-dir",
-                str(MASK_OUTPUT_DIR),
+                str(mask_output_dir),
                 *extra,
             ]
         )
